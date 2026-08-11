@@ -64,4 +64,5 @@
 - [3. 控制與暫存器層 (Control Layer)](Control-Layer.md)
 - [4. DMA 資料搬移核心層 (DMA Core Layer)](DMA-Core-Layer.md)
 - [5. 中斷與頂層整合 (System Support Layer)](System-Support-Layer.md)
-- [6. 仿真驗證與測試指南 (Verification Guide)](Verification-and-Simulation.md)
+- [6. 透過 Control-Layer 控制其他 IP Cores (Controlling Other IP Cores)](Controlling-Other-IP-Cores.md)
+- [7. 仿真驗證與測試指南 (Verification Guide)](Verification-and-Simulation.md)
