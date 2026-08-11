@@ -1,0 +1,14 @@
+# Vivado / xsim temporary files & simulation artifacts
+*.log
+*.pb
+*.jou
+*.wdb
+*.vcd
+xsim.dir/
+work_sim/
+.Xil/
+
+# OS / temporary files
+.DS_Store
+*.swp
+*~
