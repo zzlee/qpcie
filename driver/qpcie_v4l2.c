@@ -1,0 +1,237 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+/*
+ * Driver: qpcie_v4l2.c
+ * Description: Video4Linux2 Multi-Planar Capture Driver for Custom PCIe 2D DMA.
+ */
+
+#include "qpcie_driver.h"
+
+static const struct v4l2_file_operations qpcie_v4l2_fops = {
+    .owner          = THIS_MODULE,
+    .open           = v4l2_fh_open,
+    .release        = vb2_fop_release,
+    .read           = vb2_fop_read,
+    .poll           = vb2_fop_poll,
+    .mmap           = vb2_fop_mmap,
+    .unlocked_ioctl = video_ioctl2,
+};
+
+static int qpcie_vidioc_querycap(struct file *file, void *priv, struct v4l2_capability *cap)
+{
+    strscpy(cap->driver, "qpcie-v4l2", sizeof(cap->driver));
+    strscpy(cap->card, "QPCIe Multi-Planar Video Capture", sizeof(cap->card));
+    strscpy(cap->bus_info, "PCIe:custom-dma", sizeof(cap->bus_info));
+    cap->capabilities = V4L2_CAP_VIDEO_CAPTURE_MPLANE | V4L2_CAP_STREAMING | V4L2_CAP_DEVICE_CAPS;
+    return 0;
+}
+
+static int qpcie_vidioc_enum_fmt_vid_cap_mplane(struct file *file, void *priv, struct v4l2_fmtdesc *f)
+{
+    if (f->index == 0) {
+        f->pixelformat = V4L2_PIX_FMT_YUV420M;
+        return 0;
+    } else if (f->index == 1) {
+        f->pixelformat = V4L2_PIX_FMT_NV12M;
+        return 0;
+    }
+    return -EINVAL;
+}
+
+static int qpcie_vidioc_g_fmt_vid_cap_mplane(struct file *file, void *priv, struct v4l2_format *f)
+{
+    struct qpcie_v4l2_channel *vch = video_drvdata(file);
+
+    f->fmt.pix_mp.width        = vch->width;
+    f->fmt.pix_mp.height       = vch->height;
+    f->fmt.pix_mp.pixelformat  = vch->pixelformat;
+    f->fmt.pix_mp.field        = V4L2_FIELD_NONE;
+    f->fmt.pix_mp.colorspace   = V4L2_COLORSPACE_REC709;
+    f->fmt.pix_mp.num_planes   = (vch->pixelformat == V4L2_PIX_FMT_YUV420M) ? 3 : 2;
+
+    f->fmt.pix_mp.plane_fmt[0].bytesperline = vch->stride;
+    f->fmt.pix_mp.plane_fmt[0].sizeimage    = vch->stride * vch->height;
+
+    if (vch->pixelformat == V4L2_PIX_FMT_YUV420M) {
+        f->fmt.pix_mp.plane_fmt[1].bytesperline = vch->stride / 2;
+        f->fmt.pix_mp.plane_fmt[1].sizeimage    = (vch->stride / 2) * (vch->height / 2);
+        f->fmt.pix_mp.plane_fmt[2].bytesperline = vch->stride / 2;
+        f->fmt.pix_mp.plane_fmt[2].sizeimage    = (vch->stride / 2) * (vch->height / 2);
+    } else { /* NV12M */
+        f->fmt.pix_mp.plane_fmt[1].bytesperline = vch->stride;
+        f->fmt.pix_mp.plane_fmt[1].sizeimage    = vch->stride * (vch->height / 2);
+    }
+
+    return 0;
+}
+
+static int qpcie_vidioc_s_fmt_vid_cap_mplane(struct file *file, void *priv, struct v4l2_format *f)
+{
+    struct qpcie_v4l2_channel *vch = video_drvdata(file);
+
+    vch->width       = f->fmt.pix_mp.width;
+    vch->height      = f->fmt.pix_mp.height;
+    vch->pixelformat = f->fmt.pix_mp.pixelformat;
+    vch->stride      = ALIGN(vch->width, 64); /* 64-byte alignment */
+
+    return qpcie_vidioc_g_fmt_vid_cap_mplane(file, priv, f);
+}
+
+static const struct v4l2_ioctl_ops qpcie_v4l2_ioctl_ops = {
+    .vidioc_querycap                = qpcie_vidioc_querycap,
+    .vidioc_enum_fmt_vid_cap_mplane = qpcie_vidioc_enum_fmt_vid_cap_mplane,
+    .vidioc_g_fmt_vid_cap_mplane    = qpcie_vidioc_g_fmt_vid_cap_mplane,
+    .vidioc_s_fmt_vid_cap_mplane    = qpcie_vidioc_s_fmt_vid_cap_mplane,
+    .vidioc_reqbufs                 = vb2_ioctl_reqbufs,
+    .vidioc_querybuf                = vb2_ioctl_querybuf,
+    .vidioc_qbuf                    = vb2_ioctl_qbuf,
+    .vidioc_dqbuf                   = vb2_ioctl_dqbuf,
+    .vidioc_streamon                = vb2_ioctl_streamon,
+    .vidioc_streamoff               = vb2_ioctl_streamoff,
+};
+
+/* Videobuf2 Queue Operations */
+static int qpcie_queue_setup(struct vb2_queue *vq,
+                            unsigned int *nbuffers, unsigned int *nplanes,
+                            unsigned int sizes[], struct device *alloc_devs[])
+{
+    struct qpcie_v4l2_channel *vch = vb2_get_drvpriv(vq);
+    int num_planes = (vch->pixelformat == V4L2_PIX_FMT_YUV420M) ? 3 : 2;
+
+    *nplanes = num_planes;
+    sizes[0] = vch->stride * vch->height;
+
+    if (num_planes == 3) {
+        sizes[1] = (vch->stride / 2) * (vch->height / 2);
+        sizes[2] = (vch->stride / 2) * (vch->height / 2);
+    } else {
+        sizes[1] = vch->stride * (vch->height / 2);
+    }
+
+    return 0;
+}
+
+static void qpcie_buf_queue(struct vb2_buffer *vb)
+{
+    struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
+    struct qpcie_v4l2_buffer *buf = container_of(vbuf, struct qpcie_v4l2_buffer, vb);
+    struct qpcie_v4l2_channel *vch = vb2_get_drvpriv(vb->vb2_queue);
+    struct qpcie_dev *qdev = vch->qdev;
+    struct qpcie_dma_desc_2d *desc;
+    dma_addr_t plane0_dma, plane1_dma, plane2_dma = 0;
+
+    plane0_dma = vb2_dma_sg_plane_desc(vb, 0)->sgl->dma_address;
+    plane1_dma = vb2_dma_sg_plane_desc(vb, 1)->sgl->dma_address;
+    if (vb->num_planes == 3)
+        plane2_dma = vb2_dma_sg_plane_desc(vb, 2)->sgl->dma_address;
+
+    /* Fill 64-Byte Extended Multi-Planar Descriptor */
+    desc = &qdev->c2h_ring_virt[qdev->c2h_tail];
+    memset(desc, 0, sizeof(*desc));
+
+    desc->plane0_src_addr = 0x0000; /* FPGA Stream In */
+    desc->plane0_dst_addr = plane0_dma;
+    desc->plane1_dst_addr = plane1_dma;
+    desc->plane2_dst_addr = plane2_dma;
+
+    desc->line_width = vch->width;
+    desc->line_count = vch->height;
+    desc->src_stride = vch->width;
+    desc->dst_stride = vch->stride;
+    desc->format     = (vb->num_planes == 3) ? 0x3 : 0x2;
+    desc->plane_count= vb->num_planes;
+    desc->control    = 0x000B; /* Valid=1, Is_C2H=1, IRQ_EN=1 */
+
+    qdev->c2h_tail = (qdev->c2h_tail + 1) % RING_BUFFER_SIZE;
+    iowrite32(((u32)qdev->c2h_tail << 16) | RING_BUFFER_SIZE, qdev->bar0_mmio + REG_C2H_RING_CFG);
+
+    spin_lock_irq(&vch->slock);
+    list_add_tail(&buf->list, &vch->active_buffers);
+    spin_unlock_irq(&vch->slock);
+}
+
+static const struct vb2_ops qpcie_vb2_ops = {
+    .queue_setup = qpcie_queue_setup,
+    .buf_queue   = qpcie_buf_queue,
+};
+
+int qpcie_v4l2_init(struct qpcie_dev *qdev)
+{
+    int i, ret;
+
+    for (i = 0; i < NUM_VIDEO_CHANNELS; i++) {
+        struct qpcie_v4l2_channel *vch = &qdev->v4l2_ch[i];
+        struct video_device *vdev = &vch->vdev;
+
+        vch->qdev       = qdev;
+        vch->channel_id = i;
+        vch->width      = 1920;
+        vch->height     = 1080;
+        vch->stride     = 2048;
+        vch->pixelformat= V4L2_PIX_FMT_YUV420M;
+
+        mutex_init(&vch->lock);
+        spin_lock_init(&vch->slock);
+        INIT_LIST_HEAD(&vch->active_buffers);
+
+        snprintf(vch->v4l2_dev.name, sizeof(vch->v4l2_dev.name), "qpcie-v4l2-%d", i);
+        ret = v4l2_device_register(&qdev->pdev->dev, &vch->v4l2_dev);
+        if (ret) return ret;
+
+        vch->queue.type            = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+        vch->queue.io_modes        = VB2_MMAP | VB2_DMABUF;
+        vch->queue.drv_priv        = vch;
+        vch->queue.buf_struct_size = sizeof(struct qpcie_v4l2_buffer);
+        vch->queue.ops             = &qpcie_vb2_ops;
+        vch->queue.mem_ops         = &vb2_dma_sg_memops;
+        vch->queue.timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
+        vch->queue.lock            = &vch->lock;
+        vch->queue.dev             = &qdev->pdev->dev;
+        ret = vb2_queue_init(&vch->queue);
+        if (ret) goto unreg_v4l2;
+
+        snprintf(vdev->name, sizeof(vdev->name), "qpcie-video-ch%d", i);
+        vdev->fops      = &qpcie_v4l2_fops;
+        vdev->ioctl_ops = &qpcie_v4l2_ioctl_ops;
+        vdev->release   = video_device_release_empty;
+        vdev->v4l2_dev  = &vch->v4l2_dev;
+        vdev->queue     = &vch->queue;
+        vdev->lock      = &vch->lock;
+        video_set_drvdata(vdev, vch);
+
+        ret = video_register_device(vdev, VFL_TYPE_VIDEO, -1);
+        if (ret) goto unreg_v4l2;
+    }
+    return 0;
+
+unreg_v4l2:
+    v4l2_device_unregister(&qdev->v4l2_ch[i].v4l2_dev);
+    return ret;
+}
+
+void qpcie_v4l2_remove(struct qpcie_dev *qdev)
+{
+    int i;
+    for (i = 0; i < NUM_VIDEO_CHANNELS; i++) {
+        video_unregister_device(&qdev->v4l2_ch[i].vdev);
+        v4l2_device_unregister(&qdev->v4l2_ch[i].v4l2_dev);
+    }
+}
+
+void qpcie_v4l2_irq_handler(struct qpcie_dev *qdev)
+{
+    int i;
+    for (i = 0; i < NUM_VIDEO_CHANNELS; i++) {
+        struct qpcie_v4l2_channel *vch = &qdev->v4l2_ch[i];
+        struct qpcie_v4l2_buffer *buf;
+
+        spin_lock(&vch->slock);
+        if (!list_empty(&vch->active_buffers)) {
+            buf = list_first_entry(&vch->active_buffers, struct qpcie_v4l2_buffer, list);
+            list_del(&buf->list);
+            buf->vb.vb2_buf.timestamp = ktime_get_ns();
+            buf->vb.sequence = vch->sequence++;
+            vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
+        }
+        spin_unlock(&vch->slock);
+    }
+}
