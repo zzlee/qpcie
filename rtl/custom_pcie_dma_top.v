@@ -1,108 +1,105 @@
 // ============================================================================
 // Module: custom_pcie_dma_top
-// Description: Top-level module for Custom PCIe AXI4-Stream DMA Controller.
-//              Supports Dual-BAR Architecture:
-//              - BAR0: PCIe BAR0 DMA Control Registers (axil_reg_space.v)
-//              - BAR1: PCIe BAR1 AXI4-Lite Master (Connects to Interconnect for User IP Cores)
+// Description: Multi-Channel 2D Video & Audio PCIe DMA Controller (AXI4-Stream Native).
+//              Uses Verilog parameter & generate loops to configure arbitrary channels:
+//              - NUM_VIDEO_CH: AXI4-Stream Video Interfaces (s_axis_video / m_axis_video)
+//              - NUM_AUDIO_CH: AXI4-Stream AES3 Audio Interfaces (s_axis_audio / m_axis_audio)
+//              - Dual-BAR: BAR0 (DMA Control), BAR1 (User IP Cores Interconnect)
+//              - Direct Streaming Architecture: Completely replaces AXI MM with native streams.
 // ============================================================================
 
 `timescale 1ns / 1ps
 
 module custom_pcie_dma_top #(
-    parameter PCIE_DATA_WIDTH = 256,
-    parameter PCIE_KEEP_WIDTH = PCIE_DATA_WIDTH / 32,
-    parameter AXI_DATA_WIDTH  = 256,
-    parameter AXI_ADDR_WIDTH  = 64
+    parameter PCIE_DATA_WIDTH  = 256,
+    parameter PCIE_KEEP_WIDTH  = PCIE_DATA_WIDTH / 32,
+    parameter NUM_VIDEO_CH     = 4,
+    parameter NUM_AUDIO_CH     = 4,
+    parameter VIDEO_DATA_WIDTH = 32,
+    parameter AUDIO_DATA_WIDTH = 32
 )(
-    input  wire                       clk,
-    input  wire                       rst_n,
+    input  wire                                             clk,
+    input  wire                                             rst_n,
 
     // PCIe CQ Interface (PCIe IP -> DMA Top)
-    input  wire [PCIE_DATA_WIDTH-1:0] s_axis_cq_tdata,
-    input  wire                       s_axis_cq_tvalid,
-    input  wire                       s_axis_cq_tlast,
-    input  wire [87:0]                s_axis_cq_tuser,
-    input  wire [PCIE_KEEP_WIDTH-1:0] s_axis_cq_tkeep,
-    output wire                       s_axis_cq_tready,
+    input  wire [PCIE_DATA_WIDTH-1:0]                       s_axis_cq_tdata,
+    input  wire                                             s_axis_cq_tvalid,
+    input  wire                                             s_axis_cq_tlast,
+    input  wire [87:0]                                      s_axis_cq_tuser,
+    input  wire [PCIE_KEEP_WIDTH-1:0]                       s_axis_cq_tkeep,
+    output wire                                             s_axis_cq_tready,
 
     // PCIe CC Interface (DMA Top -> PCIe IP)
-    output wire [PCIE_DATA_WIDTH-1:0] m_axis_cc_tdata,
-    output wire                       m_axis_cc_tvalid,
-    output wire                       m_axis_cc_tlast,
-    output wire [32:0]                m_axis_cc_tuser,
-    output wire [PCIE_KEEP_WIDTH-1:0] m_axis_cc_tkeep,
-    input  wire                       m_axis_cc_tready,
+    output wire [PCIE_DATA_WIDTH-1:0]                       m_axis_cc_tdata,
+    output wire                                             m_axis_cc_tvalid,
+    output wire                                             m_axis_cc_tlast,
+    output wire [32:0]                                      m_axis_cc_tuser,
+    output wire [PCIE_KEEP_WIDTH-1:0]                       m_axis_cc_tkeep,
+    input  wire                                             m_axis_cc_tready,
 
     // PCIe RQ Interface (DMA Top -> PCIe IP)
-    output wire [PCIE_DATA_WIDTH-1:0] m_axis_rq_tdata,
-    output wire                       m_axis_rq_tvalid,
-    output wire                       m_axis_rq_tlast,
-    output wire [59:0]                m_axis_rq_tuser,
-    output wire [PCIE_KEEP_WIDTH-1:0] m_axis_rq_tkeep,
-    input  wire                       m_axis_rq_tready,
+    output wire [PCIE_DATA_WIDTH-1:0]                       m_axis_rq_tdata,
+    output wire                                             m_axis_rq_tvalid,
+    output wire                                             m_axis_rq_tlast,
+    output wire [59:0]                                      m_axis_rq_tuser,
+    output wire [PCIE_KEEP_WIDTH-1:0]                       m_axis_rq_tkeep,
+    input  wire                                             m_axis_rq_tready,
 
     // PCIe RC Interface (PCIe IP -> DMA Top)
-    input  wire [PCIE_DATA_WIDTH-1:0] s_axis_rc_tdata,
-    input  wire                       s_axis_rc_tvalid,
-    input  wire                       s_axis_rc_tlast,
-    input  wire [74:0]                s_axis_rc_tuser,
-    input  wire [PCIE_KEEP_WIDTH-1:0] s_axis_rc_tkeep,
-    output wire                       s_axis_rc_tready,
+    input  wire [PCIE_DATA_WIDTH-1:0]                       s_axis_rc_tdata,
+    input  wire                                             s_axis_rc_tvalid,
+    input  wire                                             s_axis_rc_tlast,
+    input  wire [74:0]                                      s_axis_rc_tuser,
+    input  wire [PCIE_KEEP_WIDTH-1:0]                       s_axis_rc_tkeep,
+    output wire                                             s_axis_rc_tready,
 
     // BAR1 AXI4-Lite Master Interface (Connects to Interconnect for User IP Cores: I2C, UART, etc.)
-    output wire [31:0]                m_axil_bar1_awaddr,
-    output wire                       m_axil_bar1_awvalid,
-    input  wire                       m_axil_bar1_awready,
-    output wire [31:0]                m_axil_bar1_wdata,
-    output wire [3:0]                 m_axil_bar1_wstrb,
-    output wire                       m_axil_bar1_wvalid,
-    input  wire                       m_axil_bar1_wready,
-    input  wire [1:0]                 m_axil_bar1_bresp,
-    input  wire                       m_axil_bar1_bvalid,
-    output wire                       m_axil_bar1_bready,
+    output wire [31:0]                                      m_axil_bar1_awaddr,
+    output wire                                             m_axil_bar1_awvalid,
+    input  wire                                             m_axil_bar1_awready,
+    output wire [31:0]                                      m_axil_bar1_wdata,
+    output wire [3:0]                                       m_axil_bar1_wstrb,
+    output wire                                             m_axil_bar1_wvalid,
+    input  wire                                             m_axil_bar1_wready,
+    input  wire [1:0]                                       m_axil_bar1_bresp,
+    input  wire                                             m_axil_bar1_bvalid,
+    output wire                                             m_axil_bar1_bready,
 
-    output wire [31:0]                m_axil_bar1_araddr,
-    output wire                       m_axil_bar1_arvalid,
-    input  wire                       m_axil_bar1_arready,
-    input  wire [31:0]                m_axil_bar1_rdata,
-    input  wire [1:0]                 m_axil_bar1_rresp,
-    input  wire                       m_axil_bar1_rvalid,
-    output wire                       m_axil_bar1_rready,
+    output wire [31:0]                                      m_axil_bar1_araddr,
+    output wire                                             m_axil_bar1_arvalid,
+    input  wire                                             m_axil_bar1_arready,
+    input  wire [31:0]                                      m_axil_bar1_rdata,
+    input  wire [1:0]                                       m_axil_bar1_rresp,
+    input  wire                                             m_axil_bar1_rvalid,
+    output wire                                             m_axil_bar1_rready,
 
-    // AXI4 Memory Mapped Master Interface (To FPGA Memory/Logic)
-    output wire [AXI_ADDR_WIDTH-1:0]  m_axi_awaddr,
-    output wire [7:0]                 m_axi_awlen,
-    output wire [2:0]                 m_axi_awsize,
-    output wire [1:0]                 m_axi_awburst,
-    output wire                       m_axi_awvalid,
-    input  wire                       m_axi_awready,
+    // Multi-Channel AXI4-Stream Video Interfaces (s_axis_video: C2H In, m_axis_video: H2C Out)
+    input  wire [(NUM_VIDEO_CH*VIDEO_DATA_WIDTH)-1:0]       s_axis_video_tdata,
+    input  wire [NUM_VIDEO_CH-1:0]                          s_axis_video_tvalid,
+    input  wire [NUM_VIDEO_CH-1:0]                          s_axis_video_tlast,
+    input  wire [NUM_VIDEO_CH-1:0]                          s_axis_video_tuser, // tuser[0] = SOF
+    output wire [NUM_VIDEO_CH-1:0]                          s_axis_video_tready,
 
-    output wire [AXI_DATA_WIDTH-1:0]  m_axi_wdata,
-    output wire [(AXI_DATA_WIDTH/8)-1:0] m_axi_wstrb,
-    output wire                       m_axi_wlast,
-    output wire                       m_axi_wvalid,
-    input  wire                       m_axi_wready,
+    output wire [(NUM_VIDEO_CH*VIDEO_DATA_WIDTH)-1:0]       m_axis_video_tdata,
+    output wire [NUM_VIDEO_CH-1:0]                          m_axis_video_tvalid,
+    output wire [NUM_VIDEO_CH-1:0]                          m_axis_video_tlast,
+    output wire [NUM_VIDEO_CH-1:0]                          m_axis_video_tuser,
+    input  wire [NUM_VIDEO_CH-1:0]                          m_axis_video_tready,
 
-    input  wire [1:0]                 m_axi_bresp,
-    input  wire                       m_axi_bvalid,
-    output wire                       m_axi_bready,
+    // Multi-Channel AXI4-Stream Audio Interfaces (AES3 Subframes)
+    input  wire [(NUM_AUDIO_CH*AUDIO_DATA_WIDTH)-1:0]       s_axis_audio_tdata,
+    input  wire [NUM_AUDIO_CH-1:0]                          s_axis_audio_tvalid,
+    input  wire [NUM_AUDIO_CH-1:0]                          s_axis_audio_tlast,
+    output wire [NUM_AUDIO_CH-1:0]                          s_axis_audio_tready,
 
-    output wire [AXI_ADDR_WIDTH-1:0]  m_axi_araddr,
-    output wire [7:0]                 m_axi_arlen,
-    output wire [2:0]                 m_axi_arsize,
-    output wire [1:0]                 m_axi_arburst,
-    output wire                       m_axi_arvalid,
-    input  wire                       m_axi_arready,
-
-    input  wire [AXI_DATA_WIDTH-1:0]  m_axi_rdata,
-    input  wire [1:0]                 m_axi_rresp,
-    input  wire                       m_axi_rlast,
-    input  wire                       m_axi_rvalid,
-    output wire                       m_axi_rready,
+    output wire [(NUM_AUDIO_CH*AUDIO_DATA_WIDTH)-1:0]       m_axis_audio_tdata,
+    output wire [NUM_AUDIO_CH-1:0]                          m_axis_audio_tvalid,
+    output wire [NUM_AUDIO_CH-1:0]                          m_axis_audio_tlast,
+    input  wire [NUM_AUDIO_CH-1:0]                          m_axis_audio_tready,
 
     // Interrupt Pins
-    output wire                       usr_irq_req,
-    input  wire                       usr_irq_ack
+    output wire                                             usr_irq_req,
+    input  wire                                             usr_irq_ack
 );
 
     // Internal Wires for BAR0 Inter-module Connection
@@ -172,23 +169,17 @@ module custom_pcie_dma_top #(
 
     wire        irq_req_valid, irq_req_ack;
     wire [7:0]  irq_req_code;
-    wire        h2c_busy, h2c_done, h2c_count_inc;
-    wire        c2h_busy, c2h_done, c2h_count_inc;
 
-    // Completed Descriptor Counter Logic
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            completed_h2c_count <= 32'd0;
-            completed_c2h_count <= 32'd0;
-        end else begin
-            if (h2c_count_inc) completed_h2c_count <= completed_h2c_count + 1'b1;
-            if (c2h_count_inc) completed_c2h_count <= completed_c2h_count + 1'b1;
-        end
-    end
+    // Stream Engine Channel Wires
+    wire [NUM_VIDEO_CH-1:0] v_c2h_req_valid, v_c2h_req_ack;
+    wire [NUM_VIDEO_CH-1:0] v_busy, v_done;
 
-    assign reg_dma_status = {28'd0, c2h_done, h2c_done, c2h_busy, h2c_busy};
+    wire [NUM_AUDIO_CH-1:0] a_c2h_req_valid, a_c2h_req_ack;
+    wire [NUM_AUDIO_CH-1:0] a_busy, a_done;
 
-    // 1. CQ RX Decoder (BAR0 & BAR1 Demux)
+    assign reg_dma_status = {24'd0, a_done[0], v_done[0], a_busy[0], v_busy[0]};
+
+    // 1. CQ RX Decoder
     cq_rx_decoder #(
         .DATA_WIDTH(PCIE_DATA_WIDTH)
     ) u_cq_rx_decoder (
@@ -243,7 +234,7 @@ module custom_pcie_dma_top #(
         .read_req_ack(read_req_ack)
     );
 
-    // 2. CC TX Encoder (BAR0 & BAR1 Read Completion Mux)
+    // 2. CC TX Encoder
     cc_tx_encoder #(
         .DATA_WIDTH(PCIE_DATA_WIDTH)
     ) u_cc_tx_encoder (
@@ -272,7 +263,7 @@ module custom_pcie_dma_top #(
         .bar1_axil_rready(m_axil_bar1_rready)
     );
 
-    // 3. BAR0 AXI4-Lite Register Space (DMA Control Registers)
+    // 3. BAR0 AXI4-Lite Register Space
     axil_reg_space u_axil_reg_space (
         .clk(clk),
         .rst_n(rst_n),
@@ -347,7 +338,7 @@ module custom_pcie_dma_top #(
         .h2c_req_dw_len(h2c_req_dw_len),
         .h2c_req_tag(h2c_req_tag),
         .h2c_req_ack(h2c_req_ack),
-        .c2h_req_valid(c2h_req_valid),
+        .c2h_req_valid(v_c2h_req_valid[0] | a_c2h_req_valid[0]),
         .c2h_req_addr(c2h_req_addr),
         .c2h_req_dw_len(c2h_req_dw_len),
         .c2h_req_data(c2h_req_data),
@@ -416,91 +407,83 @@ module custom_pcie_dma_top #(
         .c2h_desc_ready(c2h_desc_ready)
     );
 
-    // 8. H2C DMA Engine
-    h2c_dma_engine #(
-        .AXI_DATA_WIDTH(AXI_DATA_WIDTH),
-        .AXI_ADDR_WIDTH(AXI_ADDR_WIDTH)
-    ) u_h2c_dma_engine (
-        .clk(clk),
-        .rst_n(rst_n),
-        .h2c_desc_valid(h2c_desc_valid),
-        .h2c_plane0_src(h2c_plane0_src), .h2c_plane0_dst(h2c_plane0_dst),
-        .h2c_plane1_src(h2c_plane1_src), .h2c_plane1_dst(h2c_plane1_dst),
-        .h2c_plane2_src(h2c_plane2_src), .h2c_plane2_dst(h2c_plane2_dst),
-        .h2c_line_width(h2c_line_width), .h2c_line_count(h2c_line_count),
-        .h2c_src_stride(h2c_src_stride), .h2c_dst_stride(h2c_dst_stride),
-        .h2c_plane12_width(h2c_plane12_width), .h2c_plane12_count(h2c_plane12_count),
-        .h2c_format(h2c_format), .h2c_plane_count(h2c_plane_count),
-        .h2c_desc_ctrl(h2c_desc_ctrl),
-        .h2c_desc_ready(h2c_desc_ready),
-        .tag_alloc_req(tag_alloc_req),
-        .tag_alloc_tag(tag_alloc_tag),
-        .tag_alloc_valid(tag_alloc_valid),
-        .h2c_req_valid(h2c_req_valid),
-        .h2c_req_addr(h2c_req_addr),
-        .h2c_req_dw_len(h2c_req_dw_len),
-        .h2c_req_tag(h2c_req_tag),
-        .h2c_req_ack(h2c_req_ack),
-        .h2c_fifo_wvalid(h2c_fifo_wvalid),
-        .h2c_fifo_wdata(h2c_fifo_wdata),
-        .h2c_fifo_wlast(h2c_fifo_wlast),
-        .m_axi_awaddr(m_axi_awaddr),
-        .m_axi_awlen(m_axi_awlen),
-        .m_axi_awsize(m_axi_awsize),
-        .m_axi_awburst(m_axi_awburst),
-        .m_axi_awvalid(m_axi_awvalid),
-        .m_axi_awready(m_axi_awready),
-        .m_axi_wdata(m_axi_wdata),
-        .m_axi_wstrb(m_axi_wstrb),
-        .m_axi_wlast(m_axi_wlast),
-        .m_axi_wvalid(m_axi_wvalid),
-        .m_axi_wready(m_axi_wready),
-        .m_axi_bresp(m_axi_bresp),
-        .m_axi_bvalid(m_axi_bvalid),
-        .m_axi_bready(m_axi_bready),
-        .h2c_busy(h2c_busy),
-        .h2c_done(h2c_done),
-        .h2c_count_inc(h2c_count_inc)
-    );
+    // 8. Multi-Channel Video Stream Engines (Parameterized Generator)
+    genvar v_idx;
+    generate
+        for (v_idx = 0; v_idx < NUM_VIDEO_CH; v_idx = v_idx + 1) begin : gen_video_ch
+            video_stream_engine #(
+                .VIDEO_DATA_WIDTH(VIDEO_DATA_WIDTH),
+                .PCIE_DATA_WIDTH(PCIE_DATA_WIDTH)
+            ) u_video_stream_engine (
+                .clk(clk),
+                .rst_n(rst_n),
+                .video_start(reg_dma_ctrl[0] && (v_idx == 0)),
+                .host_frame_addr(h2c_plane0_src),
+                .line_width_bytes(h2c_line_width),
+                .line_count(h2c_line_count),
+                .line_stride_bytes(h2c_src_stride),
+                .is_c2h(c2h_desc_valid),
+                .s_axis_video_tdata(s_axis_video_tdata[(v_idx+1)*VIDEO_DATA_WIDTH-1 : v_idx*VIDEO_DATA_WIDTH]),
+                .s_axis_video_tvalid(s_axis_video_tvalid[v_idx]),
+                .s_axis_video_tlast(s_axis_video_tlast[v_idx]),
+                .s_axis_video_tuser(s_axis_video_tuser[v_idx]),
+                .s_axis_video_tready(s_axis_video_tready[v_idx]),
+                .m_axis_video_tdata(m_axis_video_tdata[(v_idx+1)*VIDEO_DATA_WIDTH-1 : v_idx*VIDEO_DATA_WIDTH]),
+                .m_axis_video_tvalid(m_axis_video_tvalid[v_idx]),
+                .m_axis_video_tlast(m_axis_video_tlast[v_idx]),
+                .m_axis_video_tuser(m_axis_video_tuser[v_idx]),
+                .m_axis_video_tready(m_axis_video_tready[v_idx]),
+                .c2h_req_valid(v_c2h_req_valid[v_idx]),
+                .c2h_req_addr(c2h_req_addr),
+                .c2h_req_dw_len(c2h_req_dw_len),
+                .c2h_req_data(c2h_req_data),
+                .c2h_req_last(c2h_req_last),
+                .c2h_req_ack(c2h_req_ack),
+                .h2c_fifo_wvalid(h2c_fifo_wvalid),
+                .h2c_fifo_wdata(h2c_fifo_wdata),
+                .h2c_fifo_wlast(h2c_fifo_wlast),
+                .video_busy(v_busy[v_idx]),
+                .video_frame_done(v_done[v_idx])
+            );
+        end
+    endgenerate
 
-    // 9. C2H DMA Engine
-    c2h_dma_engine #(
-        .AXI_DATA_WIDTH(AXI_DATA_WIDTH),
-        .AXI_ADDR_WIDTH(AXI_ADDR_WIDTH)
-    ) u_c2h_dma_engine (
-        .clk(clk),
-        .rst_n(rst_n),
-        .c2h_desc_valid(c2h_desc_valid),
-        .c2h_plane0_src(c2h_plane0_src), .c2h_plane0_dst(c2h_plane0_dst),
-        .c2h_plane1_src(c2h_plane1_src), .c2h_plane1_dst(c2h_plane1_dst),
-        .c2h_plane2_src(c2h_plane2_src), .c2h_plane2_dst(c2h_plane2_dst),
-        .c2h_line_width(c2h_line_width), .c2h_line_count(c2h_line_count),
-        .c2h_src_stride(c2h_src_stride), .c2h_dst_stride(c2h_dst_stride),
-        .c2h_plane12_width(c2h_plane12_width), .c2h_plane12_count(c2h_plane12_count),
-        .c2h_format(c2h_format), .c2h_plane_count(c2h_plane_count),
-        .c2h_desc_ctrl(c2h_desc_ctrl),
-        .c2h_desc_ready(c2h_desc_ready),
-        .m_axi_araddr(m_axi_araddr),
-        .m_axi_arlen(m_axi_arlen),
-        .m_axi_arsize(m_axi_arsize),
-        .m_axi_arburst(m_axi_arburst),
-        .m_axi_arvalid(m_axi_arvalid),
-        .m_axi_arready(m_axi_arready),
-        .m_axi_rdata(m_axi_rdata),
-        .m_axi_rresp(m_axi_rresp),
-        .m_axi_rlast(m_axi_rlast),
-        .m_axi_rvalid(m_axi_rvalid),
-        .m_axi_rready(m_axi_rready),
-        .c2h_req_valid(c2h_req_valid),
-        .c2h_req_addr(c2h_req_addr),
-        .c2h_req_dw_len(c2h_req_dw_len),
-        .c2h_req_data(c2h_req_data),
-        .c2h_req_last(c2h_req_last),
-        .c2h_req_ack(c2h_req_ack),
-        .c2h_busy(c2h_busy),
-        .c2h_done(c2h_done),
-        .c2h_count_inc(c2h_count_inc)
-    );
+    // 9. Multi-Channel AES3 Audio Stream Engines (Parameterized Generator)
+    genvar a_idx;
+    generate
+        for (a_idx = 0; a_idx < NUM_AUDIO_CH; a_idx = a_idx + 1) begin : gen_audio_ch
+            audio_stream_engine #(
+                .AUDIO_DATA_WIDTH(AUDIO_DATA_WIDTH),
+                .PCIE_DATA_WIDTH(PCIE_DATA_WIDTH)
+            ) u_audio_stream_engine (
+                .clk(clk),
+                .rst_n(rst_n),
+                .audio_start(reg_dma_ctrl[1] && (a_idx == 0)),
+                .host_buffer_addr(h2c_plane0_src),
+                .sample_block_size(16'd32),
+                .is_c2h(c2h_desc_valid),
+                .s_axis_audio_tdata(s_axis_audio_tdata[(a_idx+1)*AUDIO_DATA_WIDTH-1 : a_idx*AUDIO_DATA_WIDTH]),
+                .s_axis_audio_tvalid(s_axis_audio_tvalid[a_idx]),
+                .s_axis_audio_tlast(s_axis_audio_tlast[a_idx]),
+                .s_axis_audio_tready(s_axis_audio_tready[a_idx]),
+                .m_axis_audio_tdata(m_axis_audio_tdata[(a_idx+1)*AUDIO_DATA_WIDTH-1 : a_idx*AUDIO_DATA_WIDTH]),
+                .m_axis_audio_tvalid(m_axis_audio_tvalid[a_idx]),
+                .m_axis_audio_tlast(m_axis_audio_tlast[a_idx]),
+                .m_axis_audio_tready(m_axis_audio_tready[a_idx]),
+                .c2h_req_valid(a_c2h_req_valid[a_idx]),
+                .c2h_req_addr(),
+                .c2h_req_dw_len(),
+                .c2h_req_data(),
+                .c2h_req_last(),
+                .c2h_req_ack(c2h_req_ack),
+                .h2c_fifo_wvalid(h2c_fifo_wvalid),
+                .h2c_fifo_wdata(h2c_fifo_wdata),
+                .h2c_fifo_wlast(h2c_fifo_wlast),
+                .audio_busy(a_busy[a_idx]),
+                .audio_block_done(a_done[a_idx])
+            );
+        end
+    endgenerate
 
     // 10. Interrupt Controller
     interrupt_ctrl u_interrupt_ctrl (
@@ -508,8 +491,8 @@ module custom_pcie_dma_top #(
         .rst_n(rst_n),
         .reg_irq_ctrl(reg_irq_ctrl),
         .reg_irq_status(reg_irq_status),
-        .h2c_done(h2c_done),
-        .c2h_done(c2h_done),
+        .h2c_done(v_done[0]),
+        .c2h_done(a_done[0]),
         .irq_req_valid(irq_req_valid),
         .irq_req_code(irq_req_code),
         .irq_req_ack(irq_req_ack),
