@@ -2,6 +2,8 @@
 /*
  * Driver: qpcie_v4l2.c
  * Description: Video4Linux2 Multi-Planar Capture Driver for Custom PCIe 2D DMA.
+ *              Supports Memory-Mapped (MMAP), User Pointer (USERPTR),
+ *              DMA-BUF Import (DMABUF), and Export Buffer (EXPBUF).
  */
 
 #include "qpcie_driver.h"
@@ -81,10 +83,18 @@ static const struct v4l2_ioctl_ops qpcie_v4l2_ioctl_ops = {
     .vidioc_enum_fmt_vid_cap_mplane = qpcie_vidioc_enum_fmt_vid_cap_mplane,
     .vidioc_g_fmt_vid_cap_mplane    = qpcie_vidioc_g_fmt_vid_cap_mplane,
     .vidioc_s_fmt_vid_cap_mplane    = qpcie_vidioc_s_fmt_vid_cap_mplane,
+
+    /* Videobuf2 Buffer Management IOCTLs (MMAP, USERPTR, DMABUF) */
     .vidioc_reqbufs                 = vb2_ioctl_reqbufs,
     .vidioc_querybuf                = vb2_ioctl_querybuf,
     .vidioc_qbuf                    = vb2_ioctl_qbuf,
     .vidioc_dqbuf                   = vb2_ioctl_dqbuf,
+    .vidioc_prepare_buf             = vb2_ioctl_prepare_buf,
+    .vidioc_create_bufs             = vb2_ioctl_create_bufs,
+
+    /* DMA-BUF Export Buffer IOCTL */
+    .vidioc_expbuf                  = vb2_ioctl_expbuf,
+
     .vidioc_streamon                = vb2_ioctl_streamon,
     .vidioc_streamoff               = vb2_ioctl_streamoff,
 };
@@ -107,6 +117,27 @@ static int qpcie_queue_setup(struct vb2_queue *vq,
         sizes[1] = vch->stride * (vch->height / 2);
     }
 
+    return 0;
+}
+
+static int qpcie_buf_prepare(struct vb2_buffer *vb)
+{
+    struct qpcie_v4l2_channel *vch = vb2_get_drvpriv(vb->vb2_queue);
+    int i;
+
+    /* Validate plane size for MMAP, USERPTR, and DMABUF memory modes */
+    for (i = 0; i < vb->num_planes; i++) {
+        unsigned long size = (i == 0) ? (vch->stride * vch->height) :
+                             (vch->pixelformat == V4L2_PIX_FMT_YUV420M) ? ((vch->stride / 2) * (vch->height / 2)) :
+                             (vch->stride * (vch->height / 2));
+
+        if (vb2_plane_size(vb, i) < size) {
+            v4l2_err(&vch->v4l2_dev, "Plane %d size %lu < required %lu\n",
+                     i, vb2_plane_size(vb, i), size);
+            return -EINVAL;
+        }
+        vb2_set_plane_payload(vb, i, size);
+    }
     return 0;
 }
 
@@ -151,6 +182,7 @@ static void qpcie_buf_queue(struct vb2_buffer *vb)
 
 static const struct vb2_ops qpcie_vb2_ops = {
     .queue_setup = qpcie_queue_setup,
+    .buf_prepare = qpcie_buf_prepare,
     .buf_queue   = qpcie_buf_queue,
 };
 
@@ -177,8 +209,9 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
         ret = v4l2_device_register(&qdev->pdev->dev, &vch->v4l2_dev);
         if (ret) return ret;
 
+        /* Enable MMAP, USERPTR, and DMABUF (Import/Export) Modes */
         vch->queue.type            = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
-        vch->queue.io_modes        = VB2_MMAP | VB2_DMABUF;
+        vch->queue.io_modes        = VB2_MMAP | VB2_USERPTR | VB2_DMABUF;
         vch->queue.drv_priv        = vch;
         vch->queue.buf_struct_size = sizeof(struct qpcie_v4l2_buffer);
         vch->queue.ops             = &qpcie_vb2_ops;
