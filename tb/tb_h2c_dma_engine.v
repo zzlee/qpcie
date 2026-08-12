@@ -1,6 +1,6 @@
 // ============================================================================
 // Testbench: tb_h2c_dma_engine
-// Description: Unit testbench for h2c_dma_engine module
+// Description: Unit testbench for h2c_dma_engine module with 2D Multi-Planar & Stride
 // ============================================================================
 
 `timescale 1ns / 1ps
@@ -14,10 +14,14 @@ module tb_h2c_dma_engine;
     reg                      rst_n;
 
     reg                      h2c_desc_valid;
-    reg [63:0]               h2c_desc_src_addr;
-    reg [63:0]               h2c_desc_dst_addr;
-    reg [31:0]               h2c_desc_len;
-    reg [31:0]               h2c_desc_ctrl;
+    reg [63:0]               h2c_plane0_src, h2c_plane0_dst;
+    reg [63:0]               h2c_plane1_src, h2c_plane1_dst;
+    reg [63:0]               h2c_plane2_src, h2c_plane2_dst;
+    reg [15:0]               h2c_line_width, h2c_line_count;
+    reg [15:0]               h2c_src_stride, h2c_dst_stride;
+    reg [15:0]               h2c_plane12_width, h2c_plane12_count;
+    reg [3:0]                h2c_format, h2c_plane_count;
+    reg [15:0]               h2c_desc_ctrl;
     wire                     h2c_desc_ready;
 
     wire                     tag_alloc_req;
@@ -63,9 +67,13 @@ module tb_h2c_dma_engine;
         .clk(clk),
         .rst_n(rst_n),
         .h2c_desc_valid(h2c_desc_valid),
-        .h2c_desc_src_addr(h2c_desc_src_addr),
-        .h2c_desc_dst_addr(h2c_desc_dst_addr),
-        .h2c_desc_len(h2c_desc_len),
+        .h2c_plane0_src(h2c_plane0_src), .h2c_plane0_dst(h2c_plane0_dst),
+        .h2c_plane1_src(h2c_plane1_src), .h2c_plane1_dst(h2c_plane1_dst),
+        .h2c_plane2_src(h2c_plane2_src), .h2c_plane2_dst(h2c_plane2_dst),
+        .h2c_line_width(h2c_line_width), .h2c_line_count(h2c_line_count),
+        .h2c_src_stride(h2c_src_stride), .h2c_dst_stride(h2c_dst_stride),
+        .h2c_plane12_width(h2c_plane12_width), .h2c_plane12_count(h2c_plane12_count),
+        .h2c_format(h2c_format), .h2c_plane_count(h2c_plane_count),
         .h2c_desc_ctrl(h2c_desc_ctrl),
         .h2c_desc_ready(h2c_desc_ready),
         .tag_alloc_req(tag_alloc_req),
@@ -104,9 +112,13 @@ module tb_h2c_dma_engine;
         clk = 0;
         rst_n = 0;
         h2c_desc_valid = 0;
-        h2c_desc_src_addr = 0;
-        h2c_desc_dst_addr = 0;
-        h2c_desc_len = 0;
+        h2c_plane0_src = 0; h2c_plane0_dst = 0;
+        h2c_plane1_src = 0; h2c_plane1_dst = 0;
+        h2c_plane2_src = 0; h2c_plane2_dst = 0;
+        h2c_line_width = 32; h2c_line_count = 2;
+        h2c_src_stride = 64; h2c_dst_stride = 32;
+        h2c_plane12_width = 0; h2c_plane12_count = 0;
+        h2c_format = 1; h2c_plane_count = 1;
         h2c_desc_ctrl = 0;
         tag_alloc_tag = 8'h02;
         tag_alloc_valid = 0;
@@ -123,15 +135,18 @@ module tb_h2c_dma_engine;
         rst_n = 1;
         #10;
 
-        $display("[%0t] Test 1: Dispatch H2C Descriptor (Host Src=0x1000, FPGA Dst=0x4000, Len=32)...", $time);
+        $display("[%0t] Test 1: Dispatch H2C 2D Descriptor (Host Src=0x1000, FPGA Dst=0x4000, Width=32, Lines=2, Stride=64)...", $time);
         @(posedge clk);
-        h2c_desc_valid    <= 1;
-        h2c_desc_src_addr <= 64'h0000_1000;
-        h2c_desc_dst_addr <= 64'h0000_4000;
-        h2c_desc_len      <= 32'd32;
+        h2c_desc_valid <= 1;
+        h2c_plane0_src <= 64'h0000_1000;
+        h2c_plane0_dst <= 64'h0000_4000;
+        h2c_line_width <= 16'd32;
+        h2c_line_count <= 16'd2;
+        h2c_src_stride <= 16'd64;
+        h2c_dst_stride <= 16'd32;
 
         wait(tag_alloc_req);
-        $display("[%0t] H2C Engine requested Tag allocation...", $time);
+        $display("[%0t] H2C Engine requested Tag allocation for Line 0...", $time);
         @(posedge clk);
         tag_alloc_valid <= 1;
         @(posedge clk);
@@ -139,14 +154,14 @@ module tb_h2c_dma_engine;
         h2c_desc_valid  <= 0;
 
         wait(h2c_req_valid);
-        $display("[%0t] H2C Engine requested MRd Addr: 0x%h Tag: 0x%h DW Len: %d", $time, h2c_req_addr, h2c_req_tag, h2c_req_dw_len);
+        $display("[%0t] H2C Engine requested MRd Line 0 Addr: 0x%h DW Len: %d", $time, h2c_req_addr, h2c_req_dw_len);
         @(posedge clk);
         h2c_req_ack <= 1;
         @(posedge clk);
         h2c_req_ack <= 0;
 
         #20;
-        $display("[%0t] Simulate Host returning CplD data into H2C FIFO...", $time);
+        $display("[%0t] Simulate Host returning Line 0 CplD data...", $time);
         @(posedge clk);
         h2c_fifo_wvalid <= 1;
         h2c_fifo_wdata  <= 256'h11223344_55667788_99AABBCC_DDEEFF00_12345678_87654321_00112233_44556677;
@@ -155,7 +170,38 @@ module tb_h2c_dma_engine;
         h2c_fifo_wvalid <= 0;
 
         wait(m_axi_awvalid && m_axi_wvalid);
-        $display("[%0t] H2C Engine driving AXI4 Master Write to FPGA Memory! Addr: 0x%h Data: 0x%h", $time, m_axi_awaddr, m_axi_wdata);
+        $display("[%0t] H2C Engine driving AXI4 Write Line 0! Addr: 0x%h", $time, m_axi_awaddr);
+
+        @(posedge clk);
+        m_axi_bvalid <= 1;
+        @(posedge clk);
+        m_axi_bvalid <= 0;
+
+        #20;
+        wait(tag_alloc_req);
+        $display("[%0t] H2C Engine requested Tag allocation for Line 1...", $time);
+        @(posedge clk);
+        tag_alloc_valid <= 1;
+        @(posedge clk);
+        tag_alloc_valid <= 0;
+
+        wait(h2c_req_valid);
+        $display("[%0t] H2C Engine requested MRd Line 1 Addr: 0x%h (Expect 0x1040)", $time, h2c_req_addr);
+        @(posedge clk);
+        h2c_req_ack <= 1;
+        @(posedge clk);
+        h2c_req_ack <= 0;
+
+        #20;
+        @(posedge clk);
+        h2c_fifo_wvalid <= 1;
+        h2c_fifo_wdata  <= 256'hA1B2C3D4_E5F67890_11223344_55667788_99AABBCC_DDEEFF00_DEADBEEF_CAFEBABE;
+        h2c_fifo_wlast  <= 1;
+        @(posedge clk);
+        h2c_fifo_wvalid <= 0;
+
+        wait(m_axi_awvalid && m_axi_wvalid);
+        $display("[%0t] H2C Engine driving AXI4 Write Line 1! Addr: 0x%h (Expect 0x4020)", $time, m_axi_awaddr);
 
         @(posedge clk);
         m_axi_bvalid <= 1;
@@ -163,10 +209,10 @@ module tb_h2c_dma_engine;
         m_axi_bvalid <= 0;
 
         wait(h2c_done);
-        $display("[%0t] H2C Transfer Complete! Done flag asserted.", $time);
+        $display("[%0t] 2D Multi-Scanline H2C Transfer Complete!", $time);
 
         #30;
-        $display("[%0t] SUCCESS: h2c_dma_engine Test Completed!", $time);
+        $display("[%0t] SUCCESS: h2c_dma_engine 2D Test Completed!", $time);
         $finish;
     end
 

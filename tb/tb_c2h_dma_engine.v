@@ -1,6 +1,6 @@
 // ============================================================================
 // Testbench: tb_c2h_dma_engine
-// Description: Unit testbench for c2h_dma_engine module
+// Description: Unit testbench for c2h_dma_engine module with 2D Multi-Planar & Stride
 // ============================================================================
 
 `timescale 1ns / 1ps
@@ -14,10 +14,14 @@ module tb_c2h_dma_engine;
     reg                      rst_n;
 
     reg                      c2h_desc_valid;
-    reg [63:0]               c2h_desc_src_addr;
-    reg [63:0]               c2h_desc_dst_addr;
-    reg [31:0]               c2h_desc_len;
-    reg [31:0]               c2h_desc_ctrl;
+    reg [63:0]               c2h_plane0_src, c2h_plane0_dst;
+    reg [63:0]               c2h_plane1_src, c2h_plane1_dst;
+    reg [63:0]               c2h_plane2_src, c2h_plane2_dst;
+    reg [15:0]               c2h_line_width, c2h_line_count;
+    reg [15:0]               c2h_src_stride, c2h_dst_stride;
+    reg [15:0]               c2h_plane12_width, c2h_plane12_count;
+    reg [3:0]                c2h_format, c2h_plane_count;
+    reg [15:0]               c2h_desc_ctrl;
     wire                     c2h_desc_ready;
 
     wire [AXI_ADDR_WIDTH-1:0] m_axi_araddr;
@@ -52,9 +56,13 @@ module tb_c2h_dma_engine;
         .clk(clk),
         .rst_n(rst_n),
         .c2h_desc_valid(c2h_desc_valid),
-        .c2h_desc_src_addr(c2h_desc_src_addr),
-        .c2h_desc_dst_addr(c2h_desc_dst_addr),
-        .c2h_desc_len(c2h_desc_len),
+        .c2h_plane0_src(c2h_plane0_src), .c2h_plane0_dst(c2h_plane0_dst),
+        .c2h_plane1_src(c2h_plane1_src), .c2h_plane1_dst(c2h_plane1_dst),
+        .c2h_plane2_src(c2h_plane2_src), .c2h_plane2_dst(c2h_plane2_dst),
+        .c2h_line_width(c2h_line_width), .c2h_line_count(c2h_line_count),
+        .c2h_src_stride(c2h_src_stride), .c2h_dst_stride(c2h_dst_stride),
+        .c2h_plane12_width(c2h_plane12_width), .c2h_plane12_count(c2h_plane12_count),
+        .c2h_format(c2h_format), .c2h_plane_count(c2h_plane_count),
         .c2h_desc_ctrl(c2h_desc_ctrl),
         .c2h_desc_ready(c2h_desc_ready),
         .m_axi_araddr(m_axi_araddr),
@@ -85,9 +93,13 @@ module tb_c2h_dma_engine;
         clk = 0;
         rst_n = 0;
         c2h_desc_valid = 0;
-        c2h_desc_src_addr = 0;
-        c2h_desc_dst_addr = 0;
-        c2h_desc_len = 0;
+        c2h_plane0_src = 0; c2h_plane0_dst = 0;
+        c2h_plane1_src = 0; c2h_plane1_dst = 0;
+        c2h_plane2_src = 0; c2h_plane2_dst = 0;
+        c2h_line_width = 32; c2h_line_count = 1;
+        c2h_src_stride = 32; c2h_dst_stride = 64;
+        c2h_plane12_width = 0; c2h_plane12_count = 0;
+        c2h_format = 1; c2h_plane_count = 1;
         c2h_desc_ctrl = 0;
         m_axi_arready = 1;
         m_axi_rdata = 0;
@@ -100,15 +112,18 @@ module tb_c2h_dma_engine;
         rst_n = 1;
         #10;
 
-        $display("[%0t] Test 1: Dispatch C2H Descriptor (FPGA Src=0x5000, Host Dst=0x9000, Len=32)...", $time);
+        $display("[%0t] Test 1: Dispatch C2H 2D Descriptor (FPGA Src=0x5000, Host Dst=0x9000, Width=32, Dst Stride=64)...", $time);
         @(posedge clk);
-        c2h_desc_valid    <= 1;
-        c2h_desc_src_addr <= 64'h0000_5000;
-        c2h_desc_dst_addr <= 64'h0000_9000;
-        c2h_desc_len      <= 32'd32;
+        c2h_desc_valid <= 1;
+        c2h_plane0_src <= 64'h0000_5000;
+        c2h_plane0_dst <= 64'h0000_9000;
+        c2h_line_width <= 16'd32;
+        c2h_line_count <= 16'd1;
+        c2h_src_stride <= 16'd32;
+        c2h_dst_stride <= 16'd64;
 
         wait(m_axi_arvalid);
-        $display("[%0t] C2H Engine issued AXI4 Master Read to FPGA Memory Addr: 0x%h", $time, m_axi_araddr);
+        $display("[%0t] C2H Engine issued AXI4 Read Addr: 0x%h", $time, m_axi_araddr);
 
         @(posedge clk);
         c2h_desc_valid <= 0;
@@ -131,7 +146,7 @@ module tb_c2h_dma_engine;
         c2h_req_ack <= 0;
 
         wait(c2h_done);
-        $display("[%0t] C2H Transfer Complete! Done flag asserted.", $time);
+        $display("[%0t] C2H Transfer Complete!", $time);
 
         #30;
         $display("[%0t] SUCCESS: c2h_dma_engine Test Completed!", $time);

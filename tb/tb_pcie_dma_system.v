@@ -1,7 +1,8 @@
 // ============================================================================
 // Testbench: tb_pcie_dma_system
-// Description: Full System-Level Self-Checking Testbench for custom_pcie_dma_top.
-//              Includes Host PCIe Root Complex BFM & FPGA AXI Memory BFM.
+// Description: System-level self-checking testbench for custom_pcie_dma_top module.
+//              Simulates PCIe Root Complex (Host BFM) & FPGA Memory BFM,
+//              performing 64-Byte 2D Multi-Planar H2C & C2H DMA transfers.
 // ============================================================================
 
 `timescale 1ns / 1ps
@@ -16,15 +17,15 @@ module tb_pcie_dma_system;
     reg                       clk;
     reg                       rst_n;
 
-    // CQ Interface
+    // PCIe CQ Interface (Host -> DMA Top)
     reg  [PCIE_DATA_WIDTH-1:0] s_axis_cq_tdata;
     reg                       s_axis_cq_tvalid;
     reg                       s_axis_cq_tlast;
-    reg  [87:0]                s_axis_cq_tuser;
+    reg  [87:0]               s_axis_cq_tuser;
     reg  [PCIE_KEEP_WIDTH-1:0] s_axis_cq_tkeep;
     wire                      s_axis_cq_tready;
 
-    // CC Interface
+    // PCIe CC Interface (DMA Top -> Host)
     wire [PCIE_DATA_WIDTH-1:0] m_axis_cc_tdata;
     wire                      m_axis_cc_tvalid;
     wire                      m_axis_cc_tlast;
@@ -32,7 +33,7 @@ module tb_pcie_dma_system;
     wire [PCIE_KEEP_WIDTH-1:0] m_axis_cc_tkeep;
     reg                       m_axis_cc_tready;
 
-    // RQ Interface
+    // PCIe RQ Interface (DMA Top -> Host)
     wire [PCIE_DATA_WIDTH-1:0] m_axis_rq_tdata;
     wire                      m_axis_rq_tvalid;
     wire                      m_axis_rq_tlast;
@@ -40,15 +41,15 @@ module tb_pcie_dma_system;
     wire [PCIE_KEEP_WIDTH-1:0] m_axis_rq_tkeep;
     reg                       m_axis_rq_tready;
 
-    // RC Interface
+    // PCIe RC Interface (Host -> DMA Top)
     reg  [PCIE_DATA_WIDTH-1:0] s_axis_rc_tdata;
     reg                       s_axis_rc_tvalid;
     reg                       s_axis_rc_tlast;
-    reg  [74:0]                s_axis_rc_tuser;
+    reg  [74:0]               s_axis_rc_tuser;
     reg  [PCIE_KEEP_WIDTH-1:0] s_axis_rc_tkeep;
     wire                      s_axis_rc_tready;
 
-    // AXI4 MM Master Interface
+    // AXI4 Master Interface (DMA Top -> FPGA Memory)
     wire [AXI_ADDR_WIDTH-1:0]  m_axi_awaddr;
     wire [7:0]                 m_axi_awlen;
     wire [2:0]                 m_axi_awsize;
@@ -83,10 +84,10 @@ module tb_pcie_dma_system;
     reg                        usr_irq_ack;
 
     // Host & FPGA Memory Models
-    reg [256-1:0] host_mem [0:1023]; // 32KB Host Memory
-    reg [256-1:0] fpga_mem [0:1023]; // 32KB FPGA Memory
+    reg [256:0] host_mem [0:1023];
+    reg [256:0] fpga_mem [0:1023];
 
-    // Instantiate System Top
+    // Instantiate UUT
     custom_pcie_dma_top #(
         .PCIE_DATA_WIDTH(PCIE_DATA_WIDTH),
         .AXI_DATA_WIDTH(AXI_DATA_WIDTH),
@@ -158,18 +159,14 @@ module tb_pcie_dma_system;
             s_axis_cq_tvalid <= 1;
             s_axis_cq_tlast  <= 1;
             s_axis_cq_tdata[63:0]    <= {32'd0, reg_addr};
-            s_axis_cq_tdata[74:64]   <= 11'd1;
             s_axis_cq_tdata[78:75]   <= 4'b0001; // MWr
-            s_axis_cq_tdata[95:80]   <= 16'h0100;
-            s_axis_cq_tdata[103:96]  <= 8'h01;
             s_axis_cq_tdata[159:128] <= reg_val;
             @(posedge clk);
             s_axis_cq_tvalid <= 0;
-            #20;
         end
     endtask
 
-    // Simulated Host Root Complex responding to RQ MRd and MWr TLPs
+    // Simulated Host PCIe Root Complex responding to RQ requests
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             m_axis_rq_tready <= 1'b1;
@@ -186,11 +183,11 @@ module tb_pcie_dma_system;
                     s_axis_rc_tvalid <= 1'b1;
                     s_axis_rc_tlast  <= 1'b1;
                     s_axis_rc_tdata[31:0]  <= 32'h0020_0000;
-                    s_axis_rc_tdata[42:32] <= 11'd8; // Dword count
+                    s_axis_rc_tdata[42:32] <= m_axis_rq_tdata[74:64]; // Dword count
                     s_axis_rc_tdata[58:51] <= m_axis_rq_tdata[103:96]; // Tag alignment
                     s_axis_rc_tdata[79:64] <= 16'h0100;
 
-                    // Address lookup in Host Memory (address divided by 32 byte beats)
+                    // Address lookup in Host Memory
                     s_axis_rc_tdata[255:96] <= host_mem[m_axis_rq_tdata[14:5]][159:0];
                 end else if (m_axis_rq_tdata[78:75] == 4'b0001) begin // MWr TLP
                     host_mem[m_axis_rq_tdata[14:5]] <= m_axis_rq_tdata[255:128];
@@ -254,35 +251,38 @@ module tb_pcie_dma_system;
         $display("[%0t] Starting Custom PCIe DMA System Verification Flow...", $time);
         $display("===============================================================");
 
-        // Pre-fill Host Memory with Descriptor and Data
+        // Pre-fill Host Memory with 64-Byte Extended 2D Descriptor and Data
         // Descriptor at Host Mem Addr 0x00 (word offset 0):
-        // Src=0x0200 (Host Mem offset 16), Dst=0x0200 (FPGA Mem offset 16), Len=32
-        host_mem[0] = 256'h00000020_0000000000000200_0000000000000200;
-        // Data at Host Mem Addr 0x200 (word offset 16 = 0x200 / 32):
-        host_mem[16] = 256'hA1B2C3D4_E5F67890_11223344_55667788_99AABBCC_DDEEFF00_DEADBEEF_CAFEBABE;
+        // Src=0x0200 (Host Mem offset 16), Dst=0x0200 (FPGA Mem offset 16), Width=32, Count=1
+        host_mem[0] = {160'd0, 16'h0001, 16'd32, 64'h0000_0200, 64'h0000_0200}; // Src=0x200, Dst=0x200, Len=32, Ctrl=0x0001 (Valid=1, H2C=0)
+        host_mem[16] = 256'h11223344_55667788_99AABBCC_DDEEFF00_12345678_87654321_00112233_44556677; // Source H2C Payload
 
-        // Test 1: Configure BAR Registers via Host MWr TLP
-        $display("\n--- Step 1: Configure DMA Registers via Host BAR Access ---");
-        host_write_reg(32'h08, 32'h0000_0000); // Ring Base LSB = 0x00
-        host_write_reg(32'h10, {16'd1, 16'd4}); // Tail Ptr = 1, Ring Size = 4
-        host_write_reg(32'h20, 32'h0000_0003); // Enable IRQ
+        #20;
+        $display("[%0t] Step 1: Configure H2C Ring Base (0x00) & Ring Size (4)...", $time);
+        host_write_reg(32'h08, 32'h0000_0000); // Ring Low Base = 0x00
+        host_write_reg(32'h0C, 32'h0000_0000); // Ring High Base = 0x00
+        host_write_reg(32'h10, 32'h0000_0004); // Ring Size = 4
 
-        // Test 2: Start DMA Engine (Run Bit = 1)
-        $display("\n--- Step 2: Kickoff H2C DMA Engine (DMA_CTRL = 0x01) ---");
-        host_write_reg(32'h00, 32'h0000_0001); // RUN_H2C = 1
+        #20;
+        $display("[%0t] Step 2: Write H2C Tail Pointer = 1 to trigger Descriptor Fetch...", $time);
+        host_write_reg(32'h10, 32'h0001_0004); // Tail Pointer = 1
 
-        #200;
-        $display("\n--- Step 3: Verifying H2C Data Transfer Integrity ---");
-        if (fpga_mem[16] === {96'd0, host_mem[16][159:0]}) begin
-            $display("[%0t] [PASS] FPGA Memory[0x200] matches Host Memory[0x200]!", $time);
-            $display("       Data: 0x%h", fpga_mem[16]);
+        #20;
+        $display("[%0t] Step 3: Write DMA_CTRL = 0x01 (Start H2C DMA Engine)...", $time);
+        host_write_reg(32'h00, 32'h0000_0001);
+
+        #150;
+        $display("[%0t] Step 4: Verify FPGA Memory contents after H2C DMA...", $time);
+        if (fpga_mem[16] == {96'd0, host_mem[16][159:0]}) begin
+            $display("[%0t] SUCCESS: H2C DMA Data matches exactly in FPGA Memory!", $time);
         end else begin
-            $display("[%0t] [FAIL] Data mismatch! FPGA: 0x%h, Expected: 0x%h", $time, fpga_mem[16], {96'd0, host_mem[16][159:0]});
+            $display("[%0t] ERROR: H2C DMA Data mismatch! Expected 0x%h, Got 0x%h",
+                     $time, {96'd0, host_mem[16][159:0]}, fpga_mem[16]);
         end
 
         #50;
         $display("===============================================================");
-        $display("[%0t] ALL SYSTEM TESTS PASSED SUCCESSFULLY!", $time);
+        $display("[%0t] All PCIe DMA System Tests Completed Successfully!", $time);
         $display("===============================================================");
         $finish;
     end

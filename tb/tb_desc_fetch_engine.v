@@ -1,6 +1,6 @@
 // ============================================================================
 // Testbench: tb_desc_fetch_engine
-// Description: Unit testbench for desc_fetch_engine module
+// Description: Unit testbench for desc_fetch_engine module with 64-Byte 2D descriptors
 // ============================================================================
 
 `timescale 1ns / 1ps
@@ -23,21 +23,29 @@ module tb_desc_fetch_engine;
     reg         desc_req_ack;
 
     reg         desc_cpl_valid;
-    reg [159:0] desc_cpl_data;
+    reg [511:0] desc_cpl_data;
     reg         desc_cpl_last;
 
     wire        h2c_desc_valid;
-    wire [63:0] h2c_desc_src_addr;
-    wire [63:0] h2c_desc_dst_addr;
-    wire [31:0] h2c_desc_len;
-    wire [31:0] h2c_desc_ctrl;
+    wire [63:0] h2c_plane0_src, h2c_plane0_dst;
+    wire [63:0] h2c_plane1_src, h2c_plane1_dst;
+    wire [63:0] h2c_plane2_src, h2c_plane2_dst;
+    wire [15:0] h2c_line_width, h2c_line_count;
+    wire [15:0] h2c_src_stride, h2c_dst_stride;
+    wire [15:0] h2c_plane12_width, h2c_plane12_count;
+    wire [3:0]  h2c_format, h2c_plane_count;
+    wire [15:0] h2c_desc_ctrl;
     reg         h2c_desc_ready;
 
     wire        c2h_desc_valid;
-    wire [63:0] c2h_desc_src_addr;
-    wire [63:0] c2h_desc_dst_addr;
-    wire [31:0] c2h_desc_len;
-    wire [31:0] c2h_desc_ctrl;
+    wire [63:0] c2h_plane0_src, c2h_plane0_dst;
+    wire [63:0] c2h_plane1_src, c2h_plane1_dst;
+    wire [63:0] c2h_plane2_src, c2h_plane2_dst;
+    wire [15:0] c2h_line_width, c2h_line_count;
+    wire [15:0] c2h_src_stride, c2h_dst_stride;
+    wire [15:0] c2h_plane12_width, c2h_plane12_count;
+    wire [3:0]  c2h_format, c2h_plane_count;
+    wire [15:0] c2h_desc_ctrl;
     reg         c2h_desc_ready;
 
     // Instantiate uut
@@ -58,15 +66,23 @@ module tb_desc_fetch_engine;
         .desc_cpl_data(desc_cpl_data),
         .desc_cpl_last(desc_cpl_last),
         .h2c_desc_valid(h2c_desc_valid),
-        .h2c_desc_src_addr(h2c_desc_src_addr),
-        .h2c_desc_dst_addr(h2c_desc_dst_addr),
-        .h2c_desc_len(h2c_desc_len),
+        .h2c_plane0_src(h2c_plane0_src), .h2c_plane0_dst(h2c_plane0_dst),
+        .h2c_plane1_src(h2c_plane1_src), .h2c_plane1_dst(h2c_plane1_dst),
+        .h2c_plane2_src(h2c_plane2_src), .h2c_plane2_dst(h2c_plane2_dst),
+        .h2c_line_width(h2c_line_width), .h2c_line_count(h2c_line_count),
+        .h2c_src_stride(h2c_src_stride), .h2c_dst_stride(h2c_dst_stride),
+        .h2c_plane12_width(h2c_plane12_width), .h2c_plane12_count(h2c_plane12_count),
+        .h2c_format(h2c_format), .h2c_plane_count(h2c_plane_count),
         .h2c_desc_ctrl(h2c_desc_ctrl),
         .h2c_desc_ready(h2c_desc_ready),
         .c2h_desc_valid(c2h_desc_valid),
-        .c2h_desc_src_addr(c2h_desc_src_addr),
-        .c2h_desc_dst_addr(c2h_desc_dst_addr),
-        .c2h_desc_len(c2h_desc_len),
+        .c2h_plane0_src(c2h_plane0_src), .c2h_plane0_dst(c2h_plane0_dst),
+        .c2h_plane1_src(c2h_plane1_src), .c2h_plane1_dst(c2h_plane1_dst),
+        .c2h_plane2_src(c2h_plane2_src), .c2h_plane2_dst(c2h_plane2_dst),
+        .c2h_line_width(c2h_line_width), .c2h_line_count(c2h_line_count),
+        .c2h_src_stride(c2h_src_stride), .c2h_dst_stride(c2h_dst_stride),
+        .c2h_plane12_width(c2h_plane12_width), .c2h_plane12_count(c2h_plane12_count),
+        .c2h_format(c2h_format), .c2h_plane_count(c2h_plane_count),
         .c2h_desc_ctrl(c2h_desc_ctrl),
         .c2h_desc_ready(c2h_desc_ready)
     );
@@ -91,13 +107,13 @@ module tb_desc_fetch_engine;
         rst_n = 1;
         #10;
 
-        $display("[%0t] Test 1: Update Tail Pointer to 1, trigger Descriptor Fetch...", $time);
+        $display("[%0t] Test 1: Update Tail Pointer to 1, trigger 64-Byte Extended Descriptor Fetch...", $time);
         @(posedge clk);
         dma_run  <= 1;
         tail_ptr <= 16'd1;
 
         wait(desc_req_valid);
-        $display("[%0t] Desc Fetch Engine requested MRd Addr: 0x%h", $time, desc_req_addr);
+        $display("[%0t] Desc Fetch Engine requested MRd Addr: 0x%h DW Len: %d", $time, desc_req_addr, desc_req_dw_len);
 
         @(posedge clk);
         desc_req_ack <= 1;
@@ -105,21 +121,32 @@ module tb_desc_fetch_engine;
         desc_req_ack <= 0;
 
         #20;
-        $display("[%0t] Return CplD Descriptor payload (Host Src=0x1000, FPGA Dst=0x4000, Len=1024)...", $time);
+        $display("[%0t] Return CplD 64-Byte 2D Multi-Planar YUV420P Descriptor payload...", $time);
         @(posedge clk);
         desc_cpl_valid <= 1;
         desc_cpl_last  <= 1;
-        // Src=0x1000 (even -> H2C), Dst=0x4000, Len=1024
-        desc_cpl_data[63:0]    <= 64'h0000_1000;
-        desc_cpl_data[127:64]  <= 64'h0000_4000;
-        desc_cpl_data[159:128] <= 32'd1024;
+        desc_cpl_data[63:0]    <= 64'h0000_1000; // Plane 0 Src (Y)
+        desc_cpl_data[127:64]  <= 64'h0000_4000; // Plane 0 Dst (Y)
+        desc_cpl_data[191:128] <= 64'h0000_2000; // Plane 1 Src (U)
+        desc_cpl_data[255:192] <= 64'h0000_5000; // Plane 1 Dst (U)
+        desc_cpl_data[319:256] <= 64'h0000_3000; // Plane 2 Src (V)
+        desc_cpl_data[383:320] <= 64'h0000_6000; // Plane 2 Dst (V)
+        desc_cpl_data[399:384] <= 16'd1920;      // Line Width = 1920 Bytes
+        desc_cpl_data[415:400] <= 16'd1080;      // Line Count = 1080 Lines
+        desc_cpl_data[431:416] <= 16'd2048;      // Src Stride = 2048 Bytes
+        desc_cpl_data[447:432] <= 16'd1920;      // Dst Stride = 1920 Bytes
+        desc_cpl_data[483:480] <= 4'h3;          // Format = 0x3 (YUV420P)
+        desc_cpl_data[487:484] <= 4'h3;          // Plane Count = 3
+        desc_cpl_data[495:488] <= 8'h01;         // Control: Valid=1, Dir=0 (H2C)
 
         @(posedge clk);
         desc_cpl_valid <= 0;
 
         wait(h2c_desc_valid);
-        $display("[%0t] Descriptor successfully dispatched to H2C Engine! Src=0x%h, Dst=0x%h, Len=%d",
-                 $time, h2c_desc_src_addr, h2c_desc_dst_addr, h2c_desc_len);
+        $display("[%0t] Extended 2D Descriptor dispatched to H2C Engine!", $time);
+        $display("       Plane 0 Y Src=0x%h, Dst=0x%h Width=%d Height=%d Stride=%d Format=%d Planes=%d",
+                 h2c_plane0_src, h2c_plane0_dst, h2c_line_width, h2c_line_count, h2c_src_stride, h2c_format, h2c_plane_count);
+        
         @(posedge clk);
         h2c_desc_ready <= 1;
         @(posedge clk);
@@ -127,7 +154,7 @@ module tb_desc_fetch_engine;
 
         #30;
         $display("[%0t] Head Pointer updated to: %d", $time, head_ptr);
-        $display("[%0t] SUCCESS: desc_fetch_engine Test Completed!", $time);
+        $display("[%0t] SUCCESS: desc_fetch_engine 64-Byte Extended Test Completed!", $time);
         $finish;
     end
 

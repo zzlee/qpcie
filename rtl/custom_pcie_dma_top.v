@@ -2,8 +2,8 @@
 // Module: custom_pcie_dma_top
 // Description: Top-level module for Custom PCIe AXI4-Stream DMA Controller.
 //              Integrates CQ/CC/RQ/RC TLP decoders, BAR0 Reg Space,
-//              Tag Manager, SG Descriptor Fetch Engine, H2C & C2H DMA Engines,
-//              and Interrupt Controller.
+//              Tag Manager, SG 64-Byte 2D Descriptor Fetch Engine,
+//              Multi-Planar 2D Strided H2C & C2H DMA Engines, and Interrupt Controller.
 // ============================================================================
 
 `timescale 1ns / 1ps
@@ -115,15 +115,27 @@ module custom_pcie_dma_top #(
     wire [7:0]  desc_req_tag;
 
     wire        desc_cpl_valid, desc_cpl_last;
-    wire [159:0] desc_cpl_data;
+    wire [511:0] desc_cpl_data;
 
     wire        h2c_desc_valid, h2c_desc_ready;
-    wire [63:0] h2c_desc_src_addr, h2c_desc_dst_addr;
-    wire [31:0] h2c_desc_len, h2c_desc_ctrl;
+    wire [63:0] h2c_plane0_src, h2c_plane0_dst;
+    wire [63:0] h2c_plane1_src, h2c_plane1_dst;
+    wire [63:0] h2c_plane2_src, h2c_plane2_dst;
+    wire [15:0] h2c_line_width, h2c_line_count;
+    wire [15:0] h2c_src_stride, h2c_dst_stride;
+    wire [15:0] h2c_plane12_width, h2c_plane12_count;
+    wire [3:0]  h2c_format, h2c_plane_count;
+    wire [15:0] h2c_desc_ctrl;
 
     wire        c2h_desc_valid, c2h_desc_ready;
-    wire [63:0] c2h_desc_src_addr, c2h_desc_dst_addr;
-    wire [31:0] c2h_desc_len, c2h_desc_ctrl;
+    wire [63:0] c2h_plane0_src, c2h_plane0_dst;
+    wire [63:0] c2h_plane1_src, c2h_plane1_dst;
+    wire [63:0] c2h_plane2_src, c2h_plane2_dst;
+    wire [15:0] c2h_line_width, c2h_line_count;
+    wire [15:0] c2h_src_stride, c2h_dst_stride;
+    wire [15:0] c2h_plane12_width, c2h_plane12_count;
+    wire [3:0]  c2h_format, c2h_plane_count;
+    wire [15:0] c2h_desc_ctrl;
 
     wire        h2c_req_valid, h2c_req_ack;
     wire [63:0] h2c_req_addr;
@@ -340,15 +352,23 @@ module custom_pcie_dma_top #(
         .desc_cpl_data(desc_cpl_data),
         .desc_cpl_last(desc_cpl_last),
         .h2c_desc_valid(h2c_desc_valid),
-        .h2c_desc_src_addr(h2c_desc_src_addr),
-        .h2c_desc_dst_addr(h2c_desc_dst_addr),
-        .h2c_desc_len(h2c_desc_len),
+        .h2c_plane0_src(h2c_plane0_src), .h2c_plane0_dst(h2c_plane0_dst),
+        .h2c_plane1_src(h2c_plane1_src), .h2c_plane1_dst(h2c_plane1_dst),
+        .h2c_plane2_src(h2c_plane2_src), .h2c_plane2_dst(h2c_plane2_dst),
+        .h2c_line_width(h2c_line_width), .h2c_line_count(h2c_line_count),
+        .h2c_src_stride(h2c_src_stride), .h2c_dst_stride(h2c_dst_stride),
+        .h2c_plane12_width(h2c_plane12_width), .h2c_plane12_count(h2c_plane12_count),
+        .h2c_format(h2c_format), .h2c_plane_count(h2c_plane_count),
         .h2c_desc_ctrl(h2c_desc_ctrl),
         .h2c_desc_ready(h2c_desc_ready),
         .c2h_desc_valid(c2h_desc_valid),
-        .c2h_desc_src_addr(c2h_desc_src_addr),
-        .c2h_desc_dst_addr(c2h_desc_dst_addr),
-        .c2h_desc_len(c2h_desc_len),
+        .c2h_plane0_src(c2h_plane0_src), .c2h_plane0_dst(c2h_plane0_dst),
+        .c2h_plane1_src(c2h_plane1_src), .c2h_plane1_dst(c2h_plane1_dst),
+        .c2h_plane2_src(c2h_plane2_src), .c2h_plane2_dst(c2h_plane2_dst),
+        .c2h_line_width(c2h_line_width), .c2h_line_count(c2h_line_count),
+        .c2h_src_stride(c2h_src_stride), .c2h_dst_stride(c2h_dst_stride),
+        .c2h_plane12_width(c2h_plane12_width), .c2h_plane12_count(c2h_plane12_count),
+        .c2h_format(c2h_format), .c2h_plane_count(c2h_plane_count),
         .c2h_desc_ctrl(c2h_desc_ctrl),
         .c2h_desc_ready(c2h_desc_ready)
     );
@@ -361,9 +381,13 @@ module custom_pcie_dma_top #(
         .clk(clk),
         .rst_n(rst_n),
         .h2c_desc_valid(h2c_desc_valid),
-        .h2c_desc_src_addr(h2c_desc_src_addr),
-        .h2c_desc_dst_addr(h2c_desc_dst_addr),
-        .h2c_desc_len(h2c_desc_len),
+        .h2c_plane0_src(h2c_plane0_src), .h2c_plane0_dst(h2c_plane0_dst),
+        .h2c_plane1_src(h2c_plane1_src), .h2c_plane1_dst(h2c_plane1_dst),
+        .h2c_plane2_src(h2c_plane2_src), .h2c_plane2_dst(h2c_plane2_dst),
+        .h2c_line_width(h2c_line_width), .h2c_line_count(h2c_line_count),
+        .h2c_src_stride(h2c_src_stride), .h2c_dst_stride(h2c_dst_stride),
+        .h2c_plane12_width(h2c_plane12_width), .h2c_plane12_count(h2c_plane12_count),
+        .h2c_format(h2c_format), .h2c_plane_count(h2c_plane_count),
         .h2c_desc_ctrl(h2c_desc_ctrl),
         .h2c_desc_ready(h2c_desc_ready),
         .tag_alloc_req(tag_alloc_req),
@@ -404,9 +428,13 @@ module custom_pcie_dma_top #(
         .clk(clk),
         .rst_n(rst_n),
         .c2h_desc_valid(c2h_desc_valid),
-        .c2h_desc_src_addr(c2h_desc_src_addr),
-        .c2h_desc_dst_addr(c2h_desc_dst_addr),
-        .c2h_desc_len(c2h_desc_len),
+        .c2h_plane0_src(c2h_plane0_src), .c2h_plane0_dst(c2h_plane0_dst),
+        .c2h_plane1_src(c2h_plane1_src), .c2h_plane1_dst(c2h_plane1_dst),
+        .c2h_plane2_src(c2h_plane2_src), .c2h_plane2_dst(c2h_plane2_dst),
+        .c2h_line_width(c2h_line_width), .c2h_line_count(c2h_line_count),
+        .c2h_src_stride(c2h_src_stride), .c2h_dst_stride(c2h_dst_stride),
+        .c2h_plane12_width(c2h_plane12_width), .c2h_plane12_count(c2h_plane12_count),
+        .c2h_format(c2h_format), .c2h_plane_count(c2h_plane_count),
         .c2h_desc_ctrl(c2h_desc_ctrl),
         .c2h_desc_ready(c2h_desc_ready),
         .m_axi_araddr(m_axi_araddr),

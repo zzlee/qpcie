@@ -1,6 +1,6 @@
 // ============================================================================
 // Testbench: tb_rc_rx_decoder
-// Description: Unit testbench for rc_rx_decoder module
+// Description: Unit testbench for rc_rx_decoder module with 512-bit extended descriptors
 // ============================================================================
 
 `timescale 1ns / 1ps
@@ -21,7 +21,7 @@ module tb_rc_rx_decoder;
     wire                 s_axis_rc_tready;
 
     wire                 desc_cpl_valid;
-    wire [159:0]         desc_cpl_data;
+    wire [511:0]         desc_cpl_data;
     wire                 desc_cpl_last;
 
     wire                 h2c_fifo_wvalid;
@@ -74,12 +74,12 @@ module tb_rc_rx_decoder;
         s_axis_rc_tlast  <= 1;
         // DW0: Byte Count=32, DW1: Tag=0x00, DW2: Completer ID=0x0100
         s_axis_rc_tdata[31:0]   <= 32'h0020_0000;
-        s_axis_rc_tdata[63:32]  <= 32'h0000_0008; // Tag 0x00
-        s_axis_rc_tdata[95:64]  <= 32'h0000_0100;
+        s_axis_rc_tdata[58:51]  <= 8'h00; // Tag 0x00
+        s_axis_rc_tdata[79:64]  <= 16'h0100;
         s_axis_rc_tdata[255:96] <= 160'h11223344_55667788_99AABBCC_DDEEFF00;
 
         wait(desc_cpl_valid);
-        $display("[%0t] RC Decoder routed CplD to Desc Fetch Engine! Data: 0x%h", $time, desc_cpl_data);
+        $display("[%0t] RC Decoder routed CplD to Desc Fetch Engine! Data: 0x%h", $time, desc_cpl_data[159:0]);
         @(posedge clk);
         s_axis_rc_tvalid <= 0;
 
@@ -89,12 +89,12 @@ module tb_rc_rx_decoder;
         s_axis_rc_tvalid <= 1;
         s_axis_rc_tlast  <= 1;
         s_axis_rc_tdata[31:0]   <= 32'h0040_0000;
-        s_axis_rc_tdata[63:32]  <= 32'h0018_0010; // Tag 0x03 (bits [58:51] = 0x03)
-        s_axis_rc_tdata[95:64]  <= 32'h0000_0100;
+        s_axis_rc_tdata[58:51]  <= 8'h03; // Tag 0x03
+        s_axis_rc_tdata[79:64]  <= 16'h0100;
         s_axis_rc_tdata[255:96] <= 160'hA5A5A5A5_5A5A5A5A_12345678_87654321;
 
         wait(h2c_fifo_wvalid);
-        $display("[%0t] RC Decoder routed CplD to H2C FIFO! Tag freed: 0x%h", $time, tag_free_val);
+        $display("[%0t] RC Decoder routed CplD to H2C FIFO! Tag freed: 0x%h Data: 0x%h", $time, tag_free_val, h2c_fifo_wdata);
         @(posedge clk);
         s_axis_rc_tvalid <= 0;
 
