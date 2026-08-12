@@ -1,9 +1,9 @@
 // ============================================================================
 // Module: custom_pcie_dma_top
 // Description: Top-level module for Custom PCIe AXI4-Stream DMA Controller.
-//              Integrates CQ/CC/RQ/RC TLP decoders, BAR0 Reg Space,
-//              Tag Manager, SG 64-Byte 2D Descriptor Fetch Engine,
-//              Multi-Planar 2D Strided H2C & C2H DMA Engines, and Interrupt Controller.
+//              Supports Dual-BAR Architecture:
+//              - BAR0: PCIe BAR0 DMA Control Registers (axil_reg_space.v)
+//              - BAR1: PCIe BAR1 AXI4-Lite Master (Connects to Interconnect for User IP Cores)
 // ============================================================================
 
 `timescale 1ns / 1ps
@@ -49,6 +49,26 @@ module custom_pcie_dma_top #(
     input  wire [PCIE_KEEP_WIDTH-1:0] s_axis_rc_tkeep,
     output wire                       s_axis_rc_tready,
 
+    // BAR1 AXI4-Lite Master Interface (Connects to Interconnect for User IP Cores: I2C, UART, etc.)
+    output wire [31:0]                m_axil_bar1_awaddr,
+    output wire                       m_axil_bar1_awvalid,
+    input  wire                       m_axil_bar1_awready,
+    output wire [31:0]                m_axil_bar1_wdata,
+    output wire [3:0]                 m_axil_bar1_wstrb,
+    output wire                       m_axil_bar1_wvalid,
+    input  wire                       m_axil_bar1_wready,
+    input  wire [1:0]                 m_axil_bar1_bresp,
+    input  wire                       m_axil_bar1_bvalid,
+    output wire                       m_axil_bar1_bready,
+
+    output wire [31:0]                m_axil_bar1_araddr,
+    output wire                       m_axil_bar1_arvalid,
+    input  wire                       m_axil_bar1_arready,
+    input  wire [31:0]                m_axil_bar1_rdata,
+    input  wire [1:0]                 m_axil_bar1_rresp,
+    input  wire                       m_axil_bar1_rvalid,
+    output wire                       m_axil_bar1_rready,
+
     // AXI4 Memory Mapped Master Interface (To FPGA Memory/Logic)
     output wire [AXI_ADDR_WIDTH-1:0]  m_axi_awaddr,
     output wire [7:0]                 m_axi_awlen,
@@ -85,15 +105,15 @@ module custom_pcie_dma_top #(
     input  wire                       usr_irq_ack
 );
 
-    // Internal Wires for Inter-module Connection
-    wire [31:0] axil_awaddr, axil_wdata, axil_araddr, axil_rdata;
-    wire [3:0]  axil_wstrb;
-    wire [1:0]  axil_bresp, axil_rresp;
-    wire        axil_awvalid, axil_awready, axil_wvalid, axil_wready;
-    wire        axil_bvalid, axil_bready, axil_arvalid, axil_arready;
-    wire        axil_rvalid, axil_rready;
+    // Internal Wires for BAR0 Inter-module Connection
+    wire [31:0] bar0_axil_awaddr, bar0_axil_wdata, bar0_axil_araddr, bar0_axil_rdata;
+    wire [3:0]  bar0_axil_wstrb;
+    wire [1:0]  bar0_axil_bresp, bar0_axil_rresp;
+    wire        bar0_axil_awvalid, bar0_axil_awready, bar0_axil_wvalid, bar0_axil_wready;
+    wire        bar0_axil_bvalid, bar0_axil_bready, bar0_axil_arvalid, bar0_axil_arready;
+    wire        bar0_axil_rvalid, bar0_axil_rready;
 
-    wire        read_req_valid, read_req_ack;
+    wire        read_req_valid, read_req_ack, read_req_bar_sel;
     wire [7:0]  read_req_tag;
     wire [15:0] read_req_id;
     wire [6:0]  read_req_lower_addr;
@@ -168,7 +188,7 @@ module custom_pcie_dma_top #(
 
     assign reg_dma_status = {28'd0, c2h_done, h2c_done, c2h_busy, h2c_busy};
 
-    // 1. CQ RX Decoder
+    // 1. CQ RX Decoder (BAR0 & BAR1 Demux)
     cq_rx_decoder #(
         .DATA_WIDTH(PCIE_DATA_WIDTH)
     ) u_cq_rx_decoder (
@@ -180,32 +200,50 @@ module custom_pcie_dma_top #(
         .s_axis_cq_tuser(s_axis_cq_tuser),
         .s_axis_cq_tkeep(s_axis_cq_tkeep),
         .s_axis_cq_tready(s_axis_cq_tready),
-        .m_axil_awaddr(axil_awaddr),
-        .m_axil_awvalid(axil_awvalid),
-        .m_axil_awready(axil_awready),
-        .m_axil_wdata(axil_wdata),
-        .m_axil_wstrb(axil_wstrb),
-        .m_axil_wvalid(axil_wvalid),
-        .m_axil_wready(axil_wready),
-        .m_axil_bresp(axil_bresp),
-        .m_axil_bvalid(axil_bvalid),
-        .m_axil_bready(axil_bready),
-        .m_axil_araddr(axil_araddr),
-        .m_axil_arvalid(axil_arvalid),
-        .m_axil_arready(axil_arready),
-        .m_axil_rdata(axil_rdata),
-        .m_axil_rresp(axil_rresp),
-        .m_axil_rvalid(axil_rvalid),
-        .m_axil_rready(axil_rready),
+        .m_axil_bar0_awaddr(bar0_axil_awaddr),
+        .m_axil_bar0_awvalid(bar0_axil_awvalid),
+        .m_axil_bar0_awready(bar0_axil_awready),
+        .m_axil_bar0_wdata(bar0_axil_wdata),
+        .m_axil_bar0_wstrb(bar0_axil_wstrb),
+        .m_axil_bar0_wvalid(bar0_axil_wvalid),
+        .m_axil_bar0_wready(bar0_axil_wready),
+        .m_axil_bar0_bresp(bar0_axil_bresp),
+        .m_axil_bar0_bvalid(bar0_axil_bvalid),
+        .m_axil_bar0_bready(bar0_axil_bready),
+        .m_axil_bar0_araddr(bar0_axil_araddr),
+        .m_axil_bar0_arvalid(bar0_axil_arvalid),
+        .m_axil_bar0_arready(bar0_axil_arready),
+        .m_axil_bar0_rdata(bar0_axil_rdata),
+        .m_axil_bar0_rresp(bar0_axil_rresp),
+        .m_axil_bar0_rvalid(bar0_axil_rvalid),
+        .m_axil_bar0_rready(bar0_axil_rready),
+        .m_axil_bar1_awaddr(m_axil_bar1_awaddr),
+        .m_axil_bar1_awvalid(m_axil_bar1_awvalid),
+        .m_axil_bar1_awready(m_axil_bar1_awready),
+        .m_axil_bar1_wdata(m_axil_bar1_wdata),
+        .m_axil_bar1_wstrb(m_axil_bar1_wstrb),
+        .m_axil_bar1_wvalid(m_axil_bar1_wvalid),
+        .m_axil_bar1_wready(m_axil_bar1_wready),
+        .m_axil_bar1_bresp(m_axil_bar1_bresp),
+        .m_axil_bar1_bvalid(m_axil_bar1_bvalid),
+        .m_axil_bar1_bready(m_axil_bar1_bready),
+        .m_axil_bar1_araddr(m_axil_bar1_araddr),
+        .m_axil_bar1_arvalid(m_axil_bar1_arvalid),
+        .m_axil_bar1_arready(m_axil_bar1_arready),
+        .m_axil_bar1_rdata(m_axil_bar1_rdata),
+        .m_axil_bar1_rresp(m_axil_bar1_rresp),
+        .m_axil_bar1_rvalid(m_axil_bar1_rvalid),
+        .m_axil_bar1_rready(m_axil_bar1_rready),
         .read_req_valid(read_req_valid),
         .read_req_tag(read_req_tag),
         .read_req_id(read_req_id),
         .read_req_lower_addr(read_req_lower_addr),
         .read_req_tc(read_req_tc),
+        .read_req_bar_sel(read_req_bar_sel),
         .read_req_ack(read_req_ack)
     );
 
-    // 2. CC TX Encoder
+    // 2. CC TX Encoder (BAR0 & BAR1 Read Completion Mux)
     cc_tx_encoder #(
         .DATA_WIDTH(PCIE_DATA_WIDTH)
     ) u_cc_tx_encoder (
@@ -222,34 +260,39 @@ module custom_pcie_dma_top #(
         .read_req_id(read_req_id),
         .read_req_lower_addr(read_req_lower_addr),
         .read_req_tc(read_req_tc),
+        .read_req_bar_sel(read_req_bar_sel),
         .read_req_ack(read_req_ack),
-        .axil_rdata(axil_rdata),
-        .axil_rresp(axil_rresp),
-        .axil_rvalid(axil_rvalid),
-        .axil_rready(axil_rready)
+        .bar0_axil_rdata(bar0_axil_rdata),
+        .bar0_axil_rresp(bar0_axil_rresp),
+        .bar0_axil_rvalid(bar0_axil_rvalid),
+        .bar0_axil_rready(bar0_axil_rready),
+        .bar1_axil_rdata(m_axil_bar1_rdata),
+        .bar1_axil_rresp(m_axil_bar1_rresp),
+        .bar1_axil_rvalid(m_axil_bar1_rvalid),
+        .bar1_axil_rready(m_axil_bar1_rready)
     );
 
-    // 3. AXI4-Lite Register Space
+    // 3. BAR0 AXI4-Lite Register Space (DMA Control Registers)
     axil_reg_space u_axil_reg_space (
         .clk(clk),
         .rst_n(rst_n),
-        .s_axil_awaddr(axil_awaddr),
-        .s_axil_awvalid(axil_awvalid),
-        .s_axil_awready(axil_awready),
-        .s_axil_wdata(axil_wdata),
-        .s_axil_wstrb(axil_wstrb),
-        .s_axil_wvalid(axil_wvalid),
-        .s_axil_wready(axil_wready),
-        .s_axil_bresp(axil_bresp),
-        .s_axil_bvalid(axil_bvalid),
-        .s_axil_bready(axil_bready),
-        .s_axil_araddr(axil_araddr),
-        .s_axil_arvalid(axil_arvalid),
-        .s_axil_arready(axil_arready),
-        .s_axil_rdata(axil_rdata),
-        .s_axil_rresp(axil_rresp),
-        .s_axil_rvalid(axil_rvalid),
-        .s_axil_rready(axil_rready),
+        .s_axil_awaddr(bar0_axil_awaddr),
+        .s_axil_awvalid(bar0_axil_awvalid),
+        .s_axil_awready(bar0_axil_awready),
+        .s_axil_wdata(bar0_axil_wdata),
+        .s_axil_wstrb(bar0_axil_wstrb),
+        .s_axil_wvalid(bar0_axil_wvalid),
+        .s_axil_wready(bar0_axil_wready),
+        .s_axil_bresp(bar0_axil_bresp),
+        .s_axil_bvalid(bar0_axil_bvalid),
+        .s_axil_bready(bar0_axil_bready),
+        .s_axil_araddr(bar0_axil_araddr),
+        .s_axil_arvalid(bar0_axil_arvalid),
+        .s_axil_arready(bar0_axil_arready),
+        .s_axil_rdata(bar0_axil_rdata),
+        .s_axil_rresp(bar0_axil_rresp),
+        .s_axil_rvalid(bar0_axil_rvalid),
+        .s_axil_rready(bar0_axil_rready),
         .reg_dma_ctrl(reg_dma_ctrl),
         .reg_dma_status(reg_dma_status),
         .reg_h2c_ring_addr(reg_h2c_ring_addr),

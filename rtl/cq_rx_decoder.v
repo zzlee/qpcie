@@ -1,7 +1,9 @@
 // ============================================================================
 // Module: cq_rx_decoder
 // Description: Decodes PCIe IP CQ (Completer Request) AXI4-Stream TLP packets.
-//              Converts Host MRd/MWr requests (BAR Access) into AXI4-Lite Master transactions.
+//              Supports Dual-BAR Demuxing:
+//              - BAR0 (bar_id == 0): Demuxes MWr/MRd to BAR0 AXI4-Lite (DMA Control Regs)
+//              - BAR1 (bar_id == 1): Demuxes MWr/MRd to BAR1 AXI4-Lite (External IP Cores Interconnect)
 // ============================================================================
 
 `timescale 1ns / 1ps
@@ -21,99 +23,143 @@ module cq_rx_decoder #(
     input  wire [KEEP_WIDTH-1:0] s_axis_cq_tkeep,
     output reg                   s_axis_cq_tready,
 
-    // AXI4-Lite Master Interface (To Register Space)
-    output reg  [31:0]           m_axil_awaddr,
-    output reg                   m_axil_awvalid,
-    input  wire                  m_axil_awready,
+    // BAR0 AXI4-Lite Master Interface (DMA Control Registers)
+    output reg  [31:0]           m_axil_bar0_awaddr,
+    output reg                   m_axil_bar0_awvalid,
+    input  wire                  m_axil_bar0_awready,
+    output reg  [31:0]           m_axil_bar0_wdata,
+    output reg  [3:0]            m_axil_bar0_wstrb,
+    output reg                   m_axil_bar0_wvalid,
+    input  wire                  m_axil_bar0_wready,
+    input  wire [1:0]            m_axil_bar0_bresp,
+    input  wire                  m_axil_bar0_bvalid,
+    output reg                   m_axil_bar0_bready,
 
-    output reg  [31:0]           m_axil_wdata,
-    output reg  [3:0]            m_axil_wstrb,
-    output reg                   m_axil_wvalid,
-    input  wire                  m_axil_wready,
+    output reg  [31:0]           m_axil_bar0_araddr,
+    output reg                   m_axil_bar0_arvalid,
+    input  wire                  m_axil_bar0_arready,
+    input  wire [31:0]           m_axil_bar0_rdata,
+    input  wire [1:0]            m_axil_bar0_rresp,
+    input  wire                  m_axil_bar0_rvalid,
+    output reg                   m_axil_bar0_rready,
 
-    input  wire [1:0]            m_axil_bresp,
-    input  wire                  m_axil_bvalid,
-    output reg                   m_axil_bready,
+    // BAR1 AXI4-Lite Master Interface (User IP Cores Interconnect: I2C, UART, etc.)
+    output reg  [31:0]           m_axil_bar1_awaddr,
+    output reg                   m_axil_bar1_awvalid,
+    input  wire                  m_axil_bar1_awready,
+    output reg  [31:0]           m_axil_bar1_wdata,
+    output reg  [3:0]            m_axil_bar1_wstrb,
+    output reg                   m_axil_bar1_wvalid,
+    input  wire                  m_axil_bar1_wready,
+    input  wire [1:0]            m_axil_bar1_bresp,
+    input  wire                  m_axil_bar1_bvalid,
+    output reg                   m_axil_bar1_bready,
 
-    output reg  [31:0]           m_axil_araddr,
-    output reg                   m_axil_arvalid,
-    input  wire                  m_axil_arready,
+    output reg  [31:0]           m_axil_bar1_araddr,
+    output reg                   m_axil_bar1_arvalid,
+    input  wire                  m_axil_bar1_arready,
+    input  wire [31:0]           m_axil_bar1_rdata,
+    input  wire [1:0]            m_axil_bar1_rresp,
+    input  wire                  m_axil_bar1_rvalid,
+    output reg                   m_axil_bar1_rready,
 
-    input  wire [31:0]           m_axil_rdata,
-    input  wire [1:0]            m_axil_rresp,
-    input  wire                  m_axil_rvalid,
-    output reg                   m_axil_rready,
-
-    // Read Request sideband interface to CC Encoder
+    // Read Request Tracking to CC TX Encoder
     output reg                   read_req_valid,
     output reg  [7:0]            read_req_tag,
     output reg  [15:0]           read_req_id,
     output reg  [6:0]            read_req_lower_addr,
     output reg  [10:0]           read_req_tc,
+    output reg                   read_req_bar_sel, // 0: BAR0, 1: BAR1
     input  wire                  read_req_ack
 );
 
-    // FSM States
-    localparam IDLE       = 3'b000;
-    localparam WRITE_AXIL = 3'b001;
-    localparam WAIT_BRESP = 3'b010;
-    localparam READ_AXIL  = 3'b011;
-    localparam WAIT_RRESP = 3'b100;
+    localparam IDLE       = 2'b00;
+    localparam WRITE_AXIL = 2'b01;
+    localparam READ_AXIL  = 2'b10;
 
-    reg [2:0] state;
+    reg [1:0] state;
 
-    // CQ TLP Header breakdown (DW0-DW3 in first beat of tdata)
-    wire [63:0] req_addr    = s_axis_cq_tdata[63:0];
-    wire [10:0] req_dword_len = s_axis_cq_tdata[74:64];
-    wire [3:0]  req_type     = s_axis_cq_tdata[78:75]; // 0000=MRd, 0001=MWr
-    wire [15:0] req_id       = s_axis_cq_tdata[95:80];
-    wire [7:0]  req_tag      = s_axis_cq_tdata[103:96];
-    wire [2:0]  bar_id       = s_axis_cq_tdata[114:112];
-
-    // Payload for MWr (in 256-bit interface, DW4 payload is at tdata[159:128])
-    wire [31:0] req_payload  = s_axis_cq_tdata[159:128];
+    // CQ TLP Header Fields
+    wire [63:0] req_addr   = s_axis_cq_tdata[63:0];
+    wire [10:0] dword_len  = s_axis_cq_tdata[74:64];
+    wire [3:0]  req_type   = s_axis_cq_tdata[78:75]; // 0000: MRd, 0001: MWr
+    wire [15:0] req_id     = s_axis_cq_tdata[95:80];
+    wire [7:0]  req_tag    = s_axis_cq_tdata[103:96];
+    wire [2:0]  bar_id     = s_axis_cq_tdata[114:112]; // 3'b000: BAR0, 3'b001: BAR1
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            state            <= IDLE;
-            s_axis_cq_tready <= 1'b1;
-            m_axil_awaddr    <= 32'd0;
-            m_axil_awvalid   <= 1'b0;
-            m_axil_wdata     <= 32'd0;
-            m_axil_wstrb     <= 4'b1111;
-            m_axil_wvalid    <= 1'b0;
-            m_axil_bready    <= 1'b1;
-            m_axil_araddr    <= 32'd0;
-            m_axil_arvalid   <= 1'b0;
-            m_axil_rready    <= 1'b0;
-            read_req_valid   <= 1'b0;
-            read_req_tag     <= 8'd0;
-            read_req_id      <= 16'd0;
+            state               <= IDLE;
+            s_axis_cq_tready    <= 1'b1;
+            m_axil_bar0_awaddr  <= 32'd0;
+            m_axil_bar0_awvalid <= 1'b0;
+            m_axil_bar0_wdata   <= 32'd0;
+            m_axil_bar0_wstrb   <= 4'hF;
+            m_axil_bar0_wvalid  <= 1'b0;
+            m_axil_bar0_bready  <= 1'b1;
+            m_axil_bar0_araddr  <= 32'd0;
+            m_axil_bar0_arvalid <= 1'b0;
+            m_axil_bar0_rready  <= 1'b1;
+
+            m_axil_bar1_awaddr  <= 32'd0;
+            m_axil_bar1_awvalid <= 1'b0;
+            m_axil_bar1_wdata   <= 32'd0;
+            m_axil_bar1_wstrb   <= 4'hF;
+            m_axil_bar1_wvalid  <= 1'b0;
+            m_axil_bar1_bready  <= 1'b1;
+            m_axil_bar1_araddr  <= 32'd0;
+            m_axil_bar1_arvalid <= 1'b0;
+            m_axil_bar1_rready  <= 1'b1;
+
+            read_req_valid      <= 1'b0;
+            read_req_tag        <= 8'd0;
+            read_req_id         <= 16'd0;
             read_req_lower_addr <= 7'd0;
-            read_req_tc      <= 11'd0;
+            read_req_tc         <= 11'd0;
+            read_req_bar_sel    <= 1'b0;
         end else begin
             case (state)
                 IDLE: begin
-                    s_axis_cq_tready <= 1'b1;
-                    m_axil_awvalid   <= 1'b0;
-                    m_axil_wvalid    <= 1'b0;
-                    m_axil_arvalid   <= 1'b0;
+                    read_req_valid      <= 1'b0;
+                    m_axil_bar0_awvalid <= 1'b0;
+                    m_axil_bar0_wvalid  <= 1'b0;
+                    m_axil_bar0_arvalid <= 1'b0;
+                    m_axil_bar1_awvalid <= 1'b0;
+                    m_axil_bar1_wvalid  <= 1'b0;
+                    m_axil_bar1_arvalid <= 1'b0;
 
                     if (s_axis_cq_tvalid && s_axis_cq_tready) begin
-                        if (req_type == 4'b0001) begin // Memory Write
-                            m_axil_awaddr  <= req_addr[31:0];
-                            m_axil_awvalid <= 1'b1;
-                            m_axil_wdata   <= req_payload;
-                            m_axil_wvalid  <= 1'b1;
+                        if (req_type == 4'b0001) begin // Memory Write (MWr)
+                            if (bar_id == 3'b001) begin // BAR1
+                                m_axil_bar1_awaddr  <= req_addr[31:0];
+                                m_axil_bar1_awvalid <= 1'b1;
+                                m_axil_bar1_wdata   <= s_axis_cq_tdata[159:128];
+                                m_axil_bar1_wstrb   <= 4'hF;
+                                m_axil_bar1_wvalid  <= 1'b1;
+                            end else begin // BAR0
+                                m_axil_bar0_awaddr  <= req_addr[31:0];
+                                m_axil_bar0_awvalid <= 1'b1;
+                                m_axil_bar0_wdata   <= s_axis_cq_tdata[159:128];
+                                m_axil_bar0_wstrb   <= 4'hF;
+                                m_axil_bar0_wvalid  <= 1'b1;
+                            end
                             s_axis_cq_tready <= 1'b0;
-                            state          <= WRITE_AXIL;
-                        end else if (req_type == 4'b0000) begin // Memory Read
-                            m_axil_araddr       <= req_addr[31:0];
-                            m_axil_arvalid      <= 1'b1;
+                            state            <= WRITE_AXIL;
+                        end else if (req_type == 4'b0000) begin // Memory Read (MRd)
+                            if (bar_id == 3'b001) begin // BAR1
+                                m_axil_bar1_araddr  <= req_addr[31:0];
+                                m_axil_bar1_arvalid <= 1'b1;
+                                read_req_bar_sel    <= 1'b1;
+                            end else begin // BAR0
+                                m_axil_bar0_araddr  <= req_addr[31:0];
+                                m_axil_bar0_arvalid <= 1'b1;
+                                read_req_bar_sel    <= 1'b0;
+                            end
+                            read_req_valid      <= 1'b1;
                             read_req_tag        <= req_tag;
                             read_req_id         <= req_id;
                             read_req_lower_addr <= req_addr[6:0];
-                            read_req_tc         <= req_dword_len;
+                            read_req_tc         <= dword_len;
                             s_axis_cq_tready    <= 1'b0;
                             state               <= READ_AXIL;
                         end
@@ -121,34 +167,28 @@ module cq_rx_decoder #(
                 end
 
                 WRITE_AXIL: begin
-                    if (m_axil_awready) m_axil_awvalid <= 1'b0;
-                    if (m_axil_wready)  m_axil_wvalid  <= 1'b0;
-
-                    if ((!m_axil_awvalid || m_axil_awready) && (!m_axil_wvalid || m_axil_wready)) begin
-                        m_axil_bready <= 1'b1;
-                        state         <= WAIT_BRESP;
+                    if (m_axil_bar0_awready || m_axil_bar1_awready) begin
+                        m_axil_bar0_awvalid <= 1'b0;
+                        m_axil_bar1_awvalid <= 1'b0;
                     end
-                end
-
-                WAIT_BRESP: begin
-                    if (m_axil_bvalid) begin
-                        m_axil_bready    <= 1'b0;
+                    if (m_axil_bar0_wready || m_axil_bar1_wready) begin
+                        m_axil_bar0_wvalid <= 1'b0;
+                        m_axil_bar1_wvalid <= 1'b0;
+                    end
+                    if (m_axil_bar0_bvalid || m_axil_bar1_bvalid) begin
                         s_axis_cq_tready <= 1'b1;
                         state            <= IDLE;
                     end
                 end
 
                 READ_AXIL: begin
-                    if (m_axil_arready) begin
-                        m_axil_arvalid <= 1'b0;
-                        read_req_valid <= 1'b1;
-                        state          <= WAIT_RRESP;
-                    end
-                end
+                    if (read_req_ack) read_req_valid <= 1'b0;
 
-                WAIT_RRESP: begin
-                    if (read_req_ack) begin
-                        read_req_valid   <= 1'b0;
+                    if (m_axil_bar0_arready || m_axil_bar1_arready) begin
+                        m_axil_bar0_arvalid <= 1'b0;
+                        m_axil_bar1_arvalid <= 1'b0;
+                    end
+                    if ((m_axil_bar0_rvalid || m_axil_bar1_rvalid) && !read_req_valid) begin
                         s_axis_cq_tready <= 1'b1;
                         state            <= IDLE;
                     end

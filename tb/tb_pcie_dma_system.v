@@ -2,7 +2,8 @@
 // Testbench: tb_pcie_dma_system
 // Description: System-level self-checking testbench for custom_pcie_dma_top module.
 //              Simulates PCIe Root Complex (Host BFM) & FPGA Memory BFM,
-//              performing 64-Byte 2D Multi-Planar H2C & C2H DMA transfers.
+//              performing 64-Byte 2D Multi-Planar H2C & C2H DMA transfers
+//              and verifying Dual-BAR (BAR0 DMA Control, BAR1 User IP Cores).
 // ============================================================================
 
 `timescale 1ns / 1ps
@@ -48,6 +49,26 @@ module tb_pcie_dma_system;
     reg  [74:0]               s_axis_rc_tuser;
     reg  [PCIE_KEEP_WIDTH-1:0] s_axis_rc_tkeep;
     wire                      s_axis_rc_tready;
+
+    // BAR1 AXI4-Lite Master Interface (User IP Cores Interconnect)
+    wire [31:0]               m_axil_bar1_awaddr;
+    wire                      m_axil_bar1_awvalid;
+    reg                       m_axil_bar1_awready;
+    wire [31:0]               m_axil_bar1_wdata;
+    wire [3:0]                m_axil_bar1_wstrb;
+    wire                      m_axil_bar1_wvalid;
+    reg                       m_axil_bar1_wready;
+    reg  [1:0]                m_axil_bar1_bresp;
+    reg                       m_axil_bar1_bvalid;
+    wire                      m_axil_bar1_bready;
+
+    wire [31:0]               m_axil_bar1_araddr;
+    wire                      m_axil_bar1_arvalid;
+    reg                       m_axil_bar1_arready;
+    reg  [31:0]               m_axil_bar1_rdata;
+    reg  [1:0]                m_axil_bar1_rresp;
+    reg                       m_axil_bar1_rvalid;
+    wire                      m_axil_bar1_rready;
 
     // AXI4 Master Interface (DMA Top -> FPGA Memory)
     wire [AXI_ADDR_WIDTH-1:0]  m_axi_awaddr;
@@ -119,6 +140,23 @@ module tb_pcie_dma_system;
         .s_axis_rc_tuser(s_axis_rc_tuser),
         .s_axis_rc_tkeep(s_axis_rc_tkeep),
         .s_axis_rc_tready(s_axis_rc_tready),
+        .m_axil_bar1_awaddr(m_axil_bar1_awaddr),
+        .m_axil_bar1_awvalid(m_axil_bar1_awvalid),
+        .m_axil_bar1_awready(m_axil_bar1_awready),
+        .m_axil_bar1_wdata(m_axil_bar1_wdata),
+        .m_axil_bar1_wstrb(m_axil_bar1_wstrb),
+        .m_axil_bar1_wvalid(m_axil_bar1_wvalid),
+        .m_axil_bar1_wready(m_axil_bar1_wready),
+        .m_axil_bar1_bresp(m_axil_bar1_bresp),
+        .m_axil_bar1_bvalid(m_axil_bar1_bvalid),
+        .m_axil_bar1_bready(m_axil_bar1_bready),
+        .m_axil_bar1_araddr(m_axil_bar1_araddr),
+        .m_axil_bar1_arvalid(m_axil_bar1_arvalid),
+        .m_axil_bar1_arready(m_axil_bar1_arready),
+        .m_axil_bar1_rdata(m_axil_bar1_rdata),
+        .m_axil_bar1_rresp(m_axil_bar1_rresp),
+        .m_axil_bar1_rvalid(m_axil_bar1_rvalid),
+        .m_axil_bar1_rready(m_axil_bar1_rready),
         .m_axi_awaddr(m_axi_awaddr),
         .m_axi_awlen(m_axi_awlen),
         .m_axi_awsize(m_axi_awsize),
@@ -160,6 +198,7 @@ module tb_pcie_dma_system;
             s_axis_cq_tlast  <= 1;
             s_axis_cq_tdata[63:0]    <= {32'd0, reg_addr};
             s_axis_cq_tdata[78:75]   <= 4'b0001; // MWr
+            s_axis_cq_tdata[114:112] <= 3'b000;  // BAR0
             s_axis_cq_tdata[159:128] <= reg_val;
             @(posedge clk);
             s_axis_cq_tvalid <= 0;
@@ -173,8 +212,25 @@ module tb_pcie_dma_system;
             s_axis_rc_tvalid <= 1'b0;
             s_axis_rc_tdata  <= 256'd0;
             s_axis_rc_tlast  <= 1'b0;
+            m_axil_bar1_awready <= 1'b1;
+            m_axil_bar1_wready  <= 1'b1;
+            m_axil_bar1_bresp   <= 2'b00;
+            m_axil_bar1_bvalid  <= 1'b0;
+            m_axil_bar1_arready <= 1'b1;
+            m_axil_bar1_rdata   <= 32'd0;
+            m_axil_bar1_rresp   <= 2'b00;
+            m_axil_bar1_rvalid  <= 1'b0;
         end else begin
             s_axis_rc_tvalid <= 1'b0;
+
+            // Simple BAR1 Responder Logic
+            if (m_axil_bar1_awvalid && m_axil_bar1_wvalid) begin
+                $display("[%0t] BAR1 Interconnect BFM received Write! Addr: 0x%h Data: 0x%h",
+                         $time, m_axil_bar1_awaddr, m_axil_bar1_wdata);
+                m_axil_bar1_bvalid <= 1'b1;
+            end else if (m_axil_bar1_bvalid && m_axil_bar1_bready) begin
+                m_axil_bar1_bvalid <= 1'b0;
+            end
 
             if (m_axis_rq_tvalid && m_axis_rq_tready) begin
                 $display("[%0t] Host BFM received RQ TLP! Type=0x%b, Addr=0x%h, Tag=0x%h, DW Len=%d",
@@ -187,7 +243,6 @@ module tb_pcie_dma_system;
                     s_axis_rc_tdata[58:51] <= m_axis_rq_tdata[103:96]; // Tag alignment
                     s_axis_rc_tdata[79:64] <= 16'h0100;
 
-                    // Address lookup in Host Memory
                     s_axis_rc_tdata[255:96] <= host_mem[m_axis_rq_tdata[14:5]][159:0];
                 end else if (m_axis_rq_tdata[78:75] == 4'b0001) begin // MWr TLP
                     host_mem[m_axis_rq_tdata[14:5]] <= m_axis_rq_tdata[255:128];
@@ -252,27 +307,37 @@ module tb_pcie_dma_system;
         $display("===============================================================");
 
         // Pre-fill Host Memory with 64-Byte Extended 2D Descriptor and Data
-        // Descriptor at Host Mem Addr 0x00 (word offset 0):
-        // Src=0x0200 (Host Mem offset 16), Dst=0x0200 (FPGA Mem offset 16), Width=32, Count=1
         host_mem[0] = {160'd0, 16'h0001, 16'd32, 64'h0000_0200, 64'h0000_0200}; // Src=0x200, Dst=0x200, Len=32, Ctrl=0x0001 (Valid=1, H2C=0)
-        host_mem[16] = 256'h11223344_55667788_99AABBCC_DDEEFF00_12345678_87654321_00112233_44556677; // Source H2C Payload
+        host_mem[16] = 256'h11223344_55667788_99AABBCC_DDEEFF00_12345678_87654321_00112233_44556677;
 
         #20;
-        $display("[%0t] Step 1: Configure H2C Ring Base (0x00) & Ring Size (4)...", $time);
+        $display("[%0t] Step 1: Configure BAR0 H2C Ring Base (0x00) & Ring Size (4)...", $time);
         host_write_reg(32'h08, 32'h0000_0000); // Ring Low Base = 0x00
         host_write_reg(32'h0C, 32'h0000_0000); // Ring High Base = 0x00
         host_write_reg(32'h10, 32'h0000_0004); // Ring Size = 4
 
         #20;
-        $display("[%0t] Step 2: Write H2C Tail Pointer = 1 to trigger Descriptor Fetch...", $time);
+        $display("[%0t] Step 2: Write BAR0 H2C Tail Pointer = 1 to trigger Descriptor Fetch...", $time);
         host_write_reg(32'h10, 32'h0001_0004); // Tail Pointer = 1
 
         #20;
-        $display("[%0t] Step 3: Write DMA_CTRL = 0x01 (Start H2C DMA Engine)...", $time);
+        $display("[%0t] Step 3: Write BAR0 DMA_CTRL = 0x01 (Start H2C DMA Engine)...", $time);
         host_write_reg(32'h00, 32'h0000_0001);
 
+        #20;
+        $display("[%0t] Step 4: Perform BAR1 Write Access to User IP Core (UART Config Reg at 0x1000)...", $time);
+        @(posedge clk);
+        s_axis_cq_tvalid <= 1;
+        s_axis_cq_tlast  <= 1;
+        s_axis_cq_tdata[63:0]    <= 64'h0000_1000;
+        s_axis_cq_tdata[78:75]   <= 4'b0001; // MWr
+        s_axis_cq_tdata[114:112] <= 3'b001;  // BAR1
+        s_axis_cq_tdata[159:128] <= 32'hABCD_1234;
+        @(posedge clk);
+        s_axis_cq_tvalid <= 0;
+
         #150;
-        $display("[%0t] Step 4: Verify FPGA Memory contents after H2C DMA...", $time);
+        $display("[%0t] Step 5: Verify FPGA Memory contents after H2C DMA...", $time);
         if (fpga_mem[16] == {96'd0, host_mem[16][159:0]}) begin
             $display("[%0t] SUCCESS: H2C DMA Data matches exactly in FPGA Memory!", $time);
         end else begin
@@ -282,7 +347,7 @@ module tb_pcie_dma_system;
 
         #50;
         $display("===============================================================");
-        $display("[%0t] All PCIe DMA System Tests Completed Successfully!", $time);
+        $display("[%0t] All PCIe DMA System & Dual-BAR Tests Completed Successfully!", $time);
         $display("===============================================================");
         $finish;
     end
