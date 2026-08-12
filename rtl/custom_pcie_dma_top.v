@@ -159,23 +159,68 @@ module custom_pcie_dma_top #(
     wire [10:0] h2c_req_dw_len;
     wire [7:0]  h2c_req_tag;
 
-    wire        c2h_req_valid, c2h_req_ack, c2h_req_last;
-    wire [63:0] c2h_req_addr;
-    wire [10:0] c2h_req_dw_len;
-    wire [PCIE_DATA_WIDTH-1:0] c2h_req_data;
-
     wire        h2c_fifo_wvalid, h2c_fifo_wlast;
     wire [PCIE_DATA_WIDTH-1:0] h2c_fifo_wdata;
 
     wire        irq_req_valid, irq_req_ack;
     wire [7:0]  irq_req_code;
 
-    // Stream Engine Channel Wires
-    wire [NUM_VIDEO_CH-1:0] v_c2h_req_valid, v_c2h_req_ack;
-    wire [NUM_VIDEO_CH-1:0] v_busy, v_done;
+    // Stream Engine Channel Per-Instance Wires
+    wire [NUM_VIDEO_CH-1:0]      v_c2h_req_valid, v_c2h_req_ack;
+    wire [63:0]                  v_c2h_req_addr [0:NUM_VIDEO_CH-1];
+    wire [10:0]                  v_c2h_req_dw_len [0:NUM_VIDEO_CH-1];
+    wire [PCIE_DATA_WIDTH-1:0]   v_c2h_req_data [0:NUM_VIDEO_CH-1];
+    wire [NUM_VIDEO_CH-1:0]      v_c2h_req_last;
+    wire [NUM_VIDEO_CH-1:0]      v_busy, v_done;
 
-    wire [NUM_AUDIO_CH-1:0] a_c2h_req_valid, a_c2h_req_ack;
-    wire [NUM_AUDIO_CH-1:0] a_busy, a_done;
+    wire [NUM_AUDIO_CH-1:0]      a_c2h_req_valid, a_c2h_req_ack;
+    wire [63:0]                  a_c2h_req_addr [0:NUM_AUDIO_CH-1];
+    wire [10:0]                  a_c2h_req_dw_len [0:NUM_AUDIO_CH-1];
+    wire [PCIE_DATA_WIDTH-1:0]   a_c2h_req_data [0:NUM_AUDIO_CH-1];
+    wire [NUM_AUDIO_CH-1:0]      a_c2h_req_last;
+    wire [NUM_AUDIO_CH-1:0]      a_busy, a_done;
+
+    // Multiplexed C2H Request Signals
+    reg                          c2h_req_valid_mux;
+    reg  [63:0]                  c2h_req_addr_mux;
+    reg  [10:0]                  c2h_req_dw_len_mux;
+    reg  [PCIE_DATA_WIDTH-1:0]   c2h_req_data_mux;
+    reg                          c2h_req_last_mux;
+    wire                         c2h_req_ack_mux;
+
+    integer i_arb;
+    reg     c2h_arb_found;
+
+    always @(*) begin
+        c2h_req_valid_mux = 1'b0;
+        c2h_req_addr_mux   = 64'd0;
+        c2h_req_dw_len_mux = 11'd0;
+        c2h_req_data_mux   = {PCIE_DATA_WIDTH{1'b0}};
+        c2h_req_last_mux   = 1'b0;
+        c2h_arb_found      = 1'b0;
+
+        for (i_arb = 0; i_arb < NUM_VIDEO_CH; i_arb = i_arb + 1) begin
+            if (!c2h_arb_found && v_c2h_req_valid[i_arb]) begin
+                c2h_req_valid_mux = 1'b1;
+                c2h_req_addr_mux   = v_c2h_req_addr[i_arb];
+                c2h_req_dw_len_mux = v_c2h_req_dw_len[i_arb];
+                c2h_req_data_mux   = v_c2h_req_data[i_arb];
+                c2h_req_last_mux   = v_c2h_req_last[i_arb];
+                c2h_arb_found      = 1'b1;
+            end
+        end
+
+        for (i_arb = 0; i_arb < NUM_AUDIO_CH; i_arb = i_arb + 1) begin
+            if (!c2h_arb_found && a_c2h_req_valid[i_arb]) begin
+                c2h_req_valid_mux = 1'b1;
+                c2h_req_addr_mux   = a_c2h_req_addr[i_arb];
+                c2h_req_dw_len_mux = a_c2h_req_dw_len[i_arb];
+                c2h_req_data_mux   = a_c2h_req_data[i_arb];
+                c2h_req_last_mux   = a_c2h_req_last[i_arb];
+                c2h_arb_found      = 1'b1;
+            end
+        end
+    end
 
     assign reg_dma_status = {24'd0, a_done[0], v_done[0], a_busy[0], v_busy[0]};
 
@@ -338,12 +383,12 @@ module custom_pcie_dma_top #(
         .h2c_req_dw_len(h2c_req_dw_len),
         .h2c_req_tag(h2c_req_tag),
         .h2c_req_ack(h2c_req_ack),
-        .c2h_req_valid(v_c2h_req_valid[0] | a_c2h_req_valid[0]),
-        .c2h_req_addr(c2h_req_addr),
-        .c2h_req_dw_len(c2h_req_dw_len),
-        .c2h_req_data(c2h_req_data),
-        .c2h_req_last(c2h_req_last),
-        .c2h_req_ack(c2h_req_ack)
+        .c2h_req_valid(c2h_req_valid_mux),
+        .c2h_req_addr(c2h_req_addr_mux),
+        .c2h_req_dw_len(c2h_req_dw_len_mux),
+        .c2h_req_data(c2h_req_data_mux),
+        .c2h_req_last(c2h_req_last_mux),
+        .c2h_req_ack(c2h_req_ack_mux)
     );
 
     // 6. RC RX Decoder
@@ -434,11 +479,11 @@ module custom_pcie_dma_top #(
                 .m_axis_video_tuser(m_axis_video_tuser[v_idx]),
                 .m_axis_video_tready(m_axis_video_tready[v_idx]),
                 .c2h_req_valid(v_c2h_req_valid[v_idx]),
-                .c2h_req_addr(c2h_req_addr),
-                .c2h_req_dw_len(c2h_req_dw_len),
-                .c2h_req_data(c2h_req_data),
-                .c2h_req_last(c2h_req_last),
-                .c2h_req_ack(c2h_req_ack),
+                .c2h_req_addr(v_c2h_req_addr[v_idx]),
+                .c2h_req_dw_len(v_c2h_req_dw_len[v_idx]),
+                .c2h_req_data(v_c2h_req_data[v_idx]),
+                .c2h_req_last(v_c2h_req_last[v_idx]),
+                .c2h_req_ack(c2h_req_ack_mux),
                 .h2c_fifo_wvalid(h2c_fifo_wvalid),
                 .h2c_fifo_wdata(h2c_fifo_wdata),
                 .h2c_fifo_wlast(h2c_fifo_wlast),
@@ -471,11 +516,11 @@ module custom_pcie_dma_top #(
                 .m_axis_audio_tlast(m_axis_audio_tlast[a_idx]),
                 .m_axis_audio_tready(m_axis_audio_tready[a_idx]),
                 .c2h_req_valid(a_c2h_req_valid[a_idx]),
-                .c2h_req_addr(),
-                .c2h_req_dw_len(),
-                .c2h_req_data(),
-                .c2h_req_last(),
-                .c2h_req_ack(c2h_req_ack),
+                .c2h_req_addr(a_c2h_req_addr[a_idx]),
+                .c2h_req_dw_len(a_c2h_req_dw_len[a_idx]),
+                .c2h_req_data(a_c2h_req_data[a_idx]),
+                .c2h_req_last(a_c2h_req_last[a_idx]),
+                .c2h_req_ack(c2h_req_ack_mux),
                 .h2c_fifo_wvalid(h2c_fifo_wvalid),
                 .h2c_fifo_wdata(h2c_fifo_wdata),
                 .h2c_fifo_wlast(h2c_fifo_wlast),
