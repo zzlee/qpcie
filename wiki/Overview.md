@@ -69,4 +69,5 @@
 - [8. 多路 2D Video 搭配多路 Audio 系統配置指南 (Multi-Channel Video & Audio Config)](Multi-Channel-Video-Audio-Config.md)
 - [9. 多路 2D Video 及 AES3 Audio AXI4-Stream 原生架構 (Multi-Channel Stream Architecture)](Multi-Channel-Stream-Architecture.md)
 - [10. Linux V4L2 視訊與 ALSA 音訊 PCIe 驅動程式指南 (Linux V4L2 & ALSA Driver Guide)](Linux-V4L2-ALSA-Driver-Guide.md)
-- [11. 仿真驗證與測試指南 (Verification Guide)](Verification-and-Simulation.md)
+- [11. Kintex UltraScale+ PCIe 卡建構指南 (FPGA Build Guide)](FPGA-Build-Guide.md)
+- [12. 仿真驗證與測試指南 (Verification Guide)](Verification-and-Simulation.md)
