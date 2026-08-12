@@ -66,4 +66,5 @@
 - [5. 中斷與頂層整合 (System Support Layer)](System-Support-Layer.md)
 - [6. 透過 Control-Layer 控制其他 IP Cores (Controlling Other IP Cores)](Controlling-Other-IP-Cores.md)
 - [7. Linux Scatterlist 填入 Descriptor 範例指南 (Linux Driver Scatterlist Guide)](Linux-Driver-Scatterlist-Guide.md)
-- [8. 仿真驗證與測試指南 (Verification Guide)](Verification-and-Simulation.md)
+- [8. 多路 2D Video 搭配多路 Audio 系統配置指南 (Multi-Channel Video & Audio Config)](Multi-Channel-Video-Audio-Config.md)
+- [9. 仿真驗證與測試指南 (Verification Guide)](Verification-and-Simulation.md)
