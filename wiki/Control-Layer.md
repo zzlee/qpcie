@@ -62,6 +62,10 @@
 | **`IRQ_STATUS`** | `0x24` | R/W1C | Bit 0: `h2c_irq`, Bit 1: `c2h_irq` |
 | **`COMPLETED_H2C_COUNT`** | `0x28` | R | 硬體自動累加之 H2C Descriptor 完成總數 |
 | **`COMPLETED_C2H_COUNT`** | `0x2C` | R | 硬體自動累加之 C2H Descriptor 完成總數 |
+| **`REG_VERSION_ID`** | `0x30` | R | 硬體版本號 (Bits[31:24]=Major, [23:16]=Minor, [15:8]=Patch, [7:0]=Variant) |
+| **`REG_GIT_COMMIT_HASH`** | `0x34` | R | 韌體 Git Commit Hash (Lower 32-bit: `0x01D6A9C5`) |
+| **`REG_BUILD_TIMESTAMP`** | `0x38` | R | 韌體建置日期時間戳記 (BCD Date: `0x20260812`) |
+| **`REG_HARDWARE_CAPS`** | `0x3C` | R | 硬體規格 Flag (Bits[23:16]=Audio通道數, [15:8]=Video通道數, [3:0]=功能選配) |
 
 ---
 

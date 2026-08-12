@@ -43,6 +43,10 @@
 #define REG_IRQ_STATUS       0x24
 #define REG_COMPLETED_H2C    0x28
 #define REG_COMPLETED_C2H    0x2C
+#define REG_VERSION_ID       0x30
+#define REG_GIT_COMMIT_HASH  0x34
+#define REG_BUILD_TIMESTAMP  0x38
+#define REG_HARDWARE_CAPS    0x3C
 
 /* 64-Byte 2D Multi-Planar Extended Descriptor Structure */
 struct qpcie_dma_desc_2d {

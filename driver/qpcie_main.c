@@ -63,6 +63,20 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
         dev_warn(&pdev->dev, "BAR1 User IP Cores MMIO not mapped\n");
     }
 
+    /* Read Firmware Version & Hardware Capabilities from BAR0 */
+    {
+        u32 ver   = ioread32(qdev->bar0_mmio + REG_VERSION_ID);
+        u32 git   = ioread32(qdev->bar0_mmio + REG_GIT_COMMIT_HASH);
+        u32 date  = ioread32(qdev->bar0_mmio + REG_BUILD_TIMESTAMP);
+        u32 caps  = ioread32(qdev->bar0_mmio + REG_HARDWARE_CAPS);
+
+        dev_info(&pdev->dev, "Firmware Ver: v%d.%d.%d (Variant %d)\n",
+                 (ver >> 24) & 0xFF, (ver >> 16) & 0xFF, (ver >> 8) & 0xFF, ver & 0xFF);
+        dev_info(&pdev->dev, "Git Commit: 0x%08X, Build Date: %08X\n", git, date);
+        dev_info(&pdev->dev, "HW Caps: Video Channels=%d, Audio Channels=%d, Caps Flags=0x%X\n",
+                 (caps >> 8) & 0xFF, (caps >> 16) & 0xFF, caps & 0xFF);
+    }
+
     /* Allocate Coherent Descriptor Ring Buffers (64-Byte 2D Descriptors) */
     qdev->h2c_ring_virt = dma_alloc_coherent(&pdev->dev,
                                              RING_BUFFER_SIZE * sizeof(struct qpcie_dma_desc_2d),
