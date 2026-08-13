@@ -25,8 +25,8 @@
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
 
-#define QPCIE_VENDOR_ID   0x10EE /* Xilinx PCI Vendor ID */
-#define QPCIE_DEVICE_ID   0x9038 /* Custom PCIe DMA Device ID */
+#define QPCIE_VENDOR_ID   0x12AB /* Custom PCI Vendor ID */
+#define QPCIE_DEVICE_ID   0xE380 /* Custom PCIe DMA Device ID */
 
 #define NUM_VIDEO_CHANNELS 4
 #define NUM_AUDIO_CHANNELS 4

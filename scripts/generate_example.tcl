@@ -16,8 +16,8 @@ set_property -dict [list \
   CONFIG.pf0_bar1_64bit {true} \
   CONFIG.pf0_bar1_scale {Kilobytes} \
   CONFIG.pf0_bar1_size {64} \
-  CONFIG.PF0_DEVICE_ID {9038} \
-  CONFIG.vendor_id {10EE} \
+  CONFIG.PF0_DEVICE_ID {E380} \
+  CONFIG.vendor_id {12AB} \
 ] [get_ips pcie4_uscale_plus_0]
 
 # Generate example design
