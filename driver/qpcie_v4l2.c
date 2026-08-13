@@ -21,9 +21,9 @@ static const struct v4l2_file_operations qpcie_v4l2_fops = {
 static int qpcie_vidioc_querycap(struct file *file, void *priv, struct v4l2_capability *cap)
 {
     strscpy(cap->driver, "qpcie-v4l2", sizeof(cap->driver));
-    strscpy(cap->card, "QPCIe Multi-Planar Video Capture", sizeof(cap->card));
+    strscpy(cap->card, "QPCIe Multi-Planar Video Capture & Output", sizeof(cap->card));
     strscpy(cap->bus_info, "PCIe:custom-dma", sizeof(cap->bus_info));
-    cap->capabilities = V4L2_CAP_VIDEO_CAPTURE_MPLANE | V4L2_CAP_STREAMING | V4L2_CAP_DEVICE_CAPS;
+    cap->capabilities = V4L2_CAP_VIDEO_CAPTURE_MPLANE | V4L2_CAP_VIDEO_OUTPUT_MPLANE | V4L2_CAP_STREAMING | V4L2_CAP_DEVICE_CAPS;
     return 0;
 }
 
@@ -129,6 +129,10 @@ static const struct v4l2_ioctl_ops qpcie_v4l2_ioctl_ops = {
     .vidioc_g_fmt_vid_cap_mplane    = qpcie_vidioc_g_fmt_vid_cap_mplane,
     .vidioc_s_fmt_vid_cap_mplane    = qpcie_vidioc_s_fmt_vid_cap_mplane,
 
+    .vidioc_enum_fmt_vid_out        = qpcie_vidioc_enum_fmt_vid_cap_mplane,
+    .vidioc_g_fmt_vid_out_mplane    = qpcie_vidioc_g_fmt_vid_cap_mplane,
+    .vidioc_s_fmt_vid_out_mplane    = qpcie_vidioc_s_fmt_vid_cap_mplane,
+
     .vidioc_g_parm                  = qpcie_vidioc_g_parm,
     .vidioc_s_parm                  = qpcie_vidioc_s_parm,
 
@@ -197,31 +201,54 @@ static void qpcie_buf_queue(struct vb2_buffer *vb)
     struct qpcie_dev *qdev = vch->qdev;
     struct qpcie_dma_desc_2d *desc;
     dma_addr_t plane0_dma, plane1_dma, plane2_dma = 0;
+    bool is_output = V4L2_TYPE_IS_OUTPUT(vb->vb2_queue->type);
 
     plane0_dma = vb2_dma_sg_plane_desc(vb, 0)->sgl->dma_address;
     plane1_dma = vb2_dma_sg_plane_desc(vb, 1)->sgl->dma_address;
     if (vb->num_planes == 3)
         plane2_dma = vb2_dma_sg_plane_desc(vb, 2)->sgl->dma_address;
 
-    /* Fill 64-Byte Extended Multi-Planar Descriptor */
-    desc = &qdev->c2h_ring_virt[qdev->c2h_tail];
-    memset(desc, 0, sizeof(*desc));
+    if (is_output) {
+        /* H2C DMA Transfer (Host RAM -> FPGA Output Stream) */
+        desc = &qdev->h2c_ring_virt[qdev->h2c_tail];
+        memset(desc, 0, sizeof(*desc));
 
-    desc->plane0_src_addr = 0x0000; /* FPGA Stream In */
-    desc->plane0_dst_addr = plane0_dma;
-    desc->plane1_dst_addr = plane1_dma;
-    desc->plane2_dst_addr = plane2_dma;
+        desc->plane0_src_addr = plane0_dma;
+        desc->plane0_dst_addr = 0x0000; /* FPGA Stream Out */
+        desc->plane1_src_addr = plane1_dma;
+        desc->plane2_src_addr = plane2_dma;
 
-    desc->line_width = vch->width;
-    desc->line_count = vch->height;
-    desc->src_stride = vch->width;
-    desc->dst_stride = vch->stride;
-    desc->format     = (vb->num_planes == 3) ? 0x3 : 0x2;
-    desc->plane_count= vb->num_planes;
-    desc->control    = 0x000B; /* Valid=1, Is_C2H=1, IRQ_EN=1 */
+        desc->line_width = vch->width;
+        desc->line_count = vch->height;
+        desc->src_stride = vch->stride;
+        desc->dst_stride = vch->width;
+        desc->format     = (vb->num_planes == 3) ? 0x3 : 0x2;
+        desc->plane_count= vb->num_planes;
+        desc->control    = 0x0009; /* Valid=1, Is_C2H=0 (H2C), IRQ_EN=1 */
 
-    qdev->c2h_tail = (qdev->c2h_tail + 1) % RING_BUFFER_SIZE;
-    iowrite32(((u32)qdev->c2h_tail << 16) | RING_BUFFER_SIZE, qdev->bar0_mmio + REG_C2H_RING_CFG);
+        qdev->h2c_tail = (qdev->h2c_tail + 1) % RING_BUFFER_SIZE;
+        iowrite32(((u32)qdev->h2c_tail << 16) | RING_BUFFER_SIZE, qdev->bar0_mmio + REG_H2C_RING_CFG);
+    } else {
+        /* C2H DMA Transfer (FPGA Input Stream -> Host RAM) */
+        desc = &qdev->c2h_ring_virt[qdev->c2h_tail];
+        memset(desc, 0, sizeof(*desc));
+
+        desc->plane0_src_addr = 0x0000; /* FPGA Stream In */
+        desc->plane0_dst_addr = plane0_dma;
+        desc->plane1_dst_addr = plane1_dma;
+        desc->plane2_dst_addr = plane2_dma;
+
+        desc->line_width = vch->width;
+        desc->line_count = vch->height;
+        desc->src_stride = vch->width;
+        desc->dst_stride = vch->stride;
+        desc->format     = (vb->num_planes == 3) ? 0x3 : 0x2;
+        desc->plane_count= vb->num_planes;
+        desc->control    = 0x000B; /* Valid=1, Is_C2H=1 (C2H), IRQ_EN=1 */
+
+        qdev->c2h_tail = (qdev->c2h_tail + 1) % RING_BUFFER_SIZE;
+        iowrite32(((u32)qdev->c2h_tail << 16) | RING_BUFFER_SIZE, qdev->bar0_mmio + REG_C2H_RING_CFG);
+    }
 
     spin_lock_irq(&vch->slock);
     list_add_tail(&buf->list, &vch->active_buffers);
