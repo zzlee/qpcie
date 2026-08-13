@@ -6,6 +6,8 @@
 
 set -e
 
+export PATH="/opt/Xilinx/Vivado/2023.2/bin:$PATH"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 

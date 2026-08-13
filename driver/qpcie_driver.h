@@ -16,10 +16,12 @@
 
 #include <media/v4l2-device.h>
 #include <media/v4l2-ioctl.h>
+#include <media/v4l2-ctrls.h>
 #include <media/videobuf2-v4l2.h>
 #include <media/videobuf2-dma-sg.h>
 
 #include <sound/core.h>
+#include <sound/control.h>
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
 
@@ -82,6 +84,7 @@ struct qpcie_v4l2_channel {
     int                     channel_id;
     struct video_device     vdev;
     struct v4l2_device      v4l2_dev;
+    struct v4l2_ctrl_handler ctrl_handler;
     struct vb2_queue        queue;
     struct mutex            lock;
     spinlock_t              slock;
@@ -134,5 +137,8 @@ void qpcie_v4l2_irq_handler(struct qpcie_dev *qdev);
 int qpcie_alsa_init(struct qpcie_dev *qdev);
 void qpcie_alsa_remove(struct qpcie_dev *qdev);
 void qpcie_alsa_irq_handler(struct qpcie_dev *qdev);
+
+int qpcie_sysfs_init(struct qpcie_dev *qdev);
+void qpcie_sysfs_remove(struct qpcie_dev *qdev);
 
 #endif /* _QPCIE_DRIVER_H_ */

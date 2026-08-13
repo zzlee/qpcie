@@ -78,11 +78,59 @@ static int qpcie_vidioc_s_fmt_vid_cap_mplane(struct file *file, void *priv, stru
     return qpcie_vidioc_g_fmt_vid_cap_mplane(file, priv, f);
 }
 
+static int qpcie_vidioc_g_parm(struct file *file, void *priv, struct v4l2_streamparm *a)
+{
+    struct qpcie_v4l2_channel *vch = video_drvdata(file);
+    struct qpcie_dev *qdev = vch->qdev;
+    u32 clks = 2083333;
+
+    if (a->type != V4L2_BUF_TYPE_VIDEO_CAPTURE && a->type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)
+        return -EINVAL;
+
+    if (qdev && qdev->bar1_mmio) {
+        clks = ioread32(qdev->bar1_mmio + 0x0000 + 0x30);
+        if (clks == 0) clks = 2083333;
+    }
+
+    a->parm.capture.capability = V4L2_CAP_TIMEPERFRAME;
+    a->parm.capture.timeperframe.numerator = 1;
+    a->parm.capture.timeperframe.denominator = 125000000 / (clks ? clks : 2083333);
+
+    return 0;
+}
+
+static int qpcie_vidioc_s_parm(struct file *file, void *priv, struct v4l2_streamparm *a)
+{
+    struct qpcie_v4l2_channel *vch = video_drvdata(file);
+    struct qpcie_dev *qdev = vch->qdev;
+
+    if (a->type != V4L2_BUF_TYPE_VIDEO_CAPTURE && a->type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)
+        return -EINVAL;
+
+    u32 num = a->parm.capture.timeperframe.numerator;
+    u32 den = a->parm.capture.timeperframe.denominator;
+
+    if (num == 0 || den == 0) return -EINVAL;
+
+    u64 target_clks = (125000000ULL * (u64)num) / (u64)den;
+
+    if (qdev && qdev->bar1_mmio) {
+        iowrite32((u32)target_clks, qdev->bar1_mmio + 0x0000 + 0x30);
+        dev_info(&qdev->pdev->dev, "V4L2 VIDIOC_S_PARM: Set Hardware Frame Rate Pacer FPS %u/%u -> Clks %llu\n",
+                 den, num, target_clks);
+    }
+
+    return qpcie_vidioc_g_parm(file, priv, a);
+}
+
 static const struct v4l2_ioctl_ops qpcie_v4l2_ioctl_ops = {
     .vidioc_querycap                = qpcie_vidioc_querycap,
-    .vidioc_enum_fmt_vid_cap_mplane = qpcie_vidioc_enum_fmt_vid_cap_mplane,
+    .vidioc_enum_fmt_vid_cap        = qpcie_vidioc_enum_fmt_vid_cap_mplane,
     .vidioc_g_fmt_vid_cap_mplane    = qpcie_vidioc_g_fmt_vid_cap_mplane,
     .vidioc_s_fmt_vid_cap_mplane    = qpcie_vidioc_s_fmt_vid_cap_mplane,
+
+    .vidioc_g_parm                  = qpcie_vidioc_g_parm,
+    .vidioc_s_parm                  = qpcie_vidioc_s_parm,
 
     /* Videobuf2 Buffer Management IOCTLs (MMAP, USERPTR, DMABUF) */
     .vidioc_reqbufs                 = vb2_ioctl_reqbufs,
@@ -104,7 +152,7 @@ static int qpcie_queue_setup(struct vb2_queue *vq,
                             unsigned int *nbuffers, unsigned int *nplanes,
                             unsigned int sizes[], struct device *alloc_devs[])
 {
-    struct qpcie_v4l2_channel *vch = vb2_get_drvpriv(vq);
+    struct qpcie_v4l2_channel *vch = vb2_get_drv_priv(vq);
     int num_planes = (vch->pixelformat == V4L2_PIX_FMT_YUV420M) ? 3 : 2;
 
     *nplanes = num_planes;
@@ -122,7 +170,7 @@ static int qpcie_queue_setup(struct vb2_queue *vq,
 
 static int qpcie_buf_prepare(struct vb2_buffer *vb)
 {
-    struct qpcie_v4l2_channel *vch = vb2_get_drvpriv(vb->vb2_queue);
+    struct qpcie_v4l2_channel *vch = vb2_get_drv_priv(vb->vb2_queue);
     int i;
 
     /* Validate plane size for MMAP, USERPTR, and DMABUF memory modes */
@@ -145,7 +193,7 @@ static void qpcie_buf_queue(struct vb2_buffer *vb)
 {
     struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
     struct qpcie_v4l2_buffer *buf = container_of(vbuf, struct qpcie_v4l2_buffer, vb);
-    struct qpcie_v4l2_channel *vch = vb2_get_drvpriv(vb->vb2_queue);
+    struct qpcie_v4l2_channel *vch = vb2_get_drv_priv(vb->vb2_queue);
     struct qpcie_dev *qdev = vch->qdev;
     struct qpcie_dma_desc_2d *desc;
     dma_addr_t plane0_dma, plane1_dma, plane2_dma = 0;
@@ -186,6 +234,44 @@ static const struct vb2_ops qpcie_vb2_ops = {
     .buf_queue   = qpcie_buf_queue,
 };
 
+/* V4L2 Control Framework Integration (V4L2_CID_TEST_PATTERN) */
+static const char * const qpcie_tpg_pattern_strings[] = {
+    "Pass-through",
+    "Horizontal Ramp",
+    "Vertical Ramp",
+    "Color Bars",
+    "Zone Plate",
+    NULL
+};
+
+static int qpcie_s_ctrl(struct v4l2_ctrl *ctrl)
+{
+    struct qpcie_v4l2_channel *vch = container_of(ctrl->handler, struct qpcie_v4l2_channel, ctrl_handler);
+    struct qpcie_dev *qdev = vch->qdev;
+
+    switch (ctrl->id) {
+    case V4L2_CID_TEST_PATTERN:
+        if (qdev && qdev->bar1_mmio) {
+            u32 pat_id = ctrl->val;
+            if (pat_id == 3) pat_id = 9;  /* Color Bars */
+            if (pat_id == 4) pat_id = 10; /* Zone Plate */
+
+            /* Write Pattern ID to BAR1 Offset 0x0020 */
+            iowrite32(pat_id, qdev->bar1_mmio + 0x0000 + 0x20);
+            /* Trigger AP_START & Auto-Restart on TPG Control Reg (0x0000) */
+            iowrite32(0x81, qdev->bar1_mmio + 0x0000 + 0x00);
+            dev_info(&qdev->pdev->dev, "V4L2 Ctrl: Set Video TPG Pattern Menu Val %d -> HW Pattern %u\n",
+                     ctrl->val, pat_id);
+        }
+        break;
+    }
+    return 0;
+}
+
+static const struct v4l2_ctrl_ops qpcie_ctrl_ops = {
+    .s_ctrl = qpcie_s_ctrl,
+};
+
 int qpcie_v4l2_init(struct qpcie_dev *qdev)
 {
     int i, ret;
@@ -209,6 +295,18 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
         ret = v4l2_device_register(&qdev->pdev->dev, &vch->v4l2_dev);
         if (ret) return ret;
 
+        /* Initialize V4L2 Control Handler for Video TPG */
+        v4l2_ctrl_handler_init(&vch->ctrl_handler, 2);
+        v4l2_ctrl_new_std_menu_items(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                                     V4L2_CID_TEST_PATTERN,
+                                     4, 0, 0, qpcie_tpg_pattern_strings);
+        if (vch->ctrl_handler.error) {
+            ret = vch->ctrl_handler.error;
+            v4l2_device_unregister(&vch->v4l2_dev);
+            return ret;
+        }
+        vch->v4l2_dev.ctrl_handler = &vch->ctrl_handler;
+
         /* Enable MMAP, USERPTR, and DMABUF (Import/Export) Modes */
         vch->queue.type            = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
         vch->queue.io_modes        = VB2_MMAP | VB2_USERPTR | VB2_DMABUF;
@@ -223,20 +321,24 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
         if (ret) goto unreg_v4l2;
 
         snprintf(vdev->name, sizeof(vdev->name), "qpcie-video-ch%d", i);
-        vdev->fops      = &qpcie_v4l2_fops;
-        vdev->ioctl_ops = &qpcie_v4l2_ioctl_ops;
-        vdev->release   = video_device_release_empty;
-        vdev->v4l2_dev  = &vch->v4l2_dev;
-        vdev->queue     = &vch->queue;
-        vdev->lock      = &vch->lock;
+        vdev->fops         = &qpcie_v4l2_fops;
+        vdev->ioctl_ops    = &qpcie_v4l2_ioctl_ops;
+        vdev->release      = video_device_release_empty;
+        vdev->v4l2_dev     = &vch->v4l2_dev;
+        vdev->ctrl_handler = &vch->ctrl_handler;
+        vdev->queue        = &vch->queue;
+        vdev->lock         = &vch->lock;
         video_set_drvdata(vdev, vch);
 
         ret = video_register_device(vdev, VFL_TYPE_VIDEO, -1);
         if (ret) goto unreg_v4l2;
+
+        v4l2_ctrl_handler_setup(&vch->ctrl_handler);
     }
     return 0;
 
 unreg_v4l2:
+    v4l2_ctrl_handler_free(&qdev->v4l2_ch[i].ctrl_handler);
     v4l2_device_unregister(&qdev->v4l2_ch[i].v4l2_dev);
     return ret;
 }
@@ -246,6 +348,7 @@ void qpcie_v4l2_remove(struct qpcie_dev *qdev)
     int i;
     for (i = 0; i < NUM_VIDEO_CHANNELS; i++) {
         video_unregister_device(&qdev->v4l2_ch[i].vdev);
+        v4l2_ctrl_handler_free(&qdev->v4l2_ch[i].ctrl_handler);
         v4l2_device_unregister(&qdev->v4l2_ch[i].v4l2_dev);
     }
 }

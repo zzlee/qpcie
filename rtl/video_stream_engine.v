@@ -1,16 +1,16 @@
 // ============================================================================
 // Module: video_stream_engine
-// Description: Multi-Channel 2D Video Stream Engine (AXI4-Stream Video Interface).
-//              Replaces AXI4 Memory Mapped interface with native AXI4-Stream Video:
-//              - s_axis_video_* (C2H: Video Stream Input -> PCIe Host MWr)
-//              - m_axis_video_* (H2C: PCIe Host MRd -> Video Stream Output)
-//              Handles SOF (tuser[0]) and EOL (tlast) for video frame timing.
+// Description: Multi-Channel 2D Video Stream Engine with Hardware Frame Rate Pacer.
+//              Handles:
+//              - Native AXI4-Stream Video Input (C2H) & Output (H2C)
+//              - Hardware Frame Pacer (frame_interval_clks) for exact 60/59.94/50/30/24 FPS
+//              - SOF (tuser) and EOL (tlast) video timing
 // ============================================================================
 
 `timescale 1ns / 1ps
 
 module video_stream_engine #(
-    parameter VIDEO_DATA_WIDTH = 32,
+    parameter VIDEO_DATA_WIDTH = 128,
     parameter PCIE_DATA_WIDTH  = 256
 )(
     input  wire                          clk,
@@ -23,19 +23,20 @@ module video_stream_engine #(
     input  wire [15:0]                   line_count,
     input  wire [15:0]                   line_stride_bytes,
     input  wire                          is_c2h, // 0: H2C (Host->Video Out), 1: C2H (Video In->Host)
+    input  wire [31:0]                   frame_interval_clks, // Hardware Frame Pacer Clocks (e.g. 2083333 for 60.00 FPS @ 125MHz)
 
     // C2H Input Video Stream (External Video Source -> PCIe Engine)
     input  wire [VIDEO_DATA_WIDTH-1:0]   s_axis_video_tdata,
     input  wire                          s_axis_video_tvalid,
     input  wire                          s_axis_video_tlast, // EOL (End of Line)
-    input  wire [0:0]                    s_axis_video_tuser, // tuser[0] = SOF (Start of Frame)
+    input  wire                          s_axis_video_tuser, // tuser = SOF (Start of Frame)
     output reg                           s_axis_video_tready,
 
     // H2C Output Video Stream (PCIe Engine -> External Video Sink)
     output reg  [VIDEO_DATA_WIDTH-1:0]   m_axis_video_tdata,
     output reg                           m_axis_video_tvalid,
     output reg                           m_axis_video_tlast, // EOL
-    output reg  [0:0]                    m_axis_video_tuser, // SOF
+    output reg                           m_axis_video_tuser, // SOF
     input  wire                          m_axis_video_tready,
 
     // Interface to RQ Encoder (C2H MWr Request)
@@ -59,12 +60,26 @@ module video_stream_engine #(
     localparam IDLE      = 3'b000;
     localparam C2H_LINE  = 3'b001;
     localparam C2H_SEND  = 3'b010;
-    localparam H2C_OUT   = 3'b011;
+    localparam C2H_PACE  = 3'b011;
+    localparam H2C_OUT   = 3'b100;
 
     reg [2:0]  state;
     reg [15:0] curr_line;
-    reg [15:0] pixel_count;
     reg [PCIE_DATA_WIDTH-1:0] line_buffer;
+    reg [31:0] pacer_clk_cnt;
+
+    // Hardware Frame Pacer Timer (Resets on frame start, counts up every clock)
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            pacer_clk_cnt <= 32'd0;
+        end else begin
+            if (state == IDLE && video_start) begin
+                pacer_clk_cnt <= 32'd0;
+            end else if (state != IDLE) begin
+                pacer_clk_cnt <= pacer_clk_cnt + 1'b1;
+            end
+        end
+    end
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -82,7 +97,6 @@ module video_stream_engine #(
             video_busy          <= 1'b0;
             video_frame_done    <= 1'b0;
             curr_line           <= 16'd0;
-            pixel_count         <= 16'd0;
             line_buffer         <= {PCIE_DATA_WIDTH{1'b0}};
         end else begin
             case (state)
@@ -110,7 +124,7 @@ module video_stream_engine #(
                         if (s_axis_video_tlast) begin // EOL (End of Line)
                             s_axis_video_tready <= 1'b0;
                             c2h_req_addr   <= host_frame_addr + (curr_line * line_stride_bytes);
-                            c2h_req_dw_len <= (line_width_bytes > 0) ? (line_width_bytes / 4) : 11'd8;
+                            c2h_req_dw_len <= (line_width_bytes > 16'd0) ? line_width_bytes[12:2] : 11'd8;
                             c2h_req_data   <= {s_axis_video_tdata, line_buffer[PCIE_DATA_WIDTH-1:VIDEO_DATA_WIDTH]};
                             c2h_req_last   <= 1'b1;
                             c2h_req_valid  <= 1'b1;
@@ -127,10 +141,24 @@ module video_stream_engine #(
                             s_axis_video_tready <= 1'b1;
                             state               <= C2H_LINE;
                         end else begin
-                            video_busy       <= 1'b0;
-                            video_frame_done <= 1'b1;
-                            state            <= IDLE;
+                            // Check Frame Pacer: Wait for target clocks before finishing frame
+                            if (frame_interval_clks > 32'd0 && pacer_clk_cnt < frame_interval_clks) begin
+                                state <= C2H_PACE;
+                            end else begin
+                                video_busy       <= 1'b0;
+                                video_frame_done <= 1'b1;
+                                state            <= IDLE;
+                            end
                         end
+                    end
+                end
+
+                // C2H_PACE: Hardware Frame Rate Pacing Delay
+                C2H_PACE: begin
+                    if (pacer_clk_cnt >= frame_interval_clks) begin
+                        video_busy       <= 1'b0;
+                        video_frame_done <= 1'b1;
+                        state            <= IDLE;
                     end
                 end
 

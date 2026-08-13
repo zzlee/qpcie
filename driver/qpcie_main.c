@@ -118,8 +118,15 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
     ret = qpcie_alsa_init(qdev);
     if (ret) goto remove_v4l2;
 
+    /* Register Sysfs Device Attributes (tpg_pattern, aud_pattern, aud_volume, version) */
+    ret = qpcie_sysfs_init(qdev);
+    if (ret) goto remove_alsa;
+
     dev_info(&pdev->dev, "QPCIe Multi-Channel Video (V4L2) & Audio (ALSA) Driver Probed Successfully!\n");
     return 0;
+
+remove_alsa:
+    qpcie_alsa_remove(qdev);
 
 remove_v4l2:
     qpcie_v4l2_remove(qdev);
@@ -152,6 +159,7 @@ static void qpcie_remove(struct pci_dev *pdev)
     /* Disable IRQ in BAR0 */
     iowrite32(0x00, qdev->bar0_mmio + REG_IRQ_CTRL);
 
+    qpcie_sysfs_remove(qdev);
     qpcie_alsa_remove(qdev);
     qpcie_v4l2_remove(qdev);
 

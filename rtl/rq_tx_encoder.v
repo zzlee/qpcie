@@ -18,7 +18,7 @@ module rq_tx_encoder #(
     output reg  [DATA_WIDTH-1:0] m_axis_rq_tdata,
     output reg                   m_axis_rq_tvalid,
     output reg                   m_axis_rq_tlast,
-    output reg  [59:0]           m_axis_rq_tuser,
+    output reg  [61:0]           m_axis_rq_tuser,
     output reg  [KEEP_WIDTH-1:0] m_axis_rq_tkeep,
     input  wire                  m_axis_rq_tready,
 
@@ -62,7 +62,7 @@ module rq_tx_encoder #(
             m_axis_rq_tdata  <= {DATA_WIDTH{1'b0}};
             m_axis_rq_tvalid <= 1'b0;
             m_axis_rq_tlast  <= 1'b0;
-            m_axis_rq_tuser  <= 60'd0;
+            m_axis_rq_tuser  <= 62'd0;
             m_axis_rq_tkeep  <= {KEEP_WIDTH{1'b1}};
             irq_req_ack      <= 1'b0;
             desc_req_ack     <= 1'b0;

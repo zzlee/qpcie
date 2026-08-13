@@ -165,8 +165,8 @@ module desc_fetch_engine (
                 end
 
                 INC_HEAD: begin
-                    if (ring_size > 0) begin
-                        head_ptr <= (head_ptr + 1'b1) % ring_size;
+                    if (ring_size > 16'd0 && ((head_ptr + 1'b1) >= ring_size)) begin
+                        head_ptr <= 16'd0;
                     end else begin
                         head_ptr <= head_ptr + 1'b1;
                     end

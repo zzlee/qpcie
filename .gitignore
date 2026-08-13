@@ -1,14 +1,58 @@
-# Vivado / xsim temporary files & simulation artifacts
+# ==============================================================================
+# QPCIe Project .gitignore
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. Vivado / Xilinx Tools Build Artifacts & Temporary Files
+# ------------------------------------------------------------------------------
+build/
+tmp_proj/
+.Xil/
+.gen/
+.srcs/
+xsim.dir/
+work_sim/
 *.log
 *.pb
 *.jou
 *.wdb
 *.vcd
-xsim.dir/
-work_sim/
-.Xil/
+*.str
+*.str.bak
+vivado_*.backup.log
+vivado_*.backup.jou
+xsim_*.backup.log
+xsim_*.backup.jou
 
-# OS / temporary files
+# ------------------------------------------------------------------------------
+# 2. Linux Kernel Driver Build Artifacts
+# ------------------------------------------------------------------------------
+driver/*.o
+driver/*.ko
+driver/*.mod
+driver/*.mod.c
+driver/*.mod.o
+driver/.*.cmd
+driver/.*.o
+driver/Module.symvers
+driver/modules.order
+
+# ------------------------------------------------------------------------------
+# 3. User Test App Build Artifacts & Captured Media Files
+# ------------------------------------------------------------------------------
+test_app/*.o
+test_app/v4l2_test_app
+test_app/alsa_test_app
+test_app/*.yuv
+test_app/*.pcm
+test_app/*.raw
+
+# ------------------------------------------------------------------------------
+# 4. OS, IDE, Editor & Temporary Files
+# ------------------------------------------------------------------------------
 .DS_Store
 *.swp
+*.swo
 *~
+*.bak
+*.tmp

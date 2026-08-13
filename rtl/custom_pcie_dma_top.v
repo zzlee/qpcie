@@ -1,7 +1,7 @@
 // ============================================================================
 // Module: custom_pcie_dma_top
 // Description: Multi-Channel 2D Video & Audio PCIe DMA Controller (AXI4-Stream Native).
-//              Uses Verilog parameter & generate loops to configure arbitrary channels:
+//              Uses Verilog parameter & generator loops to configure arbitrary channels:
 //              - NUM_VIDEO_CH: AXI4-Stream Video Interfaces (s_axis_video / m_axis_video)
 //              - NUM_AUDIO_CH: AXI4-Stream AES3 Audio Interfaces (s_axis_audio / m_axis_audio)
 //              - Dual-BAR: BAR0 (DMA Control), BAR1 (User IP Cores Interconnect)
@@ -41,7 +41,7 @@ module custom_pcie_dma_top #(
     output wire [PCIE_DATA_WIDTH-1:0]                       m_axis_rq_tdata,
     output wire                                             m_axis_rq_tvalid,
     output wire                                             m_axis_rq_tlast,
-    output wire [59:0]                                      m_axis_rq_tuser,
+    output wire [61:0]                                      m_axis_rq_tuser,
     output wire [PCIE_KEEP_WIDTH-1:0]                       m_axis_rq_tkeep,
     input  wire                                             m_axis_rq_tready,
 
@@ -165,28 +165,28 @@ module custom_pcie_dma_top #(
     wire        irq_req_valid, irq_req_ack;
     wire [7:0]  irq_req_code;
 
-    // Stream Engine Channel Per-Instance Wires
-    wire [NUM_VIDEO_CH-1:0]      v_c2h_req_valid, v_c2h_req_ack;
-    wire [63:0]                  v_c2h_req_addr [0:NUM_VIDEO_CH-1];
-    wire [10:0]                  v_c2h_req_dw_len [0:NUM_VIDEO_CH-1];
-    wire [PCIE_DATA_WIDTH-1:0]   v_c2h_req_data [0:NUM_VIDEO_CH-1];
-    wire [NUM_VIDEO_CH-1:0]      v_c2h_req_last;
-    wire [NUM_VIDEO_CH-1:0]      v_busy, v_done;
+    // Stream Engine Channel Wires (Flat Packed Vectors for Verilog Standard Compatibility)
+    wire [NUM_VIDEO_CH-1:0]                    v_c2h_req_valid;
+    wire [(NUM_VIDEO_CH*64)-1:0]               v_c2h_req_addr;
+    wire [(NUM_VIDEO_CH*11)-1:0]               v_c2h_req_dw_len;
+    wire [(NUM_VIDEO_CH*PCIE_DATA_WIDTH)-1:0]   v_c2h_req_data;
+    wire [NUM_VIDEO_CH-1:0]                    v_c2h_req_last;
+    wire [NUM_VIDEO_CH-1:0]                    v_busy, v_done;
 
-    wire [NUM_AUDIO_CH-1:0]      a_c2h_req_valid, a_c2h_req_ack;
-    wire [63:0]                  a_c2h_req_addr [0:NUM_AUDIO_CH-1];
-    wire [10:0]                  a_c2h_req_dw_len [0:NUM_AUDIO_CH-1];
-    wire [PCIE_DATA_WIDTH-1:0]   a_c2h_req_data [0:NUM_AUDIO_CH-1];
-    wire [NUM_AUDIO_CH-1:0]      a_c2h_req_last;
-    wire [NUM_AUDIO_CH-1:0]      a_busy, a_done;
+    wire [NUM_AUDIO_CH-1:0]                    a_c2h_req_valid;
+    wire [(NUM_AUDIO_CH*64)-1:0]               a_c2h_req_addr;
+    wire [(NUM_AUDIO_CH*11)-1:0]               a_c2h_req_dw_len;
+    wire [(NUM_AUDIO_CH*PCIE_DATA_WIDTH)-1:0]   a_c2h_req_data;
+    wire [NUM_AUDIO_CH-1:0]                    a_c2h_req_last;
+    wire [NUM_AUDIO_CH-1:0]                    a_busy, a_done;
 
     // Multiplexed C2H Request Signals
-    reg                          c2h_req_valid_mux;
-    reg  [63:0]                  c2h_req_addr_mux;
-    reg  [10:0]                  c2h_req_dw_len_mux;
-    reg  [PCIE_DATA_WIDTH-1:0]   c2h_req_data_mux;
-    reg                          c2h_req_last_mux;
-    wire                         c2h_req_ack_mux;
+    reg                        c2h_req_valid_mux;
+    reg  [63:0]                c2h_req_addr_mux;
+    reg  [10:0]                c2h_req_dw_len_mux;
+    reg  [PCIE_DATA_WIDTH-1:0] c2h_req_data_mux;
+    reg                        c2h_req_last_mux;
+    wire                       c2h_req_ack_mux;
 
     integer i_arb;
     reg     c2h_arb_found;
@@ -202,9 +202,9 @@ module custom_pcie_dma_top #(
         for (i_arb = 0; i_arb < NUM_VIDEO_CH; i_arb = i_arb + 1) begin
             if (!c2h_arb_found && v_c2h_req_valid[i_arb]) begin
                 c2h_req_valid_mux = 1'b1;
-                c2h_req_addr_mux   = v_c2h_req_addr[i_arb];
-                c2h_req_dw_len_mux = v_c2h_req_dw_len[i_arb];
-                c2h_req_data_mux   = v_c2h_req_data[i_arb];
+                c2h_req_addr_mux   = v_c2h_req_addr[(i_arb*64) +: 64];
+                c2h_req_dw_len_mux = v_c2h_req_dw_len[(i_arb*11) +: 11];
+                c2h_req_data_mux   = v_c2h_req_data[(i_arb*PCIE_DATA_WIDTH) +: PCIE_DATA_WIDTH];
                 c2h_req_last_mux   = v_c2h_req_last[i_arb];
                 c2h_arb_found      = 1'b1;
             end
@@ -213,9 +213,9 @@ module custom_pcie_dma_top #(
         for (i_arb = 0; i_arb < NUM_AUDIO_CH; i_arb = i_arb + 1) begin
             if (!c2h_arb_found && a_c2h_req_valid[i_arb]) begin
                 c2h_req_valid_mux = 1'b1;
-                c2h_req_addr_mux   = a_c2h_req_addr[i_arb];
-                c2h_req_dw_len_mux = a_c2h_req_dw_len[i_arb];
-                c2h_req_data_mux   = a_c2h_req_data[i_arb];
+                c2h_req_addr_mux   = a_c2h_req_addr[(i_arb*64) +: 64];
+                c2h_req_dw_len_mux = a_c2h_req_dw_len[(i_arb*11) +: 11];
+                c2h_req_data_mux   = a_c2h_req_data[(i_arb*PCIE_DATA_WIDTH) +: PCIE_DATA_WIDTH];
                 c2h_req_last_mux   = a_c2h_req_last[i_arb];
                 c2h_arb_found      = 1'b1;
             end
@@ -456,32 +456,36 @@ module custom_pcie_dma_top #(
     genvar v_idx;
     generate
         for (v_idx = 0; v_idx < NUM_VIDEO_CH; v_idx = v_idx + 1) begin : gen_video_ch
+            wire v_start;
+            assign v_start = (v_idx == 0) ? reg_dma_ctrl[0] : 1'b0;
+
             video_stream_engine #(
                 .VIDEO_DATA_WIDTH(VIDEO_DATA_WIDTH),
                 .PCIE_DATA_WIDTH(PCIE_DATA_WIDTH)
             ) u_video_stream_engine (
                 .clk(clk),
                 .rst_n(rst_n),
-                .video_start(reg_dma_ctrl[0] && (v_idx == 0)),
+                .video_start(v_start),
                 .host_frame_addr(h2c_plane0_src),
                 .line_width_bytes(h2c_line_width),
                 .line_count(h2c_line_count),
                 .line_stride_bytes(h2c_src_stride),
                 .is_c2h(c2h_desc_valid),
-                .s_axis_video_tdata(s_axis_video_tdata[(v_idx+1)*VIDEO_DATA_WIDTH-1 : v_idx*VIDEO_DATA_WIDTH]),
+                .frame_interval_clks(32'd2083333), // 60.00 FPS Pacer @ 125MHz
+                .s_axis_video_tdata(s_axis_video_tdata[(v_idx*VIDEO_DATA_WIDTH) +: VIDEO_DATA_WIDTH]),
                 .s_axis_video_tvalid(s_axis_video_tvalid[v_idx]),
                 .s_axis_video_tlast(s_axis_video_tlast[v_idx]),
                 .s_axis_video_tuser(s_axis_video_tuser[v_idx]),
                 .s_axis_video_tready(s_axis_video_tready[v_idx]),
-                .m_axis_video_tdata(m_axis_video_tdata[(v_idx+1)*VIDEO_DATA_WIDTH-1 : v_idx*VIDEO_DATA_WIDTH]),
+                .m_axis_video_tdata(m_axis_video_tdata[(v_idx*VIDEO_DATA_WIDTH) +: VIDEO_DATA_WIDTH]),
                 .m_axis_video_tvalid(m_axis_video_tvalid[v_idx]),
                 .m_axis_video_tlast(m_axis_video_tlast[v_idx]),
                 .m_axis_video_tuser(m_axis_video_tuser[v_idx]),
                 .m_axis_video_tready(m_axis_video_tready[v_idx]),
                 .c2h_req_valid(v_c2h_req_valid[v_idx]),
-                .c2h_req_addr(v_c2h_req_addr[v_idx]),
-                .c2h_req_dw_len(v_c2h_req_dw_len[v_idx]),
-                .c2h_req_data(v_c2h_req_data[v_idx]),
+                .c2h_req_addr(v_c2h_req_addr[(v_idx*64) +: 64]),
+                .c2h_req_dw_len(v_c2h_req_dw_len[(v_idx*11) +: 11]),
+                .c2h_req_data(v_c2h_req_data[(v_idx*PCIE_DATA_WIDTH) +: PCIE_DATA_WIDTH]),
                 .c2h_req_last(v_c2h_req_last[v_idx]),
                 .c2h_req_ack(c2h_req_ack_mux),
                 .h2c_fifo_wvalid(h2c_fifo_wvalid),
@@ -497,28 +501,31 @@ module custom_pcie_dma_top #(
     genvar a_idx;
     generate
         for (a_idx = 0; a_idx < NUM_AUDIO_CH; a_idx = a_idx + 1) begin : gen_audio_ch
+            wire a_start;
+            assign a_start = (a_idx == 0) ? reg_dma_ctrl[1] : 1'b0;
+
             audio_stream_engine #(
                 .AUDIO_DATA_WIDTH(AUDIO_DATA_WIDTH),
                 .PCIE_DATA_WIDTH(PCIE_DATA_WIDTH)
             ) u_audio_stream_engine (
                 .clk(clk),
                 .rst_n(rst_n),
-                .audio_start(reg_dma_ctrl[1] && (a_idx == 0)),
+                .audio_start(a_start),
                 .host_buffer_addr(h2c_plane0_src),
                 .sample_block_size(16'd32),
                 .is_c2h(c2h_desc_valid),
-                .s_axis_audio_tdata(s_axis_audio_tdata[(a_idx+1)*AUDIO_DATA_WIDTH-1 : a_idx*AUDIO_DATA_WIDTH]),
+                .s_axis_audio_tdata(s_axis_audio_tdata[(a_idx*AUDIO_DATA_WIDTH) +: AUDIO_DATA_WIDTH]),
                 .s_axis_audio_tvalid(s_axis_audio_tvalid[a_idx]),
                 .s_axis_audio_tlast(s_axis_audio_tlast[a_idx]),
                 .s_axis_audio_tready(s_axis_audio_tready[a_idx]),
-                .m_axis_audio_tdata(m_axis_audio_tdata[(a_idx+1)*AUDIO_DATA_WIDTH-1 : a_idx*AUDIO_DATA_WIDTH]),
+                .m_axis_audio_tdata(m_axis_audio_tdata[(a_idx*AUDIO_DATA_WIDTH) +: AUDIO_DATA_WIDTH]),
                 .m_axis_audio_tvalid(m_axis_audio_tvalid[a_idx]),
                 .m_axis_audio_tlast(m_axis_audio_tlast[a_idx]),
                 .m_axis_audio_tready(m_axis_audio_tready[a_idx]),
                 .c2h_req_valid(a_c2h_req_valid[a_idx]),
-                .c2h_req_addr(a_c2h_req_addr[a_idx]),
-                .c2h_req_dw_len(a_c2h_req_dw_len[a_idx]),
-                .c2h_req_data(a_c2h_req_data[a_idx]),
+                .c2h_req_addr(a_c2h_req_addr[(a_idx*64) +: 64]),
+                .c2h_req_dw_len(a_c2h_req_dw_len[(a_idx*11) +: 11]),
+                .c2h_req_data(a_c2h_req_data[(a_idx*PCIE_DATA_WIDTH) +: PCIE_DATA_WIDTH]),
                 .c2h_req_last(a_c2h_req_last[a_idx]),
                 .c2h_req_ack(c2h_req_ack_mux),
                 .h2c_fifo_wvalid(h2c_fifo_wvalid),

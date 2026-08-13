@@ -36,23 +36,34 @@ create_ip -name pcie4_uscale_plus -vendor xilinx.com -library ip -version 1.3 -m
 set_property -dict [list \
   CONFIG.PL_LINK_CAP_MAX_LINK_SPEED {8.0_GT/s} \
   CONFIG.PL_LINK_CAP_MAX_LINK_WIDTH {X4} \
-  CONFIG.AXISTEN_IF_DATA_WIDTH {256_bit} \
-  CONFIG.AXISTEN_IF_RC_STRADDLE {true} \
-  CONFIG.PF0_BAR0_64BIT {true} \
-  CONFIG.PF0_BAR0_SIZE {64_KB} \
-  CONFIG.PF0_BAR0_TYPE {AXI_LITE} \
-  CONFIG.PF0_BAR1_64BIT {true} \
-  CONFIG.PF0_BAR1_SIZE {64_KB} \
-  CONFIG.PF0_BAR1_TYPE {AXI_LITE} \
-  CONFIG.PF0_CLASS_CODE {058000} \
+  CONFIG.axisten_if_width {256_bit} \
+  CONFIG.pf0_bar0_64bit {true} \
+  CONFIG.pf0_bar0_scale {Kilobytes} \
+  CONFIG.pf0_bar0_size {64} \
+  CONFIG.pf0_bar1_enabled {true} \
+  CONFIG.pf0_bar1_64bit {true} \
+  CONFIG.pf0_bar1_scale {Kilobytes} \
+  CONFIG.pf0_bar1_size {64} \
   CONFIG.PF0_DEVICE_ID {9038} \
-  CONFIG.PF0_VENDOR_ID {10EE} \
+  CONFIG.vendor_id {10EE} \
 ] [get_ips pcie4_uscale_plus_0]
 
 generate_target all [get_ips pcie4_uscale_plus_0]
 
+# 4.1 Generate Xilinx Video Test Pattern Generator IP Core (v_tpg_0) - 4 PPC @ 4K60
+puts "Generating Xilinx Video Test Pattern Generator IP Core (v_tpg_0) for 4 PPC 4K60..."
+create_ip -name v_tpg -vendor xilinx.com -library ip -version 8.2 -module_name v_tpg_0
+
+set_property -dict [list \
+  CONFIG.SAMPLES_PER_CLOCK {4} \
+  CONFIG.MAX_COLS {3840} \
+  CONFIG.MAX_ROWS {2160} \
+] [get_ips v_tpg_0]
+
+generate_target all [get_ips v_tpg_0]
+
 # 5. Set Top Module
-set_property top custom_pcie_dma_top [current_fileset]
+set_property top ku3p_pcie_card_top [current_fileset]
 
 # 6. Run Synthesis
 puts "Starting Synthesis (synth_1)..."
@@ -66,6 +77,7 @@ if {[get_property PROGRESS [get_runs synth_1]] != "100%"} {
 
 # 7. Run Implementation & Write Bitstream
 puts "Starting Implementation (impl_1)..."
+set_property STEPS.WRITE_BITSTREAM.TCL.PRE [add_files -fileset constrs_1 ./constraints/ku3p_pcie_pinout.xdc] [get_runs impl_1]
 launch_runs impl_1 -to_step write_bitstream -jobs 8
 wait_on_run impl_1
 
@@ -76,5 +88,5 @@ if {[get_property PROGRESS [get_runs impl_1]] != "100%"} {
 
 puts "================================================================="
 puts " SUCCESS: PCIe Kintex UltraScale+ Bitstream Built Successfully!"
-puts " Bitstream Location: $project_dir/$project_name.runs/impl_1/custom_pcie_dma_top.bit"
+puts " Bitstream Location: $project_dir/$project_name.runs/impl_1/ku3p_pcie_card_top.bit"
 puts "================================================================="
