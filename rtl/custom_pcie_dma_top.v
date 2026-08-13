@@ -491,9 +491,12 @@ module custom_pcie_dma_top #(
     );
 
     // 8. Multi-Channel Video Stream Engines (Parameterized Generator)
+    localparam integer NUM_V_CH = NUM_VIDEO_CH;
+    localparam integer NUM_A_CH = NUM_AUDIO_CH;
+
     genvar v_idx;
     generate
-        for (v_idx = 0; v_idx < NUM_VIDEO_CH; v_idx = v_idx + 1) begin : gen_video_ch
+        for (v_idx = 0; v_idx < NUM_V_CH; v_idx = v_idx + 1) begin : gen_video_ch
             wire v_start;
             assign v_start = (v_idx == 0) ? reg_dma_ctrl[0] : 1'b0;
 
@@ -542,7 +545,7 @@ module custom_pcie_dma_top #(
     // 9. Multi-Channel AES3 Audio Stream Engines (Parameterized Generator)
     genvar a_idx;
     generate
-        for (a_idx = 0; a_idx < NUM_AUDIO_CH; a_idx = a_idx + 1) begin : gen_audio_ch
+        for (a_idx = 0; a_idx < NUM_A_CH; a_idx = a_idx + 1) begin : gen_audio_ch
             wire a_start;
             assign a_start = (a_idx == 0) ? reg_dma_ctrl[1] : 1'b0;
 
