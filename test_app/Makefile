@@ -6,7 +6,7 @@ CC ?= gcc
 CFLAGS ?= -O2 -Wall -I.
 LDFLAGS ?= -lm
 
-TARGETS = v4l2_test_app alsa_test_app dmabuf_p2p_test_app
+TARGETS = v4l2_test_app alsa_test_app dmabuf_p2p_test_app loopback_test_app
 
 all: $(TARGETS)
 
@@ -18,6 +18,9 @@ alsa_test_app: alsa_test_app.c qpcie_control.h
 
 dmabuf_p2p_test_app: dmabuf_p2p_test_app.c qpcie_control.h
 	$(CC) $(CFLAGS) -o $@ dmabuf_p2p_test_app.c $(LDFLAGS)
+
+loopback_test_app: loopback_test_app.c qpcie_control.h
+	$(CC) $(CFLAGS) -o $@ loopback_test_app.c $(LDFLAGS)
 
 clean:
 	rm -f $(TARGETS) *.o *.yuv *.pcm *.raw

@@ -41,12 +41,19 @@ else
 fi
 
 # 4. Test ALSA Audio Subsystem
-echo "[4/5] Testing ALSA AES3 Audio Capture Subsystem..."
+echo "[4/6] Testing ALSA AES3 Audio Capture Subsystem..."
 ./alsa_test_app --dev /dev/snd/pcmC0D0c --channels 2 --rate 48000 --seconds 2 --out test_audio.pcm || true
 echo "      --> ALSA AES3 Audio Subsystem [PASS]"
 
-# 5. Check GStreamer / FFmpeg Pipelines Command Template
-echo "[5/5] Checking GStreamer & FFmpeg Streaming Pipelines..."
+# 5. Test Hardware H2C -> C2H Video & Audio Loopback
+echo "[5/6] Testing Hardware H2C -> C2H Streaming Loopback (Ch 1~3)..."
+./loopback_test_app 1
+./loopback_test_app 2
+./loopback_test_app 3
+echo "      --> Hardware H2C -> C2H Streaming Loopback [PASS]"
+
+# 6. Check GStreamer / FFmpeg Pipelines Command Template
+echo "[6/6] Checking GStreamer & FFmpeg Streaming Pipelines..."
 echo "      --> Standard GStreamer 4K60 AV Sync Command:"
 echo "          gst-launch-1.0 v4l2src device=/dev/video0 ! video/x-raw,format=AYUV,width=3840,height=2160,framerate=60/1 ! alsasrc device=hw:0,0 ! queue ! videoconvert ! autovideosink"
 echo "      --> Standard FFmpeg 4K60 NVENC GPU Direct Encoding Command:"
