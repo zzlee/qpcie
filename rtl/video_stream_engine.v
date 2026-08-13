@@ -22,6 +22,7 @@ module video_stream_engine #(
     input  wire [15:0]                   line_count,
     input  wire [15:0]                   line_stride_bytes,
     input  wire                          is_c2h, // 0: H2C (Host->Video Out), 1: C2H (Video In->Host)
+    input  wire                          pacer_enable,        // 1: Enable Fixed Clock Pacer, 0: Disable (External Live Signal Mode)
     input  wire [31:0]                   frame_interval_clks, // Hardware Frame Pacer Clocks (e.g. 2083333 for 60.00 FPS @ 125MHz)
     input  wire [63:0]                   global_timestamp,    // Hardware AV Sync Master Timestamp (ns)
     input  wire                          ring_full,           // Host DMA Ring Full Indicator
@@ -159,8 +160,8 @@ module video_stream_engine #(
                             s_axis_video_tready <= 1'b1;
                             state               <= C2H_LINE;
                         end else begin
-                            // Check Frame Pacer: Wait for target clocks before finishing frame
-                            if (frame_interval_clks > 32'd0 && pacer_clk_cnt < frame_interval_clks) begin
+                            // Check Frame Pacer: Wait for target clocks if pacer is enabled
+                            if (pacer_enable && frame_interval_clks > 32'd0 && pacer_clk_cnt < frame_interval_clks) begin
                                 state <= C2H_PACE;
                             end else begin
                                 video_busy       <= 1'b0;
@@ -187,9 +188,9 @@ module video_stream_engine #(
                     end
                 end
 
-                // C2H_PACE: Hardware Frame Rate Pacing Delay
+                // C2H_PACE: Internal Pacer Wait State (Bypassed if pacer_enable == 0)
                 C2H_PACE: begin
-                    if (pacer_clk_cnt >= frame_interval_clks) begin
+                    if (!pacer_enable || pacer_clk_cnt >= frame_interval_clks) begin
                         video_busy       <= 1'b0;
                         video_frame_done <= 1'b1;
                         state            <= IDLE;

@@ -250,12 +250,14 @@ User space applications configure hardware IP cores without direct MMIO by calli
 - **HDMI HPD Pin Control**: Register bit at BAR1 `0x0034` controls physical HDMI HPD pin.
 - **Sysfs Dynamic Update**: Writing to `/sys/bus/pci/devices/.../edid` pulses HPD low, updates EDID RAM, and pulses HPD high to trigger HDMI resolution re-enumeration without unbinding driver.
 
-### 8.6 Automated End-to-End Test Suite (`test_app/run_stream_test.sh`)
-- **Automated Validation**: `run_stream_test.sh` builds and verifies:
-  1. `v4l2_test_app`: V4L2 4K60 MMAP/USERPTR frame capture.
-  2. `dmabuf_p2p_test_app`: DMABUF P2P Zero-Copy pipeline.
-  3. `alsa_test_app`: ALSA 32-bit AES3 audio capture.
-  4. Real-time Telemetry, PTS AV Sync & Frame Dropper verification.
+### 8.7 Hardware Video Pacer Bypass & External Sync Control (`pacer_enable`)
+- **BAR0 Register Offset `0x74` (`REG_PACER_CTRL`)**:
+  - Bit 0 (`pacer_enable`): `1` = Internal Clock Pacer Mode (for TPG/Generator testing at fixed 60FPS), `0` = External Sync Mode (bypasses clock pacer; frame flow is controlled 100% natively by external HDMI/SDI video source `s_axis_video_tvalid`/`tuser`).
+- **Sysfs Control**:
+  - Read: `cat /sys/bus/pci/devices/.../pacer_enable` -> `1 (Enabled)` or `0 (Disabled)`
+  - Write: `echo 0 > /sys/bus/pci/devices/.../pacer_enable` (Switch to External Signal Mode)
+- **User App Option**:
+  - `./v4l2_test_app --pacer 0` (Bypasses pacer for external live video source).
 
 
 

@@ -49,6 +49,7 @@
 #define REG_GIT_COMMIT_HASH  0x34
 #define REG_BUILD_TIMESTAMP  0x38
 #define REG_HARDWARE_CAPS    0x3C
+#define REG_PACER_CTRL       0x74
 
 /* 64-Byte 2D Multi-Planar Extended Descriptor Structure */
 struct qpcie_dma_desc_2d {

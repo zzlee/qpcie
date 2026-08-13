@@ -351,11 +351,46 @@ static ssize_t version_show(struct device *dev, struct device_attribute *attr, c
 }
 static DEVICE_ATTR_RO(version);
 
+static ssize_t pacer_enable_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+    struct pci_dev *pdev = to_pci_dev(dev);
+    struct qpcie_dev *qdev = pci_get_drvdata(pdev);
+    u32 val = 1;
+
+    if (qdev && qdev->bar0_mmio) {
+        val = ioread32(qdev->bar0_mmio + REG_PACER_CTRL) & 0x01;
+    }
+
+    return sysfs_emit(buf, "%u (%s)\n", val,
+                      val ? "1 (Enabled - Generator Mode)" : "0 (Disabled - External Live Signal Mode)");
+}
+
+static ssize_t pacer_enable_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+{
+    struct pci_dev *pdev = to_pci_dev(dev);
+    struct qpcie_dev *qdev = pci_get_drvdata(pdev);
+    u32 enable = 0;
+
+    if (kstrtou32(buf, 0, &enable)) return -EINVAL;
+
+    if (qdev && qdev->bar0_mmio) {
+        u32 val = ioread32(qdev->bar0_mmio + REG_PACER_CTRL);
+        val = (val & ~0x01) | (enable & 0x01);
+        iowrite32(val, qdev->bar0_mmio + REG_PACER_CTRL);
+        dev_info(dev, "Updated Video Pacer Mode: %s\n",
+                 enable ? "Enabled (Internal Clock Pacer)" : "Disabled (External Sync / Live Signal)");
+    }
+
+    return count;
+}
+static DEVICE_ATTR_RW(pacer_enable);
+
 /* Sysfs Attribute Group Table */
 static struct attribute *qpcie_sysfs_attrs[] = {
     &dev_attr_tpg_pattern.attr,
     &dev_attr_tpg_resolution.attr,
     &dev_attr_tpg_fps.attr,
+    &dev_attr_pacer_enable.attr,
     &dev_attr_timestamp.attr,
     &dev_attr_frame_drop_count.attr,
     &dev_attr_bandwidth.attr,

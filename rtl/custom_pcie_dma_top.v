@@ -316,6 +316,7 @@ module custom_pcie_dma_top #(
     wire [31:0] v_drop_cnt[NUM_VIDEO_CH-1:0];
     wire [31:0] reg_bandwidth_bps;
     wire [31:0] reg_latency_max_ns;
+    wire [31:0] reg_pacer_ctrl;
 
     // 3. BAR0 AXI4-Lite Register Space
     axil_reg_space u_axil_reg_space (
@@ -355,7 +356,8 @@ module custom_pcie_dma_top #(
         .reg_last_audio_pts(a_pts[0]),
         .reg_frame_drop_count(v_drop_cnt[0]),
         .reg_bandwidth_bps(reg_bandwidth_bps),
-        .reg_latency_max_ns(reg_latency_max_ns)
+        .reg_latency_max_ns(reg_latency_max_ns),
+        .reg_pacer_ctrl(reg_pacer_ctrl)
     );
 
     // 3.1 Hardware AV Sync Global Precision Timestamp Generator (64-bit @ 125MHz, 8ns resolution)
@@ -512,6 +514,7 @@ module custom_pcie_dma_top #(
                 .line_count(h2c_line_count),
                 .line_stride_bytes(h2c_src_stride),
                 .is_c2h(c2h_desc_valid),
+                .pacer_enable(reg_pacer_ctrl[0]),
                 .frame_interval_clks(32'd2083333), // 60.00 FPS Pacer @ 125MHz
                 .global_timestamp(global_timestamp),
                 .ring_full(!c2h_desc_valid),

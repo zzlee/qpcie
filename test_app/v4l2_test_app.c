@@ -72,6 +72,7 @@ int main(int argc, char **argv) {
     uint32_t num_frames = DEFAULT_FRAMES;
     int tpg_pattern = -1;
     int target_fps = -1;
+    int pacer_mode = -1;
 
     static struct option long_options[] = {
         {"dev",     required_argument, 0, 'd'},
@@ -79,6 +80,7 @@ int main(int argc, char **argv) {
         {"frames",  required_argument, 0, 'f'},
         {"pattern", required_argument, 0, 'p'},
         {"fps",     required_argument, 0, 'r'},
+        {"pacer",   required_argument, 0, 'c'},
         {"width",   required_argument, 0, 'w'},
         {"height",  required_argument, 0, 'h'},
         {"out",     required_argument, 0, 'o'},
@@ -87,7 +89,7 @@ int main(int argc, char **argv) {
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "d:m:f:p:r:w:h:o:?", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "d:m:f:p:r:c:w:h:o:?", long_options, NULL)) != -1) {
         switch (opt) {
             case 'd': dev_name = optarg; break;
             case 'm':
@@ -103,11 +105,22 @@ int main(int argc, char **argv) {
             case 'f': num_frames = atoi(optarg); break;
             case 'p': tpg_pattern = atoi(optarg); break;
             case 'r': target_fps = atoi(optarg); break;
+            case 'c': pacer_mode = atoi(optarg); break;
             case 'w': width = atoi(optarg); break;
             case 'h': height = atoi(optarg); break;
             case 'o': out_filename = optarg; break;
             case '?': print_usage(argv[0]); return EXIT_SUCCESS;
             default: break;
+        }
+    }
+
+    if (pacer_mode >= 0) {
+        FILE *sysfs_fp = fopen("/sys/bus/pci/devices/0000:01:00.0/pacer_enable", "w");
+        if (sysfs_fp) {
+            fprintf(sysfs_fp, "%d", pacer_mode ? 1 : 0);
+            fclose(sysfs_fp);
+            printf("[Pacer Control] Switched Hardware Pacer Mode to: %s\n",
+                   pacer_mode ? "1 (Internal Clock Pacer)" : "0 (Disabled / External Sync Mode)");
         }
     }
 
