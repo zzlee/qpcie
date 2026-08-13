@@ -130,11 +130,12 @@ struct qpcie_dev {
 };
 
 /* Subsystem Init & Sub-driver Interfaces */
-int qpcie_v4l2_init(struct qpcie_dev *qdev);
+int  qpcie_v4l2_init(struct qpcie_dev *qdev);
 void qpcie_v4l2_remove(struct qpcie_dev *qdev);
 void qpcie_v4l2_irq_handler(struct qpcie_dev *qdev);
+int  qpcie_v4l2_export_dmabuf(struct qpcie_v4l2_channel *vch, struct v4l2_exportbuffer *exp);
 
-int qpcie_alsa_init(struct qpcie_dev *qdev);
+int  qpcie_alsa_init(struct qpcie_dev *qdev);
 void qpcie_alsa_remove(struct qpcie_dev *qdev);
 void qpcie_alsa_irq_handler(struct qpcie_dev *qdev);
 

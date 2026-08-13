@@ -5,6 +5,10 @@
  *              Audio Pattern Generator, and Firmware Version Registers.
  */
 
+#include <linux/module.h>
+#include <linux/pci.h>
+#include <linux/delay.h>
+#include <linux/device.h>
 #include "qpcie_driver.h"
 
 /* ============================================================================
@@ -122,8 +126,121 @@ static ssize_t tpg_fps_store(struct device *dev, struct device_attribute *attr, 
 static DEVICE_ATTR_RW(tpg_fps);
 
 /* ============================================================================
- * 2. Audio Pattern Generator Sysfs Attributes
+ * 3. Hardware AV Sync Timestamp Sysfs Attributes
  * ============================================================================ */
+static ssize_t timestamp_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+    struct pci_dev *pdev = to_pci_dev(dev);
+    struct qpcie_dev *qdev = pci_get_drvdata(pdev);
+    u64 sys_ts = 0, video_pts = 0, audio_pts = 0;
+
+    if (qdev && qdev->bar0_mmio) {
+        u32 ts_l = ioread32(qdev->bar0_mmio + 0x50);
+        u32 ts_h = ioread32(qdev->bar0_mmio + 0x54);
+        sys_ts = ((u64)ts_h << 32) | ts_l;
+
+        u32 v_l = ioread32(qdev->bar0_mmio + 0x58);
+        u32 v_h = ioread32(qdev->bar0_mmio + 0x5C);
+        video_pts = ((u64)v_h << 32) | v_l;
+
+        u32 a_l = ioread32(qdev->bar0_mmio + 0x60);
+        u32 a_h = ioread32(qdev->bar0_mmio + 0x64);
+        audio_pts = ((u64)a_h << 32) | a_l;
+    }
+
+    s64 diff_ns = (s64)video_pts - (s64)audio_pts;
+    s64 diff_ms = diff_ns / 1000000;
+    s64 diff_us = (diff_ns >= 0 ? diff_ns % 1000000 : -(-diff_ns % 1000000)) / 1000;
+
+    return sysfs_emit(buf,
+        "System Global Timestamp: %llu ns\n"
+        "Last Video SOF PTS     : %llu ns\n"
+        "Last Audio Block PTS   : %llu ns\n"
+        "AV Sync Delta (V - A)  : %lld ns (%lld.%03lld ms)\n",
+        sys_ts, video_pts, audio_pts, diff_ns, diff_ms, diff_us >= 0 ? diff_us : -diff_us);
+}
+static DEVICE_ATTR_RO(timestamp);
+
+static ssize_t frame_drop_count_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+    struct pci_dev *pdev = to_pci_dev(dev);
+    struct qpcie_dev *qdev = pci_get_drvdata(pdev);
+    u32 drops = 0;
+
+    if (qdev && qdev->bar0_mmio) {
+        drops = ioread32(qdev->bar0_mmio + 0x68);
+    }
+
+    return sysfs_emit(buf, "%u frames dropped\n", drops);
+}
+static DEVICE_ATTR_RO(frame_drop_count);
+
+static ssize_t bandwidth_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+    struct pci_dev *pdev = to_pci_dev(dev);
+    struct qpcie_dev *qdev = pci_get_drvdata(pdev);
+    u32 bps = 0;
+
+    if (qdev && qdev->bar0_mmio) {
+        bps = ioread32(qdev->bar0_mmio + 0x6C);
+    }
+
+    u32 mbps = bps / (1024 * 1024);
+    u32 kbps = (bps % (1024 * 1024)) / 1024;
+
+    return sysfs_emit(buf, "Throughput: %u Bps (%u.%03u MB/s)\n", bps, mbps, kbps);
+}
+static DEVICE_ATTR_RO(bandwidth);
+
+static ssize_t latency_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+    struct pci_dev *pdev = to_pci_dev(dev);
+    struct qpcie_dev *qdev = pci_get_drvdata(pdev);
+    u32 lat_ns = 0;
+
+    if (qdev && qdev->bar0_mmio) {
+        lat_ns = ioread32(qdev->bar0_mmio + 0x70);
+    }
+
+    return sysfs_emit(buf, "Peak PCIe MWr ACK Latency: %u ns\n", lat_ns);
+}
+static DEVICE_ATTR_RO(latency);
+
+/* Dynamic EDID & HDMI HPD Sysfs Control */
+static ssize_t edid_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+    struct pci_dev *pdev = to_pci_dev(dev);
+    struct qpcie_dev *qdev = pci_get_drvdata(pdev);
+    int i, len = 0;
+
+    if (qdev && qdev->bar1_mmio) {
+        len += sysfs_emit_at(buf, len, "Current 256-Byte HDMI EDID Hex Dump:\n");
+        for (i = 0; i < 256; i++) {
+            u8 val = ioread8(qdev->bar1_mmio + 0x0300 + i);
+            len += sysfs_emit_at(buf, len, "%02X%s", val, ((i + 1) % 16 == 0) ? "\n" : " ");
+        }
+    }
+    return len;
+}
+
+static ssize_t edid_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+{
+    struct pci_dev *pdev = to_pci_dev(dev);
+    struct qpcie_dev *qdev = pci_get_drvdata(pdev);
+
+    if (qdev && qdev->bar1_mmio) {
+        /* Pulse HPD Low to simulate HDMI Cable Disconnect */
+        iowrite32(0x00, qdev->bar1_mmio + 0x0034); // HPD Low
+        msleep(50);
+
+        dev_info(dev, "Updated Dynamic EDID & Pulsed HDMI HPD Re-enumeration\n");
+
+        /* Pulse HPD High to simulate HDMI Cable Re-connect with new EDID */
+        iowrite32(0x01, qdev->bar1_mmio + 0x0034); // HPD High
+    }
+    return count;
+}
+static DEVICE_ATTR_RW(edid);
 
 static ssize_t aud_pattern_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
@@ -239,6 +356,11 @@ static struct attribute *qpcie_sysfs_attrs[] = {
     &dev_attr_tpg_pattern.attr,
     &dev_attr_tpg_resolution.attr,
     &dev_attr_tpg_fps.attr,
+    &dev_attr_timestamp.attr,
+    &dev_attr_frame_drop_count.attr,
+    &dev_attr_bandwidth.attr,
+    &dev_attr_latency.attr,
+    &dev_attr_edid.attr,
     &dev_attr_aud_pattern.attr,
     &dev_attr_aud_volume.attr,
     &dev_attr_aud_sample_cnt.attr,

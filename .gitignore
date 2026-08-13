@@ -43,9 +43,10 @@ driver/modules.order
 test_app/*.o
 test_app/v4l2_test_app
 test_app/alsa_test_app
-test_app/*.yuv
-test_app/*.pcm
-test_app/*.raw
+test_app/dmabuf_p2p_test_app
+*.yuv
+*.pcm
+*.raw
 
 # ------------------------------------------------------------------------------
 # 4. OS, IDE, Editor & Temporary Files

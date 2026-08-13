@@ -1,10 +1,9 @@
 // ============================================================================
 // Module: video_stream_engine
-// Description: Multi-Channel 2D Video Stream Engine with Hardware Frame Rate Pacer.
-//              Handles:
-//              - Native AXI4-Stream Video Input (C2H) & Output (H2C)
-//              - Hardware Frame Pacer (frame_interval_clks) for exact 60/59.94/50/30/24 FPS
-//              - SOF (tuser) and EOL (tlast) video timing
+// Description: Multi-Channel 2D Video Stream Engine with:
+//              - Hardware Frame Rate Pacer (frame_interval_clks)
+//              - Hardware AV Sync PTS Timestamp Latching
+//              - Hardware Automatic Frame Dropper & Ring Overflow Protection
 // ============================================================================
 
 `timescale 1ns / 1ps
@@ -24,6 +23,8 @@ module video_stream_engine #(
     input  wire [15:0]                   line_stride_bytes,
     input  wire                          is_c2h, // 0: H2C (Host->Video Out), 1: C2H (Video In->Host)
     input  wire [31:0]                   frame_interval_clks, // Hardware Frame Pacer Clocks (e.g. 2083333 for 60.00 FPS @ 125MHz)
+    input  wire [63:0]                   global_timestamp,    // Hardware AV Sync Master Timestamp (ns)
+    input  wire                          ring_full,           // Host DMA Ring Full Indicator
 
     // C2H Input Video Stream (External Video Source -> PCIe Engine)
     input  wire [VIDEO_DATA_WIDTH-1:0]   s_axis_video_tdata,
@@ -52,16 +53,19 @@ module video_stream_engine #(
     input  wire [PCIE_DATA_WIDTH-1:0]    h2c_fifo_wdata,
     input  wire                          h2c_fifo_wlast,
 
-    // Status Signals
+    // Status, PTS & Frame Drop Telemetry Signals
     output reg                           video_busy,
-    output reg                           video_frame_done
+    output reg                           video_frame_done,
+    output reg  [63:0]                   frame_pts,           // Latched SOF PTS Timestamp (ns)
+    output reg  [31:0]                   frame_drop_count     // Hardware Frame Drop Counter
 );
 
     localparam IDLE      = 3'b000;
     localparam C2H_LINE  = 3'b001;
     localparam C2H_SEND  = 3'b010;
     localparam C2H_PACE  = 3'b011;
-    localparam H2C_OUT   = 3'b100;
+    localparam C2H_DROP  = 3'b100;
+    localparam H2C_OUT   = 3'b101;
 
     reg [2:0]  state;
     reg [15:0] curr_line;
@@ -98,6 +102,8 @@ module video_stream_engine #(
             video_frame_done    <= 1'b0;
             curr_line           <= 16'd0;
             line_buffer         <= {PCIE_DATA_WIDTH{1'b0}};
+            frame_pts           <= 64'd0;
+            frame_drop_count    <= 32'd0;
         end else begin
             case (state)
                 IDLE: begin
@@ -109,8 +115,15 @@ module video_stream_engine #(
                         video_busy <= 1'b1;
                         curr_line  <= 16'd0;
                         if (is_c2h) begin
-                            s_axis_video_tready <= 1'b1;
-                            state               <= C2H_LINE;
+                            if (ring_full) begin
+                                // Ring Full Overflow Protection: Drop frame silently and count
+                                frame_drop_count    <= frame_drop_count + 1'b1;
+                                s_axis_video_tready <= 1'b1;
+                                state               <= C2H_DROP;
+                            end else begin
+                                s_axis_video_tready <= 1'b1;
+                                state               <= C2H_LINE;
+                            end
                         end else begin
                             state               <= H2C_OUT;
                         end
@@ -120,6 +133,11 @@ module video_stream_engine #(
                 // C2H: Collect AXI4-Stream Video input line and issue PCIe MWr TLP
                 C2H_LINE: begin
                     if (s_axis_video_tvalid && s_axis_video_tready) begin
+                        // Latch Frame PTS on Start of Frame (SOF)
+                        if (s_axis_video_tuser || curr_line == 0) begin
+                            frame_pts <= global_timestamp;
+                        end
+
                         line_buffer <= {s_axis_video_tdata, line_buffer[PCIE_DATA_WIDTH-1:VIDEO_DATA_WIDTH]};
                         if (s_axis_video_tlast) begin // EOL (End of Line)
                             s_axis_video_tready <= 1'b0;
@@ -148,6 +166,22 @@ module video_stream_engine #(
                                 video_busy       <= 1'b0;
                                 video_frame_done <= 1'b1;
                                 state            <= IDLE;
+                            end
+                        end
+                    end
+                end
+
+                // C2H_DROP: Drain stream when Host Ring Buffer is FULL (Overflow Protection)
+                C2H_DROP: begin
+                    if (s_axis_video_tvalid && s_axis_video_tready) begin
+                        if (s_axis_video_tlast) begin
+                            if (curr_line + 1'b1 < line_count) begin
+                                curr_line <= curr_line + 1'b1;
+                            end else begin
+                                s_axis_video_tready <= 1'b0;
+                                video_busy          <= 1'b0;
+                                video_frame_done    <= 1'b1;
+                                state               <= IDLE;
                             end
                         end
                     end

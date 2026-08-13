@@ -308,6 +308,15 @@ module custom_pcie_dma_top #(
         .bar1_axil_rready(m_axil_bar1_rready)
     );
 
+    // Hardware AV Sync Global Precision Timestamp Wires & Telemetry
+    wire [63:0] global_timestamp;
+    wire [63:0] timestamp_90khz;
+    wire [63:0] v_pts[NUM_VIDEO_CH-1:0];
+    wire [63:0] a_pts[NUM_AUDIO_CH-1:0];
+    wire [31:0] v_drop_cnt[NUM_VIDEO_CH-1:0];
+    wire [31:0] reg_bandwidth_bps;
+    wire [31:0] reg_latency_max_ns;
+
     // 3. BAR0 AXI4-Lite Register Space
     axil_reg_space u_axil_reg_space (
         .clk(clk),
@@ -340,7 +349,36 @@ module custom_pcie_dma_top #(
         .reg_irq_ctrl(reg_irq_ctrl),
         .reg_irq_status(reg_irq_status),
         .completed_h2c_count(completed_h2c_count),
-        .completed_c2h_count(completed_c2h_count)
+        .completed_c2h_count(completed_c2h_count),
+        .reg_global_timestamp(global_timestamp),
+        .reg_last_video_pts(v_pts[0]),
+        .reg_last_audio_pts(a_pts[0]),
+        .reg_frame_drop_count(v_drop_cnt[0]),
+        .reg_bandwidth_bps(reg_bandwidth_bps),
+        .reg_latency_max_ns(reg_latency_max_ns)
+    );
+
+    // 3.1 Hardware AV Sync Global Precision Timestamp Generator (64-bit @ 125MHz, 8ns resolution)
+    global_timer u_global_timer (
+        .clk(clk),
+        .rst_n(rst_n),
+        .timer_clear(1'b0),
+        .timer_enable(1'b1),
+        .timer_preset(64'd0),
+        .timer_load(1'b0),
+        .global_timestamp(global_timestamp),
+        .timestamp_90khz(timestamp_90khz)
+    );
+
+    // 3.2 Real-time Hardware Telemetry & Profiler (Throughput Bps & ACK Latency ns)
+    dma_telemetry u_dma_telemetry (
+        .clk(clk),
+        .rst_n(rst_n),
+        .c2h_req_valid(c2h_req_valid_mux),
+        .c2h_req_dw_len(c2h_req_dw_len_mux),
+        .c2h_req_ack(c2h_req_ack_mux),
+        .reg_bandwidth_bps(reg_bandwidth_bps),
+        .reg_latency_max_ns(reg_latency_max_ns)
     );
 
     // 4. PCIe Tag Manager
@@ -472,6 +510,8 @@ module custom_pcie_dma_top #(
                 .line_stride_bytes(h2c_src_stride),
                 .is_c2h(c2h_desc_valid),
                 .frame_interval_clks(32'd2083333), // 60.00 FPS Pacer @ 125MHz
+                .global_timestamp(global_timestamp),
+                .ring_full(!c2h_desc_valid),
                 .s_axis_video_tdata(s_axis_video_tdata[(v_idx*VIDEO_DATA_WIDTH) +: VIDEO_DATA_WIDTH]),
                 .s_axis_video_tvalid(s_axis_video_tvalid[v_idx]),
                 .s_axis_video_tlast(s_axis_video_tlast[v_idx]),
@@ -492,7 +532,9 @@ module custom_pcie_dma_top #(
                 .h2c_fifo_wdata(h2c_fifo_wdata),
                 .h2c_fifo_wlast(h2c_fifo_wlast),
                 .video_busy(v_busy[v_idx]),
-                .video_frame_done(v_done[v_idx])
+                .video_frame_done(v_done[v_idx]),
+                .frame_pts(v_pts[v_idx]),
+                .frame_drop_count(v_drop_cnt[v_idx])
             );
         end
     endgenerate
@@ -514,6 +556,7 @@ module custom_pcie_dma_top #(
                 .host_buffer_addr(h2c_plane0_src),
                 .sample_block_size(16'd32),
                 .is_c2h(c2h_desc_valid),
+                .global_timestamp(global_timestamp),
                 .s_axis_audio_tdata(s_axis_audio_tdata[(a_idx*AUDIO_DATA_WIDTH) +: AUDIO_DATA_WIDTH]),
                 .s_axis_audio_tvalid(s_axis_audio_tvalid[a_idx]),
                 .s_axis_audio_tlast(s_axis_audio_tlast[a_idx]),
@@ -532,7 +575,8 @@ module custom_pcie_dma_top #(
                 .h2c_fifo_wdata(h2c_fifo_wdata),
                 .h2c_fifo_wlast(h2c_fifo_wlast),
                 .audio_busy(a_busy[a_idx]),
-                .audio_block_done(a_done[a_idx])
+                .audio_block_done(a_done[a_idx]),
+                .audio_pts(a_pts[a_idx])
             );
         end
     endgenerate

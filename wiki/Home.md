@@ -12,7 +12,8 @@ This directory contains complete technical documentation covering FPGA RTL hardw
 * **[FPGA Build Guide](FPGA-Build-Guide.md)** - Step-by-step Vivado batch compilation, bitstream synthesis, and XDC pinout constraints.
 
 ### 2. 🎬 Video & Audio Datapath Architecture
-* **[AV Dataflow Wiki (TPG/AudioGen ➔ Host DDR RAM)](AV_DATAPATH_WIKI.md)** - Complete end-to-end dataflow description for 4K60 4 PPC Video and 32-bit AES3 Audio from hardware IP cores down to Host DDR RAM.
+* **[AV Datapath & Hardware Architecture](AV_DATAPATH_WIKI.md)** - Complete end-to-end dataflow description for 4K60 4 PPC Video and 32-bit AES3 Audio from hardware IP cores down to Host DDR RAM.
+* **[Artix UltraScale+ AU15P Cost-Down Feasibility Analysis](AU15P_FEASIBILITY.md)**
 * **[Multi-Channel Stream Architecture](Multi-Channel-Stream-Architecture.md)** - Architecture of 4-Channel 2D Video Engine (YUV420M, NV12M, Mono, AYUV) and 4-Channel AES3 Audio Engine.
 * **[Multi-Channel Video & Audio Config](Multi-Channel-Video-Audio-Config.md)** - Hardware stream configurations, frame pacing, and clocking.
 

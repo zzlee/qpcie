@@ -30,7 +30,7 @@ TESTS=(
     "tb_h2c_dma_engine rtl/h2c_dma_engine.v tb/tb_h2c_dma_engine.v"
     "tb_c2h_dma_engine rtl/c2h_dma_engine.v tb/tb_c2h_dma_engine.v"
     "tb_interrupt_ctrl rtl/interrupt_ctrl.v tb/tb_interrupt_ctrl.v"
-    "tb_pcie_dma_system rtl/*.v tb/tb_pcie_dma_system.v"
+    "tb_pcie_dma_system rtl/global_timer.v rtl/dma_telemetry.v rtl/video_stream_engine.v rtl/audio_stream_engine.v rtl/axil_reg_space.v rtl/c2h_dma_engine.v rtl/h2c_dma_engine.v rtl/desc_fetch_engine.v rtl/cq_rx_decoder.v rtl/cc_tx_encoder.v rtl/rq_tx_encoder.v rtl/rc_rx_decoder.v rtl/pcie_tag_manager.v rtl/interrupt_ctrl.v rtl/custom_pcie_dma_top.v tb/tb_pcie_dma_system.v"
 )
 
 PASSED=0

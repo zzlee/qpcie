@@ -62,6 +62,20 @@ set_property -dict [list \
 
 generate_target all [get_ips v_tpg_0]
 
+# 4.2 Generate Xilinx Official AXI Crossbar IP Core (axi_crossbar_0) - 1x3 AXI4-Lite
+puts "Generating Xilinx Official AXI Crossbar IP Core (axi_crossbar_0) for 1x3 Interconnect..."
+create_ip -name axi_crossbar -vendor xilinx.com -library ip -version 2.1 -module_name axi_crossbar_0
+
+set_property -dict [list \
+  CONFIG.NUM_SI {1} \
+  CONFIG.NUM_MI {3} \
+  CONFIG.PROTOCOL {AXI4LITE} \
+  CONFIG.DATA_WIDTH {32} \
+  CONFIG.ADDR_WIDTH {32} \
+] [get_ips axi_crossbar_0]
+
+generate_target all [get_ips axi_crossbar_0]
+
 # 5. Set Top Module
 set_property top ku3p_pcie_card_top [current_fileset]
 

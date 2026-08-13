@@ -47,7 +47,17 @@ module axil_reg_space (
     output reg  [31:0] reg_irq_status,
 
     input  wire [31:0] completed_h2c_count,
-    input  wire [31:0] completed_c2h_count
+    input  wire [31:0] completed_c2h_count,
+
+    // Hardware AV Sync Timestamp Ports
+    input  wire [63:0] reg_global_timestamp,
+    input  wire [63:0] reg_last_video_pts,
+    input  wire [63:0] reg_last_audio_pts,
+
+    // Hardware Telemetry & Frame Dropper Ports
+    input  wire [31:0] reg_frame_drop_count,
+    input  wire [31:0] reg_bandwidth_bps,
+    input  wire [31:0] reg_latency_max_ns
 );
 
     // BAR0 Register Offset Definitions
@@ -157,6 +167,19 @@ module axil_reg_space (
                     ADDR_GIT_COMMIT_HASH: s_axil_rdata <= GIT_COMMIT_HASH_VAL;
                     ADDR_BUILD_TIMESTAMP: s_axil_rdata <= BUILD_TIMESTAMP_VAL;
                     ADDR_HARDWARE_CAPS:   s_axil_rdata <= HARDWARE_CAPS_VAL;
+
+                    // Hardware AV Sync Timestamp Registers (BAR0 Offsets 0x50..0x64)
+                    8'h50:                s_axil_rdata <= reg_global_timestamp[31:0];
+                    8'h54:                s_axil_rdata <= reg_global_timestamp[63:32];
+                    8'h58:                s_axil_rdata <= reg_last_video_pts[31:0];
+                    8'h5C:                s_axil_rdata <= reg_last_video_pts[63:32];
+                    8'h60:                s_axil_rdata <= reg_last_audio_pts[31:0];
+                    8'h64:                s_axil_rdata <= reg_last_audio_pts[63:32];
+
+                    // Hardware Telemetry & Frame Dropper Registers (BAR0 Offsets 0x68..0x70)
+                    8'h68:                s_axil_rdata <= reg_frame_drop_count;
+                    8'h6C:                s_axil_rdata <= reg_bandwidth_bps;
+                    8'h70:                s_axil_rdata <= reg_latency_max_ns;
 
                     default:              s_axil_rdata <= 32'hDEAD_BEEF;
                 endcase

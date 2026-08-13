@@ -190,89 +190,66 @@ module ku3p_pcie_card_top #(
         end
     end
 
-    // Instantiate AXI4-Lite 1x3 Interconnect (BAR1 Master -> Video TPG, Audio Pat Gen, User Regs)
-    axil_interconnect #(
-        .ADDR_WIDTH(32),
-        .DATA_WIDTH(32)
-    ) u_axil_interconnect (
-        .clk(pcie_user_clk),
-        .rst_n(pcie_user_rst_n),
+    // =========================================================================
+    // Xilinx Official AXI Crossbar IP (axi_crossbar_0) Instantiation (1x3 AXI4-Lite)
+    // Routes BAR1 Master (S00) to:
+    // - M00 (Bits 31:0)  : Video TPG IP s_axi_CTRL (Offset 0x0000)
+    // - M01 (Bits 63:32) : Audio Pattern Generator (Offset 0x0100)
+    // - M02 (Bits 95:64) : User Register Space (Offset 0x0200)
+    // =========================================================================
+    wire [31:0] tpg_axi_awaddr_32, tpg_axi_araddr_32;
+    wire [31:0] aud_axi_awaddr_32, aud_axi_araddr_32;
 
-        // Slave Interface (From PCIe DMA Top BAR1 Master)
-        .s_axil_awaddr(bar1_m_awaddr),
-        .s_axil_awvalid(bar1_m_awvalid),
-        .s_axil_awready(bar1_m_awready),
-        .s_axil_wdata(bar1_m_wdata),
-        .s_axil_wstrb(bar1_m_wstrb),
-        .s_axil_wvalid(bar1_m_wvalid),
-        .s_axil_wready(bar1_m_wready),
-        .s_axil_bresp(bar1_m_bresp),
-        .s_axil_bvalid(bar1_m_bvalid),
-        .s_axil_bready(bar1_m_bready),
-        .s_axil_araddr(bar1_m_araddr),
-        .s_axil_arvalid(bar1_m_arvalid),
-        .s_axil_arready(bar1_m_arready),
-        .s_axil_rdata(bar1_m_rdata),
-        .s_axil_rresp(bar1_m_rresp),
-        .s_axil_rvalid(bar1_m_rvalid),
-        .s_axil_rready(bar1_m_rready),
+    assign tpg_axi_awaddr = tpg_axi_awaddr_32[7:0];
+    assign tpg_axi_araddr = tpg_axi_araddr_32[7:0];
+    assign aud_axi_awaddr = aud_axi_awaddr_32[7:0];
+    assign aud_axi_araddr = aud_axi_araddr_32[7:0];
 
-        // Master 0 (M00) -> Video TPG IP s_axi_CTRL (Offset 0x0000 - 0x00FF)
-        .m00_axil_awaddr(tpg_axi_awaddr),
-        .m00_axil_awvalid(tpg_axi_awvalid),
-        .m00_axil_awready(tpg_axi_awready),
-        .m00_axil_wdata(tpg_axi_wdata),
-        .m00_axil_wstrb(tpg_axi_wstrb),
-        .m00_axil_wvalid(tpg_axi_wvalid),
-        .m00_axil_wready(tpg_axi_wready),
-        .m00_axil_bresp(tpg_axi_bresp),
-        .m00_axil_bvalid(tpg_axi_bvalid),
-        .m00_axil_bready(tpg_axi_bready),
-        .m00_axil_araddr(tpg_axi_araddr),
-        .m00_axil_arvalid(tpg_axi_arvalid),
-        .m00_axil_arready(tpg_axi_arready),
-        .m00_axil_rdata(tpg_axi_rdata),
-        .m00_axil_rresp(tpg_axi_rresp),
-        .m00_axil_rvalid(tpg_axi_rvalid),
-        .m00_axil_rready(tpg_axi_rready),
+    axi_crossbar_0 u_axil_crossbar (
+        .aclk(pcie_user_clk),
+        .aresetn(pcie_user_rst_n),
 
-        // Master 1 (M01) -> Audio Pattern Generator (Offset 0x0100 - 0x01FF)
-        .m01_axil_awaddr(aud_axi_awaddr),
-        .m01_axil_awvalid(aud_axi_awvalid),
-        .m01_axil_awready(aud_axi_awready),
-        .m01_axil_wdata(aud_axi_wdata),
-        .m01_axil_wstrb(aud_axi_wstrb),
-        .m01_axil_wvalid(aud_axi_wvalid),
-        .m01_axil_wready(aud_axi_wready),
-        .m01_axil_bresp(aud_axi_bresp),
-        .m01_axil_bvalid(aud_axi_bvalid),
-        .m01_axil_bready(aud_axi_bready),
-        .m01_axil_araddr(aud_axi_araddr),
-        .m01_axil_arvalid(aud_axi_arvalid),
-        .m01_axil_arready(aud_axi_arready),
-        .m01_axil_rdata(aud_axi_rdata),
-        .m01_axil_rresp(aud_axi_rresp),
-        .m01_axil_rvalid(aud_axi_rvalid),
-        .m01_axil_rready(aud_axi_rready),
+        // Slave Interface 0 (S00) <- BAR1 Master
+        .s_axi_awaddr(bar1_m_awaddr),
+        .s_axi_awprot(3'b000),
+        .s_axi_awvalid(bar1_m_awvalid),
+        .s_axi_awready(bar1_m_awready),
+        .s_axi_wdata(bar1_m_wdata),
+        .s_axi_wstrb(bar1_m_wstrb),
+        .s_axi_wvalid(bar1_m_wvalid),
+        .s_axi_wready(bar1_m_wready),
+        .s_axi_bresp(bar1_m_bresp),
+        .s_axi_bvalid(bar1_m_bvalid),
+        .s_axi_bready(bar1_m_bready),
+        .s_axi_araddr(bar1_m_araddr),
+        .s_axi_arprot(3'b000),
+        .s_axi_arvalid(bar1_m_arvalid),
+        .s_axi_arready(bar1_m_arready),
+        .s_axi_rdata(bar1_m_rdata),
+        .s_axi_rresp(bar1_m_rresp),
+        .s_axi_rvalid(bar1_m_rvalid),
+        .s_axi_rready(bar1_m_rready),
 
-        // Master 2 (M02) -> User Register Space (Offset 0x0200 - 0xFFFF)
-        .m02_axil_awaddr(bar1_reg_awaddr),
-        .m02_axil_awvalid(bar1_reg_awvalid),
-        .m02_axil_awready(bar1_reg_awready),
-        .m02_axil_wdata(bar1_reg_wdata),
-        .m02_axil_wstrb(bar1_reg_wstrb),
-        .m02_axil_wvalid(bar1_reg_wvalid),
-        .m02_axil_wready(bar1_reg_wready),
-        .m02_axil_bresp(bar1_reg_bresp),
-        .m02_axil_bvalid(bar1_reg_bvalid),
-        .m02_axil_bready(bar1_reg_bready),
-        .m02_axil_araddr(bar1_reg_araddr),
-        .m02_axil_arvalid(bar1_reg_arvalid),
-        .m02_axil_arready(bar1_reg_arready),
-        .m02_axil_rdata(bar1_reg_rdata),
-        .m02_axil_rresp(bar1_reg_rresp),
-        .m02_axil_rvalid(bar1_reg_rvalid),
-        .m02_axil_rready(bar1_reg_rready)
+        // Master Interfaces Vector Output: [M02, M01, M00]
+        .m_axi_awaddr({bar1_reg_awaddr, aud_axi_awaddr_32, tpg_axi_awaddr_32}),
+        .m_axi_awprot(),
+        .m_axi_awvalid({bar1_reg_awvalid, aud_axi_awvalid, tpg_axi_awvalid}),
+        .m_axi_awready({bar1_reg_awready, aud_axi_awready, tpg_axi_awready}),
+        .m_axi_wdata({bar1_reg_wdata, aud_axi_wdata, tpg_axi_wdata}),
+        .m_axi_wstrb({bar1_reg_wstrb, aud_axi_wstrb, tpg_axi_wstrb}),
+        .m_axi_wvalid({bar1_reg_wvalid, aud_axi_wvalid, tpg_axi_wvalid}),
+        .m_axi_wready({bar1_reg_wready, aud_axi_wready, tpg_axi_wready}),
+        .m_axi_bresp({bar1_reg_bresp, aud_axi_bresp, tpg_axi_bresp}),
+        .m_axi_bvalid({bar1_reg_bvalid, aud_axi_bvalid, tpg_axi_bvalid}),
+        .m_axi_bready({bar1_reg_bready, aud_axi_bready, tpg_axi_bready}),
+        .m_axi_araddr({bar1_reg_araddr, aud_axi_araddr_32, tpg_axi_araddr_32}),
+        .m_axi_arprot(),
+        .m_axi_arvalid({bar1_reg_arvalid, aud_axi_arvalid, tpg_axi_arvalid}),
+        .m_axi_arready({bar1_reg_arready, aud_axi_arready, tpg_axi_arready}),
+        .m_axi_rdata({bar1_reg_rdata, aud_axi_rdata, tpg_axi_rdata}),
+        .m_axi_rresp({bar1_reg_rresp, aud_axi_rresp, tpg_axi_rresp}),
+        .m_axi_rvalid({bar1_reg_rvalid, aud_axi_rvalid, tpg_axi_rvalid}),
+        .m_axi_rready({bar1_reg_rready, aud_axi_rready, tpg_axi_rready})
     );
 
     // =========================================================================
