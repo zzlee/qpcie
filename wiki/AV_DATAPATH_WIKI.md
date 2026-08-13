@@ -258,8 +258,3 @@ User space applications configure hardware IP cores without direct MMIO by calli
   - Write: `echo 0 > /sys/bus/pci/devices/.../pacer_enable` (Switch to External Signal Mode)
 - **User App Option**:
   - `./v4l2_test_app --pacer 0` (Bypasses pacer for external live video source).
-
-
-
-
-

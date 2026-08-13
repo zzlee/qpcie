@@ -20,7 +20,7 @@
 ## 2. 結論與建議
 
 > **結論: 強烈推薦 (Highly Feasible & Recommended)**
-> 
+>
 > 切換至 **Artix UltraScale+ AU15P** 具有 **極高可行性**：
 > 1. **單價節省 50% ~ 65%**，極具商用量產競爭力。
 > 2. 完整支援 **4K60 YUV444 零壓縮擷取** 與 **$3.2\text{ GB/s}$ PCIe Gen3 x4 吞吐量**。

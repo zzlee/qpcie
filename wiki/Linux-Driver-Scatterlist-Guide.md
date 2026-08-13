@@ -95,7 +95,7 @@ int pcie_dma_map_and_fill_sg(struct pci_dev *pdev, struct pcie_dma_ring *ring,
     /* 5. 寫入 PCIe BAR0 暫存器 (H2C_RING_CFG 或 C2H_RING_CFG)，通知 FPGA 硬體開工 */
     u32 ring_cfg_val = ((u32)ring->tail_ptr << 16) | (ring->ring_size & 0xFFFF);
     iowrite32(ring_cfg_val, ring->bar0_mmio + (is_c2h ? 0x1C : 0x10));
-    
+
     /* 啟動 DMA Engine (DMA_CTRL 暫存器 Offset 0x00) */
     iowrite32(is_c2h ? 0x02 : 0x01, ring->bar0_mmio + 0x00);
 

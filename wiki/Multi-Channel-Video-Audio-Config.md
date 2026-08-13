@@ -92,16 +92,16 @@
 /* 多路影音通用 64-Byte 描述符結構體 */
 struct pcie_av_dma_desc {
     u64 plane0_src_addr;  /* Video Y Base Addr 或 Audio PCM Buffer Base Addr */
-    u64 plane0_dst_addr;  
+    u64 plane0_dst_addr;
     u64 plane1_src_addr;  /* Video U / UV Base Addr (Audio 未使用) */
-    u64 plane1_dst_addr;  
+    u64 plane1_dst_addr;
     u64 plane2_src_addr;  /* Video V Base Addr (Audio 未使用) */
-    u24 plane2_dst_addr;  
+    u24 plane2_dst_addr;
 
     u16 line_width;       /* Video: Row Width (Bytes) | Audio: PCM Block Length */
     u16 line_count;       /* Video: Row Height (Lines)| Audio: 設為 1 (1D) */
     u16 src_stride;       /* Video: Line Stride       | Audio: 設為 0 */
-    u16 dst_stride;       
+    u16 dst_stride;
 
     u8  channel_id;       /* 通道編號: 0 ~ N */
     u8  stream_type;      /* 0: Video YUV420P, 1: Video NV12, 2: Audio LPCM */
