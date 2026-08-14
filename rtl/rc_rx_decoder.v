@@ -72,19 +72,31 @@ module rc_rx_decoder #(
                     if (s_axis_rc_tvalid && s_axis_rc_tready) begin
                         if (rc_tag == 8'h00) begin // Descriptor CplD
                             if (s_axis_rc_tlast) begin
-                                // Single beat payload (up to 160 bits)
+                                // Single beat payload
                                 desc_cpl_valid <= 1'b1;
-                                desc_cpl_data  <= {352'd0, s_axis_rc_tdata[255:96]};
+                                if (DATA_WIDTH >= 256) begin
+                                    desc_cpl_data <= {352'd0, s_axis_rc_tdata[255:96]};
+                                end else begin
+                                    desc_cpl_data <= {480'd0, s_axis_rc_tdata[127:96]};
+                                end
                                 desc_cpl_last  <= 1'b1;
                             end else begin
                                 // Multi-beat payload for 64-Byte (512-bit) Extended Descriptor
-                                desc_beat0       <= {96'd0, s_axis_rc_tdata[255:96]};
+                                if (DATA_WIDTH >= 256) begin
+                                    desc_beat0 <= {96'd0, s_axis_rc_tdata[255:96]};
+                                end else begin
+                                    desc_beat0 <= {224'd0, s_axis_rc_tdata[127:96]};
+                                end
                                 s_axis_rc_tready <= 1'b1;
                                 state            <= ROUTE_DESC_2;
                             end
                         end else begin // H2C DMA CplD
                             h2c_fifo_wvalid <= 1'b1;
-                            h2c_fifo_wdata  <= {96'd0, s_axis_rc_tdata[255:96]};
+                            if (DATA_WIDTH >= 256) begin
+                                h2c_fifo_wdata <= {96'd0, s_axis_rc_tdata[255:96]};
+                            end else begin
+                                h2c_fifo_wdata <= {224'd0, s_axis_rc_tdata[127:96]};
+                            end
                             h2c_fifo_wlast  <= s_axis_rc_tlast;
                             tag_free_req    <= 1'b1;
                             tag_free_val    <= rc_tag;
@@ -98,7 +110,11 @@ module rc_rx_decoder #(
                 ROUTE_DESC_2: begin
                     if (s_axis_rc_tvalid) begin
                         desc_cpl_valid <= 1'b1;
-                        desc_cpl_data  <= {s_axis_rc_tdata[255:0], desc_beat0[255:0]};
+                        if (DATA_WIDTH >= 256) begin
+                            desc_cpl_data <= {s_axis_rc_tdata[255:0], desc_beat0[255:0]};
+                        end else begin
+                            desc_cpl_data <= {384'd0, s_axis_rc_tdata[127:0], desc_beat0[127:0]};
+                        end
                         desc_cpl_last  <= s_axis_rc_tlast;
                         state          <= IDLE;
                     end else begin

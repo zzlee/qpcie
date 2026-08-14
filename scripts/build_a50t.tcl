@@ -32,14 +32,14 @@ create_ip -name pcie_7x -vendor xilinx.com -library ip -version 3.3 -module_name
 
 set_property -dict [list \
   CONFIG.Link_Speed {5.0_GT/s} \
-  CONFIG.Link_Width {X4} \
+  CONFIG.Maximum_Link_Width {X4} \
   CONFIG.Interface_Width {128_bit} \
   CONFIG.User_Clk_Freq {125} \
   CONFIG.Vendor_ID {12AB} \
   CONFIG.Device_ID {E380} \
   CONFIG.Bar0_Scale {Kilobytes} \
   CONFIG.Bar0_Size {64} \
-  CONFIG.Bar1_Enable {true} \
+  CONFIG.Bar1_Enabled {true} \
   CONFIG.Bar1_Scale {Kilobytes} \
   CONFIG.Bar1_Size {64} \
 ] [get_ips pcie_7x_0]
@@ -55,7 +55,6 @@ set_property -dict [list \
   CONFIG.MAX_DATA_WIDTH {8} \
   CONFIG.MAX_COLS {3840} \
   CONFIG.MAX_ROWS {2160} \
-  CONFIG.HAS_AXI4_LITE {1} \
 ] [get_ips v_tpg_0]
 
 generate_target all [get_ips v_tpg_0]
@@ -70,12 +69,6 @@ set_property -dict [list \
   CONFIG.PROTOCOL {AXI4LITE} \
   CONFIG.DATA_WIDTH {32} \
   CONFIG.ADDR_WIDTH {32} \
-  CONFIG.M00_ADDR_WIDTH {8} \
-  CONFIG.M01_ADDR_WIDTH {8} \
-  CONFIG.M02_ADDR_WIDTH {8} \
-  CONFIG.M00_BASE_ADDR {0x0000000000000000} \
-  CONFIG.M01_BASE_ADDR {0x0000000000000100} \
-  CONFIG.M02_BASE_ADDR {0x0000000000000300} \
 ] [get_ips axi_crossbar_0]
 
 generate_target all [get_ips axi_crossbar_0]

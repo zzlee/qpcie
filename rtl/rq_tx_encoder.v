@@ -122,7 +122,11 @@ module rq_tx_encoder #(
                         m_axis_rq_tdata[78:75] <= 4'b0001; // MWr
                         m_axis_rq_tdata[95:80] <= REQUESTER_ID;
                         m_axis_rq_tdata[103:96]<= 8'd0;
-                        m_axis_rq_tdata[255:128]<= c2h_req_data[127:0]; // Payload starting at DW4
+                        if (DATA_WIDTH >= 256) begin
+                            m_axis_rq_tdata[255:128] <= c2h_req_data[127:0]; // Payload starting at DW4
+                        end else begin
+                            m_axis_rq_tdata[127:96]  <= c2h_req_data[31:0];  // Payload starting at DW3 for 128-bit
+                        end
                         c2h_req_ack            <= 1'b1;
                         state                  <= c2h_req_last ? SEND_SINGLE : SEND_MWR;
                     end

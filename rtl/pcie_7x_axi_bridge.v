@@ -41,7 +41,7 @@ module pcie_7x_axi_bridge #(
     output wire                  m_axis_cq_tvalid,
     output wire                  m_axis_cq_tlast,
     output wire [87:0]           m_axis_cq_tuser,
-    output wire [KEEP_WIDTH/4-1:0] m_axis_cq_tkeep,
+    output wire [KEEP_WIDTH-1:0] m_axis_cq_tkeep,
     input  wire                  m_axis_cq_tready,
 
     // ------------------------------------------------------------------------
@@ -51,7 +51,7 @@ module pcie_7x_axi_bridge #(
     input  wire                  s_axis_cc_tvalid,
     input  wire                  s_axis_cc_tlast,
     input  wire [32:0]           s_axis_cc_tuser,
-    input  wire [KEEP_WIDTH/4-1:0] s_axis_cc_tkeep,
+    input  wire [KEEP_WIDTH-1:0] s_axis_cc_tkeep,
     output wire                  s_axis_cc_tready,
 
     // ------------------------------------------------------------------------
@@ -61,7 +61,7 @@ module pcie_7x_axi_bridge #(
     input  wire                  s_axis_rq_tvalid,
     input  wire                  s_axis_rq_tlast,
     input  wire [61:0]           s_axis_rq_tuser,
-    input  wire [KEEP_WIDTH/4-1:0] s_axis_rq_tkeep,
+    input  wire [KEEP_WIDTH-1:0] s_axis_rq_tkeep,
     output wire                  s_axis_rq_tready,
 
     // ------------------------------------------------------------------------
@@ -71,7 +71,7 @@ module pcie_7x_axi_bridge #(
     output wire                  m_axis_rc_tvalid,
     output wire                  m_axis_rc_tlast,
     output wire [74:0]           m_axis_rc_tuser,
-    output wire [KEEP_WIDTH/4-1:0] m_axis_rc_tkeep,
+    output wire [KEEP_WIDTH-1:0] m_axis_rc_tkeep,
     input  wire                  m_axis_rc_tready
 );
 
@@ -80,13 +80,13 @@ module pcie_7x_axi_bridge #(
     assign m_axis_cq_tvalid = m_axis_rx_tvalid && (m_axis_rx_tdata[30:24] == 7'b0000000 || m_axis_rx_tdata[30:24] == 7'b1000000); // MRd/MWr
     assign m_axis_cq_tlast  = m_axis_rx_tlast;
     assign m_axis_cq_tuser  = 88'd0;
-    assign m_axis_cq_tkeep  = m_axis_rx_tkeep[3:0];
+    assign m_axis_cq_tkeep  = m_axis_rx_tkeep;
 
     assign m_axis_rc_tdata  = m_axis_rx_tdata;
     assign m_axis_rc_tvalid = m_axis_rx_tvalid && (m_axis_rx_tdata[30:24] == 7'b1001010); // CplD
     assign m_axis_rc_tlast  = m_axis_rx_tlast;
     assign m_axis_rc_tuser  = 75'd0;
-    assign m_axis_rc_tkeep  = m_axis_rx_tkeep[3:0];
+    assign m_axis_rc_tkeep  = m_axis_rx_tkeep;
 
     assign m_axis_rx_tready = m_axis_cq_tready && m_axis_rc_tready;
 
@@ -96,7 +96,7 @@ module pcie_7x_axi_bridge #(
     assign s_axis_tx_tdata  = tx_sel_cc ? s_axis_cc_tdata  : s_axis_rq_tdata;
     assign s_axis_tx_tvalid = tx_sel_cc ? s_axis_cc_tvalid : s_axis_rq_tvalid;
     assign s_axis_tx_tlast  = tx_sel_cc ? s_axis_cc_tlast  : s_axis_rq_tlast;
-    assign s_axis_tx_tkeep  = tx_sel_cc ? {12'hFFF, s_axis_cc_tkeep} : {12'hFFF, s_axis_rq_tkeep};
+    assign s_axis_tx_tkeep  = tx_sel_cc ? s_axis_cc_tkeep  : s_axis_rq_tkeep;
     assign s_axis_tx_tuser  = 4'b0000;
 
     assign s_axis_cc_tready = s_axis_tx_tready;

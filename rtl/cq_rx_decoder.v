@@ -133,13 +133,13 @@ module cq_rx_decoder #(
                             if (bar_id == 3'b001) begin // BAR1
                                 m_axil_bar1_awaddr  <= req_addr[31:0];
                                 m_axil_bar1_awvalid <= 1'b1;
-                                m_axil_bar1_wdata   <= s_axis_cq_tdata[159:128];
+                                m_axil_bar1_wdata   <= (DATA_WIDTH >= 256) ? s_axis_cq_tdata[159:128] : s_axis_cq_tdata[127:96];
                                 m_axil_bar1_wstrb   <= 4'hF;
                                 m_axil_bar1_wvalid  <= 1'b1;
                             end else begin // BAR0
                                 m_axil_bar0_awaddr  <= req_addr[31:0];
                                 m_axil_bar0_awvalid <= 1'b1;
-                                m_axil_bar0_wdata   <= s_axis_cq_tdata[159:128];
+                                m_axil_bar0_wdata   <= (DATA_WIDTH >= 256) ? s_axis_cq_tdata[159:128] : s_axis_cq_tdata[127:96];
                                 m_axil_bar0_wstrb   <= 4'hF;
                                 m_axil_bar0_wvalid  <= 1'b1;
                             end

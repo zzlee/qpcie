@@ -499,8 +499,9 @@ module custom_pcie_dma_top #(
     genvar v_idx;
     generate
         for (v_idx = 0; v_idx < NUM_V_CH; v_idx = v_idx + 1) begin : gen_video_ch
+            localparam integer v_idx_int = v_idx;
             wire v_start;
-            assign v_start = (v_idx == 0) ? reg_dma_ctrl[0] : 1'b0;
+            assign v_start = (v_idx_int == 0) ? reg_dma_ctrl[0] : 1'b0;
 
             video_stream_engine #(
                 .VIDEO_DATA_WIDTH(VIDEO_DATA_WIDTH),

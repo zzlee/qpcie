@@ -139,12 +139,21 @@ module video_stream_engine #(
                             frame_pts <= global_timestamp;
                         end
 
-                        line_buffer <= {s_axis_video_tdata, line_buffer[PCIE_DATA_WIDTH-1:VIDEO_DATA_WIDTH]};
+                        if (PCIE_DATA_WIDTH > VIDEO_DATA_WIDTH) begin
+                            line_buffer <= {s_axis_video_tdata, line_buffer[PCIE_DATA_WIDTH-1:VIDEO_DATA_WIDTH]};
+                        end else begin
+                            line_buffer <= s_axis_video_tdata;
+                        end
+
                         if (s_axis_video_tlast) begin // EOL (End of Line)
                             s_axis_video_tready <= 1'b0;
                             c2h_req_addr   <= host_frame_addr + (curr_line * line_stride_bytes);
                             c2h_req_dw_len <= (line_width_bytes > 16'd0) ? line_width_bytes[12:2] : 11'd8;
-                            c2h_req_data   <= {s_axis_video_tdata, line_buffer[PCIE_DATA_WIDTH-1:VIDEO_DATA_WIDTH]};
+                            if (PCIE_DATA_WIDTH > VIDEO_DATA_WIDTH) begin
+                                c2h_req_data <= {s_axis_video_tdata, line_buffer[PCIE_DATA_WIDTH-1:VIDEO_DATA_WIDTH]};
+                            end else begin
+                                c2h_req_data <= s_axis_video_tdata;
+                            end
                             c2h_req_last   <= 1'b1;
                             c2h_req_valid  <= 1'b1;
                             state          <= C2H_SEND;
