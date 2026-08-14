@@ -100,9 +100,11 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
     iowrite32(lower_32_bits(qdev->c2h_ring_dma), qdev->bar0_mmio + REG_C2H_RING_ADDR_L);
     iowrite32(upper_32_bits(qdev->c2h_ring_dma), qdev->bar0_mmio + REG_C2H_RING_ADDR_H);
 
-    /* Setup Interrupts */
-    ret = pci_alloc_irq_vectors(pdev, 1, 1, PCI_IRQ_ALL_TYPES);
+    /* Setup MSI-X / MSI Multi-Vector Interrupts */
+    ret = pci_alloc_irq_vectors(pdev, 1, 8, PCI_IRQ_MSIX | PCI_IRQ_MSI | PCI_IRQ_INTX);
     if (ret < 0) goto free_c2h_ring;
+
+    dev_info(&pdev->dev, "Allocated %d PCIe MSI-X / MSI Interrupt Vectors\n", ret);
 
     qdev->irq = pci_irq_vector(pdev, 0);
     ret = request_irq(qdev->irq, qpcie_irq_handler, IRQF_SHARED, "qpcie-dma", qdev);
