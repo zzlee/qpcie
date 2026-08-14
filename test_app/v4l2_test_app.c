@@ -73,6 +73,7 @@ int main(int argc, char **argv) {
     int tpg_pattern = -1;
     int target_fps = -1;
     int pacer_mode = -1;
+    int slice_height = -1;
 
     static struct option long_options[] = {
         {"dev",     required_argument, 0, 'd'},
@@ -81,6 +82,7 @@ int main(int argc, char **argv) {
         {"pattern", required_argument, 0, 'p'},
         {"fps",     required_argument, 0, 'r'},
         {"pacer",   required_argument, 0, 'c'},
+        {"slice",   required_argument, 0, 's'},
         {"width",   required_argument, 0, 'w'},
         {"height",  required_argument, 0, 'h'},
         {"out",     required_argument, 0, 'o'},
@@ -89,7 +91,7 @@ int main(int argc, char **argv) {
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "d:m:f:p:r:c:w:h:o:?", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "d:m:f:p:r:c:s:w:h:o:?", long_options, NULL)) != -1) {
         switch (opt) {
             case 'd': dev_name = optarg; break;
             case 'm':
@@ -106,6 +108,7 @@ int main(int argc, char **argv) {
             case 'p': tpg_pattern = atoi(optarg); break;
             case 'r': target_fps = atoi(optarg); break;
             case 'c': pacer_mode = atoi(optarg); break;
+            case 's': slice_height = atoi(optarg); break;
             case 'w': width = atoi(optarg); break;
             case 'h': height = atoi(optarg); break;
             case 'o': out_filename = optarg; break;
@@ -119,8 +122,16 @@ int main(int argc, char **argv) {
         if (sysfs_fp) {
             fprintf(sysfs_fp, "%d", pacer_mode ? 1 : 0);
             fclose(sysfs_fp);
-            printf("[Pacer Control] Switched Hardware Pacer Mode to: %s\n",
-                   pacer_mode ? "1 (Internal Clock Pacer)" : "0 (Disabled / External Sync Mode)");
+            printf("[CONFIG] Set Video Pacer Mode: %s\n", pacer_mode ? "1 (Internal Pacer)" : "0 (External Live Signal)");
+        }
+    }
+
+    if (slice_height >= 0) {
+        FILE *sysfs_fp = fopen("/sys/bus/pci/devices/0000:01:00.0/slice_height", "w");
+        if (sysfs_fp) {
+            fprintf(sysfs_fp, "%d", slice_height);
+            fclose(sysfs_fp);
+            printf("[CONFIG] Set Sub-Frame Low-Latency Slice DMA Height: %d lines\n", slice_height);
         }
     }
 

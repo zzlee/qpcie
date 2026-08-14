@@ -40,6 +40,7 @@ module tb_axil_reg_space;
     wire [15:0] reg_c2h_tail_ptr;
     wire [31:0] reg_irq_ctrl;
     wire [31:0] reg_irq_status;
+    wire [31:0] reg_pacer_ctrl, reg_slice_height;
     reg  [31:0] completed_h2c_count;
     reg  [31:0] completed_c2h_count;
 
@@ -74,6 +75,8 @@ module tb_axil_reg_space;
         .reg_c2h_tail_ptr(reg_c2h_tail_ptr),
         .reg_irq_ctrl(reg_irq_ctrl),
         .reg_irq_status(reg_irq_status),
+        .reg_pacer_ctrl(reg_pacer_ctrl),
+        .reg_slice_height(reg_slice_height),
         .completed_h2c_count(completed_h2c_count),
         .completed_c2h_count(completed_c2h_count)
     );

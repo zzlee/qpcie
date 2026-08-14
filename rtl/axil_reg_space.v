@@ -43,8 +43,10 @@ module axil_reg_space (
     output reg  [15:0] reg_c2h_ring_size,
     output reg  [15:0] reg_c2h_tail_ptr,
 
-    output reg  [31:0] reg_irq_ctrl,
-    output reg  [31:0] reg_irq_status,
+    output reg  [31:0]           reg_irq_ctrl,
+    output reg  [31:0]           reg_irq_status,
+    output reg  [31:0]           reg_pacer_ctrl,
+    output reg  [31:0]           reg_slice_height,
 
     input  wire [31:0] completed_h2c_count,
     input  wire [31:0] completed_c2h_count,
@@ -55,8 +57,7 @@ module axil_reg_space (
     input  wire [63:0] reg_last_audio_pts,
     input  wire [31:0] reg_frame_drop_count,
     input  wire [31:0] reg_bandwidth_bps,
-    input  wire [31:0] reg_latency_max_ns,
-    output reg  [31:0] reg_pacer_ctrl
+    input  wire [31:0] reg_latency_max_ns
 );
 
     // BAR0 Register Offset Definitions
@@ -98,6 +99,7 @@ module axil_reg_space (
             reg_irq_ctrl      <= 32'd0;
             reg_irq_status    <= 32'd0;
             reg_pacer_ctrl    <= 32'd1; // Default: 1 (Enabled - Internal Clock Pacer Mode)
+            reg_slice_height  <= 32'd0; // Default: 0 (Disabled - Full Frame IRQ)
             s_axil_awready    <= 1'b0;
             s_axil_wready     <= 1'b0;
             s_axil_bvalid     <= 1'b0;
@@ -125,6 +127,7 @@ module axil_reg_space (
                     ADDR_IRQ_CTRL:        reg_irq_ctrl             <= s_axil_wdata;
                     ADDR_IRQ_STATUS:      reg_irq_status           <= reg_irq_status & ~s_axil_wdata; // W1C
                     8'h74:                reg_pacer_ctrl           <= s_axil_wdata; // BAR0 0x74: Pacer Control
+                    8'h78:                reg_slice_height         <= s_axil_wdata; // BAR0 0x78: Sub-Frame Slice Height
                     default: ; // Ignore writes to read-only registers
                 endcase
             end else begin
@@ -177,11 +180,12 @@ module axil_reg_space (
                     8'h60:                s_axil_rdata <= reg_last_audio_pts[31:0];
                     8'h64:                s_axil_rdata <= reg_last_audio_pts[63:32];
 
-                    // Hardware Telemetry & Frame Dropper Registers (BAR0 Offsets 0x68..0x74)
+                    // Hardware Telemetry & Frame Dropper Registers (BAR0 Offsets 0x68..0x78)
                     8'h68:                s_axil_rdata <= reg_frame_drop_count;
                     8'h6C:                s_axil_rdata <= reg_bandwidth_bps;
                     8'h70:                s_axil_rdata <= reg_latency_max_ns;
                     8'h74:                s_axil_rdata <= reg_pacer_ctrl;
+                    8'h78:                s_axil_rdata <= reg_slice_height;
 
                     default:              s_axil_rdata <= 32'hDEAD_BEEF;
                 endcase

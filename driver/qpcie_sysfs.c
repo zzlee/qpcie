@@ -385,12 +385,48 @@ static ssize_t pacer_enable_store(struct device *dev, struct device_attribute *a
 }
 static DEVICE_ATTR_RW(pacer_enable);
 
+static ssize_t slice_height_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+    struct pci_dev *pdev = to_pci_dev(dev);
+    struct qpcie_dev *qdev = pci_get_drvdata(pdev);
+    u32 lines = 0;
+
+    if (qdev && qdev->bar0_mmio) {
+        lines = ioread32(qdev->bar0_mmio + REG_SLICE_HEIGHT);
+    }
+
+    return sysfs_emit(buf, "%u lines %s\n", lines,
+                      lines > 0 ? "(Sub-Frame Low-Latency Slice DMA Enabled)" : "(0 = Disabled, Full Frame IRQ Mode)");
+}
+
+static ssize_t slice_height_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+{
+    struct pci_dev *pdev = to_pci_dev(dev);
+    struct qpcie_dev *qdev = pci_get_drvdata(pdev);
+    u32 lines = 0;
+
+    if (kstrtou32(buf, 0, &lines)) return -EINVAL;
+
+    if (qdev && qdev->bar0_mmio) {
+        iowrite32(lines, qdev->bar0_mmio + REG_SLICE_HEIGHT);
+        if (lines > 0) {
+            dev_info(dev, "Updated Sub-Frame Slice DMA Height to %u lines (Low-Latency Sub-5ms Mode)\n", lines);
+        } else {
+            dev_info(dev, "Disabled Sub-Frame Slice DMA (Full-Frame IRQ Mode)\n");
+        }
+    }
+
+    return count;
+}
+static DEVICE_ATTR_RW(slice_height);
+
 /* Sysfs Attribute Group Table */
 static struct attribute *qpcie_sysfs_attrs[] = {
     &dev_attr_tpg_pattern.attr,
     &dev_attr_tpg_resolution.attr,
     &dev_attr_tpg_fps.attr,
     &dev_attr_pacer_enable.attr,
+    &dev_attr_slice_height.attr,
     &dev_attr_timestamp.attr,
     &dev_attr_frame_drop_count.attr,
     &dev_attr_bandwidth.attr,

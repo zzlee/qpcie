@@ -24,6 +24,7 @@ module video_stream_engine #(
     input  wire                          is_c2h, // 0: H2C (Host->Video Out), 1: C2H (Video In->Host)
     input  wire                          pacer_enable,        // 1: Enable Fixed Clock Pacer, 0: Disable (External Live Signal Mode)
     input  wire [31:0]                   frame_interval_clks, // Hardware Frame Pacer Clocks (e.g. 2083333 for 60.00 FPS @ 125MHz)
+    input  wire [15:0]                   slice_height,        // Sub-Frame Slice Height in Lines (0=Disabled)
     input  wire [63:0]                   global_timestamp,    // Hardware AV Sync Master Timestamp (ns)
     input  wire                          ring_full,           // Host DMA Ring Full Indicator
 
@@ -164,6 +165,14 @@ module video_stream_engine #(
                 C2H_SEND: begin
                     if (c2h_req_ack) begin
                         c2h_req_valid <= 1'b0;
+
+                        // Check Sub-Frame Low-Latency Slice DMA Trigger (slice_height > 0)
+                        if (slice_height > 16'd0 && (((curr_line + 1'b1) % slice_height) == 16'd0)) begin
+                            video_frame_done <= 1'b1;
+                        end else begin
+                            video_frame_done <= 1'b0;
+                        end
+
                         if (curr_line + 1'b1 < line_count) begin
                             curr_line           <= curr_line + 1'b1;
                             s_axis_video_tready <= 1'b1;
@@ -178,6 +187,8 @@ module video_stream_engine #(
                                 state            <= IDLE;
                             end
                         end
+                    end else begin
+                        video_frame_done <= 1'b0;
                     end
                 end
 

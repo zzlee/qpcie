@@ -117,6 +117,7 @@ module custom_pcie_dma_top #(
     wire [10:0] read_req_tc;
 
     wire [31:0] reg_dma_ctrl, reg_dma_status, reg_irq_ctrl, reg_irq_status;
+    wire [31:0] reg_slice_height;
     wire [63:0] reg_h2c_ring_addr, reg_c2h_ring_addr;
     wire [15:0] reg_h2c_ring_size, reg_h2c_tail_ptr, reg_h2c_head_ptr;
     wire [15:0] reg_c2h_ring_size, reg_c2h_tail_ptr, reg_c2h_head_ptr;
@@ -357,7 +358,8 @@ module custom_pcie_dma_top #(
         .reg_frame_drop_count(v_drop_cnt[0]),
         .reg_bandwidth_bps(reg_bandwidth_bps),
         .reg_latency_max_ns(reg_latency_max_ns),
-        .reg_pacer_ctrl(reg_pacer_ctrl)
+        .reg_pacer_ctrl(reg_pacer_ctrl),
+        .reg_slice_height(reg_slice_height)
     );
 
     // 3.1 Hardware AV Sync Global Precision Timestamp Generator (64-bit @ 125MHz, 8ns resolution)
@@ -517,6 +519,7 @@ module custom_pcie_dma_top #(
                 .is_c2h(c2h_desc_valid),
                 .pacer_enable(reg_pacer_ctrl[0]),
                 .frame_interval_clks(32'd2083333), // 60.00 FPS Pacer @ 125MHz
+                .slice_height(reg_slice_height[15:0]),
                 .global_timestamp(global_timestamp),
                 .ring_full(!c2h_desc_valid),
                 .s_axis_video_tdata(s_axis_video_tdata[(v_idx*VIDEO_DATA_WIDTH) +: VIDEO_DATA_WIDTH]),
