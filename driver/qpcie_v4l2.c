@@ -7,6 +7,7 @@
  */
 
 #include "qpcie_driver.h"
+#include <media/v4l2-event.h>
 
 static const struct v4l2_file_operations qpcie_v4l2_fops = {
     .owner          = THIS_MODULE,
@@ -146,6 +147,10 @@ static const struct v4l2_ioctl_ops qpcie_v4l2_ioctl_ops = {
 
     /* DMA-BUF Export Buffer IOCTL */
     .vidioc_expbuf                  = vb2_ioctl_expbuf,
+
+    /* Sub-Frame Low-Latency Slice DMA V4L2 Event Subscription */
+    .vidioc_subscribe_event         = v4l2_ctrl_subscribe_event,
+    .vidioc_unsubscribe_event       = v4l2_event_unsubscribe,
 
     .vidioc_streamon                = vb2_ioctl_streamon,
     .vidioc_streamoff               = vb2_ioctl_streamoff,
@@ -383,6 +388,12 @@ void qpcie_v4l2_remove(struct qpcie_dev *qdev)
 void qpcie_v4l2_irq_handler(struct qpcie_dev *qdev)
 {
     int i;
+    u32 slice_height = 0;
+
+    if (qdev && qdev->bar0_mmio) {
+        slice_height = ioread32(qdev->bar0_mmio + REG_SLICE_HEIGHT);
+    }
+
     for (i = 0; i < NUM_VIDEO_CHANNELS; i++) {
         struct qpcie_v4l2_channel *vch = &qdev->v4l2_ch[i];
         struct qpcie_v4l2_buffer *buf;
@@ -390,10 +401,34 @@ void qpcie_v4l2_irq_handler(struct qpcie_dev *qdev)
         spin_lock(&vch->slock);
         if (!list_empty(&vch->active_buffers)) {
             buf = list_first_entry(&vch->active_buffers, struct qpcie_v4l2_buffer, list);
-            list_del(&buf->list);
-            buf->vb.vb2_buf.timestamp = ktime_get_ns();
-            buf->vb.sequence = vch->sequence++;
-            vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
+
+            if (slice_height > 0) {
+                /* Sub-Frame Low-Latency Slice DMA Mode */
+                u32 total_slices = (vch->height + slice_height - 1) / slice_height;
+                vch->current_slice_idx++;
+
+                /* Fire Sub-Frame Slice Ready V4L2 Event to Userspace */
+                struct v4l2_event ev = {
+                    .type = V4L2_EVENT_FRAME_SYNC,
+                    .u.frame_sync.frame_sequence = vch->sequence,
+                };
+                v4l2_event_queue(&vch->vdev, &ev);
+
+                /* Complete frame when all slices land in Host DDR/VRAM */
+                if (vch->current_slice_idx >= total_slices) {
+                    vch->current_slice_idx = 0;
+                    list_del(&buf->list);
+                    buf->vb.vb2_buf.timestamp = ktime_get_ns();
+                    buf->vb.sequence = vch->sequence++;
+                    vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
+                }
+            } else {
+                /* Standard Full-Frame IRQ Mode */
+                list_del(&buf->list);
+                buf->vb.vb2_buf.timestamp = ktime_get_ns();
+                buf->vb.sequence = vch->sequence++;
+                vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
+            }
         }
         spin_unlock(&vch->slock);
     }

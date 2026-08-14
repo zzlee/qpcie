@@ -96,6 +96,8 @@ struct qpcie_v4l2_channel {
     u32                     stride;
     u32                     pixelformat;
     u32                     sequence;
+    u32                     current_slice_idx;
+    u32                     total_slices;
 };
 
 /* ALSA Audio Channel Data Structure */
