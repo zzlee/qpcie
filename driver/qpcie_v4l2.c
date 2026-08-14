@@ -124,6 +124,19 @@ static int qpcie_vidioc_s_parm(struct file *file, void *priv, struct v4l2_stream
     return qpcie_vidioc_g_parm(file, priv, a);
 }
 
+static int qpcie_vidioc_subscribe_event(struct v4l2_fh *fh,
+                                        const struct v4l2_event_subscription *sub)
+{
+    switch (sub->type) {
+    case V4L2_EVENT_FRAME_SYNC:
+        return v4l2_event_subscribe(fh, sub, 16, NULL);
+    case V4L2_EVENT_CTRL:
+        return v4l2_ctrl_subscribe_event(fh, sub);
+    default:
+        return -EINVAL;
+    }
+}
+
 static const struct v4l2_ioctl_ops qpcie_v4l2_ioctl_ops = {
     .vidioc_querycap                = qpcie_vidioc_querycap,
     .vidioc_enum_fmt_vid_cap        = qpcie_vidioc_enum_fmt_vid_cap_mplane,
@@ -149,7 +162,7 @@ static const struct v4l2_ioctl_ops qpcie_v4l2_ioctl_ops = {
     .vidioc_expbuf                  = vb2_ioctl_expbuf,
 
     /* Sub-Frame Low-Latency Slice DMA V4L2 Event Subscription */
-    .vidioc_subscribe_event         = v4l2_ctrl_subscribe_event,
+    .vidioc_subscribe_event         = qpcie_vidioc_subscribe_event,
     .vidioc_unsubscribe_event       = v4l2_event_unsubscribe,
 
     .vidioc_streamon                = vb2_ioctl_streamon,

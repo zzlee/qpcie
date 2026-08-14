@@ -323,6 +323,14 @@ int main(int argc, char **argv) {
         }
     }
 
+    // 6.2 Subscribe to V4L2_EVENT_FRAME_SYNC for Sub-Frame Low-Latency Slice DMA
+    struct v4l2_event_subscription sub_ev;
+    memset(&sub_ev, 0, sizeof(sub_ev));
+    sub_ev.type = V4L2_EVENT_FRAME_SYNC;
+    if (ioctl(fd, VIDIOC_SUBSCRIBE_EVENT, &sub_ev) == 0) {
+        printf("--> Subscribed to V4L2_EVENT_FRAME_SYNC (Sub-Frame Low-Latency Slice DMA Ready Events) successfully.\n");
+    }
+
     // Start Streaming
     enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     if (ioctl(fd, VIDIOC_STREAMON, &type) < 0) {
