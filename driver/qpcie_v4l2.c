@@ -124,6 +124,47 @@ static int qpcie_vidioc_s_parm(struct file *file, void *priv, struct v4l2_stream
     return qpcie_vidioc_g_parm(file, priv, a);
 }
 
+static const struct v4l2_frmsize_discrete supported_framesizes[] = {
+    { 3840, 2160 },
+    { 1920, 1080 },
+    { 1280, 720 },
+};
+
+static int qpcie_vidioc_enum_framesizes(struct file *file, void *priv, struct v4l2_frmsizeenum *fsize)
+{
+    if (fsize->pixel_format != V4L2_PIX_FMT_YUV420M && fsize->pixel_format != V4L2_PIX_FMT_NV12M)
+        return -EINVAL;
+
+    if (fsize->index >= ARRAY_SIZE(supported_framesizes))
+        return -EINVAL;
+
+    fsize->type = V4L2_FRMSIZE_TYPE_DISCRETE;
+    fsize->discrete = supported_framesizes[fsize->index];
+    return 0;
+}
+
+static const struct v4l2_fract supported_frameintervals[] = {
+    { 1, 60 },
+    { 1001, 60000 }, /* 59.94 FPS */
+    { 1, 50 },
+    { 1, 30 },
+    { 1, 25 },
+    { 1, 24 },
+};
+
+static int qpcie_vidioc_enum_frameintervals(struct file *file, void *priv, struct v4l2_frmivalenum *fival)
+{
+    if (fival->pixel_format != V4L2_PIX_FMT_YUV420M && fival->pixel_format != V4L2_PIX_FMT_NV12M)
+        return -EINVAL;
+
+    if (fival->index >= ARRAY_SIZE(supported_frameintervals))
+        return -EINVAL;
+
+    fival->type = V4L2_FRMIVAL_TYPE_DISCRETE;
+    fival->discrete = supported_frameintervals[fival->index];
+    return 0;
+}
+
 static int qpcie_vidioc_subscribe_event(struct v4l2_fh *fh,
                                         const struct v4l2_event_subscription *sub)
 {
@@ -146,6 +187,9 @@ static const struct v4l2_ioctl_ops qpcie_v4l2_ioctl_ops = {
     .vidioc_enum_fmt_vid_out        = qpcie_vidioc_enum_fmt_vid_cap_mplane,
     .vidioc_g_fmt_vid_out_mplane    = qpcie_vidioc_g_fmt_vid_cap_mplane,
     .vidioc_s_fmt_vid_out_mplane    = qpcie_vidioc_s_fmt_vid_cap_mplane,
+
+    .vidioc_enum_framesizes         = qpcie_vidioc_enum_framesizes,
+    .vidioc_enum_frameintervals     = qpcie_vidioc_enum_frameintervals,
 
     .vidioc_g_parm                  = qpcie_vidioc_g_parm,
     .vidioc_s_parm                  = qpcie_vidioc_s_parm,
