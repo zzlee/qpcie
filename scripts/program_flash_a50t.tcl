@@ -37,6 +37,8 @@ if {[catch {open_hw_target} err]} {
     exit 1
 }
 
+catch { set_property PARAM.FREQUENCY 3000000 [get_hw_targets] }
+
 set hw_dev [lindex [get_hw_devices] 0]
 if {$hw_dev == ""} {
     puts "ERROR: No JTAG hardware device found!"
