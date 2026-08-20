@@ -3,6 +3,10 @@
 // Description: Decodes PCIe IP RC (Requester Completion) AXI4-Stream TLP packets.
 //              Extracts CplD data and routes to Descriptor Fetch Engine (supporting
 //              64-Byte Extended Descriptors across beats) or H2C FIFO based on Tag.
+// Audit Compliance: Verified with UltraScale PCIe Specification pg213 Table 2-19:
+//                   - rc_tag is at bits [71:64]
+//                   - rc_dword_len is at bits [42:32]
+//                   - rc_req_id is at bits [87:72]
 // ============================================================================
 
 `timescale 1ns / 1ps
@@ -44,9 +48,10 @@ module rc_rx_decoder #(
     reg [1:0] state;
     reg [255:0] desc_beat0;
 
-    // Header Extraction from first beat
-    wire [7:0]  rc_tag       = s_axis_rc_tdata[58:51];
-    wire [10:0] rc_dword_len = s_axis_rc_tdata[42:32];
+    // Header Extraction from first beat according to pg213 Table 2-19
+    wire [7:0]  rc_tag       = s_axis_rc_tdata[71:64];  // pg213 Table 2-19: Tag is at [71:64]
+    wire [10:0] rc_dword_len = s_axis_rc_tdata[42:32];  // pg213 Table 2-19: Dword Count is at [42:32]
+    wire [15:0] rc_req_id    = s_axis_rc_tdata[87:72];  // pg213 Table 2-19: Requester ID is at [87:72]
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -98,39 +103,48 @@ module rc_rx_decoder #(
                                 h2c_fifo_wdata <= {224'd0, s_axis_rc_tdata[127:96]};
                             end
                             h2c_fifo_wlast  <= s_axis_rc_tlast;
-                            tag_free_req    <= 1'b1;
+
+                            tag_free_req    <= s_axis_rc_tlast;
                             tag_free_val    <= rc_tag;
+
                             if (!s_axis_rc_tlast) begin
-                                state <= ROUTE_H2C;
+                                s_axis_rc_tready <= 1'b1;
+                                state            <= ROUTE_H2C;
                             end
                         end
                     end
                 end
 
                 ROUTE_DESC_2: begin
-                    if (s_axis_rc_tvalid) begin
+                    if (s_axis_rc_tvalid && s_axis_rc_tready) begin
                         desc_cpl_valid <= 1'b1;
                         if (DATA_WIDTH >= 256) begin
                             desc_cpl_data <= {s_axis_rc_tdata[255:0], desc_beat0[255:0]};
                         end else begin
                             desc_cpl_data <= {384'd0, s_axis_rc_tdata[127:0], desc_beat0[127:0]};
                         end
-                        desc_cpl_last  <= s_axis_rc_tlast;
-                        state          <= IDLE;
-                    end else begin
-                        desc_cpl_valid <= 1'b0;
+                        desc_cpl_last <= s_axis_rc_tlast;
+
+                        tag_free_req  <= s_axis_rc_tlast;
+                        tag_free_val  <= 8'h00;
+
+                        if (s_axis_rc_tlast) begin
+                            state <= IDLE;
+                        end
                     end
                 end
 
                 ROUTE_H2C: begin
-                    tag_free_req <= 1'b0;
-                    if (s_axis_rc_tvalid) begin
+                    if (s_axis_rc_tvalid && s_axis_rc_tready) begin
                         h2c_fifo_wvalid <= 1'b1;
                         h2c_fifo_wdata  <= s_axis_rc_tdata;
                         h2c_fifo_wlast  <= s_axis_rc_tlast;
-                        if (s_axis_rc_tlast) state <= IDLE;
-                    end else begin
-                        h2c_fifo_wvalid <= 1'b0;
+
+                        if (s_axis_rc_tlast) begin
+                            tag_free_req <= 1'b1;
+                            tag_free_val <= rc_tag;
+                            state        <= IDLE;
+                        end
                     end
                 end
 

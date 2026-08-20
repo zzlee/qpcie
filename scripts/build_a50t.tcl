@@ -81,7 +81,7 @@ generate_target all [get_ips axi_crossbar_0]
 # 6. Update Compile Order
 update_compile_order -fileset sources_1
 
-# 7. Run Synthesis and Implementation
+# 7. Run Synthesis and Implementation to Bitstream
 puts "Launching Synthesis and Implementation for qpcie top module..."
 launch_runs impl_1 -to_step write_bitstream -jobs 8
 wait_on_run impl_1
@@ -90,17 +90,6 @@ if {[get_property PROGRESS [get_runs impl_1]] != "100%"} {
     puts "ERROR: Implementation failed for qpcie top module!"
     exit 1
 }
-
-# 8. Configure Bitstream Options & Export Bitstream
-open_run impl_1
-set_property CFGBVS VCCO [current_design]
-set_property CONFIG_VOLTAGE 3.3 [current_design]
-set_property BITSTREAM.CONFIG.CONFIGRATE 40 [current_design]
-set_property BITSTREAM.CONFIG.SPI_BUSWIDTH 1 [current_design]
-set_property SEVERITY {Warning} [get_drc_checks UCIO-1]
-set_property SEVERITY {Warning} [get_drc_checks AVAL-326]
-
-write_bitstream -force $project_dir/$project_name.runs/impl_1/a50t_pcie_card_top.bit -bin_file
 
 puts "================================================================="
 puts " 🎉 SUCCESS: Artix-7 A50T qpcie Native RTL Bitstream Built (12AB:E380)!"

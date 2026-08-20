@@ -439,6 +439,9 @@ module a50t_pcie_card_top #(
         .cfg_ds_bus_number(8'b0),
         .cfg_ds_device_number(5'b0),
         .cfg_ds_function_number(3'b0),
+        .cfg_bus_number(cfg_bus_number),
+        .cfg_device_number(cfg_device_number),
+        .cfg_function_number(cfg_function_number),
 
         .cfg_interrupt(1'b0),
         .cfg_interrupt_assert(1'b0),
@@ -459,12 +462,20 @@ module a50t_pcie_card_top #(
         .pcie_drp_di(16'h0)
     );
 
+    wire [7:0] cfg_bus_number;
+    wire [4:0] cfg_device_number;
+    wire [2:0] cfg_function_number;
+
     // Instantiate 7-Series PCIe AXI-Stream Protocol Bridge (128-bit)
     pcie_7x_axi_bridge #(
         .DATA_WIDTH(128)
     ) u_pcie_bridge (
         .clk(pcie_user_clk),
         .rst_n(pcie_user_rst_n),
+
+        .cfg_bus_number(cfg_bus_number),
+        .cfg_device_number(cfg_device_number),
+        .cfg_function_number(cfg_function_number),
 
         .m_axis_rx_tdata(m_axis_rx_tdata),
         .m_axis_rx_tkeep(m_axis_rx_tkeep),
