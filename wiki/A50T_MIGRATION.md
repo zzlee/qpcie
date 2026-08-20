@@ -24,6 +24,19 @@
 ## 2. 結論
 
 > **結論: 高度可行且高度共用 (Highly Feasible & 90%+ Reusable)**
-> 
+
 > 1. **90% 以上的 RTL 核心邏輯與 100% 的 Linux 驅動/應用程式** 可直接復用，無須修改軟體層。
 > 2. 只需針對 Artix-7 A50T 新增 **7-Series AXI-Stream TLP 轉譯層 (Bridge Wrapper)** 與 `build_a50t.tcl` 即可完成建置！
+
+---
+
+## 3. 測試驗證狀態
+
+> **✅ A50T TLP Loopback 測試已通過** (2026-08-20)
+
+- 最小化設計 (`pcie_7x_tlp_loopback.v` + `a50t_pcie_tlp_test_top.v`) 已成功建置並燒錄
+- Host `lspci` 正確枚舉 Vendor 0x12AB / Device 0xE380
+- `dmesg` 無 TIMEOUT_ERR、AER error、probe failed
+- MRd → CplD 回覆邏輯驗證通過
+
+> 詳見 **[A50T TLP Loopback Test](A50T-TLP-Loopback-Test.md)**
