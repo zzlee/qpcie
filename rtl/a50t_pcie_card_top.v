@@ -348,12 +348,14 @@ module a50t_pcie_card_top #(
 
     wire usr_irq_req, usr_irq_ack;
 
-    // Differential Reference Clock Input Buffer for Artix-7
+    // Differential Reference Clock Input Buffer for Artix-7 GTP Transceiver (sys_clk_p/n D6/D5)
     wire sys_clk;
-    IBUFDS u_ibufds_sys_clk (
+    IBUFDS_GTE2 u_ibufds_gte2_sys_clk (
         .I(sys_clk_p),
         .IB(sys_clk_n),
-        .O(sys_clk)
+        .CEB(1'b0),
+        .O(sys_clk),
+        .ODIV2()
     );
 
     // 7-Series PCIe 128-bit AXI-Stream Wires

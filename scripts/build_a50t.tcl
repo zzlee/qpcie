@@ -35,8 +35,8 @@ set_property -dict [list \
   CONFIG.Maximum_Link_Width {X4} \
   CONFIG.Interface_Width {128_bit} \
   CONFIG.User_Clk_Freq {125} \
-  CONFIG.Vendor_ID {12AB} \
-  CONFIG.Device_ID {E380} \
+  CONFIG.Vendor_ID {10EE} \
+  CONFIG.Device_ID {E381} \
   CONFIG.Bar0_Scale {Kilobytes} \
   CONFIG.Bar0_Size {64} \
   CONFIG.Bar1_Enabled {true} \
