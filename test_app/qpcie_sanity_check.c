@@ -58,9 +58,15 @@ int main(int argc, char **argv) {
     int ret = system(cmd);
     (void)ret;
 
-    // 2. Open /sys/bus/pci/devices/0000:<bdf>/resource0
+    // 2. Open sysfs resource0 path (handling domain prefix e.g. 0004:01:00.0)
     char resource_path[256];
-    snprintf(resource_path, sizeof(resource_path), "/sys/bus/pci/devices/0000:%s/resource0", bdf_str);
+    if (strchr(bdf_str, ':') != strrchr(bdf_str, ':')) {
+        // bdf_str already has domain prefix (e.g., 0004:01:00.0)
+        snprintf(resource_path, sizeof(resource_path), "/sys/bus/pci/devices/%s/resource0", bdf_str);
+    } else {
+        // bdf_str is bus:dev.func (e.g., 01:00.0)
+        snprintf(resource_path, sizeof(resource_path), "/sys/bus/pci/devices/0000:%s/resource0", bdf_str);
+    }
 
     int fd = open(resource_path, O_RDWR | O_SYNC);
     if (fd < 0) {

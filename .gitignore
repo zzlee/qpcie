@@ -35,6 +35,8 @@ driver/*.mod.c
 driver/*.mod.o
 driver/.*.cmd
 driver/.*.o
+driver/*.o.d
+driver/.tmp_versions/
 driver/Module.symvers
 driver/modules.order
 
@@ -42,6 +44,7 @@ driver/modules.order
 # 3. User Test App Build Artifacts & Captured Media Files
 # ------------------------------------------------------------------------------
 test_app/*.o
+test_app/qpcie_sanity_check
 test_app/v4l2_test_app
 test_app/alsa_test_app
 test_app/dmabuf_p2p_test_app
