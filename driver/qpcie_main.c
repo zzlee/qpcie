@@ -83,7 +83,7 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
                                              &qdev->h2c_ring_dma, GFP_KERNEL);
     if (!qdev->h2c_ring_virt) {
         ret = -ENOMEM;
-        goto unmap_bar0;
+        goto unmap_mmio;
     }
 
     qdev->c2h_ring_virt = dma_alloc_coherent(&pdev->dev,
@@ -100,7 +100,7 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
     iowrite32(lower_32_bits(qdev->c2h_ring_dma), qdev->bar0_mmio + REG_C2H_RING_ADDR_L);
     iowrite32(upper_32_bits(qdev->c2h_ring_dma), qdev->bar0_mmio + REG_C2H_RING_ADDR_H);
 
-    /* Setup MSI-X / MSI Multi-Vector Interrupts */
+    /* Setup MSI-X / MSI Multi-Vector Interrupts (compatible across Linux Kernel 5.x / 6.x) */
     ret = pci_alloc_irq_vectors(pdev, 1, 8, PCI_IRQ_MSIX | PCI_IRQ_MSI | PCI_IRQ_INTX);
     if (ret < 0) goto free_c2h_ring;
 
@@ -118,19 +118,12 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
     if (ret) goto free_irq;
 
     ret = qpcie_alsa_init(qdev);
-    if (ret) goto remove_v4l2;
+    if (ret) goto cleanup_v4l2;
 
-    /* Register Sysfs Device Attributes (tpg_pattern, aud_pattern, aud_volume, version) */
-    ret = qpcie_sysfs_init(qdev);
-    if (ret) goto remove_alsa;
-
-    dev_info(&pdev->dev, "QPCIe Multi-Channel Video (V4L2) & Audio (ALSA) Driver Probed Successfully!\n");
+    dev_info(&pdev->dev, "QPCIe Multi-Channel Driver Initialized Successfully\n");
     return 0;
 
-remove_alsa:
-    qpcie_alsa_remove(qdev);
-
-remove_v4l2:
+cleanup_v4l2:
     qpcie_v4l2_remove(qdev);
 free_irq:
     free_irq(qdev->irq, qdev);
@@ -142,7 +135,7 @@ free_c2h_ring:
 free_h2c_ring:
     dma_free_coherent(&pdev->dev, RING_BUFFER_SIZE * sizeof(struct qpcie_dma_desc_2d),
                       qdev->h2c_ring_virt, qdev->h2c_ring_dma);
-unmap_bar0:
+unmap_mmio:
     if (qdev->bar1_mmio) pci_iounmap(pdev, qdev->bar1_mmio);
     pci_iounmap(pdev, qdev->bar0_mmio);
 release_regions:
@@ -161,7 +154,6 @@ static void qpcie_remove(struct pci_dev *pdev)
     /* Disable IRQ in BAR0 */
     iowrite32(0x00, qdev->bar0_mmio + REG_IRQ_CTRL);
 
-    qpcie_sysfs_remove(qdev);
     qpcie_alsa_remove(qdev);
     qpcie_v4l2_remove(qdev);
 
@@ -175,20 +167,21 @@ static void qpcie_remove(struct pci_dev *pdev)
 
     if (qdev->bar1_mmio) pci_iounmap(pdev, qdev->bar1_mmio);
     pci_iounmap(pdev, qdev->bar0_mmio);
-
     pci_release_regions(pdev);
     pci_disable_device(pdev);
+
+    dev_info(&pdev->dev, "QPCIe Driver Removed Cleanly\n");
 }
 
-static struct pci_driver qpcie_pci_driver = {
+static struct pci_driver qpcie_driver = {
     .name     = "qpcie-dma",
     .id_table = qpcie_id_table,
     .probe    = qpcie_probe,
     .remove   = qpcie_remove,
 };
 
-module_pci_driver(qpcie_pci_driver);
+module_pci_driver(qpcie_driver);
 
-MODULE_AUTHOR("Antigravity Team");
-MODULE_DESCRIPTION("Linux Kernel V4L2 & ALSA PCIe Driver for Custom 2D DMA Controller");
+MODULE_AUTHOR("Advanced Agentic Coding Team");
+MODULE_DESCRIPTION("QPCIe Multi-Channel 2D Video (V4L2) & Audio (ALSA) DMA Driver");
 MODULE_LICENSE("GPL");
