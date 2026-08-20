@@ -1,25 +1,26 @@
 # ==============================================================================
-# Vivado TCL Build Script for Artix-7 A50T (XC7A50T) PCIe Video & Audio DMA Card
-# Target Board: AMD/Xilinx Artix-7 (xc7a50t-fgg484-2)
-# PCIe IP Core: pcie_7x_0 (7 Series Integrated Block for PCIe v3.3, Gen2 x4, 128-bit)
-# Vendor ID: 0x12AB, Device ID: 0xE380
+# Vivado TCL Build Script for Artix-7 A50T PCIe Video & Audio DMA Card (qpcie)
+# Target Board: AMD/Xilinx Artix-7 (xc7a50t-csg325-2)
+# Top-Level RTL: a50t_pcie_card_top.v (qpcie native RTL top)
+# PCIe IP Core: pcie_7x_0 (7-Series Integrated Block for PCIe v3.3, Gen2 x4, 128-bit)
+# Distinct Identification: Vendor ID 0x12AB, Device ID 0xE380
 # ==============================================================================
 
 set project_name "qpcie_a50t_card"
 set project_dir "./build/qpcie_a50t_proj"
-set device_part "xc7a50t-fgg484-2"
+set device_part "xc7a50t-csg325-2"
 
 puts "================================================================="
-puts " Starting Vivado Build for Artix-7 A50T PCIe DMA Project"
+puts " Starting Vivado Build for qpcie Native RTL (a50t_pcie_card_top.v)"
 puts " Target Part : $device_part"
-puts " PCIe Config : Gen2 x4 (5.0 GT/s), 128-bit AXI-Stream @ 125MHz"
-puts " Vendor/Dev  : 0x12AB / 0xE380"
+puts " PCIe Core   : pcie_7x_0 (Gen2 x4, 128-bit AXI-Stream)"
+puts " Distinct ID : Vendor 0x12AB / Device 0xE380 (qpcie Card)"
 puts "================================================================="
 
 file mkdir $project_dir
 create_project $project_name $project_dir -part $device_part -force
 
-# 1. Add RTL Source Files
+# 1. Add qpcie RTL Source Files
 add_files [glob ./rtl/*.v]
 set_property top a50t_pcie_card_top [current_fileset]
 
@@ -27,7 +28,7 @@ set_property top a50t_pcie_card_top [current_fileset]
 add_files -fileset constrs_1 ./constraints/a50t_pcie_pinout.xdc
 
 # 3. Generate Xilinx 7-Series Integrated PCIe Block IP Core (pcie_7x_0)
-puts "Generating 7-Series PCIe IP Core (pcie_7x_0 - Gen2 x4, 128-bit)..."
+puts "Generating 7-Series PCIe IP Core (pcie_7x_0 - Gen2 x4, 128-bit, 12AB:E380)..."
 create_ip -name pcie_7x -vendor xilinx.com -library ip -version 3.3 -module_name pcie_7x_0
 
 set_property -dict [list \
@@ -35,13 +36,17 @@ set_property -dict [list \
   CONFIG.Maximum_Link_Width {X4} \
   CONFIG.Interface_Width {128_bit} \
   CONFIG.User_Clk_Freq {125} \
-  CONFIG.Vendor_ID {10EE} \
-  CONFIG.Device_ID {E381} \
-  CONFIG.Bar0_Scale {Kilobytes} \
-  CONFIG.Bar0_Size {64} \
+  CONFIG.Vendor_ID {12AB} \
+  CONFIG.Device_ID {E380} \
+  CONFIG.Subsystem_Vendor_ID {12AB} \
+  CONFIG.Subsystem_ID {0007} \
+  CONFIG.Bar0_Scale {Megabytes} \
+  CONFIG.Bar0_Size {1} \
   CONFIG.Bar1_Enabled {true} \
   CONFIG.Bar1_Scale {Kilobytes} \
   CONFIG.Bar1_Size {64} \
+  CONFIG.Shared_Logic_In_Core {true} \
+  CONFIG.en_ext_clk {false} \
 ] [get_ips pcie_7x_0]
 
 generate_target all [get_ips pcie_7x_0]
@@ -73,25 +78,32 @@ set_property -dict [list \
 
 generate_target all [get_ips axi_crossbar_0]
 
-# 6. Run Synthesis and Implementation
-puts "Launching Synthesis and Implementation..."
-launch_runs synth_1 -jobs 8
-wait_on_run synth_1
+# 6. Update Compile Order
+update_compile_order -fileset sources_1
 
-if {[get_property PROGRESS [get_runs synth_1]] != "100%"} {
-    puts "ERROR: Synthesis failed!"
-    exit 1
-}
-
+# 7. Run Synthesis and Implementation
+puts "Launching Synthesis and Implementation for qpcie top module..."
 launch_runs impl_1 -to_step write_bitstream -jobs 8
 wait_on_run impl_1
 
 if {[get_property PROGRESS [get_runs impl_1]] != "100%"} {
-    puts "ERROR: Implementation failed!"
+    puts "ERROR: Implementation failed for qpcie top module!"
     exit 1
 }
 
+# 8. Configure Bitstream Options & Export Bitstream
+open_run impl_1
+set_property CFGBVS VCCO [current_design]
+set_property CONFIG_VOLTAGE 3.3 [current_design]
+set_property BITSTREAM.CONFIG.CONFIGRATE 40 [current_design]
+set_property BITSTREAM.CONFIG.SPI_BUSWIDTH 1 [current_design]
+set_property SEVERITY {Warning} [get_drc_checks UCIO-1]
+set_property SEVERITY {Warning} [get_drc_checks AVAL-326]
+
+write_bitstream -force $project_dir/$project_name.runs/impl_1/a50t_pcie_card_top.bit -bin_file
+
 puts "================================================================="
-puts " SUCCESS: Artix-7 A50T 128-bit PCIe Bitstream Built Successfully!"
+puts " 🎉 SUCCESS: Artix-7 A50T qpcie Native RTL Bitstream Built (12AB:E380)!"
 puts " Bitstream Location: $project_dir/$project_name.runs/impl_1/a50t_pcie_card_top.bit"
 puts "================================================================="
+close_project

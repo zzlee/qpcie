@@ -1,6 +1,6 @@
 // ============================================================================
 // Module: a50t_pcie_card_top
-// Target: AMD/Xilinx Artix-7 (xc7a50t-fgg484-2)
+// Target: AMD/Xilinx Artix-7 (xc7a50t-csg325-2)
 // Description: Top-level FPGA card wrapper module for Artix-7 A50T target.
 //              Uses pcie_7x_0 (7-Series PCIe Block Gen2 x4, 128-bit AXI-Stream).
 //              100% shared core DMA logic with UltraScale+ solutions.
@@ -26,12 +26,7 @@ module a50t_pcie_card_top #(
     output wire [3:0]                                       pci_exp_txp,
     output wire [3:0]                                       pci_exp_txn,
     input  wire [3:0]                                       pci_exp_rxp,
-    input  wire [3:0]                                       pci_exp_rxn,
-
-    // Status LEDs & HDMI HPD Pin
-    output wire                                             user_led_dma_active,
-    output wire                                             user_led_pcie_link_up,
-    output wire                                             hdmi_hpd_out
+    input  wire [3:0]                                       pci_exp_rxn
 );
 
     // =========================================================================
@@ -42,9 +37,7 @@ module a50t_pcie_card_top #(
     wire pcie_user_rst_n;
     wire pcie_user_lnk_up;
 
-    assign pcie_user_rst_n       = ~pcie_user_reset;
-    assign user_led_pcie_link_up = pcie_user_lnk_up;
-    assign user_led_dma_active   = 1'b1;
+    assign pcie_user_rst_n = ~pcie_user_reset;
 
     // =========================================================================
     // BAR1 AXI4-Lite Master Interconnect Wires

@@ -1,5 +1,5 @@
 # ==============================================================================
-# Xilinx Artix-7 XC7A50T-FGG484-2 PCIe Card Constraints
+# Xilinx Artix-7 XC7A50T-CSG325-2 PCIe Card Constraints
 # Updated based on sc7xx_e382 Hardware Pinout Schema
 # ==============================================================================
 
@@ -47,16 +47,16 @@ set_property PACKAGE_PIN H2 [get_ports {pci_exp_txp[3]}]
 set_property PACKAGE_PIN H1 [get_ports {pci_exp_txn[3]}]
 
 # ------------------------------------------------------------------------------
-# 4. User Telemetry Status LEDs & HDMI HPD Pin
+# 4. User Telemetry Status LEDs & HDMI HPD Pin (commented out - unknown CSG325 pins)
 # ------------------------------------------------------------------------------
-set_property PACKAGE_PIN W10 [get_ports user_led_dma_active]
-set_property IOSTANDARD LVCMOS33 [get_ports user_led_dma_active]
+# set_property PACKAGE_PIN W10 [get_ports user_led_dma_active]
+# set_property IOSTANDARD LVCMOS33 [get_ports user_led_dma_active]
 
-set_property PACKAGE_PIN V10 [get_ports user_led_pcie_link_up]
-set_property IOSTANDARD LVCMOS33 [get_ports user_led_pcie_link_up]
+# set_property PACKAGE_PIN V10 [get_ports user_led_pcie_link_up]
+# set_property IOSTANDARD LVCMOS33 [get_ports user_led_pcie_link_up]
 
-set_property PACKAGE_PIN Y11 [get_ports hdmi_hpd_out]
-set_property IOSTANDARD LVCMOS33 [get_ports hdmi_hpd_out]
+# set_property PACKAGE_PIN Y11 [get_ports hdmi_hpd_out]
+# set_property IOSTANDARD LVCMOS33 [get_ports hdmi_hpd_out]
 
 # ------------------------------------------------------------------------------
 # 5. Bitstream Configuration Properties
