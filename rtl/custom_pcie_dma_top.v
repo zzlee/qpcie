@@ -121,7 +121,7 @@ module custom_pcie_dma_top #(
     wire [63:0] reg_h2c_ring_addr, reg_c2h_ring_addr;
     wire [15:0] reg_h2c_ring_size, reg_h2c_tail_ptr, reg_h2c_head_ptr;
     wire [15:0] reg_c2h_ring_size, reg_c2h_tail_ptr, reg_c2h_head_ptr;
-    reg  [31:0] completed_h2c_count, completed_c2h_count;
+    wire [31:0] completed_h2c_count, completed_c2h_count;
 
     wire        tag_alloc_req, tag_alloc_valid, tag_full;
     wire [7:0]  tag_alloc_tag, tag_free_val;
