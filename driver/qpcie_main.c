@@ -189,6 +189,9 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
             desc_ring[p + SG_PAGES].control         = 0x00; /* H2C: Host -> FPGA */
         }
 
+        /* Flush all descriptor writes to memory before informing hardware */
+        dma_wmb();
+
         /* Program Ring Base Address into BAR0 0x08 (Low) and 0x0C (High) */
         iowrite32((u32)(desc_ring_dma & 0xFFFFFFFF), qdev->bar0_mmio + REG_H2C_RING_ADDR_L);
         iowrite32((u32)((desc_ring_dma >> 32) & 0xFFFFFFFF), qdev->bar0_mmio + REG_H2C_RING_ADDR_H);
@@ -205,8 +208,9 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
         u32 dma_stat = ioread32(qdev->bar0_mmio + REG_DMA_STATUS);
         u32 comp_c2h = ioread32(qdev->bar0_mmio + REG_COMPLETED_C2H);
         u32 ptr_dbg  = ioread32(qdev->bar0_mmio + 0x40);
-        dev_info(&pdev->dev, "  C2H SG Status: DMA_STATUS=0x%08X, Completed Count=%u, Pointers=0x%08X (Tail=%u, Head=%u)\n",
-                 dma_stat, comp_c2h, ptr_dbg, (ptr_dbg >> 16) & 0xFFFF, ptr_dbg & 0xFFFF);
+        u32 ptr_fmt  = swab32(ptr_dbg);
+        dev_info(&pdev->dev, "  C2H SG Status: DMA_STATUS=0x%08X, Completed Count=%u, Pointers: Tail=%u, Head=%u (Raw: 0x%08X)\n",
+                 dma_stat, comp_c2h, (ptr_fmt >> 16) & 0xFFFF, ptr_fmt & 0xFFFF, ptr_dbg);
 
         /* Advance Tail Pointer to 8 (Trigger 4x H2C Descriptors) */
         dev_info(&pdev->dev, "--- [3.2 Step 2: H2C 4-Page SG List DMA Read Test] ---\n");
@@ -217,8 +221,12 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
         dma_stat = ioread32(qdev->bar0_mmio + REG_DMA_STATUS);
         u32 comp_h2c = ioread32(qdev->bar0_mmio + REG_COMPLETED_H2C);
         ptr_dbg  = ioread32(qdev->bar0_mmio + 0x40);
-        dev_info(&pdev->dev, "  H2C SG Status: DMA_STATUS=0x%08X, Completed Count=%u, Pointers=0x%08X (Tail=%u, Head=%u)\n",
-                 dma_stat, comp_h2c, ptr_dbg, (ptr_dbg >> 16) & 0xFFFF, ptr_dbg & 0xFFFF);
+        ptr_fmt  = swab32(ptr_dbg);
+        dev_info(&pdev->dev, "  H2C SG Status: DMA_STATUS=0x%08X, Completed Count=%u, Pointers: Tail=%u, Head=%u (Raw: 0x%08X)\n",
+                 dma_stat, comp_h2c, (ptr_fmt >> 16) & 0xFFFF, ptr_fmt & 0xFFFF, ptr_dbg);
+
+        /* Ensure CPU observes all DMA writes from FPGA */
+        dma_rmb();
 
         /* Inspect C2H pages */
         for (p = 0; p < SG_PAGES; p++) {
