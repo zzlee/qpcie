@@ -85,7 +85,7 @@ module cq_rx_decoder #(
     wire [3:0]  req_type   = s_axis_cq_tdata[78:75]; // 0000: MRd, 0001: MWr
     wire [15:0] req_id     = s_axis_cq_tdata[95:80];
     wire [7:0]  req_tag    = s_axis_cq_tdata[103:96];
-    wire [2:0]  bar_id     = s_axis_cq_tdata[114:112]; // 3'b000: BAR0, 3'b001: BAR1
+    wire [2:0]  bar_id     = (DATA_WIDTH >= 256) ? s_axis_cq_tdata[114:112] : s_axis_cq_tuser[2:0]; // 3'b000: BAR0, 3'b001: BAR1
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin

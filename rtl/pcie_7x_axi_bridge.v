@@ -148,12 +148,14 @@ module pcie_7x_axi_bridge #(
                         m_axis_cq_tvalid = 1'b1;
                         m_axis_cq_tlast  = 1'b1;
                         m_axis_cq_tkeep  = {KEEP_WIDTH{1'b1}};
+                        m_axis_cq_tuser  = {85'd0, rx_bar_id};
                         m_axis_cq_tdata  = {
-                            32'd0,                                        // [127:96]
-                            2'b00, 2'b00, 3'b000, 6'b000000, rx_bar_id,   // [95:80]
-                            8'h00, rx_tag, rx_req_id, 1'b0,               // [79:48]
-                            4'b0000, 1'b0, rx_length,                     // [78:64]
-                            rx_addr_64                                    // [63:0]
+                            32'd0,                        // [127:96]: Unused in MRd
+                            rx_req_id,                    // [95:80]: Requester ID
+                            1'b0,                         // [79]
+                            4'b0000,                      // [78:75]: ReqType (0000 = MRd)
+                            1'b0, rx_length,              // [74:64]: Dword Length
+                            rx_addr_64                    // [63:0]: 64-bit Target Address
                         };
                         m_axis_rx_tready = m_axis_cq_tready;
                     end else if (rx_is_mwr) begin
@@ -161,12 +163,14 @@ module pcie_7x_axi_bridge #(
                             m_axis_cq_tvalid = 1'b1;
                             m_axis_cq_tlast  = 1'b1;
                             m_axis_cq_tkeep  = {KEEP_WIDTH{1'b1}};
+                            m_axis_cq_tuser  = {85'd0, rx_bar_id};
                             m_axis_cq_tdata  = {
-                                m_axis_rx_tdata[127:96],                      // [127:96]: Write Data Payload for 3DW
-                                2'b00, 2'b00, 3'b000, 6'b000000, rx_bar_id,   // [127:112]
-                                8'h00, rx_tag, rx_req_id, 1'b0,               // [111:79]
-                                4'b0001, 1'b0, rx_length,                     // [78:64]
-                                rx_addr_64                                    // [63:0]
+                                m_axis_rx_tdata[127:96],      // [127:96]: Write Data Payload for 3-DW
+                                rx_req_id,                    // [95:80]: Requester ID
+                                1'b0,                         // [79]
+                                4'b0001,                      // [78:75]: ReqType (0001 = MWr)
+                                1'b0, rx_length,              // [74:64]: Dword Length
+                                rx_addr_64                    // [63:0]: 64-bit Target Address
                             };
                             m_axis_rx_tready = m_axis_cq_tready;
                         end else begin // 4-DW MWr: Beat 0 holds Address, Beat 1 holds Payload Data
@@ -199,12 +203,14 @@ module pcie_7x_axi_bridge #(
                     m_axis_cq_tvalid = 1'b1;
                     m_axis_cq_tlast  = 1'b1;
                     m_axis_cq_tkeep  = {KEEP_WIDTH{1'b1}};
+                    m_axis_cq_tuser  = {85'd0, reg_mwr4_bar_id};
                     m_axis_cq_tdata  = {
                         m_axis_rx_tdata[31:0],                        // [127:96]: Write Data Payload from Beat 1
-                        2'b00, 2'b00, 3'b000, 6'b000000, reg_mwr4_bar_id, // [127:112]
-                        8'h00, reg_mwr4_tag, reg_mwr4_req_id, 1'b0,   // [111:79]
-                        4'b0001, 1'b0, reg_mwr4_length,               // [78:64]
-                        reg_mwr4_addr                                 // [63:0]
+                        reg_mwr4_req_id,                              // [95:80]: Requester ID
+                        1'b0,                                         // [79]
+                        4'b0001,                                      // [78:75]: ReqType (0001 = MWr)
+                        1'b0, reg_mwr4_length,                        // [74:64]: Dword Length
+                        reg_mwr4_addr                                 // [63:0]: 64-bit Target Address
                     };
                     m_axis_rx_tready = m_axis_cq_tready;
                 end
