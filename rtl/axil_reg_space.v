@@ -88,6 +88,10 @@ module axil_reg_space (
         `define BUILD_TIMESTAMP_DEF 32'h2026_0821
     `endif
 
+    // Hardware Debug Write Capture Registers
+    reg [31:0] reg_debug_last_wdata;
+    reg [31:0] reg_debug_last_waddr;
+
     // Version Constant Constants
     localparam [31:0] VERSION_ID_VAL      = 32'h0201_0001; // v2.1.0 (Variant 1)
     localparam [31:0] GIT_COMMIT_HASH_VAL = `GIT_COMMIT_HASH_DEF;
@@ -107,8 +111,10 @@ module axil_reg_space (
             reg_irq_ctrl      <= 32'd0;
             reg_irq_status    <= 32'd0;
             reg_pacer_ctrl    <= 32'd1; // Default: 1 (Enabled - Internal Clock Pacer Mode)
-            reg_slice_height  <= 32'd0; // Default: 0 (Disabled - Full Frame IRQ)
-            s_axil_awready    <= 1'b0;
+            reg_slice_height     <= 32'd0; // Default: 0 (Disabled - Full Frame IRQ)
+            reg_debug_last_wdata <= 32'd0;
+            reg_debug_last_waddr <= 32'd0;
+            s_axil_awready       <= 1'b0;
             s_axil_wready     <= 1'b0;
             s_axil_bvalid     <= 1'b0;
             s_axil_bresp      <= 2'b00; // OKAY
