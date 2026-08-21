@@ -263,20 +263,33 @@ module pcie_7x_axi_bridge #(
     // =========================================================================
     // CC Header Extraction (Matches UltraScale CC Encoder Format from cc_tx_encoder.v)
     wire [6:0]  cc_lower_addr  = s_axis_cc_tdata[6:0];
-    wire [9:0]  cc_dword_len   = s_axis_cc_tdata[41:32]; // Dword Count (11-bit at [42:32])
-    wire [7:0]  cc_tag         = s_axis_cc_tdata[58:51]; // Tag (8-bit at [58:51])
-    wire [15:0] cc_req_id      = s_axis_cc_tdata[79:64]; // Requester ID (16-bit at [79:64])
-    wire [15:0] cc_compl_id    = (s_axis_cc_tdata[95:80] != 16'd0) ? s_axis_cc_tdata[95:80] : compl_id; // Completer ID
+    wire [9:0]  cc_dword_len   = s_axis_cc_tdata[41:32];
+    wire [7:0]  cc_tag         = s_axis_cc_tdata[58:51];
+    wire [15:0] cc_req_id      = s_axis_cc_tdata[79:64];
+    wire [15:0] cc_compl_id    = (s_axis_cc_tdata[95:80] != 16'd0) ? s_axis_cc_tdata[95:80] : compl_id;
     wire [31:0] cc_reg_rdata   = s_axis_cc_tdata[127:96];
+
+    // CC CplD DW0..DW3 Definition (pg054 Table 2-8: 128-bit beat)
+    wire [31:0] tx_cpld_dw0 = {1'b0, 2'b10, 5'b01010, 1'b0, 3'b000, 4'b0000, 2'b00, 2'b00, 2'b00, cc_dword_len};
+    wire [31:0] tx_cpld_dw1 = {cc_compl_id, 3'b000, 1'b0, 12'd4};
+    wire [31:0] tx_cpld_dw2 = {cc_req_id, cc_tag, 1'b0, cc_lower_addr};
+    wire [31:0] tx_cpld_dw3 = cc_reg_rdata;
 
     // Decoding RQ Descriptor
     wire [63:0] rq_target_addr = s_axis_rq_tdata[63:0];
-    wire [10:0] rq_dword_len   = s_axis_rq_tdata[74:64];
+    wire [9:0]  rq_dword_len   = s_axis_rq_tdata[73:64];
     wire [3:0]  rq_req_type    = s_axis_rq_tdata[78:75];
     wire [15:0] rq_req_id      = compl_id;
     wire [7:0]  rq_tag         = s_axis_rq_tdata[103:96];
     wire        rq_is_mwr      = (rq_req_type == 4'b0001);
     wire        rq_is_4dw      = (rq_target_addr[63:32] != 32'h0);
+
+    // RQ MRd / MWr DW0 Definitions (pg054 Table 2-8: 128-bit beat)
+    wire [31:0] tx_mrd3_dw0 = {1'b0, 2'b00, 5'b00000, 1'b0, 3'b000, 4'b0000, 2'b00, 2'b00, 2'b00, rq_dword_len};
+    wire [31:0] tx_mwr3_dw0 = {1'b0, 2'b10, 5'b00000, 1'b0, 3'b000, 4'b0000, 2'b00, 2'b00, 2'b00, rq_dword_len};
+    wire [31:0] tx_mrd4_dw0 = {1'b0, 2'b01, 5'b00000, 1'b0, 3'b000, 4'b0000, 2'b00, 2'b00, 2'b00, rq_dword_len};
+    wire [31:0] tx_mwr4_dw0 = {1'b0, 2'b11, 5'b00000, 1'b0, 3'b000, 4'b0000, 2'b00, 2'b00, 2'b00, rq_dword_len};
+    wire [31:0] tx_rq_dw1   = {rq_req_id, rq_tag, 4'hF, 4'hF};
 
     localparam TX_IDLE     = 2'b00;
     localparam TX_PASS_RQ  = 2'b01;
@@ -301,12 +314,7 @@ module pcie_7x_axi_bridge #(
                     s_axis_tx_tvalid = 1'b1;
                     s_axis_tx_tlast  = 1'b1;
                     s_axis_tx_tkeep  = 16'hFFFF;
-                    s_axis_tx_tdata  = {
-                        cc_reg_rdata,                                 // DW3: Read Response Data
-                        {cc_req_id, cc_tag, 1'b0, cc_lower_addr},     // DW2: ReqID + Tag + LowerAddr
-                        {cc_compl_id, 3'b000, 1'b0, 12'd4},           // DW1: CompID + Status(SC) + ByteCount 4
-                        {1'b0, 2'b10, 5'b01010, 3'b000, 1'b0, 2'b00, 2'b00, 2'b00, 2'b00, 2'b00, cc_dword_len} // DW0: 32-bit CplD Header
-                    };
+                    s_axis_tx_tdata  = {tx_cpld_dw3, tx_cpld_dw2, tx_cpld_dw1, tx_cpld_dw0};
                 end
                 // RQ Priority (DMA Memory Reads / Writes to Host RAM)
                 else if (s_axis_rq_tvalid) begin
@@ -326,15 +334,15 @@ module pcie_7x_axi_bridge #(
                         s_axis_tx_tdata = {
                             (rq_is_mwr ? s_axis_rq_tdata[127:96] : 32'd0), // DW3: Payload for 3-DW MWr
                             rq_target_addr[31:0],                         // DW2: 32-bit Address
-                            {rq_req_id, rq_tag, 4'hF, 4'hF},              // DW1: ReqID + Tag + BE
-                            {1'b0, (rq_is_mwr ? 2'b10 : 2'b00), 5'b00000, 3'b000, 1'b0, 2'b00, 2'b00, 2'b00, 2'b00, 2'b00, rq_dword_len} // DW0: Header
+                            tx_rq_dw1,                                    // DW1: ReqID + Tag + BE
+                            (rq_is_mwr ? tx_mwr3_dw0 : tx_mrd3_dw0)       // DW0: Header
                         };
                     end else begin // 4-DW TLP
                         s_axis_tx_tdata = {
                             rq_target_addr[31:0],                         // DW3: Addr Low
                             rq_target_addr[63:32],                        // DW2: Addr High
-                            {rq_req_id, rq_tag, 4'hF, 4'hF},              // DW1: ReqID + Tag + BE
-                            {1'b0, (rq_is_mwr ? 2'b11 : 2'b01), 5'b00000, 3'b000, 1'b0, 2'b00, 2'b00, 2'b00, 2'b00, 2'b00, rq_dword_len} // DW0: Header
+                            tx_rq_dw1,                                    // DW1: ReqID + Tag + BE
+                            (rq_is_mwr ? tx_mwr4_dw0 : tx_mrd4_dw0)       // DW0: Header
                         };
                     end
                 end
