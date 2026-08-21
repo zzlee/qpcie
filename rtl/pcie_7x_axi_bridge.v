@@ -8,7 +8,7 @@
 `timescale 1ns / 1ps
 
 module pcie_7x_axi_bridge #(
-    parameter DATA_WIDTH = 128,
+    parameter DATA_WIDTH = 256,
     parameter KEEP_WIDTH = DATA_WIDTH / 8
 )(
     input  wire                  clk,
@@ -22,8 +22,8 @@ module pcie_7x_axi_bridge #(
     // ------------------------------------------------------------------------
     // 7-Series PCIe IP (pg054) 128-bit AXI-Stream RX Interface
     // ------------------------------------------------------------------------
-    input  wire [DATA_WIDTH-1:0] m_axis_rx_tdata,
-    input  wire [KEEP_WIDTH-1:0] m_axis_rx_tkeep,
+    input  wire [127:0]          m_axis_rx_tdata,
+    input  wire [15:0]           m_axis_rx_tkeep,
     input  wire                  m_axis_rx_tlast,
     input  wire                  m_axis_rx_tvalid,
     output reg                   m_axis_rx_tready,
@@ -32,8 +32,8 @@ module pcie_7x_axi_bridge #(
     // ------------------------------------------------------------------------
     // 7-Series PCIe IP (pg054) 128-bit AXI-Stream TX Interface
     // ------------------------------------------------------------------------
-    output reg  [DATA_WIDTH-1:0] s_axis_tx_tdata,
-    output reg  [KEEP_WIDTH-1:0] s_axis_tx_tkeep,
+    output reg  [127:0]          s_axis_tx_tdata,
+    output reg  [15:0]           s_axis_tx_tkeep,
     output reg                   s_axis_tx_tlast,
     output reg                   s_axis_tx_tvalid,
     input  wire                  s_axis_tx_tready,
@@ -82,14 +82,11 @@ module pcie_7x_axi_bridge #(
 
     wire [15:0] compl_id = {cfg_bus_number, cfg_device_number, cfg_function_number};
 
-    // =========================================================================
-    // 1. RX Path: 7-Series RX -> UltraScale CQ / RC Translator
-    // =========================================================================
-    wire [1:0] rx_fmt  = m_axis_rx_tdata[30:29];
-    wire [4:0] rx_type = m_axis_rx_tdata[28:24];
-
-    wire rx_is_mrd = (rx_type == 5'b00000) && (rx_fmt[1] == 1'b0);
-    wire rx_is_mwr = (rx_type == 5'b00000) && (rx_fmt[1] == 1'b1);
+    // Decoding 7-Series TLP Header (pg054 Table 2-8)
+    wire [1:0]  rx_fmt   = m_axis_rx_tdata[30:29];
+    wire [4:0]  rx_type  = m_axis_rx_tdata[28:24];
+    wire rx_is_mrd = (rx_type == 5'b00000);
+    wire rx_is_mwr = (rx_type == 5'b00000 && rx_fmt[1]);
     wire rx_is_cpl = (rx_type == 5'b01010);
     wire rx_is_4dw = rx_fmt[0];
 
@@ -113,9 +110,10 @@ module pcie_7x_axi_bridge #(
     wire [7:0]  rc_tag        = m_axis_rx_tdata[79:72];
     wire [15:0] rc_req_id     = m_axis_rx_tdata[95:80];
 
-    localparam RX_IDLE       = 2'b00;
-    localparam RX_MWR4_BEAT1 = 2'b01;
-    localparam RX_PASS_RC    = 2'b10;
+    // State machine to handle 4-DW MWr TLPs
+    localparam RX_IDLE       = 2'd0;
+    localparam RX_MWR4_BEAT1 = 2'd1;
+    localparam RX_PASS_RC    = 2'd2;
 
     reg [1:0]  rx_state;
     reg [63:0] reg_mwr4_addr;
@@ -124,20 +122,20 @@ module pcie_7x_axi_bridge #(
     reg [7:0]  reg_mwr4_tag;
     reg [2:0]  reg_mwr4_bar_id;
 
+    // Combinational RX Bridge Logic
     always @(*) begin
-        m_axis_cq_tdata  = 128'd0;
         m_axis_cq_tvalid = 1'b0;
         m_axis_cq_tlast  = 1'b0;
+        m_axis_cq_tkeep  = 32'h0;
+        m_axis_cq_tdata  = {DATA_WIDTH{1'b0}};
         m_axis_cq_tuser  = 88'd0;
-        m_axis_cq_tkeep  = 16'd0;
+        m_axis_rx_tready = 1'b0;
 
-        m_axis_rc_tdata  = 128'd0;
         m_axis_rc_tvalid = 1'b0;
         m_axis_rc_tlast  = 1'b0;
+        m_axis_rc_tkeep  = 32'h0;
+        m_axis_rc_tdata  = {DATA_WIDTH{1'b0}};
         m_axis_rc_tuser  = 75'd0;
-        m_axis_rc_tkeep  = 16'd0;
-
-        m_axis_rx_tready = 1'b1;
 
         case (rx_state)
             RX_IDLE: begin
@@ -147,22 +145,26 @@ module pcie_7x_axi_bridge #(
                         m_axis_cq_tlast  = 1'b1;
                         m_axis_cq_tkeep  = 32'hFFFFFFFF;
                         m_axis_cq_tdata  = {
-                            128'd0, // [255:128]
-                            2'b00, 2'b00, 3'b000, 6'b000000, rx_bar_id,
-                            8'h00, rx_tag, rx_req_id, 1'b0,
-                            4'b0000, 1'b0, rx_length,
-                            rx_addr_64
+                            96'd0, // [255:160]
+                            32'd0, // [159:128]
+                            2'b00, 2'b00, 3'b000, 6'b000000, rx_bar_id, // [127:112]
+                            8'h00, rx_tag, rx_req_id, 1'b0, // [111:79]
+                            4'b0000, 1'b0, rx_length, // [78:64]
+                            rx_addr_64 // [63:0]
                         };
                         m_axis_rx_tready = m_axis_cq_tready;
                     end else if (rx_is_mwr) begin
                         if (!rx_is_4dw) begin // 3-DW MWr: Payload data is at [127:96]
                             m_axis_cq_tvalid = 1'b1;
                             m_axis_cq_tlast  = 1'b1;
-                            m_axis_cq_tkeep  = 16'hFFFF;
+                            m_axis_cq_tkeep  = 32'hFFFFFFFF;
                             m_axis_cq_tdata  = {
-                                m_axis_rx_tdata[127:96], // [127:96]: Write Data Payload for 128-bit bus
-                                4'b0001, 1'b0, rx_length, 8'h00, rx_tag, rx_req_id,
-                                rx_addr_64
+                                96'd0, // [255:160]
+                                m_axis_rx_tdata[127:96], // [159:128]: Write Data Payload
+                                2'b00, 2'b00, 3'b000, 6'b000000, rx_bar_id, // [127:112]
+                                8'h00, rx_tag, rx_req_id, 1'b0, // [111:79]
+                                4'b0001, 1'b0, rx_length, // [78:64]
+                                rx_addr_64 // [63:0]
                             };
                             m_axis_rx_tready = m_axis_cq_tready;
                         end else begin // 4-DW MWr: Beat 0 holds Address, Beat 1 holds Payload Data
@@ -171,8 +173,9 @@ module pcie_7x_axi_bridge #(
                     end else if (rx_is_cpl) begin
                         m_axis_rc_tvalid = 1'b1;
                         m_axis_rc_tlast  = m_axis_rx_tlast;
-                        m_axis_rc_tkeep  = m_axis_rx_tkeep;
+                        m_axis_rc_tkeep  = 32'hFFFFFFFF;
                         m_axis_rc_tdata  = {
+                            128'd0,
                             m_axis_rx_tdata[127:96],
                             rc_req_id, rc_tag, 2'b00, rc_cpl_status,
                             1'b0, rx_length, 3'b000, rc_byte_count, 4'd0, rc_lower_addr
@@ -186,11 +189,14 @@ module pcie_7x_axi_bridge #(
                 if (m_axis_rx_tvalid) begin
                     m_axis_cq_tvalid = 1'b1;
                     m_axis_cq_tlast  = 1'b1;
-                    m_axis_cq_tkeep  = 16'hFFFF;
+                    m_axis_cq_tkeep  = 32'hFFFFFFFF;
                     m_axis_cq_tdata  = {
-                        m_axis_rx_tdata[31:0], // [127:96]: Write Data Payload from Beat 1 for 128-bit bus
-                        4'b0001, 1'b0, reg_mwr4_length, 8'h00, reg_mwr4_tag, reg_mwr4_req_id,
-                        reg_mwr4_addr
+                        96'd0, // [255:160]
+                        m_axis_rx_tdata[31:0], // [159:128]: Write Data Payload from Beat 1
+                        2'b00, 2'b00, 3'b000, 6'b000000, reg_mwr4_bar_id, // [127:112]
+                        8'h00, reg_mwr4_tag, reg_mwr4_req_id, 1'b0, // [111:79]
+                        4'b0001, 1'b0, reg_mwr4_length, // [78:64]
+                        reg_mwr4_addr // [63:0]
                     };
                     m_axis_rx_tready = m_axis_cq_tready;
                 end
