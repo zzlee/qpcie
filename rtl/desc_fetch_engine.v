@@ -123,10 +123,10 @@ module desc_fetch_engine (
                             h2c_plane1_dst      <= desc_cpl_data[255:192];
                             h2c_plane2_src      <= desc_cpl_data[319:256];
                             h2c_plane2_dst      <= desc_cpl_data[383:320];
-                            h2c_line_width      <= (desc_cpl_data[399:384] > 0) ? desc_cpl_data[399:384] : desc_cpl_data[159:128];
+                            h2c_line_width      <= (desc_cpl_data[399:384] > 0) ? desc_cpl_data[399:384] : 16'd4096;
                             h2c_line_count      <= (desc_cpl_data[415:400] > 0) ? desc_cpl_data[415:400] : 16'd1;
-                            h2c_src_stride      <= (desc_cpl_data[431:416] > 0) ? desc_cpl_data[431:416] : desc_cpl_data[399:384];
-                            h2c_dst_stride      <= (desc_cpl_data[447:432] > 0) ? desc_cpl_data[447:432] : desc_cpl_data[399:384];
+                            h2c_src_stride      <= (desc_cpl_data[431:416] > 0) ? desc_cpl_data[431:416] : 16'd4096;
+                            h2c_dst_stride      <= (desc_cpl_data[447:432] > 0) ? desc_cpl_data[447:432] : 16'd4096;
                             h2c_plane12_width   <= desc_cpl_data[463:448];
                             h2c_plane12_count   <= desc_cpl_data[479:464];
                             h2c_format          <= desc_cpl_data[483:480];
@@ -140,10 +140,10 @@ module desc_fetch_engine (
                             c2h_plane1_dst      <= desc_cpl_data[255:192];
                             c2h_plane2_src      <= desc_cpl_data[319:256];
                             c2h_plane2_dst      <= desc_cpl_data[383:320];
-                            c2h_line_width      <= (desc_cpl_data[399:384] > 0) ? desc_cpl_data[399:384] : desc_cpl_data[159:128];
+                            c2h_line_width      <= (desc_cpl_data[399:384] > 0) ? desc_cpl_data[399:384] : 16'd4096;
                             c2h_line_count      <= (desc_cpl_data[415:400] > 0) ? desc_cpl_data[415:400] : 16'd1;
-                            c2h_src_stride      <= (desc_cpl_data[431:416] > 0) ? desc_cpl_data[431:416] : desc_cpl_data[399:384];
-                            c2h_dst_stride      <= (desc_cpl_data[447:432] > 0) ? desc_cpl_data[447:432] : desc_cpl_data[399:384];
+                            c2h_src_stride      <= (desc_cpl_data[431:416] > 0) ? desc_cpl_data[431:416] : 16'd4096;
+                            c2h_dst_stride      <= (desc_cpl_data[447:432] > 0) ? desc_cpl_data[447:432] : 16'd4096;
                             c2h_plane12_width   <= desc_cpl_data[463:448];
                             c2h_plane12_count   <= desc_cpl_data[479:464];
                             c2h_format          <= desc_cpl_data[483:480];

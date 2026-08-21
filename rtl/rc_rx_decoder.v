@@ -41,12 +41,12 @@ module rc_rx_decoder #(
     output reg  [7:0]            tag_free_val
 );
 
-    localparam IDLE         = 2'b00;
-    localparam ROUTE_DESC_2 = 2'b01;
-    localparam ROUTE_H2C    = 2'b10;
+    localparam IDLE       = 2'b00;
+    localparam ROUTE_DESC = 2'b01;
+    localparam ROUTE_H2C  = 2'b10;
 
     reg [1:0] state;
-    reg [255:0] desc_beat0;
+    reg [2:0] desc_beat_cnt;
 
     // Header Extraction from first beat according to pg213 Table 2-19
     wire [7:0]  rc_tag       = s_axis_rc_tdata[71:64];  // pg213 Table 2-19: Tag is at [71:64]
@@ -65,71 +65,58 @@ module rc_rx_decoder #(
             h2c_fifo_wlast   <= 1'b0;
             tag_free_req     <= 1'b0;
             tag_free_val     <= 8'd0;
-            desc_beat0       <= 256'd0;
+            desc_beat_cnt    <= 3'd0;
         end else begin
             case (state)
                 IDLE: begin
-                    desc_cpl_valid  <= 1'b0;
-                    h2c_fifo_wvalid <= 1'b0;
-                    tag_free_req    <= 1'b0;
+                    desc_cpl_valid   <= 1'b0;
+                    h2c_fifo_wvalid  <= 1'b0;
+                    tag_free_req     <= 1'b0;
                     s_axis_rc_tready <= 1'b1;
+                    desc_beat_cnt    <= 3'd0;
 
                     if (s_axis_rc_tvalid && s_axis_rc_tready) begin
-                        if (rc_tag == 8'h00) begin // Descriptor CplD
+                        if (rc_tag == 8'h00) begin // Descriptor CplD (Tag 0)
+                            desc_cpl_data[31:0] <= s_axis_rc_tdata[127:96]; // Payload DW0 from Beat 0
                             if (s_axis_rc_tlast) begin
-                                // Single beat payload
                                 desc_cpl_valid <= 1'b1;
-                                if (DATA_WIDTH >= 256) begin
-                                    desc_cpl_data <= {352'd0, s_axis_rc_tdata[255:96]};
-                                end else begin
-                                    desc_cpl_data <= {480'd0, s_axis_rc_tdata[127:96]};
-                                end
                                 desc_cpl_last  <= 1'b1;
+                                tag_free_req   <= 1'b1;
+                                tag_free_val   <= 8'h00;
                             end else begin
-                                // Multi-beat payload for 64-Byte (512-bit) Extended Descriptor
-                                if (DATA_WIDTH >= 256) begin
-                                    desc_beat0 <= {96'd0, s_axis_rc_tdata[255:96]};
-                                end else begin
-                                    desc_beat0 <= {224'd0, s_axis_rc_tdata[127:96]};
-                                end
-                                s_axis_rc_tready <= 1'b1;
-                                state            <= ROUTE_DESC_2;
+                                desc_beat_cnt <= 3'd1;
+                                state         <= ROUTE_DESC;
                             end
-                        end else begin // H2C DMA CplD
+                        end else begin // H2C Data CplD (Tag > 0)
                             h2c_fifo_wvalid <= 1'b1;
-                            if (DATA_WIDTH >= 256) begin
-                                h2c_fifo_wdata <= {96'd0, s_axis_rc_tdata[255:96]};
-                            end else begin
-                                h2c_fifo_wdata <= {224'd0, s_axis_rc_tdata[127:96]};
-                            end
+                            h2c_fifo_wdata  <= {96'd0, s_axis_rc_tdata[127:96]};
                             h2c_fifo_wlast  <= s_axis_rc_tlast;
-
                             tag_free_req    <= s_axis_rc_tlast;
                             tag_free_val    <= rc_tag;
 
                             if (!s_axis_rc_tlast) begin
-                                s_axis_rc_tready <= 1'b1;
-                                state            <= ROUTE_H2C;
+                                state <= ROUTE_H2C;
                             end
                         end
                     end
                 end
 
-                ROUTE_DESC_2: begin
+                ROUTE_DESC: begin
                     if (s_axis_rc_tvalid && s_axis_rc_tready) begin
-                        desc_cpl_valid <= 1'b1;
-                        if (DATA_WIDTH >= 256) begin
-                            desc_cpl_data <= {s_axis_rc_tdata[255:0], desc_beat0[255:0]};
-                        end else begin
-                            desc_cpl_data <= {384'd0, s_axis_rc_tdata[127:0], desc_beat0[127:0]};
-                        end
-                        desc_cpl_last <= s_axis_rc_tlast;
+                        case (desc_beat_cnt)
+                            3'd1: desc_cpl_data[159:32]  <= s_axis_rc_tdata[127:0]; // DW1..DW4
+                            3'd2: desc_cpl_data[287:160] <= s_axis_rc_tdata[127:0]; // DW5..DW8
+                            3'd3: desc_cpl_data[415:288] <= s_axis_rc_tdata[127:0]; // DW9..DW12
+                            3'd4: desc_cpl_data[511:416] <= s_axis_rc_tdata[95:0];  // DW13..DW15
+                        endcase
+                        desc_beat_cnt <= desc_beat_cnt + 1'b1;
 
-                        tag_free_req  <= s_axis_rc_tlast;
-                        tag_free_val  <= 8'h00;
-
-                        if (s_axis_rc_tlast) begin
-                            state <= IDLE;
+                        if (s_axis_rc_tlast || desc_beat_cnt >= 3'd4) begin
+                            desc_cpl_valid <= 1'b1;
+                            desc_cpl_last  <= 1'b1;
+                            tag_free_req   <= 1'b1;
+                            tag_free_val   <= 8'h00;
+                            state          <= IDLE;
                         end
                     end
                 end
