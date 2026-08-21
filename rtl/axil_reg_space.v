@@ -50,6 +50,8 @@ module axil_reg_space (
 
     input  wire [31:0] completed_h2c_count,
     input  wire [31:0] completed_c2h_count,
+    input  wire [15:0] reg_h2c_head_ptr,
+    input  wire [15:0] reg_c2h_head_ptr,
 
     // Telemetry & Hardware AV Sync Input Registers
     input  wire [63:0] reg_global_timestamp,
@@ -189,6 +191,8 @@ module axil_reg_space (
                     ADDR_GIT_COMMIT_HASH: s_axil_rdata <= GIT_COMMIT_HASH_VAL;
                     ADDR_BUILD_TIMESTAMP: s_axil_rdata <= BUILD_TIMESTAMP_VAL;
                     ADDR_HARDWARE_CAPS:   s_axil_rdata <= HARDWARE_CAPS_VAL;
+                    8'h40:                s_axil_rdata <= {reg_h2c_tail_ptr, reg_h2c_head_ptr};
+                    8'h44:                s_axil_rdata <= {reg_c2h_tail_ptr, reg_c2h_head_ptr};
 
                     // Hardware AV Sync Timestamp Registers (BAR0 Offsets 0x50..0x64)
                     8'h50:                s_axil_rdata <= reg_global_timestamp[31:0];

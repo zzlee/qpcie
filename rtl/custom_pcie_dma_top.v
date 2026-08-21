@@ -181,6 +181,19 @@ module custom_pcie_dma_top #(
     wire [NUM_AUDIO_CH-1:0]                    a_c2h_req_last;
     wire [NUM_AUDIO_CH-1:0]                    a_busy, a_done;
 
+    // SG DMA Engine Wires
+    wire        sg_h2c_desc_ready, sg_c2h_desc_ready;
+    wire        sg_h2c_req_valid, sg_h2c_req_ack;
+    wire [63:0] sg_h2c_req_addr;
+    wire [10:0] sg_h2c_req_dw_len;
+    wire [7:0]  sg_h2c_req_tag;
+    wire        sg_c2h_req_valid, sg_c2h_req_ack, sg_c2h_req_last;
+    wire [63:0] sg_c2h_req_addr;
+    wire [10:0] sg_c2h_req_dw_len;
+    wire [PCIE_DATA_WIDTH-1:0] sg_c2h_req_data;
+    wire [31:0] sg_h2c_bytes, sg_c2h_bytes;
+    wire        sg_h2c_busy, sg_c2h_busy;
+
     // Multiplexed C2H Request Signals
     reg                        c2h_req_valid_mux;
     reg  [63:0]                c2h_req_addr_mux;
@@ -193,12 +206,22 @@ module custom_pcie_dma_top #(
     reg     c2h_arb_found;
 
     always @(*) begin
-        c2h_req_valid_mux = 1'b0;
+        c2h_req_valid_mux  = 1'b0;
         c2h_req_addr_mux   = 64'd0;
         c2h_req_dw_len_mux = 11'd0;
         c2h_req_data_mux   = {PCIE_DATA_WIDTH{1'b0}};
         c2h_req_last_mux   = 1'b0;
         c2h_arb_found      = 1'b0;
+
+        // Priority 1: SG DMA Engine
+        if (sg_c2h_req_valid) begin
+            c2h_req_valid_mux  = 1'b1;
+            c2h_req_addr_mux   = sg_c2h_req_addr;
+            c2h_req_dw_len_mux = sg_c2h_req_dw_len;
+            c2h_req_data_mux   = sg_c2h_req_data;
+            c2h_req_last_mux   = sg_c2h_req_last;
+            c2h_arb_found      = 1'b1;
+        end
 
         for (i_arb = 0; i_arb < NUM_VIDEO_CH; i_arb = i_arb + 1) begin
             if (!c2h_arb_found && v_c2h_req_valid[i_arb]) begin
@@ -223,7 +246,9 @@ module custom_pcie_dma_top #(
         end
     end
 
-    assign reg_dma_status = {24'd0, a_done[0], v_done[0], a_busy[0], v_busy[0]};
+    assign sg_c2h_req_ack = sg_c2h_req_valid ? c2h_req_ack_mux : 1'b0;
+
+    assign reg_dma_status = {16'd0, sg_c2h_busy, sg_h2c_busy, 6'd0, a_done[0], v_done[0], a_busy[0], v_busy[0]};
 
     // 1. CQ RX Decoder
     cq_rx_decoder #(
@@ -352,6 +377,8 @@ module custom_pcie_dma_top #(
         .reg_irq_status(reg_irq_status),
         .completed_h2c_count(completed_h2c_count),
         .completed_c2h_count(completed_c2h_count),
+        .reg_h2c_head_ptr(reg_h2c_head_ptr),
+        .reg_c2h_head_ptr(reg_c2h_head_ptr),
         .reg_global_timestamp(global_timestamp),
         .reg_last_video_pts(v_pts[0]),
         .reg_last_audio_pts(a_pts[0]),
@@ -420,11 +447,11 @@ module custom_pcie_dma_top #(
         .desc_req_dw_len(desc_req_dw_len),
         .desc_req_tag(desc_req_tag),
         .desc_req_ack(desc_req_ack),
-        .h2c_req_valid(h2c_req_valid),
-        .h2c_req_addr(h2c_req_addr),
-        .h2c_req_dw_len(h2c_req_dw_len),
-        .h2c_req_tag(h2c_req_tag),
-        .h2c_req_ack(h2c_req_ack),
+        .h2c_req_valid(sg_h2c_req_valid),
+        .h2c_req_addr(sg_h2c_req_addr),
+        .h2c_req_dw_len(sg_h2c_req_dw_len),
+        .h2c_req_tag(sg_h2c_req_tag),
+        .h2c_req_ack(sg_h2c_req_ack),
         .c2h_req_valid(c2h_req_valid_mux),
         .c2h_req_addr(c2h_req_addr_mux),
         .c2h_req_dw_len(c2h_req_dw_len_mux),
@@ -481,7 +508,7 @@ module custom_pcie_dma_top #(
         .h2c_plane12_width(h2c_plane12_width), .h2c_plane12_count(h2c_plane12_count),
         .h2c_format(h2c_format), .h2c_plane_count(h2c_plane_count),
         .h2c_desc_ctrl(h2c_desc_ctrl),
-        .h2c_desc_ready(h2c_desc_ready),
+        .h2c_desc_ready(sg_h2c_desc_ready),
         .c2h_desc_valid(c2h_desc_valid),
         .c2h_plane0_src(c2h_plane0_src), .c2h_plane0_dst(c2h_plane0_dst),
         .c2h_plane1_src(c2h_plane1_src), .c2h_plane1_dst(c2h_plane1_dst),
@@ -491,7 +518,43 @@ module custom_pcie_dma_top #(
         .c2h_plane12_width(c2h_plane12_width), .c2h_plane12_count(c2h_plane12_count),
         .c2h_format(c2h_format), .c2h_plane_count(c2h_plane_count),
         .c2h_desc_ctrl(c2h_desc_ctrl),
-        .c2h_desc_ready(c2h_desc_ready)
+        .c2h_desc_ready(sg_c2h_desc_ready)
+    );
+
+    // 7.1 Scatter-Gather (SG) DMA Engine (H2C MRd Stream Consumer & C2H MWr Pattern Generator)
+    sg_dma_engine #(
+        .PCIE_DATA_WIDTH(PCIE_DATA_WIDTH)
+    ) u_sg_dma_engine (
+        .clk(clk),
+        .rst_n(rst_n),
+        .h2c_desc_valid(h2c_desc_valid),
+        .h2c_plane0_src(h2c_plane0_src),
+        .h2c_line_width(h2c_line_width),
+        .h2c_desc_ready(sg_h2c_desc_ready),
+        .c2h_desc_valid(c2h_desc_valid),
+        .c2h_plane0_dst(c2h_plane0_dst),
+        .c2h_line_width(c2h_line_width),
+        .c2h_desc_ready(sg_c2h_desc_ready),
+        .h2c_req_valid(sg_h2c_req_valid),
+        .h2c_req_addr(sg_h2c_req_addr),
+        .h2c_req_dw_len(sg_h2c_req_dw_len),
+        .h2c_req_tag(sg_h2c_req_tag),
+        .h2c_req_ack(sg_h2c_req_ack),
+        .c2h_req_valid(sg_c2h_req_valid),
+        .c2h_req_addr(sg_c2h_req_addr),
+        .c2h_req_dw_len(sg_c2h_req_dw_len),
+        .c2h_req_data(sg_c2h_req_data),
+        .c2h_req_last(sg_c2h_req_last),
+        .c2h_req_ack(sg_c2h_req_ack),
+        .h2c_cpl_valid(h2c_fifo_wvalid),
+        .h2c_cpl_data(h2c_fifo_wdata),
+        .h2c_cpl_last(h2c_fifo_wlast),
+        .completed_h2c_count(completed_h2c_count),
+        .completed_c2h_count(completed_c2h_count),
+        .h2c_bytes_transferred(sg_h2c_bytes),
+        .c2h_bytes_transferred(sg_c2h_bytes),
+        .h2c_busy(sg_h2c_busy),
+        .c2h_busy(sg_c2h_busy)
     );
 
     // 8. Multi-Channel Video Stream Engines (Parameterized Generator)

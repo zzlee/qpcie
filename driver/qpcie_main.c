@@ -130,95 +130,113 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
     }
     pci_set_master(pdev);
 
-    /* ------------------------------------------------------------------------
-     * 3. Step 1: H2C 4KB DMA Read Test (Host -> FPGA)
-     * ------------------------------------------------------------------------ */
-    dev_info(&pdev->dev, "--- [3. Step 1: H2C 4KB DMA Read Test (Host -> FPGA)] ---\n");
-    dma_addr_t desc_ring_dma = 0;
-    dma_addr_t h2c_buf_dma = 0;
-    dma_addr_t c2h_buf_dma = 0;
+    /* --------------------------------------------------------------------
+     * 3. Scatter-Gather (SG List) DMA Verification: 4x H2C + 4x C2H Pages
+     * -------------------------------------------------------------------- */
+    dev_info(&pdev->dev, "--- [3. Scatter-Gather (SG List) DMA Verification] ---\n");
+
+    #define SG_PAGES 4
+    dma_addr_t desc_ring_dma;
+    dma_addr_t h2c_page_dma[SG_PAGES];
+    dma_addr_t c2h_page_dma[SG_PAGES];
+    u32 *h2c_pages[SG_PAGES];
+    u32 *c2h_pages[SG_PAGES];
+    int p, w;
 
     struct qpcie_dma_desc_64b *desc_ring = dma_alloc_coherent(&pdev->dev, 64 * 16, &desc_ring_dma, GFP_KERNEL);
-    u32 *h2c_buf = dma_alloc_coherent(&pdev->dev, 4096, &h2c_buf_dma, GFP_KERNEL);
-    u32 *c2h_buf = dma_alloc_coherent(&pdev->dev, 4096, &c2h_buf_dma, GFP_KERNEL);
 
-    if (!desc_ring || !h2c_buf || !c2h_buf) {
-        dev_err(&pdev->dev, "[ERROR] dma_alloc_coherent failed!\n");
+    if (!desc_ring) {
+        dev_err(&pdev->dev, "[ERROR] dma_alloc_coherent failed for Descriptor Ring!\n");
     } else {
-        int i;
         memset(desc_ring, 0, 64 * 16);
-        for (i = 0; i < 1024; i++) {
-            h2c_buf[i] = 0xAA550000 + i;
-        }
-        memset(c2h_buf, 0x00, 4096);
-
         dev_info(&pdev->dev, "  Allocated Coherent Ring: Phys=0x%llX (Virt=%p)\n", (u64)desc_ring_dma, desc_ring);
-        dev_info(&pdev->dev, "  Allocated H2C Buffer   : Phys=0x%llX (Virt=%p), Seed Pattern=0x%08X\n", (u64)h2c_buf_dma, h2c_buf, h2c_buf[0]);
-        dev_info(&pdev->dev, "  Allocated C2H Buffer   : Phys=0x%llX (Virt=%p)\n", (u64)c2h_buf_dma, c2h_buf);
 
-        /* Configure Descriptor 0 for 4KB H2C DMA */
-        desc_ring[0].plane0_src_addr = (u64)h2c_buf_dma;
-        desc_ring[0].plane0_dst_addr = 0x0ULL;
-        desc_ring[0].line_width      = 4096;
-        desc_ring[0].line_count      = 1;
-        desc_ring[0].src_stride      = 4096;
-        desc_ring[0].dst_stride      = 4096;
-        desc_ring[0].format          = 0;
-        desc_ring[0].plane_count     = 1;
-        desc_ring[0].control         = 0x00; /* Direction: 0 = H2C (Host -> FPGA) */
+        for (p = 0; p < SG_PAGES; p++) {
+            h2c_pages[p] = dma_alloc_coherent(&pdev->dev, 4096, &h2c_page_dma[p], GFP_KERNEL);
+            c2h_pages[p] = dma_alloc_coherent(&pdev->dev, 4096, &c2h_page_dma[p], GFP_KERNEL);
+            if (h2c_pages[p]) {
+                for (w = 0; w < 1024; w++) {
+                    h2c_pages[p][w] = 0xAA000000 | (p << 16) | w;
+                }
+            }
+            if (c2h_pages[p]) {
+                memset(c2h_pages[p], 0x00, 4096);
+            }
+            dev_info(&pdev->dev, "  [SG Page %d] H2C Phys=0x%llX (Pattern: 0x%08X), C2H Phys=0x%llX\n",
+                     p, (u64)h2c_page_dma[p], h2c_pages[p] ? h2c_pages[p][0] : 0, (u64)c2h_page_dma[p]);
+        }
+
+        /* Build SG Ring: Descriptors 0..3 for H2C, Descriptors 4..7 for C2H */
+        for (p = 0; p < SG_PAGES; p++) {
+            desc_ring[p].plane0_src_addr = (u64)h2c_page_dma[p];
+            desc_ring[p].plane0_dst_addr = 0x0ULL;
+            desc_ring[p].line_width      = 4096;
+            desc_ring[p].line_count      = 1;
+            desc_ring[p].src_stride      = 4096;
+            desc_ring[p].dst_stride      = 4096;
+            desc_ring[p].format          = 0;
+            desc_ring[p].plane_count     = 1;
+            desc_ring[p].control         = 0x00; /* H2C: Host -> FPGA */
+
+            desc_ring[p + SG_PAGES].plane0_src_addr = 0x0ULL;
+            desc_ring[p + SG_PAGES].plane0_dst_addr = (u64)c2h_page_dma[p];
+            desc_ring[p + SG_PAGES].line_width      = 4096;
+            desc_ring[p + SG_PAGES].line_count      = 1;
+            desc_ring[p + SG_PAGES].src_stride      = 4096;
+            desc_ring[p + SG_PAGES].dst_stride      = 4096;
+            desc_ring[p + SG_PAGES].format          = 0;
+            desc_ring[p + SG_PAGES].plane_count     = 1;
+            desc_ring[p + SG_PAGES].control         = 0x02; /* C2H: FPGA -> Host */
+        }
 
         /* Program Ring Base Address into BAR0 0x08 (Low) and 0x0C (High) */
         iowrite32((u32)(desc_ring_dma & 0xFFFFFFFF), qdev->bar0_mmio + REG_H2C_RING_ADDR_L);
         iowrite32((u32)((desc_ring_dma >> 32) & 0xFFFFFFFF), qdev->bar0_mmio + REG_H2C_RING_ADDR_H);
 
-        /* Set Ring Config: Size=16, Tail=1 */
-        iowrite32((1 << 16) | 16, qdev->bar0_mmio + REG_H2C_RING_CFG);
+        /* Set Ring Config: Size=16, Tail=4 (Trigger 4x H2C Descriptors) */
+        iowrite32((4 << 16) | 16, qdev->bar0_mmio + REG_H2C_RING_CFG);
 
         /* Trigger DMA Start */
         iowrite32(0x00000001, qdev->bar0_mmio + REG_DMA_CTRL);
-        dev_info(&pdev->dev, "  Triggered H2C DMA Run (Tail=1, Size=16)... Waiting 10ms\n");
-        msleep(10);
+        dev_info(&pdev->dev, "--- [3.1 Step 1: H2C 4-Page SG List DMA Read Test] ---\n");
+        dev_info(&pdev->dev, "  Triggered H2C SG Run (Tail=4, Size=16)... Waiting 20ms\n");
+        msleep(20);
 
         u32 dma_stat = ioread32(qdev->bar0_mmio + REG_DMA_STATUS);
         u32 comp_h2c = ioread32(qdev->bar0_mmio + REG_COMPLETED_H2C);
-        dev_info(&pdev->dev, "  H2C Execution Status: DMA_STATUS=0x%08X, Completed Count=0x%08X\n", dma_stat, comp_h2c);
+        u32 ptr_dbg  = ioread32(qdev->bar0_mmio + 0x40);
+        dev_info(&pdev->dev, "  H2C SG Status: DMA_STATUS=0x%08X, Completed Count=%u, Pointers=0x%08X (Tail=%u, Head=%u)\n",
+                 dma_stat, comp_h2c, ptr_dbg, (ptr_dbg >> 16) & 0xFFFF, ptr_dbg & 0xFFFF);
 
-        /* --------------------------------------------------------------------
-         * 4. Step 2: C2H 4KB DMA Write Test (FPGA -> Host)
-         * -------------------------------------------------------------------- */
-        dev_info(&pdev->dev, "--- [4. Step 2: C2H 4KB DMA Write Test (FPGA -> Host)] ---\n");
-
-        /* Configure Descriptor 1 for 4KB C2H DMA */
-        desc_ring[1].plane0_src_addr = 0x0ULL;
-        desc_ring[1].plane0_dst_addr = (u64)c2h_buf_dma;
-        desc_ring[1].line_width      = 4096;
-        desc_ring[1].line_count      = 1;
-        desc_ring[1].src_stride      = 4096;
-        desc_ring[1].dst_stride      = 4096;
-        desc_ring[1].format          = 0;
-        desc_ring[1].plane_count     = 1;
-        desc_ring[1].control         = 0x02; /* Direction: 1 = C2H (FPGA -> Host) */
-
-        /* Advance Tail Pointer to 2 */
-        iowrite32((2 << 16) | 16, qdev->bar0_mmio + REG_H2C_RING_CFG);
-        dev_info(&pdev->dev, "  Triggered C2H DMA Run (Tail=2)... Waiting 10ms\n");
-        msleep(10);
+        /* Advance Tail Pointer to 8 (Trigger 4x C2H Descriptors) */
+        dev_info(&pdev->dev, "--- [3.2 Step 2: C2H 4-Page SG List DMA Write Test] ---\n");
+        iowrite32((8 << 16) | 16, qdev->bar0_mmio + REG_H2C_RING_CFG);
+        dev_info(&pdev->dev, "  Triggered C2H SG Run (Tail=8, Size=16)... Waiting 20ms\n");
+        msleep(20);
 
         dma_stat = ioread32(qdev->bar0_mmio + REG_DMA_STATUS);
         u32 comp_c2h = ioread32(qdev->bar0_mmio + REG_COMPLETED_C2H);
-        dev_info(&pdev->dev, "  C2H Execution Status: DMA_STATUS=0x%08X, Completed Count=0x%08X\n", dma_stat, comp_c2h);
+        ptr_dbg  = ioread32(qdev->bar0_mmio + 0x40);
+        dev_info(&pdev->dev, "  C2H SG Status: DMA_STATUS=0x%08X, Completed Count=%u, Pointers=0x%08X (Tail=%u, Head=%u)\n",
+                 dma_stat, comp_c2h, ptr_dbg, (ptr_dbg >> 16) & 0xFFFF, ptr_dbg & 0xFFFF);
 
-        /* Inspect C2H buffer */
-        dev_info(&pdev->dev, "  C2H Buffer Content: [0]=0x%08X, [1]=0x%08X, [2]=0x%08X, [3]=0x%08X\n",
-                 c2h_buf[0], c2h_buf[1], c2h_buf[2], c2h_buf[3]);
+        /* Inspect C2H pages */
+        for (p = 0; p < SG_PAGES; p++) {
+            if (c2h_pages[p]) {
+                dev_info(&pdev->dev, "  C2H Page %d Content: [0]=0x%08X, [1]=0x%08X, [2]=0x%08X, [3]=0x%08X\n",
+                         p, c2h_pages[p][0], c2h_pages[p][1], c2h_pages[p][2], c2h_pages[p][3]);
+            }
+        }
 
         /* Stop DMA */
         iowrite32(0x00000000, qdev->bar0_mmio + REG_DMA_CTRL);
 
         /* Free DMA Buffers */
         dma_free_coherent(&pdev->dev, 64 * 16, desc_ring, desc_ring_dma);
-        dma_free_coherent(&pdev->dev, 4096, h2c_buf, h2c_buf_dma);
-        dma_free_coherent(&pdev->dev, 4096, c2h_buf, c2h_buf_dma);
+        for (p = 0; p < SG_PAGES; p++) {
+            if (h2c_pages[p]) dma_free_coherent(&pdev->dev, 4096, h2c_pages[p], h2c_page_dma[p]);
+            if (c2h_pages[p]) dma_free_coherent(&pdev->dev, 4096, c2h_pages[p], c2h_page_dma[p]);
+        }
     }
 
     dev_info(&pdev->dev, "=======================================================\n");
