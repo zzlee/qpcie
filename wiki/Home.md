@@ -10,6 +10,7 @@ This directory contains complete technical documentation covering FPGA RTL hardw
 ### 1. 📘 System Overview & Build Guides
 * **[Overview](Overview.md)** - Comprehensive project architecture, feature matrix, and technical highlights.
 * **[FPGA Build Guide](FPGA-Build-Guide.md)** - Step-by-step Vivado batch compilation, bitstream synthesis, and XDC pinout constraints.
+* **[A50T Hardware Verification Log](A50T-Hardware-Verification-Log.md)** - Artix-7 A50T 實機測試進度、除錯歷程、CplD 標頭校正與 4096-Byte 仿真驗證成果。
 * **[A50T TLP Loopback Test](A50T-TLP-Loopback-Test.md)** - Artix-7 A50T 最小化 PCIe TLP 驗證：MRd/MWr TLP 正常處理、lspci 枚舉、dmesg 無 error。
 
 ### 2. 🎬 Video & Audio Datapath Architecture

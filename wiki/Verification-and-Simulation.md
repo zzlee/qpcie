@@ -18,6 +18,7 @@
 | [`tb_h2c_dma_engine.v`](file:///home/zzlee/qpcie/tb/tb_h2c_dma_engine.v) | `h2c_dma_engine` | Tag 申請、Host MRd 發起、CplD 接收與 AXI4 Master Write |
 | [`tb_c2h_dma_engine.v`](file:///home/zzlee/qpcie/tb/tb_c2h_dma_engine.v) | `c2h_dma_engine` | AXI4 Master Read、Host MWr 發起與傳輸完成狀態 |
 | [`tb_interrupt_ctrl.v`](file:///home/zzlee/qpcie/tb/tb_interrupt_ctrl.v) | `interrupt_ctrl` | DMA 完成觸發、MSI Msg TLP 產生與遮罩邏輯 |
+| [`tb_sg_dma_pipeline.v`](file:///home/zzlee/qpcie/tb/tb_sg_dma_pipeline.v) | `custom_pcie_dma_top` + `pcie_7x_axi_bridge` | **128-bit 原生端到端 SG DMA 鏈路**（含 4096-Byte / 1024-DWORD 全域 Golden 驗證） |
 | [`tb_pcie_dma_system.v`](file:///home/zzlee/qpcie/tb/tb_pcie_dma_system.v) | `custom_pcie_dma_top` | **全系統端到端測試**（Host Root Complex BFM + FPGA DRAM BFM） |
 
 ---
