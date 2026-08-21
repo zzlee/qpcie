@@ -68,7 +68,6 @@ module sg_dma_engine #(
     reg [10:0] h2c_burst_dw;
     reg [15:0] h2c_cpl_dw_cnt;
     reg [15:0] h2c_total_dw_req;
-    reg [31:0] h2c_bytes_transferred;
 
     assign h2c_busy = (h2c_state != H2C_IDLE);
 
@@ -157,7 +156,6 @@ module sg_dma_engine #(
     reg [63:0] c2h_cur_addr;
     reg [15:0] c2h_rem_bytes;
     reg [15:0] c2h_word_idx;
-    reg [31:0] c2h_bytes_transferred;
 
     assign c2h_busy = (c2h_state != C2H_IDLE);
 
