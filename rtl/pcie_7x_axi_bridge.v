@@ -85,8 +85,8 @@ module pcie_7x_axi_bridge #(
     // Decoding 7-Series TLP Header (pg054 Table 2-8)
     wire [1:0]  rx_fmt   = m_axis_rx_tdata[30:29];
     wire [4:0]  rx_type  = m_axis_rx_tdata[28:24];
-    wire rx_is_mrd = (rx_type == 5'b00000);
-    wire rx_is_mwr = (rx_type == 5'b00000 && rx_fmt[1]);
+    wire rx_is_mrd = (rx_type == 5'b00000) && (rx_fmt[1] == 1'b0);
+    wire rx_is_mwr = (rx_type == 5'b00000) && (rx_fmt[1] == 1'b1);
     wire rx_is_cpl = (rx_type == 5'b01010);
     wire rx_is_4dw = rx_fmt[0];
 
