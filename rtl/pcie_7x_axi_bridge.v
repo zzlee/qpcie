@@ -113,11 +113,16 @@ module pcie_7x_axi_bridge #(
     wire [7:0]  rc_tag        = m_axis_rx_tdata[79:72];
     wire [15:0] rc_req_id     = m_axis_rx_tdata[95:80];
 
-    localparam RX_IDLE      = 2'b00;
-    localparam RX_PASS_CQ   = 2'b01;
-    localparam RX_PASS_RC   = 2'b10;
+    localparam RX_IDLE       = 2'b00;
+    localparam RX_MWR4_BEAT1 = 2'b01;
+    localparam RX_PASS_RC    = 2'b10;
 
-    reg [1:0] rx_state;
+    reg [1:0]  rx_state;
+    reg [63:0] reg_mwr4_addr;
+    reg [9:0]  reg_mwr4_length;
+    reg [15:0] reg_mwr4_req_id;
+    reg [7:0]  reg_mwr4_tag;
+    reg [2:0]  reg_mwr4_bar_id;
 
     always @(*) begin
         m_axis_cq_tdata  = 128'd0;
@@ -137,17 +142,34 @@ module pcie_7x_axi_bridge #(
         case (rx_state)
             RX_IDLE: begin
                 if (m_axis_rx_tvalid) begin
-                    if (rx_is_mrd || rx_is_mwr) begin
+                    if (rx_is_mrd) begin // MRd (3-DW or 4-DW Memory Read)
                         m_axis_cq_tvalid = 1'b1;
-                        m_axis_cq_tlast  = m_axis_rx_tlast || rx_is_mrd;
-                        m_axis_cq_tkeep  = m_axis_rx_tkeep;
+                        m_axis_cq_tlast  = 1'b1;
+                        m_axis_cq_tkeep  = 16'hFFFF;
                         m_axis_cq_tdata  = {
+                            32'd0,
                             2'b00, 2'b00, 3'b000, 6'b000000, rx_bar_id,
                             8'h00, rx_tag, rx_req_id, 1'b0,
-                            (rx_is_mwr ? 4'b0001 : 4'b0000), 1'b0, rx_length,
+                            4'b0000, 1'b0, rx_length,
                             rx_addr_64
                         };
                         m_axis_rx_tready = m_axis_cq_tready;
+                    end else if (rx_is_mwr) begin
+                        if (!rx_is_4dw) begin // 3-DW MWr: Payload data is at [127:96]
+                            m_axis_cq_tvalid = 1'b1;
+                            m_axis_cq_tlast  = 1'b1;
+                            m_axis_cq_tkeep  = 16'hFFFF;
+                            m_axis_cq_tdata  = {
+                                m_axis_rx_tdata[127:96], // DW3: Write Data Payload
+                                2'b00, 2'b00, 3'b000, 6'b000000, rx_bar_id,
+                                8'h00, rx_tag, rx_req_id, 1'b0,
+                                4'b0001, 1'b0, rx_length,
+                                rx_addr_64
+                            };
+                            m_axis_rx_tready = m_axis_cq_tready;
+                        end else begin // 4-DW MWr: Beat 0 holds Address, Beat 1 holds Payload Data
+                            m_axis_rx_tready = 1'b1; // Accept Beat 0 and latch fields
+                        end
                     end else if (rx_is_cpl) begin
                         m_axis_rc_tvalid = 1'b1;
                         m_axis_rc_tlast  = m_axis_rx_tlast;
@@ -162,12 +184,20 @@ module pcie_7x_axi_bridge #(
                 end
             end
 
-            RX_PASS_CQ: begin
-                m_axis_cq_tvalid = m_axis_rx_tvalid;
-                m_axis_cq_tlast  = m_axis_rx_tlast;
-                m_axis_cq_tkeep  = m_axis_rx_tkeep;
-                m_axis_cq_tdata  = m_axis_rx_tdata;
-                m_axis_rx_tready = m_axis_cq_tready;
+            RX_MWR4_BEAT1: begin // Beat 1 of 4-DW MWr: Payload data is at [31:0]
+                if (m_axis_rx_tvalid) begin
+                    m_axis_cq_tvalid = 1'b1;
+                    m_axis_cq_tlast  = 1'b1;
+                    m_axis_cq_tkeep  = 16'hFFFF;
+                    m_axis_cq_tdata  = {
+                        m_axis_rx_tdata[31:0], // DW3: Write Data Payload from Beat 1
+                        2'b00, 2'b00, 3'b000, 6'b000000, reg_mwr4_bar_id,
+                        8'h00, reg_mwr4_tag, reg_mwr4_req_id, 1'b0,
+                        4'b0001, 1'b0, reg_mwr4_length,
+                        reg_mwr4_addr
+                    };
+                    m_axis_rx_tready = m_axis_cq_tready;
+                end
             end
 
             RX_PASS_RC: begin
@@ -182,20 +212,31 @@ module pcie_7x_axi_bridge #(
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            rx_state <= RX_IDLE;
+            rx_state        <= RX_IDLE;
+            reg_mwr4_addr   <= 64'd0;
+            reg_mwr4_length <= 10'd0;
+            reg_mwr4_req_id <= 16'd0;
+            reg_mwr4_tag    <= 8'd0;
+            reg_mwr4_bar_id <= 3'd0;
         end else begin
             case (rx_state)
                 RX_IDLE: begin
-                    if (m_axis_rx_tvalid && m_axis_rx_tready && !m_axis_rx_tlast) begin
-                        if (rx_is_mwr)
-                            rx_state <= RX_PASS_CQ;
-                        else if (rx_is_cpl)
-                            rx_state <= RX_PASS_RC;
+                    if (m_axis_rx_tvalid && m_axis_rx_tready) begin
+                        if (rx_is_mwr && rx_is_4dw && !m_axis_rx_tlast) begin
+                            reg_mwr4_addr   <= rx_addr_64;
+                            reg_mwr4_length <= rx_length;
+                            reg_mwr4_req_id <= rx_req_id;
+                            reg_mwr4_tag    <= rx_tag;
+                            reg_mwr4_bar_id <= rx_bar_id;
+                            rx_state        <= RX_MWR4_BEAT1;
+                        end else if (rx_is_cpl && !m_axis_rx_tlast) begin
+                            rx_state        <= RX_PASS_RC;
+                        end
                     end
                 end
 
-                RX_PASS_CQ: begin
-                    if (m_axis_rx_tvalid && m_axis_cq_tready && m_axis_rx_tlast)
+                RX_MWR4_BEAT1: begin
+                    if (m_axis_rx_tvalid && m_axis_cq_tready)
                         rx_state <= RX_IDLE;
                 end
 
