@@ -14,9 +14,9 @@ if {![file exists $bit_file]} {
 }
 
 puts "================================================="
-puts " 1. Generating SPI Flash BIN File (SPIx1)"
+puts " 1. Generating SPI Flash BIN File (SPIx4)"
 puts "================================================="
-write_cfgmem -format bin -size 16 -interface SPIx1 -loadbit "up 0x00000000 $bit_file" -file $bin_file -force
+write_cfgmem -format bin -size 16 -interface SPIx4 -loadbit "up 0x00000000 $bit_file" -file $bin_file -force
 
 puts "================================================="
 puts " 2. Connecting to Hardware Server & Target"
