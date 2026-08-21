@@ -100,7 +100,11 @@ module pcie_7x_axi_bridge #(
     wire [31:0] rx_addr_lo   = rx_is_4dw ? m_axis_rx_tdata[127:96] : m_axis_rx_tdata[95:64];
     wire [31:0] rx_addr_hi   = rx_is_4dw ? m_axis_rx_tdata[95:64]  : 32'h0;
     wire [63:0] rx_addr_64   = {rx_addr_hi, rx_addr_lo};
-    wire [2:0]  rx_bar_id    = (rx_addr_lo >= 32'h4000_0000) ? 3'b001 : 3'b000;
+    wire [2:0]  rx_bar_id    = m_axis_rx_tuser[3] ? 3'b001 :
+                           m_axis_rx_tuser[4] ? 3'b010 :
+                           m_axis_rx_tuser[5] ? 3'b011 :
+                           m_axis_rx_tuser[6] ? 3'b100 :
+                           m_axis_rx_tuser[7] ? 3'b101 : 3'b000;
 
     // RC Header Fields (UltraScale Descriptor Format - 128 bits)
     wire [6:0]  rc_lower_addr = m_axis_rx_tdata[70:64];

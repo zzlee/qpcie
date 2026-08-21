@@ -365,6 +365,10 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
 {
     int i, ret;
 
+    snprintf(qdev->v4l2_dev.name, sizeof(qdev->v4l2_dev.name), "qpcie-v4l2");
+    ret = v4l2_device_register(&qdev->pdev->dev, &qdev->v4l2_dev);
+    if (ret) return ret;
+
     for (i = 0; i < NUM_VIDEO_CHANNELS; i++) {
         struct qpcie_v4l2_channel *vch = &qdev->v4l2_ch[i];
         struct video_device *vdev = &vch->vdev;
@@ -380,10 +384,6 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
         spin_lock_init(&vch->slock);
         INIT_LIST_HEAD(&vch->active_buffers);
 
-        snprintf(vch->v4l2_dev.name, sizeof(vch->v4l2_dev.name), "qpcie-v4l2-%d", i);
-        ret = v4l2_device_register(&qdev->pdev->dev, &vch->v4l2_dev);
-        if (ret) return ret;
-
         /* Initialize V4L2 Control Handler for Video TPG */
         v4l2_ctrl_handler_init(&vch->ctrl_handler, 2);
         v4l2_ctrl_new_std_menu_items(&vch->ctrl_handler, &qpcie_ctrl_ops,
@@ -391,10 +391,8 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
                                      4, 0, 0, qpcie_tpg_pattern_strings);
         if (vch->ctrl_handler.error) {
             ret = vch->ctrl_handler.error;
-            v4l2_device_unregister(&vch->v4l2_dev);
-            return ret;
+            goto unreg_v4l2;
         }
-        vch->v4l2_dev.ctrl_handler = &vch->ctrl_handler;
 
         /* Enable MMAP, USERPTR, and DMABUF (Import/Export) Modes */
         vch->queue.type            = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
@@ -413,7 +411,7 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
         vdev->fops         = &qpcie_v4l2_fops;
         vdev->ioctl_ops    = &qpcie_v4l2_ioctl_ops;
         vdev->release      = video_device_release_empty;
-        vdev->v4l2_dev     = &vch->v4l2_dev;
+        vdev->v4l2_dev     = &qdev->v4l2_dev;
         vdev->ctrl_handler = &vch->ctrl_handler;
         vdev->queue        = &vch->queue;
         vdev->lock         = &vch->lock;
@@ -427,8 +425,12 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
     return 0;
 
 unreg_v4l2:
-    v4l2_ctrl_handler_free(&qdev->v4l2_ch[i].ctrl_handler);
-    v4l2_device_unregister(&qdev->v4l2_ch[i].v4l2_dev);
+    for (; i >= 0; i--) {
+        if (video_is_registered(&qdev->v4l2_ch[i].vdev))
+            video_unregister_device(&qdev->v4l2_ch[i].vdev);
+        v4l2_ctrl_handler_free(&qdev->v4l2_ch[i].ctrl_handler);
+    }
+    v4l2_device_unregister(&qdev->v4l2_dev);
     return ret;
 }
 
@@ -436,10 +438,11 @@ void qpcie_v4l2_remove(struct qpcie_dev *qdev)
 {
     int i;
     for (i = 0; i < NUM_VIDEO_CHANNELS; i++) {
-        video_unregister_device(&qdev->v4l2_ch[i].vdev);
+        if (video_is_registered(&qdev->v4l2_ch[i].vdev))
+            video_unregister_device(&qdev->v4l2_ch[i].vdev);
         v4l2_ctrl_handler_free(&qdev->v4l2_ch[i].ctrl_handler);
-        v4l2_device_unregister(&qdev->v4l2_ch[i].v4l2_dev);
     }
+    v4l2_device_unregister(&qdev->v4l2_dev);
 }
 
 void qpcie_v4l2_irq_handler(struct qpcie_dev *qdev)
