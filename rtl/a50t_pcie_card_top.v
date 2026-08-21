@@ -466,9 +466,9 @@ module a50t_pcie_card_top #(
     wire [4:0] cfg_device_number;
     wire [2:0] cfg_function_number;
 
-    // Instantiate 7-Series PCIe AXI-Stream Protocol Bridge (128-bit)
+    // Instantiate 7-Series PCIe AXI-Stream Protocol Bridge (256-bit internal CQ descriptor bus)
     pcie_7x_axi_bridge #(
-        .DATA_WIDTH(128)
+        .DATA_WIDTH(PCIE_DATA_WIDTH)
     ) u_pcie_bridge (
         .clk(pcie_user_clk),
         .rst_n(pcie_user_rst_n),
@@ -520,9 +520,9 @@ module a50t_pcie_card_top #(
         .m_axis_rc_tready(m_axis_rc_tready)
     );
 
-    // Instantiate Custom PCIe DMA Controller Top Module (128-bit AXI-Stream for 4K60 NV12/NV16)
+    // Instantiate Custom PCIe DMA Controller Top Module (256-bit internal CQ descriptor bus)
     custom_pcie_dma_top #(
-        .PCIE_DATA_WIDTH(128),
+        .PCIE_DATA_WIDTH(PCIE_DATA_WIDTH),
         .NUM_VIDEO_CH(NUM_VIDEO_CH),
         .NUM_AUDIO_CH(NUM_AUDIO_CH),
         .VIDEO_DATA_WIDTH(VIDEO_DATA_WIDTH),
