@@ -42,6 +42,12 @@ module tb_sg_dma_pipeline;
     wire [74:0]  rc_tuser;
     wire [15:0]  cq_tkeep, cc_tkeep, rq_tkeep, rc_tkeep;
 
+    // Emulated Host Memory Buffer for Full 4096-Byte Verification
+    reg [31:0] host_mem [0:1023];
+    integer burst_cnt;
+    integer dw_idx;
+    integer err_cnt;
+
     // 1. PCIe Bridge
     pcie_7x_axi_bridge #(
         .DATA_WIDTH(128)
@@ -254,34 +260,58 @@ module tb_sg_dma_pipeline;
         m_axis_rx_tvalid <= 1'b0;
         m_axis_rx_tlast  <= 1'b0;
 
-        // 7. Expect sg_dma_engine to execute C2H DMA Write bursts to Host RAM
-        $display("--- [Step 7: Waiting for sg_dma_engine C2H MWr Bursts...] ---");
-        @(posedge clk);
-        while (!(s_axis_tx_tvalid && s_axis_tx_tdata[30:29] == 2'b11)) @(posedge clk);
-        $display("  ✅ [PASS] Beat 0 (4-DW Header): Addr=0x%08X, Length=%d DWs, tlast=%b",
-                 s_axis_tx_tdata[127:96], s_axis_tx_tdata[9:0], s_axis_tx_tlast);
-        if (s_axis_tx_tlast != 1'b0) begin
-            $display("  ❌ [FAIL] Beat 0 tlast should be 0 for 4-DW MWr!");
+        // 7. Full 4096-Byte (1024-DWORD) C2H DMA Write Verification
+        $display("--- [Step 7: Verifying Full 4096-Byte (256 Bursts / 1024 DWs) C2H Transmission] ---");
+
+        for (burst_cnt = 0; burst_cnt < 256; burst_cnt = burst_cnt + 1) begin
+            // 1. Wait for Beat 0 (4-DW Header)
+            @(posedge clk);
+            while (!(s_axis_tx_tvalid && s_axis_tx_tdata[30:29] == 2'b11)) @(posedge clk);
+            if (s_axis_tx_tlast != 1'b0) begin
+                $display("  ❌ [FAIL] Burst %0d Beat 0: tlast must be 0! Got: %b", burst_cnt, s_axis_tx_tlast);
+                $finish;
+            end
+
+            // 2. Wait for Beat 1 (128-bit Payload Data: 4 DWs)
+            @(posedge clk);
+            while (!s_axis_tx_tvalid) @(posedge clk);
+            if (s_axis_tx_tlast != 1'b1) begin
+                $display("  ❌ [FAIL] Burst %0d Beat 1: tlast must be 1! Got: %b", burst_cnt, s_axis_tx_tlast);
+                $finish;
+            end
+
+            // Record into Host Memory Model
+            host_mem[(burst_cnt * 4) + 0] = s_axis_tx_tdata[31:0];
+            host_mem[(burst_cnt * 4) + 1] = s_axis_tx_tdata[63:32];
+            host_mem[(burst_cnt * 4) + 2] = s_axis_tx_tdata[95:64];
+            host_mem[(burst_cnt * 4) + 3] = s_axis_tx_tdata[127:96];
+        end
+
+        // 8. Verify all 1024 DWs (4096 Bytes) Golden Pattern
+        $display("--- [Step 8: Golden Pattern Check for All 1024 DWs (4096 Bytes)] ---");
+        err_cnt = 0;
+        for (dw_idx = 0; dw_idx < 1024; dw_idx = dw_idx + 1) begin
+            if (host_mem[dw_idx] !== (32'hC2000000 | dw_idx)) begin
+                $display("  ❌ [FAIL] DW[%0d] Mismatch! Expected: 0x%08X, Got: 0x%08X",
+                         dw_idx, (32'hC2000000 | dw_idx), host_mem[dw_idx]);
+                err_cnt = err_cnt + 1;
+            end
+        end
+
+        if (err_cnt == 0) begin
+            $display("  ✅ [PASS] 100%% of 4096 Bytes (1024 DWs) Verified Perfectly Against Golden Pattern!");
+            $display("     - First 4 DWs: 0x%08X, 0x%08X, 0x%08X, 0x%08X",
+                     host_mem[0], host_mem[1], host_mem[2], host_mem[3]);
+            $display("     - Last  4 DWs: 0x%08X, 0x%08X, 0x%08X, 0x%08X",
+                     host_mem[1020], host_mem[1021], host_mem[1022], host_mem[1023]);
+        end else begin
+            $display("  ❌ [FAIL] Encountered %0d data errors during 4096-Byte verification!", err_cnt);
             $finish;
         end
 
-        // Wait for Beat 1 (128-bit Data Payload)
-        @(posedge clk);
-        while (!s_axis_tx_tvalid) @(posedge clk);
-        $display("  ✅ [PASS] Beat 1 (128-bit Payload Data): Data=0x%08X_%08X_%08X_%08X, tlast=%b",
-                 s_axis_tx_tdata[127:96], s_axis_tx_tdata[95:64], s_axis_tx_tdata[63:32], s_axis_tx_tdata[31:0], s_axis_tx_tlast);
-        if (s_axis_tx_tlast != 1'b1) begin
-            $display("  ❌ [FAIL] Beat 1 tlast should be 1 for 4-DW MWr payload!");
-            $finish;
-        end
-        if (s_axis_tx_tdata[31:0] != 32'hC2000000) begin
-            $display("  ❌ [FAIL] Beat 1 Payload DW0 mismatch! Expected 0xC2000000, got 0x%08X", s_axis_tx_tdata[31:0]);
-            $finish;
-        end
-
-        #100;
+        #200;
         $display("\n=================================================================");
-        $display(" 🎉 FULL END-TO-END SG DMA HARDWARE PIPELINE VERIFIED 100%% PASS!");
+        $display(" 🎉 FULL END-TO-END SG DMA 4096-BYTE HARDWARE PIPELINE VERIFIED 100%% PASS!");
         $display("=================================================================\n");
         $finish;
     end
