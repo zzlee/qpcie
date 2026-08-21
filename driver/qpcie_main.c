@@ -166,59 +166,59 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
                      p, (u64)h2c_page_dma[p], h2c_pages[p] ? h2c_pages[p][0] : 0, (u64)c2h_page_dma[p]);
         }
 
-        /* Build SG Ring: Descriptors 0..3 for H2C, Descriptors 4..7 for C2H */
+        /* Build SG Ring: Descriptors 0..3 for C2H (FPGA->Host), Descriptors 4..7 for H2C (Host->FPGA) */
         for (p = 0; p < SG_PAGES; p++) {
-            desc_ring[p].plane0_src_addr = (u64)h2c_page_dma[p];
-            desc_ring[p].plane0_dst_addr = 0x0ULL;
+            desc_ring[p].plane0_src_addr = 0x0ULL;
+            desc_ring[p].plane0_dst_addr = (u64)c2h_page_dma[p];
             desc_ring[p].line_width      = 4096;
             desc_ring[p].line_count      = 1;
             desc_ring[p].src_stride      = 4096;
             desc_ring[p].dst_stride      = 4096;
             desc_ring[p].format          = 0;
             desc_ring[p].plane_count     = 1;
-            desc_ring[p].control         = 0x00; /* H2C: Host -> FPGA */
+            desc_ring[p].control         = 0x02; /* C2H: FPGA -> Host */
 
-            desc_ring[p + SG_PAGES].plane0_src_addr = 0x0ULL;
-            desc_ring[p + SG_PAGES].plane0_dst_addr = (u64)c2h_page_dma[p];
+            desc_ring[p + SG_PAGES].plane0_src_addr = (u64)h2c_page_dma[p];
+            desc_ring[p + SG_PAGES].plane0_dst_addr = 0x0ULL;
             desc_ring[p + SG_PAGES].line_width      = 4096;
             desc_ring[p + SG_PAGES].line_count      = 1;
             desc_ring[p + SG_PAGES].src_stride      = 4096;
             desc_ring[p + SG_PAGES].dst_stride      = 4096;
             desc_ring[p + SG_PAGES].format          = 0;
             desc_ring[p + SG_PAGES].plane_count     = 1;
-            desc_ring[p + SG_PAGES].control         = 0x02; /* C2H: FPGA -> Host */
+            desc_ring[p + SG_PAGES].control         = 0x00; /* H2C: Host -> FPGA */
         }
 
         /* Program Ring Base Address into BAR0 0x08 (Low) and 0x0C (High) */
         iowrite32((u32)(desc_ring_dma & 0xFFFFFFFF), qdev->bar0_mmio + REG_H2C_RING_ADDR_L);
         iowrite32((u32)((desc_ring_dma >> 32) & 0xFFFFFFFF), qdev->bar0_mmio + REG_H2C_RING_ADDR_H);
 
-        /* Set Ring Config: Size=16, Tail=4 (Trigger 4x H2C Descriptors) */
+        /* Set Ring Config: Size=16, Tail=4 (Trigger 4x C2H Descriptors) */
         iowrite32((4 << 16) | 16, qdev->bar0_mmio + REG_H2C_RING_CFG);
 
         /* Trigger DMA Start */
         iowrite32(0x00000001, qdev->bar0_mmio + REG_DMA_CTRL);
-        dev_info(&pdev->dev, "--- [3.1 Step 1: H2C 4-Page SG List DMA Read Test] ---\n");
-        dev_info(&pdev->dev, "  Triggered H2C SG Run (Tail=4, Size=16)... Waiting 20ms\n");
+        dev_info(&pdev->dev, "--- [3.1 Step 1: C2H 4-Page SG List DMA Write Test] ---\n");
+        dev_info(&pdev->dev, "  Triggered C2H SG Run (Tail=4, Size=16)... Waiting 20ms\n");
         msleep(20);
 
         u32 dma_stat = ioread32(qdev->bar0_mmio + REG_DMA_STATUS);
-        u32 comp_h2c = ioread32(qdev->bar0_mmio + REG_COMPLETED_H2C);
+        u32 comp_c2h = ioread32(qdev->bar0_mmio + REG_COMPLETED_C2H);
         u32 ptr_dbg  = ioread32(qdev->bar0_mmio + 0x40);
-        dev_info(&pdev->dev, "  H2C SG Status: DMA_STATUS=0x%08X, Completed Count=%u, Pointers=0x%08X (Tail=%u, Head=%u)\n",
-                 dma_stat, comp_h2c, ptr_dbg, (ptr_dbg >> 16) & 0xFFFF, ptr_dbg & 0xFFFF);
+        dev_info(&pdev->dev, "  C2H SG Status: DMA_STATUS=0x%08X, Completed Count=%u, Pointers=0x%08X (Tail=%u, Head=%u)\n",
+                 dma_stat, comp_c2h, ptr_dbg, (ptr_dbg >> 16) & 0xFFFF, ptr_dbg & 0xFFFF);
 
-        /* Advance Tail Pointer to 8 (Trigger 4x C2H Descriptors) */
-        dev_info(&pdev->dev, "--- [3.2 Step 2: C2H 4-Page SG List DMA Write Test] ---\n");
+        /* Advance Tail Pointer to 8 (Trigger 4x H2C Descriptors) */
+        dev_info(&pdev->dev, "--- [3.2 Step 2: H2C 4-Page SG List DMA Read Test] ---\n");
         iowrite32((8 << 16) | 16, qdev->bar0_mmio + REG_H2C_RING_CFG);
-        dev_info(&pdev->dev, "  Triggered C2H SG Run (Tail=8, Size=16)... Waiting 20ms\n");
+        dev_info(&pdev->dev, "  Triggered H2C SG Run (Tail=8, Size=16)... Waiting 20ms\n");
         msleep(20);
 
         dma_stat = ioread32(qdev->bar0_mmio + REG_DMA_STATUS);
-        u32 comp_c2h = ioread32(qdev->bar0_mmio + REG_COMPLETED_C2H);
+        u32 comp_h2c = ioread32(qdev->bar0_mmio + REG_COMPLETED_H2C);
         ptr_dbg  = ioread32(qdev->bar0_mmio + 0x40);
-        dev_info(&pdev->dev, "  C2H SG Status: DMA_STATUS=0x%08X, Completed Count=%u, Pointers=0x%08X (Tail=%u, Head=%u)\n",
-                 dma_stat, comp_c2h, ptr_dbg, (ptr_dbg >> 16) & 0xFFFF, ptr_dbg & 0xFFFF);
+        dev_info(&pdev->dev, "  H2C SG Status: DMA_STATUS=0x%08X, Completed Count=%u, Pointers=0x%08X (Tail=%u, Head=%u)\n",
+                 dma_stat, comp_h2c, ptr_dbg, (ptr_dbg >> 16) & 0xFFFF, ptr_dbg & 0xFFFF);
 
         /* Inspect C2H pages */
         for (p = 0; p < SG_PAGES; p++) {

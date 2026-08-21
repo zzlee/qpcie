@@ -92,6 +92,7 @@ module sg_dma_engine #(
                     h2c_desc_ready <= 1'b0;
                     h2c_req_valid  <= 1'b0;
                     if (h2c_desc_valid) begin
+                        h2c_desc_ready   <= 1'b1;
                         h2c_cur_addr     <= h2c_plane0_src;
                         h2c_rem_bytes    <= (h2c_line_width > 16'd0) ? h2c_line_width : 16'd4096;
                         h2c_cpl_dw_cnt   <= 16'd0;
@@ -101,6 +102,7 @@ module sg_dma_engine #(
                 end
 
                 H2C_ISSUE_MRD: begin
+                    h2c_desc_ready <= 1'b0;
                     if (h2c_rem_bytes > 16'd0) begin
                         if (h2c_rem_bytes >= 16'd128) begin
                             h2c_burst_dw   <= 11'd32;
@@ -185,14 +187,16 @@ module sg_dma_engine #(
                     c2h_desc_ready <= 1'b0;
                     c2h_req_valid  <= 1'b0;
                     if (c2h_desc_valid) begin
-                        c2h_cur_addr  <= c2h_plane0_dst;
-                        c2h_rem_bytes <= (c2h_line_width > 16'd0) ? c2h_line_width : 16'd4096;
-                        c2h_word_idx  <= 16'd0;
-                        c2h_state     <= C2H_SEND_BEAT;
+                        c2h_desc_ready <= 1'b1;
+                        c2h_cur_addr   <= c2h_plane0_dst;
+                        c2h_rem_bytes  <= (c2h_line_width > 16'd0) ? c2h_line_width : 16'd4096;
+                        c2h_word_idx   <= 16'd0;
+                        c2h_state      <= C2H_SEND_BEAT;
                     end
                 end
 
                 C2H_SEND_BEAT: begin
+                    c2h_desc_ready <= 1'b0;
                     if (c2h_rem_bytes > 16'd0) begin
                         c2h_req_addr   <= c2h_cur_addr;
                         c2h_req_dw_len <= 11'd4; // 4 DWs = 16 Bytes (1 128-bit beat)
