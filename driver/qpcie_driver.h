@@ -66,27 +66,33 @@
 #define REG_PACER_CTRL       0x74    /* Video Pacer Bypass Control (0=Bypass, 1=Enable) */
 #define REG_SLICE_HEIGHT     0x78    /* Sub-Frame Slice Height in Lines (0=Full Frame IRQ, >0=Slice IRQ) */
 
-/* 64-Byte 2D Multi-Planar Extended Descriptor Structure */
-struct qpcie_dma_desc_2d {
-    u64 plane0_src_addr; /* DW0-DW1 : Plane 0 Src Addr (Y / Mono / Audio Buffer) */
-    u64 plane0_dst_addr; /* DW2-DW3 : Plane 0 Dst Addr */
-    u64 plane1_src_addr; /* DW4-DW5 : Plane 1 Src Addr (U / UV) */
-    u64 plane1_dst_addr; /* DW6-DW7 : Plane 1 Dst Addr */
-    u64 plane2_src_addr; /* DW8-DW9 : Plane 2 Src Addr (V) */
-    u64 plane2_dst_addr; /* DW10-DW11: Plane 2 Dst Addr */
-    u32 plane0_stride;   /* DW12: Plane 0 Stride Bytes */
-    u32 plane1_stride;   /* DW13: Plane 1 Stride Bytes */
-    u32 plane2_stride;   /* DW14: Plane 2 Stride Bytes */
-    u32 line_count;      /* DW15: Total Lines per Frame */
-
-    /* Legacy / Compatibility Descriptor Fields */
-    u32 line_width;
-    u32 src_stride;
-    u32 dst_stride;
-    u32 format;
-    u32 plane_count;
-    u32 control;
+/* 64-Byte 2D Multi-Planar Extended Descriptor Structure (Hardware Wire Format) */
+struct __packed qpcie_dma_desc_64b {
+    u64 plane0_src_addr; /* Bytes 0..7   : DW0-DW1 (Src Buffer Phys Addr) */
+    u64 plane0_dst_addr; /* Bytes 8..15  : DW2-DW3 (Dst Buffer Phys Addr) */
+    u64 plane1_src_addr; /* Bytes 16..23 : DW4-DW5 */
+    u64 plane1_dst_addr; /* Bytes 24..31 : DW6-DW7 */
+    u64 plane2_src_addr; /* Bytes 32..39 : DW8-DW9 */
+    u64 plane2_dst_addr; /* Bytes 40..47 : DW10-DW11 */
+    u16 line_width;      /* Bytes 48..49 : DW12[15:0] (Line Width Bytes, e.g. 4096) */
+    u16 line_count;      /* Bytes 50..51 : DW12[31:16] (Total Lines, e.g. 1) */
+    u16 src_stride;      /* Bytes 52..53 : DW13[15:0] (Src Line Stride Bytes) */
+    u16 dst_stride;      /* Bytes 54..55 : DW13[31:16] (Dst Line Stride Bytes) */
+    u16 plane12_width;   /* Bytes 56..57 : DW14[15:0] */
+    u16 plane12_count;   /* Bytes 58..59 : DW14[31:16] */
+    union {
+        struct {
+            u8 format : 4;
+            u8 plane_count : 4;
+            u8 control;
+            u16 reserved;
+        };
+        u32 dw15_raw;
+    };
 };
+
+/* Compatibility Typedef */
+#define qpcie_dma_desc_2d qpcie_dma_desc_64b
 
 struct qpcie_dev;
 

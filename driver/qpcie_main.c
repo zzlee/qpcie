@@ -6,6 +6,7 @@
  */
 
 #include "qpcie_driver.h"
+#include <linux/delay.h>
 
 static const struct pci_device_id qpcie_id_table[] = {
     { PCI_DEVICE(QPCIE_VENDOR_ID, QPCIE_DEVICE_ID) },
@@ -118,13 +119,110 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
     iowrite32(0x00000000, qdev->bar0_mmio + REG_H2C_RING_ADDR_L);
     iowrite32(0x00000000, qdev->bar0_mmio + REG_C2H_RING_ADDR_L);
 
+    /* Enable Bus Mastering and configure 64-bit DMA Mask */
+    ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
+    if (ret) {
+        ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
+        if (ret) {
+            dev_err(&pdev->dev, "[ERROR] Cannot set DMA mask!\n");
+            goto unmap_mmio;
+        }
+    }
+    pci_set_master(pdev);
+
     /* ------------------------------------------------------------------------
-     * 3. BAR1 Read Tests (Disabled to prevent unmapped BAR1 crossbar timeout)
+     * 3. Step 1: H2C 4KB DMA Read Test (Host -> FPGA)
      * ------------------------------------------------------------------------ */
-    dev_info(&pdev->dev, "--- [3. BAR1 User IP Tests Bypassed] ---\n");
+    dev_info(&pdev->dev, "--- [3. Step 1: H2C 4KB DMA Read Test (Host -> FPGA)] ---\n");
+    dma_addr_t desc_ring_dma = 0;
+    dma_addr_t h2c_buf_dma = 0;
+    dma_addr_t c2h_buf_dma = 0;
+
+    struct qpcie_dma_desc_64b *desc_ring = dma_alloc_coherent(&pdev->dev, 64 * 16, &desc_ring_dma, GFP_KERNEL);
+    u32 *h2c_buf = dma_alloc_coherent(&pdev->dev, 4096, &h2c_buf_dma, GFP_KERNEL);
+    u32 *c2h_buf = dma_alloc_coherent(&pdev->dev, 4096, &c2h_buf_dma, GFP_KERNEL);
+
+    if (!desc_ring || !h2c_buf || !c2h_buf) {
+        dev_err(&pdev->dev, "[ERROR] dma_alloc_coherent failed!\n");
+    } else {
+        int i;
+        memset(desc_ring, 0, 64 * 16);
+        for (i = 0; i < 1024; i++) {
+            h2c_buf[i] = 0xAA550000 + i;
+        }
+        memset(c2h_buf, 0x00, 4096);
+
+        dev_info(&pdev->dev, "  Allocated Coherent Ring: Phys=0x%llX (Virt=%p)\n", (u64)desc_ring_dma, desc_ring);
+        dev_info(&pdev->dev, "  Allocated H2C Buffer   : Phys=0x%llX (Virt=%p), Seed Pattern=0x%08X\n", (u64)h2c_buf_dma, h2c_buf, h2c_buf[0]);
+        dev_info(&pdev->dev, "  Allocated C2H Buffer   : Phys=0x%llX (Virt=%p)\n", (u64)c2h_buf_dma, c2h_buf);
+
+        /* Configure Descriptor 0 for 4KB H2C DMA */
+        desc_ring[0].plane0_src_addr = (u64)h2c_buf_dma;
+        desc_ring[0].plane0_dst_addr = 0x0ULL;
+        desc_ring[0].line_width      = 4096;
+        desc_ring[0].line_count      = 1;
+        desc_ring[0].src_stride      = 4096;
+        desc_ring[0].dst_stride      = 4096;
+        desc_ring[0].format          = 0;
+        desc_ring[0].plane_count     = 1;
+        desc_ring[0].control         = 0x00; /* Direction: 0 = H2C (Host -> FPGA) */
+
+        /* Program Ring Base Address into BAR0 0x08 (Low) and 0x0C (High) */
+        iowrite32((u32)(desc_ring_dma & 0xFFFFFFFF), qdev->bar0_mmio + REG_H2C_RING_ADDR_L);
+        iowrite32((u32)((desc_ring_dma >> 32) & 0xFFFFFFFF), qdev->bar0_mmio + REG_H2C_RING_ADDR_H);
+
+        /* Set Ring Config: Size=16, Tail=1 */
+        iowrite32((16 << 16) | 1, qdev->bar0_mmio + REG_H2C_RING_CFG);
+
+        /* Trigger DMA Start */
+        iowrite32(0x00000001, qdev->bar0_mmio + REG_DMA_CTRL);
+        dev_info(&pdev->dev, "  Triggered H2C DMA Run (Tail=1, Size=16)... Waiting 10ms\n");
+        msleep(10);
+
+        u32 dma_stat = ioread32(qdev->bar0_mmio + REG_DMA_STATUS);
+        u32 comp_h2c = ioread32(qdev->bar0_mmio + REG_COMPLETED_H2C);
+        dev_info(&pdev->dev, "  H2C Execution Status: DMA_STATUS=0x%08X, Completed Count=0x%08X\n", dma_stat, comp_h2c);
+
+        /* --------------------------------------------------------------------
+         * 4. Step 2: C2H 4KB DMA Write Test (FPGA -> Host)
+         * -------------------------------------------------------------------- */
+        dev_info(&pdev->dev, "--- [4. Step 2: C2H 4KB DMA Write Test (FPGA -> Host)] ---\n");
+
+        /* Configure Descriptor 1 for 4KB C2H DMA */
+        desc_ring[1].plane0_src_addr = 0x0ULL;
+        desc_ring[1].plane0_dst_addr = (u64)c2h_buf_dma;
+        desc_ring[1].line_width      = 4096;
+        desc_ring[1].line_count      = 1;
+        desc_ring[1].src_stride      = 4096;
+        desc_ring[1].dst_stride      = 4096;
+        desc_ring[1].format          = 0;
+        desc_ring[1].plane_count     = 1;
+        desc_ring[1].control         = 0x02; /* Direction: 1 = C2H (FPGA -> Host) */
+
+        /* Advance Tail Pointer to 2 */
+        iowrite32((16 << 16) | 2, qdev->bar0_mmio + REG_H2C_RING_CFG);
+        dev_info(&pdev->dev, "  Triggered C2H DMA Run (Tail=2)... Waiting 10ms\n");
+        msleep(10);
+
+        dma_stat = ioread32(qdev->bar0_mmio + REG_DMA_STATUS);
+        u32 comp_c2h = ioread32(qdev->bar0_mmio + REG_COMPLETED_C2H);
+        dev_info(&pdev->dev, "  C2H Execution Status: DMA_STATUS=0x%08X, Completed Count=0x%08X\n", dma_stat, comp_c2h);
+
+        /* Inspect C2H buffer */
+        dev_info(&pdev->dev, "  C2H Buffer Content: [0]=0x%08X, [1]=0x%08X, [2]=0x%08X, [3]=0x%08X\n",
+                 c2h_buf[0], c2h_buf[1], c2h_buf[2], c2h_buf[3]);
+
+        /* Stop DMA */
+        iowrite32(0x00000000, qdev->bar0_mmio + REG_DMA_CTRL);
+
+        /* Free DMA Buffers */
+        dma_free_coherent(&pdev->dev, 64 * 16, desc_ring, desc_ring_dma);
+        dma_free_coherent(&pdev->dev, 4096, h2c_buf, h2c_buf_dma);
+        dma_free_coherent(&pdev->dev, 4096, c2h_buf, c2h_buf_dma);
+    }
 
     dev_info(&pdev->dev, "=======================================================\n");
-    dev_info(&pdev->dev, "🎉 [MINIMAL DIAGNOSTIC TEST COMPLETED SUCCESSFULLY]\n");
+    dev_info(&pdev->dev, "🎉 [DMA STEP-BY-STEP DIAGNOSTIC TEST COMPLETED]\n");
     dev_info(&pdev->dev, "=======================================================\n");
     return 0;
 
