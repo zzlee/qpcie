@@ -427,6 +427,8 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
         vdev->ctrl_handler = &vch->ctrl_handler;
         vdev->queue        = &vch->queue;
         vdev->lock         = &vch->lock;
+        vdev->device_caps  = V4L2_CAP_VIDEO_CAPTURE_MPLANE | V4L2_CAP_STREAMING;
+        vdev->vfl_dir      = VFL_DIR_RX;
         video_set_drvdata(vdev, vch);
 
         ret = video_register_device(vdev, VFL_TYPE_VIDEO, -1);
