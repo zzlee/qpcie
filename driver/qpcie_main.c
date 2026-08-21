@@ -98,15 +98,21 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
      * 2. BAR0 Write & Read-back Test
      * ------------------------------------------------------------------------ */
     dev_info(&pdev->dev, "--- [2. BAR0 Write & Readback Test] ---\n");
+    u32 dbg_wdata, dbg_waddr;
+
     iowrite32(0x12345678, qdev->bar0_mmio + REG_H2C_RING_ADDR_L); // offset 0x08
     readback = ioread32(qdev->bar0_mmio + REG_H2C_RING_ADDR_L);
-    dev_info(&pdev->dev, "  BAR0 [0x08] Write 0x12345678 -> Readback: 0x%08X %s\n",
-             readback, (readback == 0x12345678) ? "[PASS]" : "[FAIL]");
+    dbg_wdata = ioread32(qdev->bar0_mmio + 0x68);
+    dbg_waddr = ioread32(qdev->bar0_mmio + 0x6C);
+    dev_info(&pdev->dev, "  BAR0 [0x08] Write 0x12345678 -> Readback: 0x%08X %s (Hardware Captured: Addr=0x%02X, Data=0x%08X)\n",
+             readback, (readback == 0x12345678) ? "[PASS]" : "[FAIL]", dbg_waddr, dbg_wdata);
 
     iowrite32(0x87654321, qdev->bar0_mmio + REG_C2H_RING_ADDR_L); // offset 0x14
     readback = ioread32(qdev->bar0_mmio + REG_C2H_RING_ADDR_L);
-    dev_info(&pdev->dev, "  BAR0 [0x14] Write 0x87654321 -> Readback: 0x%08X %s\n",
-             readback, (readback == 0x87654321) ? "[PASS]" : "[FAIL]");
+    dbg_wdata = ioread32(qdev->bar0_mmio + 0x68);
+    dbg_waddr = ioread32(qdev->bar0_mmio + 0x6C);
+    dev_info(&pdev->dev, "  BAR0 [0x14] Write 0x87654321 -> Readback: 0x%08X %s (Hardware Captured: Addr=0x%02X, Data=0x%08X)\n",
+             readback, (readback == 0x87654321) ? "[PASS]" : "[FAIL]", dbg_waddr, dbg_wdata);
 
     /* Restore zero values */
     iowrite32(0x00000000, qdev->bar0_mmio + REG_H2C_RING_ADDR_L);
