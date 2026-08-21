@@ -11,6 +11,7 @@ tmp_ip/
 .Xil/
 .gen/
 .srcs/
+.hw/
 xsim.dir/
 work_sim/
 *.log
@@ -20,13 +21,29 @@ work_sim/
 *.vcd
 *.str
 *.str.bak
+*.prm
+*.bit
+*.bin
+*.dcp
+*.rpt
+webtalk*
+hs_err_pid*.log
 vivado_*.backup.log
 vivado_*.backup.jou
 xsim_*.backup.log
 xsim_*.backup.jou
 
 # ------------------------------------------------------------------------------
-# 2. Linux Kernel Driver Build Artifacts
+# 2. Simulation Artifacts (Icarus Verilog, ModelSim, Verilator)
+# ------------------------------------------------------------------------------
+tb/sim_*
+sim_*
+*.vvp
+*.out
+*.fst
+
+# ------------------------------------------------------------------------------
+# 3. Linux Kernel Driver Build Artifacts
 # ------------------------------------------------------------------------------
 driver/*.o
 driver/*.ko
@@ -39,9 +56,10 @@ driver/*.o.d
 driver/.tmp_versions/
 driver/Module.symvers
 driver/modules.order
+driver/Module.markers
 
 # ------------------------------------------------------------------------------
-# 3. User Test App Build Artifacts & Captured Media Files
+# 4. User Test App Build Artifacts & Captured Media Files
 # ------------------------------------------------------------------------------
 test_app/*.o
 test_app/qpcie_sanity_check
@@ -55,8 +73,11 @@ test_app/loopback_test_app
 raw/*.pdf
 
 # ------------------------------------------------------------------------------
-# 4. OS, IDE, Editor & Temporary Files
+# 5. OS, IDE, Editor & Temporary Files
 # ------------------------------------------------------------------------------
+.vscode/
+.idea/
+compile_commands.json
 .DS_Store
 *.swp
 *.swo
