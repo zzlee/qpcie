@@ -261,13 +261,13 @@ module pcie_7x_axi_bridge #(
     // =========================================================================
     // 2. TX Path: CC / RQ -> 7-Series TX Protocol Translator
     // =========================================================================
-    // Decoding CC Descriptor
-    wire [15:0] cc_compl_id   = compl_id;
-    wire [15:0] cc_req_id     = s_axis_cc_tdata[39:24];
-    wire [7:0]  cc_tag        = s_axis_cc_tdata[47:40];
-    wire [6:0]  cc_lower_addr = s_axis_cc_tdata[6:0];
-    wire [10:0] cc_dword_len  = s_axis_cc_tdata[74:64];
-    wire [31:0] cc_reg_rdata  = s_axis_cc_tdata[127:96];
+    // CC Header Extraction (Matches UltraScale CC Encoder Format from cc_tx_encoder.v)
+    wire [6:0]  cc_lower_addr  = s_axis_cc_tdata[6:0];
+    wire [9:0]  cc_dword_len   = s_axis_cc_tdata[41:32]; // Dword Count (11-bit at [42:32])
+    wire [7:0]  cc_tag         = s_axis_cc_tdata[58:51]; // Tag (8-bit at [58:51])
+    wire [15:0] cc_req_id      = s_axis_cc_tdata[79:64]; // Requester ID (16-bit at [79:64])
+    wire [15:0] cc_compl_id    = (s_axis_cc_tdata[95:80] != 16'd0) ? s_axis_cc_tdata[95:80] : compl_id; // Completer ID
+    wire [31:0] cc_reg_rdata   = s_axis_cc_tdata[127:96];
 
     // Decoding RQ Descriptor
     wire [63:0] rq_target_addr = s_axis_rq_tdata[63:0];
