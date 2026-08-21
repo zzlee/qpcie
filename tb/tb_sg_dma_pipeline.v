@@ -230,10 +230,14 @@ module tb_sg_dma_pipeline;
         $display("--- [Step 6: Host Returns 64-Byte CplD Descriptor] ---");
         @(posedge clk);
         // Beat 0: Header + DW0 (src_addr_lo = 0xAA001000)
+        // DW0: 0x4A000010 (CplD, Length=16 DWs)
+        // DW1: 0x04000000 (Byte Count = 64 = 0x040, Status = 0)
+        // DW2: 0x00000000 (Lower Addr = 0, Tag = 0, ReqID = 0)
+        // DW3: 0xAA001000 (Payload DW0: src_addr_lo)
         m_axis_rx_tvalid <= 1'b1;
         m_axis_rx_tlast  <= 1'b0;
         m_axis_rx_tkeep  <= 16'hFFFF;
-        m_axis_rx_tdata  <= {32'hAA001000, 32'h00010000, 32'h00000040, 32'h4A000010};
+        m_axis_rx_tdata  <= {32'hAA001000, 32'h00000000, 32'h04000000, 32'h4A000010};
         @(posedge clk);
         while (!m_axis_rx_tready) @(posedge clk);
 

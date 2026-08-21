@@ -107,12 +107,14 @@ module pcie_7x_axi_bridge #(
                                m_axis_rx_tuser[6] ? 3'b100 :
                                m_axis_rx_tuser[7] ? 3'b101 : 3'b000;
 
-    // RC Header Fields (UltraScale Descriptor Format - 128 bits)
-    wire [6:0]  rc_lower_addr = m_axis_rx_tdata[70:64];
-    wire [11:0] rc_byte_count = m_axis_rx_tdata[43:32];
-    wire [2:0]  rc_cpl_status = m_axis_rx_tdata[47:45];
-    wire [7:0]  rc_tag        = m_axis_rx_tdata[79:72];
-    wire [15:0] rc_req_id     = m_axis_rx_tdata[95:80];
+    // RC Header Fields (pg054 Table 2-8 / PCIe Base Spec Section 2.2.8.2)
+    // DW1: [63:32] -> ByteCount[31:20]=[63:52], CplStatus[18:16]=[50:48], ComplID[15:0]=[47:32]
+    // DW2: [95:64] -> LowerAddr[30:24]=[94:88], Tag[23:16]=[87:80], ReqID[15:0]=[79:64]
+    wire [6:0]  rc_lower_addr = m_axis_rx_tdata[94:88];
+    wire [11:0] rc_byte_count = m_axis_rx_tdata[63:52];
+    wire [2:0]  rc_cpl_status = m_axis_rx_tdata[50:48];
+    wire [7:0]  rc_tag        = m_axis_rx_tdata[87:80];
+    wire [15:0] rc_req_id     = m_axis_rx_tdata[79:64];
 
     // State machine to handle 4-DW MWr TLPs
     localparam RX_IDLE       = 2'd0;
