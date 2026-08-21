@@ -158,13 +158,10 @@ module pcie_7x_axi_bridge #(
                         if (!rx_is_4dw) begin // 3-DW MWr: Payload data is at [127:96]
                             m_axis_cq_tvalid = 1'b1;
                             m_axis_cq_tlast  = 1'b1;
-                            m_axis_cq_tkeep  = 32'hFFFFFFFF;
+                            m_axis_cq_tkeep  = 16'hFFFF;
                             m_axis_cq_tdata  = {
-                                96'd0, // [255:160]
-                                m_axis_rx_tdata[127:96], // [159:128]: Write Data Payload
-                                2'b00, 2'b00, 3'b000, 6'b000000, rx_bar_id,
-                                8'h00, rx_tag, rx_req_id, 1'b0,
-                                4'b0001, 1'b0, rx_length,
+                                m_axis_rx_tdata[127:96], // [127:96]: Write Data Payload for 128-bit bus
+                                4'b0001, 1'b0, rx_length, 8'h00, rx_tag, rx_req_id,
                                 rx_addr_64
                             };
                             m_axis_rx_tready = m_axis_cq_tready;
@@ -189,13 +186,10 @@ module pcie_7x_axi_bridge #(
                 if (m_axis_rx_tvalid) begin
                     m_axis_cq_tvalid = 1'b1;
                     m_axis_cq_tlast  = 1'b1;
-                    m_axis_cq_tkeep  = 32'hFFFFFFFF;
+                    m_axis_cq_tkeep  = 16'hFFFF;
                     m_axis_cq_tdata  = {
-                        96'd0, // [255:160]
-                        m_axis_rx_tdata[31:0], // [159:128]: Write Data Payload from Beat 1
-                        2'b00, 2'b00, 3'b000, 6'b000000, reg_mwr4_bar_id,
-                        8'h00, reg_mwr4_tag, reg_mwr4_req_id, 1'b0,
-                        4'b0001, 1'b0, reg_mwr4_length,
+                        m_axis_rx_tdata[31:0], // [127:96]: Write Data Payload from Beat 1 for 128-bit bus
+                        4'b0001, 1'b0, reg_mwr4_length, 8'h00, reg_mwr4_tag, reg_mwr4_req_id,
                         reg_mwr4_addr
                     };
                     m_axis_rx_tready = m_axis_cq_tready;
