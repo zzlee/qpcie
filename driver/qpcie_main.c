@@ -80,10 +80,10 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
              ver, (ver >> 24) & 0xFF, (ver >> 16) & 0xFF, (ver >> 8) & 0xFF, ver & 0xFF);
 
     git = ioread32(qdev->bar0_mmio + REG_GIT_COMMIT_HASH);
-    dev_info(&pdev->dev, "  BAR0 [0x34] Git Commit Hash: 0x%08X\n", git);
+    dev_info(&pdev->dev, "  BAR0 [0x34] Git Commit Hash: 0x%08X (Raw: 0x%08X)\n", swab32(git), git);
 
     date = ioread32(qdev->bar0_mmio + REG_BUILD_TIMESTAMP);
-    dev_info(&pdev->dev, "  BAR0 [0x38] Build Timestamp: 0x%08X (Date: %08X)\n", date, date);
+    dev_info(&pdev->dev, "  BAR0 [0x38] Build Timestamp: 20%06X (Raw: 0x%08X)\n", swab32(date), date);
 
     caps = ioread32(qdev->bar0_mmio + REG_HARDWARE_CAPS);
     dev_info(&pdev->dev, "  BAR0 [0x3C] Hardware Caps  : 0x%08X (VideoCh=%u, AudioCh=%u, Flags=0x%X)\n",
