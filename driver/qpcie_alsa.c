@@ -110,30 +110,17 @@ static int qpcie_alsa_pattern_info(struct snd_kcontrol *kcontrol, struct snd_ctl
 static int qpcie_alsa_pattern_get(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
 {
     struct qpcie_alsa_channel *ach = snd_kcontrol_chip(kcontrol);
-    struct qpcie_dev *qdev = ach->qdev;
-    u32 ctrl_val = 0;
-
-    if (qdev && qdev->bar1_mmio) {
-        ctrl_val = ioread32(qdev->bar1_mmio + 0x0100 + 0x00);
-    }
-    ucontrol->value.enumerated.item[0] = (ctrl_val >> 1) & 0x07;
+    ucontrol->value.enumerated.item[0] = ach->pattern_id & 0x07;
     return 0;
 }
 
 static int qpcie_alsa_pattern_put(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
 {
     struct qpcie_alsa_channel *ach = snd_kcontrol_chip(kcontrol);
-    struct qpcie_dev *qdev = ach->qdev;
     u32 pattern_id = ucontrol->value.enumerated.item[0];
 
     if (pattern_id > 3) return -EINVAL;
-
-    if (qdev && qdev->bar1_mmio) {
-        u32 ctrl_val = ioread32(qdev->bar1_mmio + 0x0100 + 0x00);
-        ctrl_val = (ctrl_val & ~0x0E) | ((pattern_id & 0x07) << 1) | 0x01; // Keep Enabled
-        iowrite32(ctrl_val, qdev->bar1_mmio + 0x0100 + 0x00);
-        dev_info(&qdev->pdev->dev, "ALSA Mixer: Set Audio Pattern ID %u\n", pattern_id);
-    }
+    ach->pattern_id = pattern_id;
     return 1;
 }
 
@@ -149,28 +136,17 @@ static int qpcie_alsa_volume_info(struct snd_kcontrol *kcontrol, struct snd_ctl_
 static int qpcie_alsa_volume_get(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
 {
     struct qpcie_alsa_channel *ach = snd_kcontrol_chip(kcontrol);
-    struct qpcie_dev *qdev = ach->qdev;
-    u32 volume = 200;
-
-    if (qdev && qdev->bar1_mmio) {
-        volume = ioread32(qdev->bar1_mmio + 0x0100 + 0x08);
-    }
-    ucontrol->value.integer.value[0] = volume;
+    ucontrol->value.integer.value[0] = ach->volume;
     return 0;
 }
 
 static int qpcie_alsa_volume_put(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
 {
     struct qpcie_alsa_channel *ach = snd_kcontrol_chip(kcontrol);
-    struct qpcie_dev *qdev = ach->qdev;
     u32 volume = ucontrol->value.integer.value[0];
 
     if (volume > 255) volume = 255;
-
-    if (qdev && qdev->bar1_mmio) {
-        iowrite32(volume, qdev->bar1_mmio + 0x0100 + 0x08);
-        dev_info(&qdev->pdev->dev, "ALSA Mixer: Set Audio Volume %u\n", volume);
-    }
+    ach->volume = volume;
     return 1;
 }
 

@@ -122,6 +122,8 @@ struct qpcie_alsa_channel {
     spinlock_t slock;
     u32 buffer_pos;
     u32 period_pos;
+    u32 pattern_id;
+    u32 volume;
 };
 
 struct qpcie_dev {
