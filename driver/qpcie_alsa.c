@@ -195,18 +195,24 @@ int qpcie_alsa_init(struct qpcie_dev *qdev)
 {
     int i, ret;
 
+    dev_info(&qdev->pdev->dev, "[DEBUG STEP 3.1] Starting ALSA Audio Subsystem Init...\n");
+
     for (i = 0; i < NUM_AUDIO_CHANNELS; i++) {
         struct qpcie_alsa_channel *ach = &qdev->alsa_ch[i];
         struct snd_card *card;
         struct snd_pcm *pcm;
         int k;
 
+        dev_info(&qdev->pdev->dev, "[DEBUG STEP 3.2] Initializing Audio Channel %d...\n", i);
         ach->qdev       = qdev;
         ach->channel_id = i;
         spin_lock_init(&ach->slock);
 
         ret = snd_card_new(&qdev->pdev->dev, -1, "QPCIe-AES3", THIS_MODULE, 0, &card);
-        if (ret) return ret;
+        if (ret) {
+            dev_err(&qdev->pdev->dev, "[DEBUG ERROR] Audio Ch %d: snd_card_new failed: %d\n", i, ret);
+            return ret;
+        }
 
         ach->card = card;
         strscpy(card->driver, "qpcie-alsa", sizeof(card->driver));
@@ -214,7 +220,10 @@ int qpcie_alsa_init(struct qpcie_dev *qdev)
         snprintf(card->longname, sizeof(card->longname), "QPCIe Multi-Channel AES3 Audio Channel %d", i);
 
         ret = snd_pcm_new(card, "QPCIe AES3 PCM", 0, 1, 1, &pcm);
-        if (ret) goto free_card;
+        if (ret) {
+            dev_err(&qdev->pdev->dev, "[DEBUG ERROR] Audio Ch %d: snd_pcm_new failed: %d\n", i, ret);
+            goto free_card;
+        }
 
         ach->pcm = pcm;
         pcm->private_data = ach;
@@ -227,18 +236,26 @@ int qpcie_alsa_init(struct qpcie_dev *qdev)
         /* Register ALSA Mixer Controls */
         for (k = 0; k < ARRAY_SIZE(qpcie_alsa_controls); k++) {
             ret = snd_ctl_add(card, snd_ctl_new1(&qpcie_alsa_controls[k], ach));
-            if (ret < 0) goto free_card;
+            if (ret < 0) {
+                dev_err(&qdev->pdev->dev, "[DEBUG ERROR] Audio Ch %d: snd_ctl_add failed: %d\n", i, ret);
+                goto free_card;
+            }
         }
 
         ret = snd_card_register(card);
-        if (ret) goto free_card;
+        if (ret) {
+            dev_err(&qdev->pdev->dev, "[DEBUG ERROR] Audio Ch %d: snd_card_register failed: %d\n", i, ret);
+            goto free_card;
+        }
 
+        dev_info(&qdev->pdev->dev, " -> Audio Channel %d registered as ALSA Card #%d\n", i, card->number);
         continue;
 
 free_card:
         snd_card_free(card);
         return ret;
     }
+    dev_info(&qdev->pdev->dev, "🎉 [DEBUG STEP 3 COMPLETE] All ALSA Audio Cards Initialized Successfully!\n");
     return 0;
 }
 

@@ -365,14 +365,19 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
 {
     int i, ret;
 
+    dev_info(&qdev->pdev->dev, "[DEBUG STEP 2.1] Registering top-level v4l2_device...\n");
     snprintf(qdev->v4l2_dev.name, sizeof(qdev->v4l2_dev.name), "qpcie-v4l2");
     ret = v4l2_device_register(&qdev->pdev->dev, &qdev->v4l2_dev);
-    if (ret) return ret;
+    if (ret) {
+        dev_err(&qdev->pdev->dev, "[DEBUG ERROR] v4l2_device_register failed: %d\n", ret);
+        return ret;
+    }
 
     for (i = 0; i < NUM_VIDEO_CHANNELS; i++) {
         struct qpcie_v4l2_channel *vch = &qdev->v4l2_ch[i];
         struct video_device *vdev = &vch->vdev;
 
+        dev_info(&qdev->pdev->dev, "[DEBUG STEP 2.2] Initializing Video Channel %d...\n", i);
         vch->qdev       = qdev;
         vch->channel_id = i;
         vch->width      = 1920;
@@ -385,16 +390,19 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
         INIT_LIST_HEAD(&vch->active_buffers);
 
         /* Initialize V4L2 Control Handler for Video TPG */
+        dev_info(&qdev->pdev->dev, "[DEBUG STEP 2.3] Channel %d: Initializing Control Handler...\n", i);
         v4l2_ctrl_handler_init(&vch->ctrl_handler, 2);
         v4l2_ctrl_new_std_menu_items(&vch->ctrl_handler, &qpcie_ctrl_ops,
                                      V4L2_CID_TEST_PATTERN,
                                      4, 0, 0, qpcie_tpg_pattern_strings);
         if (vch->ctrl_handler.error) {
             ret = vch->ctrl_handler.error;
+            dev_err(&qdev->pdev->dev, "[DEBUG ERROR] Channel %d: Control handler error: %d\n", i, ret);
             goto unreg_v4l2;
         }
 
         /* Enable MMAP, USERPTR, and DMABUF (Import/Export) Modes */
+        dev_info(&qdev->pdev->dev, "[DEBUG STEP 2.4] Channel %d: Initializing vb2_queue...\n", i);
         vch->queue.type            = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
         vch->queue.io_modes        = VB2_MMAP | VB2_USERPTR | VB2_DMABUF;
         vch->queue.drv_priv        = vch;
@@ -405,8 +413,12 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
         vch->queue.lock            = &vch->lock;
         vch->queue.dev             = &qdev->pdev->dev;
         ret = vb2_queue_init(&vch->queue);
-        if (ret) goto unreg_v4l2;
+        if (ret) {
+            dev_err(&qdev->pdev->dev, "[DEBUG ERROR] Channel %d: vb2_queue_init failed: %d\n", i, ret);
+            goto unreg_v4l2;
+        }
 
+        dev_info(&qdev->pdev->dev, "[DEBUG STEP 2.5] Channel %d: Registering Video Device /dev/videoX...\n", i);
         snprintf(vdev->name, sizeof(vdev->name), "qpcie-video-ch%d", i);
         vdev->fops         = &qpcie_v4l2_fops;
         vdev->ioctl_ops    = &qpcie_v4l2_ioctl_ops;
@@ -418,10 +430,15 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
         video_set_drvdata(vdev, vch);
 
         ret = video_register_device(vdev, VFL_TYPE_VIDEO, -1);
-        if (ret) goto unreg_v4l2;
+        if (ret) {
+            dev_err(&qdev->pdev->dev, "[DEBUG ERROR] Channel %d: video_register_device failed: %d\n", i, ret);
+            goto unreg_v4l2;
+        }
 
         v4l2_ctrl_handler_setup(&vch->ctrl_handler);
+        dev_info(&qdev->pdev->dev, " -> Channel %d registered as /dev/video%d\n", i, vdev->num);
     }
+    dev_info(&qdev->pdev->dev, "🎉 [DEBUG STEP 2 COMPLETE] All V4L2 Channels Initialized Successfully!\n");
     return 0;
 
 unreg_v4l2:
