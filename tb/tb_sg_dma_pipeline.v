@@ -256,8 +256,28 @@ module tb_sg_dma_pipeline;
 
         // 7. Expect sg_dma_engine to execute C2H DMA Write bursts to Host RAM
         $display("--- [Step 7: Waiting for sg_dma_engine C2H MWr Bursts...] ---");
-        @(posedge s_axis_tx_tvalid);
-        $display("  ✅ [PASS] C2H MWr TLP Burst Generated towards Host Address 0x%08X!", s_axis_tx_tdata[95:64]);
+        @(posedge clk);
+        while (!(s_axis_tx_tvalid && s_axis_tx_tdata[30:29] == 2'b11)) @(posedge clk);
+        $display("  ✅ [PASS] Beat 0 (4-DW Header): Addr=0x%08X, Length=%d DWs, tlast=%b",
+                 s_axis_tx_tdata[127:96], s_axis_tx_tdata[9:0], s_axis_tx_tlast);
+        if (s_axis_tx_tlast != 1'b0) begin
+            $display("  ❌ [FAIL] Beat 0 tlast should be 0 for 4-DW MWr!");
+            $finish;
+        end
+
+        // Wait for Beat 1 (128-bit Data Payload)
+        @(posedge clk);
+        while (!s_axis_tx_tvalid) @(posedge clk);
+        $display("  ✅ [PASS] Beat 1 (128-bit Payload Data): Data=0x%08X_%08X_%08X_%08X, tlast=%b",
+                 s_axis_tx_tdata[127:96], s_axis_tx_tdata[95:64], s_axis_tx_tdata[63:32], s_axis_tx_tdata[31:0], s_axis_tx_tlast);
+        if (s_axis_tx_tlast != 1'b1) begin
+            $display("  ❌ [FAIL] Beat 1 tlast should be 1 for 4-DW MWr payload!");
+            $finish;
+        end
+        if (s_axis_tx_tdata[31:0] != 32'hC2000000) begin
+            $display("  ❌ [FAIL] Beat 1 Payload DW0 mismatch! Expected 0xC2000000, got 0x%08X", s_axis_tx_tdata[31:0]);
+            $finish;
+        end
 
         #100;
         $display("\n=================================================================");

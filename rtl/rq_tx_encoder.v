@@ -127,9 +127,16 @@ module rq_tx_encoder #(
                             c2h_req_ack              <= 1'b1;
                             state                    <= c2h_req_last ? SEND_SINGLE : SEND_MWR;
                         end else begin
-                            // 128-bit Mode: Beat 0 is 4-DW Header, Beat 1 is 128-bit Data Payload
+                            // 128-bit Mode: Beat 0 is 4-DW Header (tlast=0)
                             m_axis_rq_tlast          <= 1'b0;
-                            state                    <= SEND_MWR;
+                            if (m_axis_rq_tready) begin
+                                m_axis_rq_tdata  <= c2h_req_data[127:0];
+                                m_axis_rq_tlast  <= 1'b1;
+                                c2h_req_ack      <= 1'b1;
+                                state            <= SEND_SINGLE;
+                            end else begin
+                                state            <= SEND_MWR;
+                            end
                         end
                     end
                 end
