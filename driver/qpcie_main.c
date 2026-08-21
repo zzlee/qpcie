@@ -113,16 +113,9 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
     iowrite32(0x00000000, qdev->bar0_mmio + REG_C2H_RING_ADDR_L);
 
     /* ------------------------------------------------------------------------
-     * 3. BAR1 Read Tests (User IP Cores Interconnect)
+     * 3. BAR1 Read Tests (Disabled to prevent unmapped BAR1 crossbar timeout)
      * ------------------------------------------------------------------------ */
-    if (qdev->bar1_mmio) {
-        dev_info(&pdev->dev, "--- [3. BAR1 User IP Register Read Tests] ---\n");
-        u32 bar1_edid = ioread32(qdev->bar1_mmio + 0x0000);
-        dev_info(&pdev->dev, "  BAR1 [0x0000] EDID Control : 0x%08X\n", bar1_edid);
-
-        u32 bar1_aud = ioread32(qdev->bar1_mmio + 0x0100);
-        dev_info(&pdev->dev, "  BAR1 [0x0100] Audio Control: 0x%08X\n", bar1_aud);
-    }
+    dev_info(&pdev->dev, "--- [3. BAR1 User IP Tests Bypassed] ---\n");
 
     dev_info(&pdev->dev, "=======================================================\n");
     dev_info(&pdev->dev, "🎉 [MINIMAL DIAGNOSTIC TEST COMPLETED SUCCESSFULLY]\n");
