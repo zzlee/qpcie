@@ -188,7 +188,7 @@ module cq_rx_decoder #(
                         m_axil_bar0_arvalid <= 1'b0;
                         m_axil_bar1_arvalid <= 1'b0;
                     end
-                    if ((m_axil_bar0_rvalid || m_axil_bar1_rvalid) && !read_req_valid) begin
+                    if (m_axil_bar0_rvalid || m_axil_bar1_rvalid) begin
                         s_axis_cq_tready <= 1'b1;
                         state            <= IDLE;
                     end
