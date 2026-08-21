@@ -115,8 +115,7 @@ module rq_tx_encoder #(
                         state                  <= SEND_SINGLE;
                     end else if (c2h_req_valid) begin
                         m_axis_rq_tvalid       <= 1'b1;
-                        m_axis_rq_tlast        <= c2h_req_last;
-                        m_axis_rq_tkeep        <= 8'hFF;
+                        m_axis_rq_tkeep        <= {KEEP_WIDTH{1'b1}};
                         m_axis_rq_tdata[63:0]  <= c2h_req_addr;
                         m_axis_rq_tdata[74:64] <= c2h_req_dw_len;
                         m_axis_rq_tdata[78:75] <= 4'b0001; // MWr
@@ -124,11 +123,14 @@ module rq_tx_encoder #(
                         m_axis_rq_tdata[103:96]<= 8'd0;
                         if (DATA_WIDTH >= 256) begin
                             m_axis_rq_tdata[255:128] <= c2h_req_data[127:0]; // Payload starting at DW4
+                            m_axis_rq_tlast          <= c2h_req_last;
+                            c2h_req_ack              <= 1'b1;
+                            state                    <= c2h_req_last ? SEND_SINGLE : SEND_MWR;
                         end else begin
-                            m_axis_rq_tdata[127:96]  <= c2h_req_data[31:0];  // Payload starting at DW3 for 128-bit
+                            // 128-bit Mode: Beat 0 is 4-DW Header, Beat 1 is 128-bit Data Payload
+                            m_axis_rq_tlast          <= 1'b0;
+                            state                    <= SEND_MWR;
                         end
-                        c2h_req_ack            <= 1'b1;
-                        state                  <= c2h_req_last ? SEND_SINGLE : SEND_MWR;
                     end
                 end
 
@@ -145,11 +147,12 @@ module rq_tx_encoder #(
                 end
 
                 SEND_MWR: begin
-                    if (m_axis_rq_tready && c2h_req_valid) begin
-                        m_axis_rq_tdata <= c2h_req_data;
-                        m_axis_rq_tlast <= c2h_req_last;
-                        c2h_req_ack     <= 1'b1;
-                        if (c2h_req_last) state <= SEND_SINGLE;
+                    if (m_axis_rq_tready) begin
+                        m_axis_rq_tdata  <= c2h_req_data[127:0];
+                        m_axis_rq_tvalid <= 1'b1;
+                        m_axis_rq_tlast  <= 1'b1;
+                        c2h_req_ack      <= 1'b1;
+                        state            <= SEND_SINGLE;
                     end
                 end
 
