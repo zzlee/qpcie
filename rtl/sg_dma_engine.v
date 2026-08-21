@@ -8,7 +8,7 @@
 `timescale 1ns / 1ps
 
 module sg_dma_engine #(
-    parameter PCIE_DATA_WIDTH = 256
+    parameter PCIE_DATA_WIDTH = 128
 )(
     input  wire                          clk,
     input  wire                          rst_n,
@@ -40,35 +40,33 @@ module sg_dma_engine #(
     output reg                           c2h_req_last,
     input  wire                          c2h_req_ack,
 
-    // Interface from RC RX Decoder (H2C CplD Stream Stream Consumer)
+    // Interface from RC RX Decoder (H2C CplD Stream Consumer)
     input  wire                          h2c_cpl_valid,
     input  wire [PCIE_DATA_WIDTH-1:0]    h2c_cpl_data,
     input  wire                          h2c_cpl_last,
 
-    // Real-Time Counters & Status Output
+    // Real-time DMA Status & Counters
     output reg  [31:0]                   completed_h2c_count,
     output reg  [31:0]                   completed_c2h_count,
-    output reg  [31:0]                   h2c_bytes_transferred,
-    output reg  [31:0]                   c2h_bytes_transferred,
     output wire                          h2c_busy,
     output wire                          c2h_busy
 );
 
     // =========================================================================
-    // 1. H2C Execution State Machine (Host -> FPGA MRd + Stream Consumer)
+    // H2C (Host -> FPGA) DMA Execution State Machine
     // =========================================================================
-    localparam H2C_IDLE       = 3'b000;
-    localparam H2C_ISSUE_MRD  = 3'b001;
-    localparam H2C_WAIT_ACK   = 3'b010;
-    localparam H2C_WAIT_CPLD  = 3'b011;
-    localparam H2C_COMPLETE   = 3'b100;
+    localparam H2C_IDLE       = 2'd0;
+    localparam H2C_ISSUE_MRD  = 2'd1;
+    localparam H2C_WAIT_ACK   = 2'd2;
+    localparam H2C_WAIT_CPLD  = 2'd3;
 
-    reg [2:0]  h2c_state;
+    reg [1:0]  h2c_state;
     reg [63:0] h2c_cur_addr;
     reg [15:0] h2c_rem_bytes;
     reg [10:0] h2c_burst_dw;
     reg [15:0] h2c_cpl_dw_cnt;
     reg [15:0] h2c_total_dw_req;
+    reg [31:0] h2c_bytes_transferred;
 
     assign h2c_busy = (h2c_state != H2C_IDLE);
 
@@ -103,7 +101,6 @@ module sg_dma_engine #(
 
                 H2C_ISSUE_MRD: begin
                     if (h2c_rem_bytes > 16'd0) begin
-                        // Issue 32 DW (128-byte) or remaining burst MRd
                         if (h2c_rem_bytes >= 16'd128) begin
                             h2c_burst_dw   <= 11'd32;
                             h2c_req_dw_len <= 11'd32;
@@ -130,7 +127,6 @@ module sg_dma_engine #(
                 end
 
                 H2C_WAIT_CPLD: begin
-                    // Stream consumer: count incoming CplD beats
                     if (h2c_cpl_valid) begin
                         h2c_cpl_dw_cnt        <= h2c_cpl_dw_cnt + (PCIE_DATA_WIDTH / 32);
                         h2c_bytes_transferred <= h2c_bytes_transferred + (PCIE_DATA_WIDTH / 8);
@@ -138,45 +134,36 @@ module sg_dma_engine #(
 
                     // Once all requested DWs received or timeout/last
                     if (h2c_cpl_dw_cnt >= h2c_total_dw_req || h2c_total_dw_req == 16'd0) begin
-                        h2c_state <= H2C_COMPLETE;
+                        completed_h2c_count <= completed_h2c_count + 1'b1;
+                        h2c_desc_ready      <= 1'b1;
+                        h2c_state           <= H2C_IDLE;
                     end
                 end
-
-                H2C_COMPLETE: begin
-                    h2c_desc_ready        <= 1'b1;
-                    completed_h2c_count   <= completed_h2c_count + 1'b1;
-                    h2c_state             <= H2C_IDLE;
-                end
-
-                default: h2c_state <= H2C_IDLE;
             endcase
         end
     end
 
     // =========================================================================
-    // 2. C2H Execution State Machine (FPGA -> Host MWr Burst Generator)
+    // C2H (FPGA -> Host) DMA Execution State Machine
     // =========================================================================
-    localparam C2H_IDLE       = 3'b000;
-    localparam C2H_SEND_BEAT  = 3'b001;
-    localparam C2H_WAIT_ACK   = 3'b010;
-    localparam C2H_COMPLETE   = 3'b011;
+    localparam C2H_IDLE     = 2'd0;
+    localparam C2H_SEND_BEAT= 2'd1;
+    localparam C2H_WAIT_ACK = 2'd2;
+    localparam C2H_COMPLETE = 2'd3;
 
-    reg [2:0]  c2h_state;
+    reg [1:0]  c2h_state;
     reg [63:0] c2h_cur_addr;
     reg [15:0] c2h_rem_bytes;
     reg [15:0] c2h_word_idx;
+    reg [31:0] c2h_bytes_transferred;
 
     assign c2h_busy = (c2h_state != C2H_IDLE);
 
-    // Form test pattern payload: 8 DWORDs per 256-bit beat
-    wire [31:0] p_dw0 = {8'hC2, completed_c2h_count[7:0], c2h_word_idx + 16'd0};
-    wire [31:0] p_dw1 = {8'hC2, completed_c2h_count[7:0], c2h_word_idx + 16'd1};
-    wire [31:0] p_dw2 = {8'hC2, completed_c2h_count[7:0], c2h_word_idx + 16'd2};
-    wire [31:0] p_dw3 = {8'hC2, completed_c2h_count[7:0], c2h_word_idx + 16'd3};
-    wire [31:0] p_dw4 = {8'hC2, completed_c2h_count[7:0], c2h_word_idx + 16'd4};
-    wire [31:0] p_dw5 = {8'hC2, completed_c2h_count[7:0], c2h_word_idx + 16'd5};
-    wire [31:0] p_dw6 = {8'hC2, completed_c2h_count[7:0], c2h_word_idx + 16'd6};
-    wire [31:0] p_dw7 = {8'hC2, completed_c2h_count[7:0], c2h_word_idx + 16'd7};
+    // Identifiable Test Pattern Generator for 128-bit Beats (4 DWs per beat)
+    wire [31:0] p_dw0 = 32'hC200_0000 | (completed_c2h_count[7:0] << 16) | c2h_word_idx;
+    wire [31:0] p_dw1 = 32'hC200_0000 | (completed_c2h_count[7:0] << 16) | (c2h_word_idx + 16'd1);
+    wire [31:0] p_dw2 = 32'hC200_0000 | (completed_c2h_count[7:0] << 16) | (c2h_word_idx + 16'd2);
+    wire [31:0] p_dw3 = 32'hC200_0000 | (completed_c2h_count[7:0] << 16) | (c2h_word_idx + 16'd3);
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -208,9 +195,9 @@ module sg_dma_engine #(
                 C2H_SEND_BEAT: begin
                     if (c2h_rem_bytes > 16'd0) begin
                         c2h_req_addr   <= c2h_cur_addr;
-                        c2h_req_dw_len <= 11'd8; // 8 DWs = 32 Bytes (1 256-bit beat)
-                        c2h_req_data   <= {p_dw7, p_dw6, p_dw5, p_dw4, p_dw3, p_dw2, p_dw1, p_dw0};
-                        c2h_req_last   <= (c2h_rem_bytes <= 16'd32);
+                        c2h_req_dw_len <= 11'd4; // 4 DWs = 16 Bytes (1 128-bit beat)
+                        c2h_req_data   <= {p_dw3, p_dw2, p_dw1, p_dw0};
+                        c2h_req_last   <= (c2h_rem_bytes <= 16'd16);
                         c2h_req_valid  <= 1'b1;
                         c2h_state      <= C2H_WAIT_ACK;
                     end else begin
@@ -221,17 +208,17 @@ module sg_dma_engine #(
                 C2H_WAIT_ACK: begin
                     if (c2h_req_ack) begin
                         c2h_req_valid         <= 1'b0;
-                        c2h_cur_addr          <= c2h_cur_addr + 64'd32;
-                        c2h_rem_bytes         <= (c2h_rem_bytes > 16'd32) ? (c2h_rem_bytes - 16'd32) : 16'd0;
-                        c2h_word_idx          <= c2h_word_idx + 16'd8;
-                        c2h_bytes_transferred <= c2h_bytes_transferred + 32'd32;
+                        c2h_cur_addr          <= c2h_cur_addr + 64'd16;
+                        c2h_rem_bytes         <= c2h_rem_bytes - 16'd16;
+                        c2h_word_idx          <= c2h_word_idx + 16'd4;
+                        c2h_bytes_transferred <= c2h_bytes_transferred + 32'd16;
                         c2h_state             <= C2H_SEND_BEAT;
                     end
                 end
 
                 C2H_COMPLETE: begin
-                    c2h_desc_ready      <= 1'b1;
                     completed_c2h_count <= completed_c2h_count + 1'b1;
+                    c2h_desc_ready      <= 1'b1;
                     c2h_state           <= C2H_IDLE;
                 end
 

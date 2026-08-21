@@ -10,7 +10,7 @@
 
 module video_stream_engine #(
     parameter VIDEO_DATA_WIDTH = 128,
-    parameter PCIE_DATA_WIDTH  = 256
+    parameter PCIE_DATA_WIDTH  = 128
 )(
     input  wire                          clk,
     input  wire                          rst_n,

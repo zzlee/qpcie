@@ -10,7 +10,7 @@
 `timescale 1ns / 1ps
 
 module a50t_pcie_card_top #(
-    parameter PCIE_DATA_WIDTH  = 256,
+    parameter PCIE_DATA_WIDTH  = 128,
     parameter PCIE_KEEP_WIDTH  = PCIE_DATA_WIDTH / 8,
     parameter NUM_VIDEO_CH     = 4,
     parameter NUM_AUDIO_CH     = 4,

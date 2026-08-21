@@ -12,8 +12,8 @@
 `timescale 1ns / 1ps
 
 module rc_rx_decoder #(
-    parameter DATA_WIDTH = 256,
-    parameter KEEP_WIDTH = DATA_WIDTH / 32
+    parameter DATA_WIDTH = 128,
+    parameter KEEP_WIDTH = DATA_WIDTH / 8
 )(
     input  wire                  clk,
     input  wire                  rst_n,

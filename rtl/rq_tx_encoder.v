@@ -7,8 +7,8 @@
 `timescale 1ns / 1ps
 
 module rq_tx_encoder #(
-    parameter DATA_WIDTH = 256,
-    parameter KEEP_WIDTH = DATA_WIDTH / 32,
+    parameter DATA_WIDTH = 128,
+    parameter KEEP_WIDTH = DATA_WIDTH / 8,
     parameter [15:0] REQUESTER_ID = 16'h0001
 )(
     input  wire                  clk,

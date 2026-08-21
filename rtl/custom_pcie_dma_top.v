@@ -11,8 +11,8 @@
 `timescale 1ns / 1ps
 
 module custom_pcie_dma_top #(
-    parameter PCIE_DATA_WIDTH  = 256,
-    parameter PCIE_KEEP_WIDTH  = PCIE_DATA_WIDTH / 32,
+    parameter PCIE_DATA_WIDTH  = 128,
+    parameter PCIE_KEEP_WIDTH  = PCIE_DATA_WIDTH / 8,
     parameter NUM_VIDEO_CH     = 4,
     parameter NUM_AUDIO_CH     = 4,
     parameter VIDEO_DATA_WIDTH = 32,
