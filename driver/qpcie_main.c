@@ -172,7 +172,7 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
         iowrite32((u32)((desc_ring_dma >> 32) & 0xFFFFFFFF), qdev->bar0_mmio + REG_H2C_RING_ADDR_H);
 
         /* Set Ring Config: Size=16, Tail=1 */
-        iowrite32((16 << 16) | 1, qdev->bar0_mmio + REG_H2C_RING_CFG);
+        iowrite32((1 << 16) | 16, qdev->bar0_mmio + REG_H2C_RING_CFG);
 
         /* Trigger DMA Start */
         iowrite32(0x00000001, qdev->bar0_mmio + REG_DMA_CTRL);
@@ -200,7 +200,7 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
         desc_ring[1].control         = 0x02; /* Direction: 1 = C2H (FPGA -> Host) */
 
         /* Advance Tail Pointer to 2 */
-        iowrite32((16 << 16) | 2, qdev->bar0_mmio + REG_H2C_RING_CFG);
+        iowrite32((2 << 16) | 16, qdev->bar0_mmio + REG_H2C_RING_CFG);
         dev_info(&pdev->dev, "  Triggered C2H DMA Run (Tail=2)... Waiting 10ms\n");
         msleep(10);
 
