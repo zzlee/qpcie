@@ -48,6 +48,8 @@ module sg_dma_engine #(
     // Real-time DMA Status & Counters
     output reg  [31:0]                   completed_h2c_count,
     output reg  [31:0]                   completed_c2h_count,
+    output reg  [31:0]                   h2c_bytes_transferred,
+    output reg  [31:0]                   c2h_bytes_transferred,
     output wire                          h2c_busy,
     output wire                          c2h_busy
 );
