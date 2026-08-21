@@ -288,7 +288,7 @@ module pcie_7x_axi_bridge #(
     wire [15:0] rq_req_id      = compl_id;
     wire [7:0]  rq_tag         = s_axis_rq_tdata[103:96];
     wire        rq_is_mwr      = (rq_req_type == 4'b0001);
-    wire        rq_is_4dw      = (rq_target_addr[63:32] != 32'h0);
+    wire        rq_is_4dw      = 1'b1; // Always use standard 4-DW (64-bit Address) TLPs for all DMA transactions
 
     // RQ MRd / MWr DW0 Definitions (pg054 Table 2-8: 128-bit beat)
     wire [31:0] tx_mrd3_dw0 = {1'b0, 2'b00, 5'b00000, 1'b0, 3'b000, 4'b0000, 2'b00, 2'b00, 2'b00, rq_dword_len};
