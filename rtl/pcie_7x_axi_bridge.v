@@ -37,7 +37,7 @@ module pcie_7x_axi_bridge #(
     output reg                   s_axis_tx_tlast,
     output reg                   s_axis_tx_tvalid,
     input  wire                  s_axis_tx_tready,
-    output wire [3:0]            s_axis_tx_tuser,
+    output reg  [3:0]            s_axis_tx_tuser,
 
     // ------------------------------------------------------------------------
     // UltraScale/PCIe4 CQ Interface (Completer Request - to cq_rx_decoder)
@@ -57,7 +57,7 @@ module pcie_7x_axi_bridge #(
     input  wire                  s_axis_cc_tlast,
     input  wire [32:0]           s_axis_cc_tuser,
     input  wire [KEEP_WIDTH-1:0] s_axis_cc_tkeep,
-    output wire                  s_axis_cc_tready,
+    output reg                   s_axis_cc_tready,
 
     // ------------------------------------------------------------------------
     // UltraScale/PCIe4 RQ Interface (Requester Request - from rq_tx_encoder)
@@ -67,7 +67,7 @@ module pcie_7x_axi_bridge #(
     input  wire                  s_axis_rq_tlast,
     input  wire [61:0]           s_axis_rq_tuser,
     input  wire [KEEP_WIDTH-1:0] s_axis_rq_tkeep,
-    output wire                  s_axis_rq_tready,
+    output reg                   s_axis_rq_tready,
 
     // ------------------------------------------------------------------------
     // UltraScale/PCIe4 RC Interface (Requester Completion - to rc_rx_decoder)
@@ -79,10 +79,6 @@ module pcie_7x_axi_bridge #(
     output reg  [KEEP_WIDTH-1:0] m_axis_rc_tkeep,
     input  wire                  m_axis_rc_tready
 );
-
-    assign s_axis_tx_tuser = 4'b0000;
-    assign s_axis_cc_tready = s_axis_tx_tready;
-    assign s_axis_rq_tready = s_axis_tx_tready;
 
     wire [15:0] compl_id = {cfg_bus_number, cfg_device_number, cfg_function_number};
 
