@@ -26,7 +26,7 @@ set date_raw [clock format [clock seconds] -format "%Y%m%d"]
 set git_commit_hex "32'h$git_raw"
 set build_date_hex "32'h$date_raw"
 
-puts "   [GIT AUTO-INJECT] Commit Hash: 0x$git_raw, Build Date: $date_raw"
+puts "   \\[GIT AUTO-INJECT\\] Commit Hash: 0x$git_raw, Build Date: $date_raw"
 
 add_files [glob ./rtl/*.v]
 set_property top a50t_pcie_card_top [current_fileset]
