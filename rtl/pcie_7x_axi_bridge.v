@@ -97,10 +97,9 @@ module pcie_7x_axi_bridge #(
     wire [9:0]  rx_length       = m_axis_rx_tdata[9:0];
     wire [15:0] rx_req_id       = m_axis_rx_tdata[63:48];
     wire [7:0]  rx_tag          = m_axis_rx_tdata[47:40];
-    wire [31:0] rx_addr_lo_raw  = rx_is_4dw ? m_axis_rx_tdata[127:96] : m_axis_rx_tdata[95:64];
-    wire [31:0] rx_addr_hi_raw  = rx_is_4dw ? m_axis_rx_tdata[95:64]  : 32'h0;
-    wire [31:0] rx_addr_lo      = {rx_addr_lo_raw[7:0], rx_addr_lo_raw[15:8], rx_addr_lo_raw[23:16], rx_addr_lo_raw[31:24]};
-    wire [31:0] rx_addr_hi      = {rx_addr_hi_raw[7:0], rx_addr_hi_raw[15:8], rx_addr_hi_raw[23:16], rx_addr_hi_raw[31:24]};
+    wire [31:0] rx_addr_lo      = rx_is_4dw ? {m_axis_rx_tdata[103:96], m_axis_rx_tdata[111:104], m_axis_rx_tdata[119:112], m_axis_rx_tdata[127:120]} :
+                                              {m_axis_rx_tdata[71:64],  m_axis_rx_tdata[79:72],   m_axis_rx_tdata[87:80],   m_axis_rx_tdata[95:88]};
+    wire [31:0] rx_addr_hi      = rx_is_4dw ? {m_axis_rx_tdata[7:0],    m_axis_rx_tdata[15:8],    m_axis_rx_tdata[23:16],   m_axis_rx_tdata[31:24]} : 32'h0;
     wire [63:0] rx_addr_64      = {rx_addr_hi, rx_addr_lo};
     wire [2:0]  rx_bar_id       = m_axis_rx_tuser[3] ? 3'b001 :
                                   m_axis_rx_tuser[4] ? 3'b010 :
