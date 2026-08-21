@@ -80,10 +80,18 @@ module axil_reg_space (
     localparam ADDR_BUILD_TIMESTAMP  = 8'h38; // BCD Date YYYYMMDD
     localparam ADDR_HARDWARE_CAPS    = 8'h3C; // Caps: [23:16]=NumAudioCh, [15:8]=NumVideoCh, [3:0]=Flags
 
+    `ifndef GIT_COMMIT_HASH_DEF
+        `define GIT_COMMIT_HASH_DEF 32'h01D6_A9C5
+    `endif
+
+    `ifndef BUILD_TIMESTAMP_DEF
+        `define BUILD_TIMESTAMP_DEF 32'h2026_0821
+    `endif
+
     // Version Constant Constants
     localparam [31:0] VERSION_ID_VAL      = 32'h0201_0001; // v2.1.0 (Variant 1)
-    localparam [31:0] GIT_COMMIT_HASH_VAL = 32'h01D6_A9C5; // Git Commit 1d6a9c5
-    localparam [31:0] BUILD_TIMESTAMP_VAL = 32'h2026_0812; // Date 2026-08-12
+    localparam [31:0] GIT_COMMIT_HASH_VAL = `GIT_COMMIT_HASH_DEF;
+    localparam [31:0] BUILD_TIMESTAMP_VAL = `BUILD_TIMESTAMP_DEF;
     localparam [31:0] HARDWARE_CAPS_VAL   = 32'h0004_040F; // 4 Audio, 4 Video, Caps: 2D+AES3+DualBAR+Stream
 
     // Write Logic

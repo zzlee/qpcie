@@ -20,9 +20,17 @@ puts "================================================================="
 file mkdir $project_dir
 create_project $project_name $project_dir -part $device_part -force
 
-# 1. Add qpcie RTL Source Files
+# 1. Add qpcie RTL Source Files & Inject Dynamic Git Commit Hash + Date
+set git_raw [string toupper [exec git rev-parse --short=8 HEAD]]
+set date_raw [clock format [clock seconds] -format "%Y%m%d"]
+set git_commit_hex "32'h$git_raw"
+set build_date_hex "32'h$date_raw"
+
+puts "   [GIT AUTO-INJECT] Commit Hash: 0x$git_raw, Build Date: $date_raw"
+
 add_files [glob ./rtl/*.v]
 set_property top a50t_pcie_card_top [current_fileset]
+set_property verilog_define [list GIT_COMMIT_HASH_DEF=$git_commit_hex BUILD_TIMESTAMP_DEF=$build_date_hex] [current_fileset]
 
 # 2. Add Constraints
 add_files -fileset constrs_1 ./constraints/a50t_pcie_pinout.xdc
