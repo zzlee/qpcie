@@ -29,7 +29,8 @@
 #define BENCHMARK_WARMUP_FRAMES  8U
 #define NV12_PLANES              2U
 #define NV12_FRAME_BYTES         (DEFAULT_WIDTH * DEFAULT_HEIGHT * 3U / 2U)
-#define NV12_MWR_PER_FRAME       194400U
+#define NV12_MWR_PAYLOAD_BYTES   128U
+#define NV12_MWR_PER_FRAME       (NV12_FRAME_BYTES / NV12_MWR_PAYLOAD_BYTES)
 
 /* Must match the private control ID in driver/qpcie_driver.h. */
 #define V4L2_CID_QPCIE_PACER_ENABLE (V4L2_CID_USER_BASE + 0x1000)
@@ -453,7 +454,7 @@ int main(int argc, char **argv)
         if (benchmark_mode) {
             double mwr_per_s = measured_frames * (double)NV12_MWR_PER_FRAME /
                                elapsed_s;
-            printf(" 16-byte PCIe MWr rate: %.3f million requests/s\n"
+            printf(" 128-byte PCIe MWr rate: %.3f million requests/s\n"
                    " Warm-up excluded: %u frames\n",
                    mwr_per_s / 1000000.0, BENCHMARK_WARMUP_FRAMES);
         }

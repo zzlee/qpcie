@@ -1,9 +1,9 @@
 `timescale 1ns / 1ps
 
 module tb_nv12_capture_engine;
-    localparam WIDTH = 16;
+    localparam WIDTH = 128;
     localparam HEIGHT = 4;
-    localparam STRIDE = 16;
+    localparam STRIDE = 128;
     localparam Y_BASE = 64'h0000_0000_0000_1000;
     localparam UV_BASE = 64'h0000_0000_0000_2000;
 
@@ -21,7 +21,7 @@ module tb_nv12_capture_engine;
     wire [10:0] req_len;
     wire [127:0] req_data;
     wire req_last;
-    reg req_ack;
+    reg req_data_ready, req_ack;
     wire busy, done;
     wire [63:0] pts;
     wire [31:0] errors;
@@ -30,6 +30,7 @@ module tb_nv12_capture_engine;
     reg [7:0] uv_mem [0:(WIDTH*HEIGHT/2)-1];
     integer i, row, beat, byte_idx, req_count;
     integer stall_count;
+    integer payload_beat;
     integer off;
     reg [7:0] expected;
 
@@ -48,7 +49,8 @@ module tb_nv12_capture_engine;
         .s_axis_tready(s_ready),
         .c2h_req_valid(req_valid), .c2h_req_addr(req_addr),
         .c2h_req_dw_len(req_len), .c2h_req_data(req_data),
-        .c2h_req_last(req_last), .c2h_req_ack(req_ack),
+        .c2h_req_last(req_last), .c2h_req_data_ready(req_data_ready),
+        .c2h_req_ack(req_ack),
         .video_busy(busy), .video_frame_done(done), .frame_pts(pts),
         .protocol_error_count(errors)
     );
@@ -97,41 +99,51 @@ module tb_nv12_capture_engine;
         end
     endtask
 
-    // Deterministic 0..2-cycle PCIe backpressure, sampled on the falling edge
-    // so ACK is stable before the engine's active edge.
+    // Streaming 128-byte request sink with deterministic payload stalls.
     always @(negedge clk) begin
         if (!rst_n) begin
+            req_data_ready <= 1'b0;
             req_ack <= 1'b0;
             stall_count <= 0;
         end else if (req_valid) begin
-            if (stall_count == 0) begin
-                req_ack <= 1'b1;
-                stall_count <= req_count % 3;
+            req_ack <= (payload_beat == 8);
+            if (payload_beat < 8 && stall_count == 0) begin
+                req_data_ready <= 1'b1;
+                stall_count <= (req_count + payload_beat) % 3;
             end else begin
-                req_ack <= 1'b0;
-                stall_count <= stall_count - 1;
+                req_data_ready <= 1'b0;
+                if (stall_count > 0)
+                    stall_count <= stall_count - 1;
             end
         end else begin
+            req_data_ready <= 1'b0;
             req_ack <= 1'b0;
+            stall_count <= 0;
         end
     end
 
     always @(posedge clk) begin
-        if (rst_n && req_valid && req_ack) begin
-            if (req_len !== 11'd4 || !req_last || req_addr[3:0] != 0)
+        if (rst_n && req_valid && req_data_ready) begin
+            if (req_len !== 11'd32 || !req_last || req_addr[6:0] != 0)
                 $fatal(1, "Malformed MWr request addr=%h len=%0d last=%b",
                        req_addr, req_len, req_last);
             if (req_addr >= Y_BASE && req_addr < Y_BASE + WIDTH*HEIGHT) begin
-                off = req_addr - Y_BASE;
+                off = req_addr - Y_BASE + payload_beat*16;
                 for (byte_idx = 0; byte_idx < 16; byte_idx = byte_idx + 1)
                     y_mem[off + byte_idx] = req_data[(byte_idx*8) +: 8];
             end else if (req_addr >= UV_BASE && req_addr < UV_BASE + WIDTH*HEIGHT/2) begin
-                off = req_addr - UV_BASE;
+                off = req_addr - UV_BASE + payload_beat*16;
                 for (byte_idx = 0; byte_idx < 16; byte_idx = byte_idx + 1)
                     uv_mem[off + byte_idx] = req_data[(byte_idx*8) +: 8];
             end else begin
                 $fatal(1, "MWr outside NV12 planes: %h", req_addr);
             end
+            payload_beat = payload_beat + 1;
+        end
+        if (rst_n && req_valid && req_ack) begin
+            if (payload_beat != 8)
+                $fatal(1, "MWr acknowledged after %0d payload beats", payload_beat);
+            payload_beat = 0;
             req_count = req_count + 1;
         end
     end
@@ -139,7 +151,8 @@ module tb_nv12_capture_engine;
     initial begin
         desc_valid = 0;
         s_data = 0; s_valid = 0; s_last = 0; s_user = 0;
-        req_ack = 0; req_count = 0; stall_count = 0;
+        req_data_ready = 0; req_ack = 0; req_count = 0;
+        stall_count = 0; payload_beat = 0;
         for (i = 0; i < WIDTH*HEIGHT; i = i + 1) y_mem[i] = 8'hEE;
         for (i = 0; i < WIDTH*HEIGHT/2; i = i + 1) uv_mem[i] = 8'hEE;
 

@@ -1,16 +1,18 @@
 // ============================================================================
 // Module: nv12_capture_engine
-// Description: Single-channel YUV444 4-PPC to NV12M PCIe capture engine.
+// Description: Pipelined single-channel YUV444 4-PPC to NV12M capture engine.
 //              - Input byte order per 32-bit pixel: Y, Cb, Cr, X
-//              - Y is copied without a color-space matrix
-//              - Cb/Cr use a rounded 2x2 box filter for 4:2:0 subsampling
-//              - Every PCIe MWr contains one aligned 16-byte payload
+//              - Rounded 2x2 Cb/Cr box filter, one input beat per clock
+//              - Independent Y and UV burst FIFOs decouple video from PCIe
+//              - Default PCIe MWr payload is 128 bytes (32 DW / 8 beats)
 // ============================================================================
 `timescale 1ns / 1ps
 
 module nv12_capture_engine #(
-    parameter integer MAX_WIDTH = 1920,
-    parameter integer PCIE_DATA_WIDTH = 128
+    parameter integer MAX_WIDTH = 3840,
+    parameter integer PCIE_DATA_WIDTH = 128,
+    parameter integer FIFO_DEPTH = 128,
+    parameter integer MWR_PAYLOAD_BYTES = 128
 )(
     input  wire                         clk,
     input  wire                         rst_n,
@@ -31,7 +33,7 @@ module nv12_capture_engine #(
     input  wire                         s_axis_tvalid,
     input  wire                         s_axis_tlast,
     input  wire                         s_axis_tuser,
-    output reg                          s_axis_tready,
+    output wire                         s_axis_tready,
 
     output reg                          c2h_req_valid,
     output reg  [63:0]                  c2h_req_addr,
@@ -46,51 +48,52 @@ module nv12_capture_engine #(
     output reg  [63:0]                  frame_pts,
     output reg  [31:0]                  protocol_error_count
 );
-
     localparam integer CHROMA_WORDS = MAX_WIDTH / 4;
-    localparam [2:0] ST_IDLE        = 3'd0;
-    localparam [2:0] ST_CAPTURE     = 3'd1;
-    localparam [2:0] ST_ODD_PROCESS = 3'd2;
-    localparam [2:0] ST_SEND_Y      = 3'd3;
-    localparam [2:0] ST_SEND_UV     = 3'd4;
-    localparam [2:0] ST_PACE        = 3'd5;
+    localparam integer CHROMA_ADDR_WIDTH = $clog2(CHROMA_WORDS);
+    localparam integer FIFO_PTR_WIDTH = $clog2(FIFO_DEPTH);
+    localparam integer FIFO_COUNT_WIDTH = FIFO_PTR_WIDTH + 1;
+    localparam integer DATA_BYTES = PCIE_DATA_WIDTH / 8;
+    localparam integer DATA_DWORDS = PCIE_DATA_WIDTH / 32;
+    localparam integer BURST_BEATS = MWR_PAYLOAD_BYTES / DATA_BYTES;
+    localparam [10:0] MWR_DWORDS = MWR_PAYLOAD_BYTES / 4;
 
-    reg [2:0] state;
     reg [15:0] width_q, height_q, stride_q;
-    reg [15:0] line_idx;
-    reg [15:0] beat_col;
-    reg [63:0] y_line_addr, uv_line_addr;
+    reg [15:0] line_idx, beat_col;
+    reg [63:0] y_send_addr, uv_send_addr;
+    reg [15:0] y_send_offset, uv_send_offset;
+    reg [15:0] y_send_line, uv_send_line;
     reg [127:0] y_pack, uv_pack;
-    reg [127:0] pending_data;
-    reg         pending_last;
-    reg [35:0]  chroma_even_q;
-    reg         chroma_we;
-    reg [15:0]  chroma_wr_addr;
-    reg [35:0]  chroma_wr_data;
-    reg [127:0] uv_req_data_q;
-    reg [63:0]  uv_req_addr_q;
-    reg         uv_pending_q;
-    reg         req_eol_q;
-    reg         req_frame_end_q;
-    reg         sof_seen;
-    reg [31:0]  frame_clk_count;
+    reg sof_seen;
+    reg capture_enable;
+    reg frontend_done;
+    reg pacing;
+    reg [31:0] frame_clk_count;
 
-    // One 480x36 memory stores horizontal Cb/Cr sums for the even row.
-    // A synchronous read on odd rows permits inference into one RAMB18.
+    // Odd-row chroma processing is one cycle behind AXI input so the block-RAM
+    // read from the matching even row can remain synchronous.
+    reg odd_valid;
+    reg [127:0] odd_data;
+    reg [15:0] odd_col;
+    reg odd_frame_end;
+    reg [35:0] chroma_even_q;
+
     (* ram_style = "block" *) reg [35:0] chroma_line [0:CHROMA_WORDS-1];
 
-    // Keep RAM accesses out of the asynchronously-reset state process. This
-    // is the canonical simple-dual-port template needed for RAMB18 inference.
-    always @(posedge clk) begin
-        if (chroma_we)
-            chroma_line[chroma_wr_addr] <= chroma_wr_data;
-        chroma_even_q <= chroma_line[beat_col];
-    end
+    // Two small asynchronous-read distributed FIFOs hold complete 16-byte
+    // output beats.  A request starts only when all eight beats of a 128-byte
+    // payload are resident, so PCIe never observes FIFO underflow.
+    (* ram_style = "distributed" *) reg [127:0] y_fifo [0:FIFO_DEPTH-1];
+    (* ram_style = "distributed" *) reg [127:0] uv_fifo [0:FIFO_DEPTH-1];
+    reg [FIFO_PTR_WIDTH-1:0] y_wr_ptr, y_rd_ptr, uv_wr_ptr, uv_rd_ptr;
+    reg [FIFO_COUNT_WIDTH-1:0] y_fifo_count, uv_fifo_count;
+
+    reg request_is_uv;
+    reg prefer_uv;
+    reg [$clog2(BURST_BEATS+1)-1:0] payload_beats_to_load;
 
     function [31:0] pack_y4;
         input [127:0] d;
         begin
-            // Numeric bits [7:0] become the first byte in host memory.
             pack_y4 = {d[103:96], d[71:64], d[39:32], d[7:0]};
         end
     endfunction
@@ -125,238 +128,293 @@ module nv12_capture_engine #(
             v01 = v01_total[9:2];
             u23 = u23_total[9:2];
             v23 = v23_total[9:2];
-            // Host byte order: Cb0, Cr0, Cb1, Cr1.
             pack_nv12_uv4 = {v23, u23, v01, u01};
         end
     endfunction
 
-    wire [63:0] group_byte_offset = {46'd0, beat_col[15:2], 4'b0000};
-    wire [15:0] expected_last_beat = (width_q >> 2) - 1'b1;
-    wire        group_complete = (beat_col[1:0] == 2'b11);
+    wire descriptor_accept = desc_valid && !video_busy;
+    wire fifo_space_available =
+        (y_fifo_count <= FIFO_DEPTH-2) &&
+        (uv_fifo_count <= FIFO_DEPTH-2);
+    assign s_axis_tready = video_busy && capture_enable && fifo_space_available;
 
-    // Synchronous reset keeps all BRAM address/enable drivers synchronous;
-    // Artix-7 RAMB18 control paths must not be driven by async-reset flops.
+    wire input_transfer = s_axis_tvalid && s_axis_tready;
+    wire pixel_accept = input_transfer && (sof_seen || s_axis_tuser);
+    wire y_fifo_push = pixel_accept && (beat_col[1:0] == 2'b11);
+    wire [127:0] y_fifo_push_data = {pack_y4(s_axis_tdata), y_pack[95:0]};
+    wire uv_fifo_push = odd_valid && (odd_col[1:0] == 2'b11);
+    wire [127:0] uv_fifo_push_data =
+        {pack_nv12_uv4(odd_data, chroma_even_q), uv_pack[95:0]};
+
+    wire y_fifo_pop = c2h_req_data_ready && c2h_req_valid && !request_is_uv;
+    wire uv_fifo_pop = c2h_req_data_ready && c2h_req_valid && request_is_uv;
+
+    // Simple-dual-port chroma line RAM.  beat_col is sampled before its input
+    // transfer update, aligning chroma_even_q with odd_data one clock later.
+    always @(posedge clk) begin
+        if (pixel_accept && !line_idx[0])
+            chroma_line[beat_col[CHROMA_ADDR_WIDTH-1:0]] <=
+                horizontal_chroma_sums(s_axis_tdata);
+        chroma_even_q <= chroma_line[beat_col[CHROMA_ADDR_WIDTH-1:0]];
+    end
+
+    // Y and UV beat FIFOs each have one producer and one PCIe consumer.
+    always @(posedge clk) begin
+        if (!rst_n || descriptor_accept) begin
+            y_wr_ptr <= 0;
+            y_rd_ptr <= 0;
+            uv_wr_ptr <= 0;
+            uv_rd_ptr <= 0;
+            y_fifo_count <= 0;
+            uv_fifo_count <= 0;
+        end else begin
+            if (y_fifo_push) begin
+                y_fifo[y_wr_ptr] <= y_fifo_push_data;
+                y_wr_ptr <= y_wr_ptr + 1'b1;
+            end
+            if (y_fifo_pop)
+                y_rd_ptr <= y_rd_ptr + 1'b1;
+            case ({y_fifo_push, y_fifo_pop})
+                2'b10: y_fifo_count <= y_fifo_count + 1'b1;
+                2'b01: y_fifo_count <= y_fifo_count - 1'b1;
+                default: y_fifo_count <= y_fifo_count;
+            endcase
+
+            if (uv_fifo_push) begin
+                uv_fifo[uv_wr_ptr] <= uv_fifo_push_data;
+                uv_wr_ptr <= uv_wr_ptr + 1'b1;
+            end
+            if (uv_fifo_pop)
+                uv_rd_ptr <= uv_rd_ptr + 1'b1;
+            case ({uv_fifo_push, uv_fifo_pop})
+                2'b10: uv_fifo_count <= uv_fifo_count + 1'b1;
+                2'b01: uv_fifo_count <= uv_fifo_count - 1'b1;
+                default: uv_fifo_count <= uv_fifo_count;
+            endcase
+        end
+    end
+
+    // One-input-beat-per-clock conversion frontend.
     always @(posedge clk) begin
         if (!rst_n) begin
-            state                <= ST_IDLE;
-            desc_ready           <= 1'b0;
-            s_axis_tready        <= 1'b0;
-            c2h_req_valid        <= 1'b0;
-            c2h_req_addr         <= 64'd0;
-            c2h_req_dw_len       <= 11'd4;
-            c2h_req_data         <= {PCIE_DATA_WIDTH{1'b0}};
-            c2h_req_last         <= 1'b1;
-            video_busy           <= 1'b0;
-            video_frame_done     <= 1'b0;
-            frame_pts            <= 64'd0;
-            protocol_error_count <= 32'd0;
-            width_q              <= 16'd0;
-            height_q             <= 16'd0;
-            stride_q             <= 16'd0;
-            line_idx             <= 16'd0;
-            beat_col             <= 16'd0;
-            y_line_addr          <= 64'd0;
-            uv_line_addr         <= 64'd0;
-            y_pack               <= 128'd0;
-            uv_pack              <= 128'd0;
-            pending_data         <= 128'd0;
-            pending_last         <= 1'b0;
-            chroma_we            <= 1'b0;
-            chroma_wr_addr       <= 16'd0;
-            chroma_wr_data       <= 36'd0;
-            uv_req_data_q        <= 128'd0;
-            uv_req_addr_q        <= 64'd0;
-            uv_pending_q         <= 1'b0;
-            req_eol_q            <= 1'b0;
-            req_frame_end_q      <= 1'b0;
-            sof_seen             <= 1'b0;
-            frame_clk_count      <= 32'd0;
+            width_q <= 0;
+            height_q <= 0;
+            stride_q <= 0;
+            line_idx <= 0;
+            beat_col <= 0;
+            y_pack <= 0;
+            uv_pack <= 0;
+            sof_seen <= 0;
+            capture_enable <= 0;
+            frontend_done <= 0;
+            odd_valid <= 0;
+            odd_data <= 0;
+            odd_col <= 0;
+            odd_frame_end <= 0;
+            frame_pts <= 0;
+            protocol_error_count <= 0;
         end else begin
-            desc_ready       <= 1'b0;
-            video_frame_done <= 1'b0;
-            chroma_we        <= 1'b0;
+            if (descriptor_accept) begin
+                width_q <= frame_width;
+                height_q <= frame_height;
+                stride_q <= frame_stride;
+                line_idx <= 0;
+                beat_col <= 0;
+                y_pack <= 0;
+                uv_pack <= 0;
+                sof_seen <= 0;
+                capture_enable <= 1;
+                frontend_done <= 0;
+                odd_valid <= 0;
+                odd_frame_end <= 0;
+                if (frame_width > MAX_WIDTH || frame_width[6:0] != 0 ||
+                    frame_height[0] || frame_stride < frame_width ||
+                    MWR_PAYLOAD_BYTES != 128 || PCIE_DATA_WIDTH != 128)
+                    protocol_error_count <= protocol_error_count + 1'b1;
+            end else begin
+                odd_valid <= pixel_accept && line_idx[0];
+                if (pixel_accept && line_idx[0]) begin
+                    odd_data <= s_axis_tdata;
+                    odd_col <= beat_col;
+                    odd_frame_end <= s_axis_tlast &&
+                                     (line_idx + 1'b1 >= height_q);
+                end
+
+                if (odd_valid) begin
+                    if (odd_col[1:0] == 2'b11)
+                        uv_pack <= 0;
+                    else
+                        uv_pack[(odd_col[1:0]*32) +: 32] <=
+                            pack_nv12_uv4(odd_data, chroma_even_q);
+                    if (odd_frame_end) begin
+                        frontend_done <= 1;
+                        capture_enable <= 0;
+                    end
+                end
+
+                if (pixel_accept) begin
+                    if (!sof_seen) begin
+                        sof_seen <= 1;
+                        frame_pts <= global_timestamp;
+                    end else if (s_axis_tuser) begin
+                        protocol_error_count <= protocol_error_count + 1'b1;
+                    end
+
+                    if (beat_col[1:0] == 2'b11)
+                        y_pack <= 0;
+                    else
+                        y_pack[(beat_col[1:0]*32) +: 32] <= pack_y4(s_axis_tdata);
+
+                    if (s_axis_tlast !=
+                        (beat_col == ((width_q >> 2) - 1'b1)))
+                        protocol_error_count <= protocol_error_count + 1'b1;
+
+                    if (s_axis_tlast) begin
+                        beat_col <= 0;
+                        line_idx <= line_idx + 1'b1;
+                        if (line_idx + 1'b1 >= height_q) begin
+                            capture_enable <= 0;
+                            if (!line_idx[0])
+                                frontend_done <= 1;
+                        end
+                    end else begin
+                        beat_col <= beat_col + 1'b1;
+                    end
+                end
+            end
+        end
+    end
+
+    // 128-byte burst packetizer.  Y/UV requests are selected round-robin when
+    // both FIFOs are ready; address generators preserve independent strides.
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            c2h_req_valid <= 0;
+            c2h_req_addr <= 0;
+            c2h_req_dw_len <= MWR_DWORDS;
+            c2h_req_data <= 0;
+            c2h_req_last <= 1;
+            request_is_uv <= 0;
+            prefer_uv <= 0;
+            payload_beats_to_load <= 0;
+            y_send_addr <= 0;
+            uv_send_addr <= 0;
+            y_send_offset <= 0;
+            uv_send_offset <= 0;
+            y_send_line <= 0;
+            uv_send_line <= 0;
+        end else if (descriptor_accept) begin
+            c2h_req_valid <= 0;
+            c2h_req_addr <= 0;
+            c2h_req_dw_len <= MWR_DWORDS;
+            c2h_req_data <= 0;
+            c2h_req_last <= 1;
+            request_is_uv <= 0;
+            prefer_uv <= 0;
+            payload_beats_to_load <= 0;
+            y_send_addr <= plane_y_addr;
+            uv_send_addr <= plane_uv_addr;
+            y_send_offset <= 0;
+            uv_send_offset <= 0;
+            y_send_line <= 0;
+            uv_send_line <= 0;
+        end else begin
+            if (!c2h_req_valid) begin
+                if ((uv_fifo_count >= BURST_BEATS) &&
+                    (prefer_uv || y_fifo_count < BURST_BEATS)) begin
+                    request_is_uv <= 1;
+                    c2h_req_addr <= uv_send_addr;
+                    c2h_req_dw_len <= MWR_DWORDS;
+                    c2h_req_data <= uv_fifo[uv_rd_ptr];
+                    c2h_req_last <= 1;
+                    payload_beats_to_load <= BURST_BEATS;
+                    c2h_req_valid <= 1;
+                    prefer_uv <= 0;
+                end else if (y_fifo_count >= BURST_BEATS) begin
+                    request_is_uv <= 0;
+                    c2h_req_addr <= y_send_addr;
+                    c2h_req_dw_len <= MWR_DWORDS;
+                    c2h_req_data <= y_fifo[y_rd_ptr];
+                    c2h_req_last <= 1;
+                    payload_beats_to_load <= BURST_BEATS;
+                    c2h_req_valid <= 1;
+                    prefer_uv <= 1;
+                end
+            end
+
+            if (c2h_req_data_ready && c2h_req_valid) begin
+                payload_beats_to_load <= payload_beats_to_load - 1'b1;
+                if (payload_beats_to_load > 1) begin
+                    if (request_is_uv)
+                        c2h_req_data <= uv_fifo[uv_rd_ptr + 1'b1];
+                    else
+                        c2h_req_data <= y_fifo[y_rd_ptr + 1'b1];
+                end
+            end
+
+            if (c2h_req_ack && c2h_req_valid) begin
+                c2h_req_valid <= 0;
+                if (request_is_uv) begin
+                    if (uv_send_offset + MWR_PAYLOAD_BYTES >= width_q) begin
+                        uv_send_offset <= 0;
+                        uv_send_line <= uv_send_line + 1'b1;
+                        uv_send_addr <= uv_send_addr + MWR_PAYLOAD_BYTES +
+                                        stride_q - width_q;
+                    end else begin
+                        uv_send_offset <= uv_send_offset + MWR_PAYLOAD_BYTES;
+                        uv_send_addr <= uv_send_addr + MWR_PAYLOAD_BYTES;
+                    end
+                end else begin
+                    if (y_send_offset + MWR_PAYLOAD_BYTES >= width_q) begin
+                        y_send_offset <= 0;
+                        y_send_line <= y_send_line + 1'b1;
+                        y_send_addr <= y_send_addr + MWR_PAYLOAD_BYTES +
+                                       stride_q - width_q;
+                    end else begin
+                        y_send_offset <= y_send_offset + MWR_PAYLOAD_BYTES;
+                        y_send_addr <= y_send_addr + MWR_PAYLOAD_BYTES;
+                    end
+                end
+            end
+        end
+    end
+
+    // Descriptor completion and 60-FPS pacing control.
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            desc_ready <= 0;
+            video_busy <= 0;
+            video_frame_done <= 0;
+            pacing <= 0;
+            frame_clk_count <= 0;
+        end else begin
+            desc_ready <= 0;
+            video_frame_done <= 0;
 
             if (video_busy)
                 frame_clk_count <= frame_clk_count + 1'b1;
             else
-                frame_clk_count <= 32'd0;
+                frame_clk_count <= 0;
 
-            case (state)
-                ST_IDLE: begin
-                    s_axis_tready <= 1'b0;
-                    c2h_req_valid <= 1'b0;
-                    video_busy    <= 1'b0;
-                    if (desc_valid) begin
-                        desc_ready      <= 1'b1;
-                        video_busy      <= 1'b1;
-                        width_q         <= frame_width;
-                        height_q        <= frame_height;
-                        stride_q        <= frame_stride;
-                        line_idx        <= 16'd0;
-                        beat_col        <= 16'd0;
-                        y_line_addr     <= plane_y_addr;
-                        uv_line_addr    <= plane_uv_addr;
-                        y_pack          <= 128'd0;
-                        uv_pack         <= 128'd0;
-                        sof_seen        <= 1'b0;
-                        frame_clk_count <= 32'd0;
-                        s_axis_tready   <= 1'b1;
-                        state           <= ST_CAPTURE;
-                        if ((frame_width[3:0] != 4'd0) || frame_height[0] ||
-                            frame_stride < frame_width)
-                            protocol_error_count <= protocol_error_count + 1'b1;
-                    end
-                end
-
-                ST_CAPTURE: begin
-                    if (s_axis_tvalid && s_axis_tready) begin
-                        if (!sof_seen && !s_axis_tuser) begin
-                            // STREAMOFF/restart can leave TPG mid-frame. Drain
-                            // until the next real start-of-frame marker.
-                        end else begin
-                            if (!sof_seen) begin
-                                sof_seen <= 1'b1;
-                                frame_pts <= global_timestamp;
-                            end
-
-                            if (line_idx[0]) begin
-                                pending_data  <= s_axis_tdata;
-                                pending_last  <= s_axis_tlast;
-                                s_axis_tready <= 1'b0;
-                                state         <= ST_ODD_PROCESS;
-                            end else begin
-                                chroma_we      <= 1'b1;
-                                chroma_wr_addr <= beat_col;
-                                chroma_wr_data <= horizontal_chroma_sums(s_axis_tdata);
-                                if (group_complete) begin
-                                    c2h_req_addr   <= y_line_addr + group_byte_offset;
-                                    c2h_req_dw_len <= 11'd4;
-                                    c2h_req_data   <= {pack_y4(s_axis_tdata), y_pack[95:0]};
-                                    c2h_req_last   <= 1'b1;
-                                    c2h_req_valid  <= 1'b1;
-                                    uv_pending_q   <= 1'b0;
-                                    req_eol_q      <= s_axis_tlast;
-                                    req_frame_end_q<= s_axis_tlast &&
-                                                       (line_idx + 1'b1 >= height_q);
-                                    if (s_axis_tlast != (beat_col == expected_last_beat))
-                                        protocol_error_count <= protocol_error_count + 1'b1;
-                                    s_axis_tready <= 1'b0;
-                                    state <= ST_SEND_Y;
-                                end else begin
-                                    y_pack[(beat_col[1:0]*32) +: 32] <= pack_y4(s_axis_tdata);
-                                    beat_col <= beat_col + 1'b1;
-                                end
-                            end
-                        end
-                    end
-                end
-
-                ST_ODD_PROCESS: begin
-                    if (group_complete) begin
-                        c2h_req_addr   <= y_line_addr + group_byte_offset;
-                        c2h_req_dw_len <= 11'd4;
-                        c2h_req_data   <= {pack_y4(pending_data), y_pack[95:0]};
-                        c2h_req_last   <= 1'b1;
-                        c2h_req_valid  <= 1'b1;
-                        uv_req_addr_q  <= uv_line_addr + group_byte_offset;
-                        uv_req_data_q  <= {pack_nv12_uv4(pending_data, chroma_even_q),
-                                           uv_pack[95:0]};
-                        uv_pending_q   <= 1'b1;
-                        req_eol_q      <= pending_last;
-                        req_frame_end_q<= pending_last &&
-                                           (line_idx + 1'b1 >= height_q);
-                        if (pending_last != (beat_col == expected_last_beat))
-                            protocol_error_count <= protocol_error_count + 1'b1;
-                        state <= ST_SEND_Y;
-                    end else begin
-                        y_pack[(beat_col[1:0]*32) +: 32] <= pack_y4(pending_data);
-                        uv_pack[(beat_col[1:0]*32) +: 32] <=
-                            pack_nv12_uv4(pending_data, chroma_even_q);
-                        beat_col <= beat_col + 1'b1;
-                        s_axis_tready <= 1'b1;
-                        state <= ST_CAPTURE;
-                    end
-                end
-
-                ST_SEND_Y: begin
-                    if (c2h_req_ack) begin
-                        c2h_req_valid <= 1'b0;
-                        if (uv_pending_q) begin
-                            c2h_req_addr   <= uv_req_addr_q;
-                            c2h_req_dw_len <= 11'd4;
-                            c2h_req_data   <= uv_req_data_q;
-                            c2h_req_last   <= 1'b1;
-                            c2h_req_valid  <= 1'b1;
-                            state          <= ST_SEND_UV;
-                        end else if (req_eol_q) begin
-                            if (req_frame_end_q) begin
-                                video_frame_done <= 1'b1;
-                                if (pacer_enable && frame_interval_clks != 0 &&
-                                    frame_clk_count < frame_interval_clks)
-                                    state <= ST_PACE;
-                                else begin
-                                    video_busy <= 1'b0;
-                                    state <= ST_IDLE;
-                                end
-                            end else begin
-                                line_idx     <= line_idx + 1'b1;
-                                beat_col     <= 16'd0;
-                                y_line_addr  <= y_line_addr + stride_q;
-                                y_pack       <= 128'd0;
-                                uv_pack      <= 128'd0;
-                                s_axis_tready<= 1'b1;
-                                state        <= ST_CAPTURE;
-                            end
-                        end else begin
-                            beat_col      <= beat_col + 1'b1;
-                            s_axis_tready <= 1'b1;
-                            state         <= ST_CAPTURE;
-                        end
-                    end
-                end
-
-                ST_SEND_UV: begin
-                    if (c2h_req_ack) begin
-                        c2h_req_valid <= 1'b0;
-                        uv_pending_q  <= 1'b0;
-                        if (req_eol_q) begin
-                            if (req_frame_end_q) begin
-                                video_frame_done <= 1'b1;
-                                if (pacer_enable && frame_interval_clks != 0 &&
-                                    frame_clk_count < frame_interval_clks)
-                                    state <= ST_PACE;
-                                else begin
-                                    video_busy <= 1'b0;
-                                    state <= ST_IDLE;
-                                end
-                            end else begin
-                                line_idx      <= line_idx + 1'b1;
-                                beat_col      <= 16'd0;
-                                y_line_addr   <= y_line_addr + stride_q;
-                                uv_line_addr  <= uv_line_addr + stride_q;
-                                y_pack        <= 128'd0;
-                                uv_pack       <= 128'd0;
-                                s_axis_tready <= 1'b1;
-                                state         <= ST_CAPTURE;
-                            end
-                        end else begin
-                            beat_col      <= beat_col + 1'b1;
-                            s_axis_tready <= 1'b1;
-                            state         <= ST_CAPTURE;
-                        end
-                    end
-                end
-
-                ST_PACE: begin
-                    s_axis_tready <= 1'b0;
-                    if (!pacer_enable || frame_clk_count >= frame_interval_clks) begin
-                        video_busy <= 1'b0;
-                        state <= ST_IDLE;
-                    end
-                end
-
-                default: state <= ST_IDLE;
-            endcase
+            if (descriptor_accept) begin
+                desc_ready <= 1;
+                video_busy <= 1;
+                pacing <= 0;
+                frame_clk_count <= 0;
+            end else if (video_busy && !pacing && frontend_done &&
+                         y_fifo_count == 0 && uv_fifo_count == 0 &&
+                         !c2h_req_valid) begin
+                video_frame_done <= 1;
+                if (pacer_enable && frame_interval_clks != 0 &&
+                    frame_clk_count < frame_interval_clks)
+                    pacing <= 1;
+                else
+                    video_busy <= 0;
+            end else if (pacing &&
+                         (!pacer_enable || frame_clk_count >= frame_interval_clks)) begin
+                pacing <= 0;
+                video_busy <= 0;
+            end
         end
     end
 

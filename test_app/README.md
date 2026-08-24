@@ -44,10 +44,10 @@ static-frame hashes, sample variation, frame rate, and DMA drain behavior.
 ## Uncapped C2H DMA write benchmark
 
 The benchmark disables only the NV12 engine's 60 FPS frame pacer. Resolution,
-pixel conversion, descriptor format, and 16-byte PCIe Memory Write requests
-remain unchanged, so it measures the maximum sustained payload rate of the
-current capture/DMA implementation rather than the theoretical Gen2 x4 link
-rate.
+pixel conversion and descriptor format remain unchanged. The pipelined engine
+packs eight 16-byte FIFO beats into each 128-byte PCIe Memory Write, so this
+measures the maximum sustained payload rate of the current capture/DMA
+implementation rather than the theoretical Gen2 x4 link rate.
 
 ```bash
 ./test_app/v4l2_test_app \
@@ -63,13 +63,14 @@ limit buffer recycling. The report includes:
 
 - frames per second;
 - NV12 payload write throughput in MiB/s;
-- 16-byte PCIe MWr requests per second;
+- 128-byte PCIe MWr requests per second;
 - payload/sequence errors.
 
-RTL simulation completes an uncapped frame in 1,555,200 PCIe user clocks
-(12.442 ms), corresponding to approximately 80.4 FPS, 238 MiB/s of NV12
-payload, and 15.6 million 16-byte MWr requests/s before physical PCIe
-backpressure.
+RTL simulation completes an uncapped 1080p frame in 518,425 PCIe user clocks
+(4.147 ms), corresponding to approximately 241.1 FPS, 715.2 MiB/s of NV12
+payload, and 5.86 million 128-byte MWr requests/s before physical PCIe
+backpressure. A 4K frame completes in 2,073,636 clocks (16.589 ms) under the
+simulated random-ready profile, within the 2,083,333-clock 60 FPS budget.
 
 After testing, verify the driver drained the ring and saw no video errors:
 
