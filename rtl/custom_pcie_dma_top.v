@@ -197,6 +197,12 @@ module custom_pcie_dma_top #(
 
     // SG DMA Engine Wires
     wire        sg_h2c_desc_ready, sg_c2h_desc_ready;
+    wire        nv12_desc_ready;
+    wire        sg_c2h_desc_select = (c2h_format == 4'd0);
+    wire        nv12_desc_select = (c2h_format == 4'd2) &&
+                                     (c2h_plane_count == 4'd2);
+    assign c2h_desc_ready = nv12_desc_select ? nv12_desc_ready :
+                            sg_c2h_desc_select ? sg_c2h_desc_ready : 1'b0;
     wire        sg_h2c_req_valid, sg_h2c_req_ack;
     wire [63:0] sg_h2c_req_addr;
     wire [10:0] sg_h2c_req_dw_len;
@@ -548,7 +554,7 @@ module custom_pcie_dma_top #(
         .c2h_plane12_width(c2h_plane12_width), .c2h_plane12_count(c2h_plane12_count),
         .c2h_format(c2h_format), .c2h_plane_count(c2h_plane_count),
         .c2h_desc_ctrl(c2h_desc_ctrl),
-        .c2h_desc_ready(sg_c2h_desc_ready)
+        .c2h_desc_ready(c2h_desc_ready)
     );
 
     // 7.1 Scatter-Gather (SG) DMA Engine (H2C MRd Stream Consumer & C2H MWr Pattern Generator)
@@ -561,7 +567,7 @@ module custom_pcie_dma_top #(
         .h2c_plane0_src(h2c_plane0_src),
         .h2c_line_width(h2c_line_width),
         .h2c_desc_ready(sg_h2c_desc_ready),
-        .c2h_desc_valid(c2h_desc_valid),
+        .c2h_desc_valid(c2h_desc_valid && sg_c2h_desc_select),
         .c2h_plane0_dst(c2h_plane0_dst),
         .c2h_line_width(c2h_line_width),
         .c2h_desc_ready(sg_c2h_desc_ready),
@@ -587,58 +593,69 @@ module custom_pcie_dma_top #(
         .c2h_busy(sg_c2h_busy)
     );
 
-    // 8. Multi-Channel Video Stream Engines (Parameterized Generator)
+    // 8. Channel-0 YUV444 -> NV12M Capture Engine
+    // Descriptor format 0 remains reserved for the SG diagnostic engine;
+    // format 2 with two planes is accepted only by this video engine.
     localparam integer NUM_V_CH = NUM_VIDEO_CH;
     localparam integer NUM_A_CH = NUM_AUDIO_CH;
 
+    nv12_capture_engine #(
+        .MAX_WIDTH(1920),
+        .PCIE_DATA_WIDTH(PCIE_DATA_WIDTH)
+    ) u_nv12_capture_engine (
+        .clk(clk),
+        .rst_n(rst_n),
+        .desc_valid(c2h_desc_valid && nv12_desc_select),
+        .desc_ready(nv12_desc_ready),
+        .plane_y_addr(c2h_plane0_dst),
+        .plane_uv_addr(c2h_plane1_dst),
+        .frame_width(c2h_line_width),
+        .frame_height(c2h_line_count),
+        .frame_stride(c2h_dst_stride),
+        .pacer_enable(reg_pacer_ctrl[0]),
+        .frame_interval_clks(32'd2083333),
+        .global_timestamp(global_timestamp),
+        .s_axis_tdata(s_axis_video_tdata[127:0]),
+        .s_axis_tvalid(s_axis_video_tvalid[0]),
+        .s_axis_tlast(s_axis_video_tlast[0]),
+        .s_axis_tuser(s_axis_video_tuser[0]),
+        .s_axis_tready(s_axis_video_tready[0]),
+        .c2h_req_valid(v_c2h_req_valid[0]),
+        .c2h_req_addr(v_c2h_req_addr[63:0]),
+        .c2h_req_dw_len(v_c2h_req_dw_len[10:0]),
+        .c2h_req_data(v_c2h_req_data[PCIE_DATA_WIDTH-1:0]),
+        .c2h_req_last(v_c2h_req_last[0]),
+        .c2h_req_ack(v_c2h_req_ack[0]),
+        .video_busy(v_busy[0]),
+        .video_frame_done(v_done[0]),
+        .frame_pts(v_pts[0]),
+        .protocol_error_count(v_drop_cnt[0])
+    );
+
+    assign m_axis_video_tdata[VIDEO_DATA_WIDTH-1:0] = {VIDEO_DATA_WIDTH{1'b0}};
+    assign m_axis_video_tvalid[0] = 1'b0;
+    assign m_axis_video_tlast[0] = 1'b0;
+    assign m_axis_video_tuser[0] = 1'b0;
+
     genvar v_idx;
     generate
-        for (v_idx = 0; v_idx < NUM_V_CH; v_idx = v_idx + 1) begin : gen_video_ch
-            localparam integer v_idx_int = v_idx;
-            wire v_start;
-            assign v_start = (v_idx_int == 0) ? reg_dma_ctrl[0] : 1'b0;
-
-            video_stream_engine #(
-                .VIDEO_DATA_WIDTH(VIDEO_DATA_WIDTH),
-                .PCIE_DATA_WIDTH(PCIE_DATA_WIDTH)
-            ) u_video_stream_engine (
-                .clk(clk),
-                .rst_n(rst_n),
-                .video_start(v_start),
-                .host_frame_addr(h2c_plane0_src),
-                .line_width_bytes(h2c_line_width),
-                .line_count(h2c_line_count),
-                .line_stride_bytes(h2c_src_stride),
-                .is_c2h(c2h_desc_valid),
-                .pacer_enable(reg_pacer_ctrl[0]),
-                .frame_interval_clks(32'd2083333), // 60.00 FPS Pacer @ 125MHz
-                .slice_height(reg_slice_height[15:0]),
-                .global_timestamp(global_timestamp),
-                .ring_full(!c2h_desc_valid),
-                .s_axis_video_tdata(s_axis_video_tdata[(v_idx*VIDEO_DATA_WIDTH) +: VIDEO_DATA_WIDTH]),
-                .s_axis_video_tvalid(s_axis_video_tvalid[v_idx]),
-                .s_axis_video_tlast(s_axis_video_tlast[v_idx]),
-                .s_axis_video_tuser(s_axis_video_tuser[v_idx]),
-                .s_axis_video_tready(s_axis_video_tready[v_idx]),
-                .m_axis_video_tdata(m_axis_video_tdata[(v_idx*VIDEO_DATA_WIDTH) +: VIDEO_DATA_WIDTH]),
-                .m_axis_video_tvalid(m_axis_video_tvalid[v_idx]),
-                .m_axis_video_tlast(m_axis_video_tlast[v_idx]),
-                .m_axis_video_tuser(m_axis_video_tuser[v_idx]),
-                .m_axis_video_tready(m_axis_video_tready[v_idx]),
-                .c2h_req_valid(v_c2h_req_valid[v_idx]),
-                .c2h_req_addr(v_c2h_req_addr[(v_idx*64) +: 64]),
-                .c2h_req_dw_len(v_c2h_req_dw_len[(v_idx*11) +: 11]),
-                .c2h_req_data(v_c2h_req_data[(v_idx*PCIE_DATA_WIDTH) +: PCIE_DATA_WIDTH]),
-                .c2h_req_last(v_c2h_req_last[v_idx]),
-                .c2h_req_ack(v_c2h_req_ack[v_idx]),
-                .h2c_fifo_wvalid(h2c_fifo_wvalid),
-                .h2c_fifo_wdata(h2c_fifo_wdata),
-                .h2c_fifo_wlast(h2c_fifo_wlast),
-                .video_busy(v_busy[v_idx]),
-                .video_frame_done(v_done[v_idx]),
-                .frame_pts(v_pts[v_idx]),
-                .frame_drop_count(v_drop_cnt[v_idx])
-            );
+        for (v_idx = 1; v_idx < NUM_V_CH; v_idx = v_idx + 1) begin : gen_unused_video_ch
+            assign s_axis_video_tready[v_idx] = 1'b0;
+            assign m_axis_video_tdata[(v_idx*VIDEO_DATA_WIDTH) +: VIDEO_DATA_WIDTH] =
+                   {VIDEO_DATA_WIDTH{1'b0}};
+            assign m_axis_video_tvalid[v_idx] = 1'b0;
+            assign m_axis_video_tlast[v_idx] = 1'b0;
+            assign m_axis_video_tuser[v_idx] = 1'b0;
+            assign v_c2h_req_valid[v_idx] = 1'b0;
+            assign v_c2h_req_addr[(v_idx*64) +: 64] = 64'd0;
+            assign v_c2h_req_dw_len[(v_idx*11) +: 11] = 11'd0;
+            assign v_c2h_req_data[(v_idx*PCIE_DATA_WIDTH) +: PCIE_DATA_WIDTH] =
+                   {PCIE_DATA_WIDTH{1'b0}};
+            assign v_c2h_req_last[v_idx] = 1'b0;
+            assign v_busy[v_idx] = 1'b0;
+            assign v_done[v_idx] = 1'b0;
+            assign v_pts[v_idx] = 64'd0;
+            assign v_drop_cnt[v_idx] = 32'd0;
         end
     endgenerate
 

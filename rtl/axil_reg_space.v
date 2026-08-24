@@ -210,6 +210,7 @@ module axil_reg_space (
                     8'h70:                s_axil_rdata <= reg_latency_max_ns;
                     8'h74:                s_axil_rdata <= reg_pacer_ctrl;
                     8'h78:                s_axil_rdata <= reg_slice_height;
+                    8'h7C:                s_axil_rdata <= reg_frame_drop_count;
 
                     default:              s_axil_rdata <= 32'hDEAD_BEEF;
                 endcase

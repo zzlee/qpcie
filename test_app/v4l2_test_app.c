@@ -1,521 +1,421 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * v4l2_test_app.c - Comprehensive V4L2 User-Mode Test Application
- * Supports: MMAP, USERPTR, DMABUF, EXPORTBUFFER memory modes & BAR1 Video TPG Pattern Control.
- *
- * Usage:
- *   ./v4l2_test_app --dev /dev/video0 --mode mmap --frames 30 --pattern 9 --out frame.yuv
- *   ./v4l2_test_app --dev /dev/video0 --mode userptr --frames 30
- *   ./v4l2_test_app --dev /dev/video0 --mode dmabuf --frames 30
- *   ./v4l2_test_app --dev /dev/video0 --mode expbuf --frames 30
+ * QPCIe Stage-2 V4L2 tester: one 1920x1080@60 NV12M MMAP capture channel.
+ * The FPGA source is Xilinx TPG YUV444; RTL performs only 2x2 chroma
+ * subsampling and writes separate Y and UV planes through PCIe DMA.
  */
 
+#include <errno.h>
+#include <fcntl.h>
+#include <getopt.h>
+#include <inttypes.h>
+#include <linux/videodev2.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <errno.h>
-#include <getopt.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
-#include <sys/time.h>
-#include <linux/videodev2.h>
-
-#include "qpcie_control.h"
+#include <sys/select.h>
+#include <time.h>
+#include <unistd.h>
 
 #define DEFAULT_DEVICE  "/dev/video0"
-#define DEFAULT_WIDTH   1920
-#define DEFAULT_HEIGHT  1080
-#define DEFAULT_BUFFERS 4
-#define DEFAULT_FRAMES  30
+#define DEFAULT_WIDTH   1920U
+#define DEFAULT_HEIGHT  1080U
+#define DEFAULT_BUFFERS 4U
+#define DEFAULT_FRAMES  120U
+#define NV12_PLANES     2U
 
-typedef enum {
-    MODE_MMAP,
-    MODE_USERPTR,
-    MODE_DMABUF,
-    MODE_EXPBUF
-} buffer_mode_t;
-
-struct buffer {
-    void   *start;
-    size_t  length;
-    int     export_fd;
+struct plane_map {
+    void *addr;
+    size_t length;
 };
 
-static void print_usage(const char *prog_name) {
-    printf("QPCIe V4L2 User-Mode Test Application\n");
-    printf("Usage: %s [options]\n", prog_name);
-    printf("Options:\n");
-    printf("  -d, --dev <device>     V4L2 Device node (default: %s)\n", DEFAULT_DEVICE);
-    printf("  -m, --mode <mode>      Buffer mode: mmap | userptr | dmabuf | expbuf (default: mmap)\n");
-    printf("  -f, --frames <count>   Number of frames to capture (default: %d)\n", DEFAULT_FRAMES);
-    printf("  -p, --pattern <id>     Set Video TPG Pattern (0: Pass-thru, 1: H-Ramp, 9: Colorbar, 10: ZonePlate)\n");
-    printf("  -r, --fps <rate>       Set Target Frame Rate in FPS (default: 60)\n");
-    printf("  -w, --width <pixels>   Frame width (default: %d)\n", DEFAULT_WIDTH);
-    printf("  -h, --height <pixels>  Frame height (default: %d)\n", DEFAULT_HEIGHT);
-    printf("  -o, --out <file>       Save captured frames to file\n");
-    printf("      --probe             Stage-1 control-plane probe only (no STREAMON)\n");
-    printf("  -help                  Show this help message\n");
+struct mapped_buffer {
+    struct plane_map plane[NV12_PLANES];
+};
+
+static int xioctl(int fd, unsigned long request, void *arg)
+{
+    int ret;
+    do {
+        ret = ioctl(fd, request, arg);
+    } while (ret < 0 && errno == EINTR);
+    return ret;
 }
 
-static double get_timestamp_ms(void) {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return (tv.tv_sec * 1000.0) + (tv.tv_usec / 1000.0);
+static double monotonic_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1000000.0;
 }
 
-int main(int argc, char **argv) {
-    const char *dev_name = DEFAULT_DEVICE;
-    const char *out_filename = NULL;
-    buffer_mode_t mode = MODE_MMAP;
-    uint32_t width = DEFAULT_WIDTH;
-    uint32_t height = DEFAULT_HEIGHT;
-    uint32_t num_frames = DEFAULT_FRAMES;
-    int tpg_pattern = -1;
-    int target_fps = -1;
-    int pacer_mode = -1;
-    int slice_height = -1;
-    int probe_only = 0;
+static uint64_t fnv1a64(const uint8_t *data, size_t length)
+{
+    uint64_t hash = UINT64_C(1469598103934665603);
+    size_t i;
+    for (i = 0; i < length; i++) {
+        hash ^= data[i];
+        hash *= UINT64_C(1099511628211);
+    }
+    return hash;
+}
 
-    static struct option long_options[] = {
-        {"dev",     required_argument, 0, 'd'},
-        {"mode",    required_argument, 0, 'm'},
-        {"frames",  required_argument, 0, 'f'},
-        {"pattern", required_argument, 0, 'p'},
-        {"fps",     required_argument, 0, 'r'},
-        {"pacer",   required_argument, 0, 'c'},
-        {"slice",   required_argument, 0, 's'},
-        {"width",   required_argument, 0, 'w'},
-        {"height",  required_argument, 0, 'h'},
-        {"out",     required_argument, 0, 'o'},
-        {"probe",   no_argument,       0, 'P'},
-        {"help",    no_argument,       0, '?'},
-        {0, 0, 0, 0}
+static void byte_range(const uint8_t *data, size_t length,
+                       uint8_t *minimum, uint8_t *maximum)
+{
+    size_t i;
+    uint8_t lo = 255, hi = 0;
+    for (i = 0; i < length; i++) {
+        if (data[i] < lo) lo = data[i];
+        if (data[i] > hi) hi = data[i];
+    }
+    *minimum = lo;
+    *maximum = hi;
+}
+
+static void usage(const char *program)
+{
+    printf("QPCIe NV12M V4L2 capture tester\n"
+           "Usage: %s [options]\n"
+           "  -d, --dev DEVICE       video node (default %s)\n"
+           "  -f, --frames COUNT     frames to capture (default %u)\n"
+           "  -p, --pattern ID       TPG ID: 1 ramp, 9 color bars, 10 zone plate\n"
+           "  -r, --fps FPS          requested rate (fixed to 60)\n"
+           "  -o, --out FILE         save first frame as contiguous NV12\n"
+           "      --probe            control-plane probe only, no STREAMON\n"
+           "      --help             show this help\n",
+           program, DEFAULT_DEVICE, DEFAULT_FRAMES);
+}
+
+int main(int argc, char **argv)
+{
+    const char *device = DEFAULT_DEVICE;
+    const char *output_name = NULL;
+    unsigned int frame_target = DEFAULT_FRAMES;
+    unsigned int width = DEFAULT_WIDTH, height = DEFAULT_HEIGHT;
+    int pattern = 9, fps = 60, probe_only = 0;
+    int fd = -1, opt, rc = EXIT_FAILURE;
+    struct v4l2_capability cap;
+    struct v4l2_fmtdesc desc;
+    struct v4l2_format fmt;
+    struct v4l2_streamparm parm;
+    struct v4l2_control ctrl;
+    struct v4l2_requestbuffers req;
+    struct mapped_buffer *buffers = NULL;
+    FILE *output = NULL;
+    unsigned int i, p, captured = 0, data_errors = 0;
+    uint64_t first_y_hash = 0, first_uv_hash = 0;
+    unsigned int expected_sequence = 0;
+    double start_ms, end_ms;
+
+    static const struct option options[] = {
+        {"dev", required_argument, NULL, 'd'},
+        {"frames", required_argument, NULL, 'f'},
+        {"pattern", required_argument, NULL, 'p'},
+        {"fps", required_argument, NULL, 'r'},
+        {"width", required_argument, NULL, 'w'},
+        {"height", required_argument, NULL, 'h'},
+        {"out", required_argument, NULL, 'o'},
+        {"probe", no_argument, NULL, 'P'},
+        {"help", no_argument, NULL, 'H'},
+        {NULL, 0, NULL, 0}
     };
 
-    int opt;
-    while ((opt = getopt_long(argc, argv, "d:m:f:p:r:c:s:w:h:o:?", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "d:f:p:r:w:h:o:", options, NULL)) != -1) {
         switch (opt) {
-            case 'd': dev_name = optarg; break;
-            case 'm':
-                if (strcmp(optarg, "mmap") == 0) mode = MODE_MMAP;
-                else if (strcmp(optarg, "userptr") == 0) mode = MODE_USERPTR;
-                else if (strcmp(optarg, "dmabuf") == 0) mode = MODE_DMABUF;
-                else if (strcmp(optarg, "expbuf") == 0) mode = MODE_EXPBUF;
-                else {
-                    fprintf(stderr, "Unknown mode: %s\n", optarg);
-                    return EXIT_FAILURE;
-                }
-                break;
-            case 'f': num_frames = atoi(optarg); break;
-            case 'p': tpg_pattern = atoi(optarg); break;
-            case 'r': target_fps = atoi(optarg); break;
-            case 'c': pacer_mode = atoi(optarg); break;
-            case 's': slice_height = atoi(optarg); break;
-            case 'w': width = atoi(optarg); break;
-            case 'h': height = atoi(optarg); break;
-            case 'o': out_filename = optarg; break;
-            case 'P': probe_only = 1; break;
-            case '?': print_usage(argv[0]); return EXIT_SUCCESS;
-            default: break;
+        case 'd': device = optarg; break;
+        case 'f': frame_target = strtoul(optarg, NULL, 0); break;
+        case 'p': pattern = strtol(optarg, NULL, 0); break;
+        case 'r': fps = strtol(optarg, NULL, 0); break;
+        case 'w': width = strtoul(optarg, NULL, 0); break;
+        case 'h': height = strtoul(optarg, NULL, 0); break;
+        case 'o': output_name = optarg; break;
+        case 'P': probe_only = 1; break;
+        case 'H': usage(argv[0]); return EXIT_SUCCESS;
+        default: usage(argv[0]); return EXIT_FAILURE;
         }
     }
 
-    if (pacer_mode >= 0) {
-        FILE *sysfs_fp = fopen("/sys/bus/pci/devices/0000:01:00.0/pacer_enable", "w");
-        if (sysfs_fp) {
-            fprintf(sysfs_fp, "%d", pacer_mode ? 1 : 0);
-            fclose(sysfs_fp);
-            printf("[CONFIG] Set Video Pacer Mode: %s\n", pacer_mode ? "1 (Internal Pacer)" : "0 (External Live Signal)");
-        }
-    }
+    printf("=================================================================\n"
+           " QPCIe YUV444 -> NV12M Capture Test\n"
+           " Device: %s, Mode: %ux%u@%d, Frames: %u, Memory: MMAP\n"
+           "=================================================================\n",
+           device, width, height, fps, frame_target);
 
-    if (slice_height >= 0) {
-        FILE *sysfs_fp = fopen("/sys/bus/pci/devices/0000:01:00.0/slice_height", "w");
-        if (sysfs_fp) {
-            fprintf(sysfs_fp, "%d", slice_height);
-            fclose(sysfs_fp);
-            printf("[CONFIG] Set Sub-Frame Low-Latency Slice DMA Height: %d lines\n", slice_height);
-        }
-    }
-
-    printf("=================================================================\n");
-    printf(" QPCIe V4L2 Capture Test Application\n");
-    printf(" Device: %s, Format: %ux%u, Frames: %u\n", dev_name, width, height, num_frames);
-    printf(" Memory Mode: %s\n", (mode == MODE_MMAP) ? "MMAP" :
-                                 (mode == MODE_USERPTR) ? "USERPTR" :
-                                 (mode == MODE_DMABUF) ? "DMABUF" : "EXPORTBUFFER");
-    printf("=================================================================\n");
-
-    // 1. Open Device
-    int fd = open(dev_name, O_RDWR | O_NONBLOCK, 0);
+    fd = open(device, O_RDWR | O_NONBLOCK);
     if (fd < 0) {
-        perror("Cannot open video device");
-        return EXIT_FAILURE;
+        perror("open video device");
+        goto out;
     }
 
-    // 2. Query Capabilities
-    struct v4l2_capability cap;
-    if (ioctl(fd, VIDIOC_QUERYCAP, &cap) < 0) {
-        perror("VIDIOC_QUERYCAP failed");
-        close(fd);
-        return EXIT_FAILURE;
+    memset(&cap, 0, sizeof(cap));
+    if (xioctl(fd, VIDIOC_QUERYCAP, &cap) < 0) {
+        perror("VIDIOC_QUERYCAP");
+        goto out;
+    }
+    printf("[CAP] driver=%s card=%s bus=%s\n", cap.driver, cap.card, cap.bus_info);
+    {
+        uint32_t caps = (cap.capabilities & V4L2_CAP_DEVICE_CAPS) ?
+                        cap.device_caps : cap.capabilities;
+        if (!(caps & V4L2_CAP_VIDEO_CAPTURE_MPLANE) ||
+            !(caps & V4L2_CAP_STREAMING)) {
+            fprintf(stderr, "[FAIL] CAPTURE_MPLANE/STREAMING not supported\n");
+            goto out;
+        }
     }
 
-    printf("[V4L2 Cap] Driver: %s, Card: %s, Bus: %s\n", cap.driver, cap.card, cap.bus_info);
+    memset(&desc, 0, sizeof(desc));
+    desc.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+    if (xioctl(fd, VIDIOC_ENUM_FMT, &desc) < 0 ||
+        desc.pixelformat != V4L2_PIX_FMT_NV12M) {
+        perror("VIDIOC_ENUM_FMT NV12M");
+        goto out;
+    }
+    printf("[PASS] Format[0]: %c%c%c%c (NV12M)\n",
+           desc.pixelformat & 0xff, (desc.pixelformat >> 8) & 0xff,
+           (desc.pixelformat >> 16) & 0xff, (desc.pixelformat >> 24) & 0xff);
+
+    memset(&fmt, 0, sizeof(fmt));
+    fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+    fmt.fmt.pix_mp.width = width;
+    fmt.fmt.pix_mp.height = height;
+    fmt.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_NV12M;
+    fmt.fmt.pix_mp.field = V4L2_FIELD_NONE;
+    if (xioctl(fd, VIDIOC_S_FMT, &fmt) < 0) {
+        perror("VIDIOC_S_FMT");
+        goto out;
+    }
+    if (fmt.fmt.pix_mp.width != DEFAULT_WIDTH ||
+        fmt.fmt.pix_mp.height != DEFAULT_HEIGHT ||
+        fmt.fmt.pix_mp.pixelformat != V4L2_PIX_FMT_NV12M ||
+        fmt.fmt.pix_mp.num_planes != NV12_PLANES) {
+        fprintf(stderr, "[FAIL] Driver did not select fixed 1920x1080 NV12M/2-plane mode\n");
+        goto out;
+    }
+    printf("[PASS] Mode: %ux%u NV12M planes=%u Y=%u UV=%u bytes\n",
+           fmt.fmt.pix_mp.width, fmt.fmt.pix_mp.height,
+           fmt.fmt.pix_mp.num_planes,
+           fmt.fmt.pix_mp.plane_fmt[0].sizeimage,
+           fmt.fmt.pix_mp.plane_fmt[1].sizeimage);
+
+    memset(&parm, 0, sizeof(parm));
+    parm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+    parm.parm.capture.timeperframe.numerator = 1;
+    parm.parm.capture.timeperframe.denominator = fps;
+    if (xioctl(fd, VIDIOC_S_PARM, &parm) < 0) {
+        perror("VIDIOC_S_PARM");
+        goto out;
+    }
+    printf("[PASS] Frame interval: %u/%u s\n",
+           parm.parm.capture.timeperframe.numerator,
+           parm.parm.capture.timeperframe.denominator);
+
+    memset(&ctrl, 0, sizeof(ctrl));
+    ctrl.id = V4L2_CID_TEST_PATTERN;
+    ctrl.value = pattern == 9 ? 3 : pattern == 10 ? 4 : pattern;
+    if (xioctl(fd, VIDIOC_S_CTRL, &ctrl) < 0 ||
+        xioctl(fd, VIDIOC_G_CTRL, &ctrl) < 0) {
+        perror("TPG VIDIOC_S/G_CTRL");
+        goto out;
+    }
+    printf("[PASS] TPG menu value=%d (hardware pattern %d)\n", ctrl.value, pattern);
 
     if (probe_only) {
-        struct v4l2_fmtdesc desc;
-        struct v4l2_format probe_fmt;
-        struct v4l2_streamparm parm;
-        struct v4l2_control ctrl;
-        uint32_t dev_caps = cap.capabilities & V4L2_CAP_DEVICE_CAPS ?
-                            cap.device_caps : cap.capabilities;
-
-        if (!(dev_caps & V4L2_CAP_VIDEO_CAPTURE_MPLANE) ||
-            !(dev_caps & V4L2_CAP_STREAMING)) {
-            fprintf(stderr, "[FAIL] Device lacks CAPTURE_MPLANE or STREAMING\n");
-            close(fd);
-            return EXIT_FAILURE;
-        }
-
-        memset(&desc, 0, sizeof(desc));
-        desc.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
-        if (ioctl(fd, VIDIOC_ENUM_FMT, &desc) < 0) {
-            perror("VIDIOC_ENUM_FMT(CAPTURE_MPLANE) failed");
-            close(fd);
-            return EXIT_FAILURE;
-        }
-        printf("[PASS] Format[0]: %c%c%c%c\n",
-               desc.pixelformat & 0xff, (desc.pixelformat >> 8) & 0xff,
-               (desc.pixelformat >> 16) & 0xff,
-               (desc.pixelformat >> 24) & 0xff);
-        if (desc.pixelformat != V4L2_PIX_FMT_NV12M) {
-            fprintf(stderr, "[FAIL] Expected NV12M\n");
-            close(fd);
-            return EXIT_FAILURE;
-        }
-
-        memset(&probe_fmt, 0, sizeof(probe_fmt));
-        probe_fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
-        probe_fmt.fmt.pix_mp.width = width;
-        probe_fmt.fmt.pix_mp.height = height;
-        probe_fmt.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_NV12M;
-        probe_fmt.fmt.pix_mp.field = V4L2_FIELD_NONE;
-        if (ioctl(fd, VIDIOC_S_FMT, &probe_fmt) < 0) {
-            perror("VIDIOC_S_FMT(CAPTURE_MPLANE) failed");
-            close(fd);
-            return EXIT_FAILURE;
-        }
-        printf("[PASS] Mode: %ux%u NV12M, planes=%u, Y=%u, UV=%u bytes\n",
-               probe_fmt.fmt.pix_mp.width, probe_fmt.fmt.pix_mp.height,
-               probe_fmt.fmt.pix_mp.num_planes,
-               probe_fmt.fmt.pix_mp.plane_fmt[0].sizeimage,
-               probe_fmt.fmt.pix_mp.plane_fmt[1].sizeimage);
-
-        memset(&parm, 0, sizeof(parm));
-        parm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
-        parm.parm.capture.timeperframe.numerator = 1;
-        parm.parm.capture.timeperframe.denominator =
-            target_fps > 0 ? target_fps : 60;
-        if (ioctl(fd, VIDIOC_S_PARM, &parm) < 0) {
-            perror("VIDIOC_S_PARM failed");
-            close(fd);
-            return EXIT_FAILURE;
-        }
-        printf("[PASS] Frame interval: %u/%u s\n",
-               parm.parm.capture.timeperframe.numerator,
-               parm.parm.capture.timeperframe.denominator);
-
-        memset(&ctrl, 0, sizeof(ctrl));
-        ctrl.id = V4L2_CID_TEST_PATTERN;
-        if (tpg_pattern == 10)
-            ctrl.value = 4;
-        else if (tpg_pattern == 9 || tpg_pattern < 0)
-            ctrl.value = 3;
-        else
-            ctrl.value = tpg_pattern;
-        if (ioctl(fd, VIDIOC_S_CTRL, &ctrl) < 0 ||
-            ioctl(fd, VIDIOC_G_CTRL, &ctrl) < 0) {
-            perror("TPG VIDIOC_S/G_CTRL failed");
-            close(fd);
-            return EXIT_FAILURE;
-        }
-        printf("[PASS] TPG test-pattern menu value: %d\n", ctrl.value);
-        printf("[PASS] Stage-1 V4L2/TPG control-plane probe complete; streaming was not started.\n");
-        close(fd);
-        return EXIT_SUCCESS;
+        printf("[PASS] Control-plane probe complete; STREAMON was not issued.\n");
+        rc = EXIT_SUCCESS;
+        goto out;
     }
 
-    // 3. Set Video Format
-    struct v4l2_format fmt;
-    memset(&fmt, 0, sizeof(fmt));
-    fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    fmt.fmt.pix.width = width;
-    fmt.fmt.pix.height = height;
-    fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_YUYV; // YUV 4:2:2 Packed
-    fmt.fmt.pix.field = V4L2_FIELD_NONE;
-
-    if (ioctl(fd, VIDIOC_S_FMT, &fmt) < 0) {
-        perror("VIDIOC_S_FMT failed");
-        close(fd);
-        return EXIT_FAILURE;
+    if (!frame_target) {
+        fprintf(stderr, "Frame count must be non-zero\n");
+        goto out;
     }
 
-    printf("[V4L2 Format] Set Width: %u, Height: %u, SizeImage: %u\n",
-           fmt.fmt.pix.width, fmt.fmt.pix.height, fmt.fmt.pix.sizeimage);
-
-    // 4. Request Buffers
-    struct v4l2_requestbuffers req;
     memset(&req, 0, sizeof(req));
     req.count = DEFAULT_BUFFERS;
-    req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-
-    switch (mode) {
-        case MODE_MMAP:
-        case MODE_EXPBUF:
-            req.memory = V4L2_MEMORY_MMAP;
-            break;
-        case MODE_USERPTR:
-            req.memory = V4L2_MEMORY_USERPTR;
-            break;
-        case MODE_DMABUF:
-            req.memory = V4L2_MEMORY_DMABUF;
-            break;
+    req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+    req.memory = V4L2_MEMORY_MMAP;
+    if (xioctl(fd, VIDIOC_REQBUFS, &req) < 0 || req.count < 2) {
+        perror("VIDIOC_REQBUFS MMAP");
+        goto out;
     }
+    buffers = calloc(req.count, sizeof(*buffers));
+    if (!buffers) goto out;
 
-    if (ioctl(fd, VIDIOC_REQBUFS, &req) < 0) {
-        perror("VIDIOC_REQBUFS failed");
-        close(fd);
-        return EXIT_FAILURE;
-    }
-
-    printf("[V4L2 ReqBufs] Allocated %u buffers\n", req.count);
-
-    // 5. Allocate / Map Buffers
-    struct buffer *buffers = calloc(req.count, sizeof(*buffers));
-    for (uint32_t i = 0; i < req.count; i++) {
+    for (i = 0; i < req.count; i++) {
         struct v4l2_buffer buf;
+        struct v4l2_plane planes[NV12_PLANES];
         memset(&buf, 0, sizeof(buf));
-        buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        memset(planes, 0, sizeof(planes));
+        buf.type = req.type;
         buf.memory = req.memory;
         buf.index = i;
-
-        if (mode == MODE_MMAP || mode == MODE_EXPBUF) {
-            if (ioctl(fd, VIDIOC_QUERYBUF, &buf) < 0) {
-                perror("VIDIOC_QUERYBUF failed");
-                close(fd);
-                return EXIT_FAILURE;
+        buf.length = NV12_PLANES;
+        buf.m.planes = planes;
+        if (xioctl(fd, VIDIOC_QUERYBUF, &buf) < 0) {
+            perror("VIDIOC_QUERYBUF");
+            goto out;
+        }
+        for (p = 0; p < NV12_PLANES; p++) {
+            buffers[i].plane[p].length = planes[p].length;
+            buffers[i].plane[p].addr = mmap(NULL, planes[p].length,
+                                             PROT_READ | PROT_WRITE,
+                                             MAP_SHARED, fd,
+                                             planes[p].m.mem_offset);
+            if (buffers[i].plane[p].addr == MAP_FAILED) {
+                buffers[i].plane[p].addr = NULL;
+                perror("mmap plane");
+                goto out;
             }
+        }
+        if (xioctl(fd, VIDIOC_QBUF, &buf) < 0) {
+            perror("VIDIOC_QBUF initial");
+            goto out;
+        }
+    }
+    printf("[PASS] Allocated and queued %u contiguous NV12M MMAP buffers\n", req.count);
 
-            buffers[i].length = buf.length;
-            buffers[i].start = mmap(NULL, buf.length,
-                                    PROT_READ | PROT_WRITE,
-                                    MAP_SHARED, fd, buf.m.offset);
-
-            if (buffers[i].start == MAP_FAILED) {
-                perror("mmap failed");
-                close(fd);
-                return EXIT_FAILURE;
-            }
-
-            if (mode == MODE_EXPBUF) {
-                struct v4l2_exportbuffer expbuf;
-                memset(&expbuf, 0, sizeof(expbuf));
-                expbuf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-                expbuf.index = i;
-                if (ioctl(fd, VIDIOC_EXPBUF, &expbuf) < 0) {
-                    perror("VIDIOC_EXPBUF failed");
-                } else {
-                    buffers[i].export_fd = expbuf.fd;
-                    printf("  Buffer %u Exported DMABUF FD: %d\n", i, expbuf.fd);
-                }
-            }
-
-            if (ioctl(fd, VIDIOC_QBUF, &buf) < 0) {
-                perror("VIDIOC_QBUF failed");
-                close(fd);
-                return EXIT_FAILURE;
-            }
-        } else if (mode == MODE_USERPTR) {
-            buffers[i].length = fmt.fmt.pix.sizeimage;
-            if (posix_memalign(&buffers[i].start, 4096, buffers[i].length) != 0) {
-                perror("posix_memalign failed");
-                close(fd);
-                return EXIT_FAILURE;
-            }
-
-            buf.m.userptr = (unsigned long)buffers[i].start;
-            buf.length = buffers[i].length;
-
-            if (ioctl(fd, VIDIOC_QBUF, &buf) < 0) {
-                perror("VIDIOC_QBUF (USERPTR) failed");
-                close(fd);
-                return EXIT_FAILURE;
-            }
+    if (output_name) {
+        output = fopen(output_name, "wb");
+        if (!output) {
+            perror("open output");
+            goto out;
         }
     }
 
-    // 6. Config Video TPG Pattern if requested via standard V4L2 VIDIOC_S_CTRL ioctl (fallback to sysfs)
-    if (tpg_pattern >= 0) {
-        printf("--> Setting Video TPG Pattern ID: %d...\n", tpg_pattern);
-
-        struct v4l2_control ctrl;
-        memset(&ctrl, 0, sizeof(ctrl));
-        ctrl.id = V4L2_CID_TEST_PATTERN;
-        // Map 9 -> 3 (Color Bars), 10 -> 4 (Zone Plate) for standard V4L2 menu
-        if (tpg_pattern == 9) ctrl.value = 3;
-        else if (tpg_pattern == 10) ctrl.value = 4;
-        else ctrl.value = tpg_pattern;
-
-        if (ioctl(fd, VIDIOC_S_CTRL, &ctrl) == 0) {
-            printf("    Updated Video TPG Pattern via standard V4L2 VIDIOC_S_CTRL ioctl successfully.\n");
-        } else {
-            FILE *sysfs_fp = fopen("/sys/class/video4linux/video0/tpg_pattern", "w");
-            if (!sysfs_fp) sysfs_fp = fopen("/sys/bus/pci/devices/0000:01:00.0/tpg_pattern", "w");
-
-            if (sysfs_fp) {
-                fprintf(sysfs_fp, "%d\n", tpg_pattern);
-                fclose(sysfs_fp);
-                printf("    Updated Video TPG Pattern via sysfs fallback successfully.\n");
-            } else {
-                printf("    Note: Could not set pattern via ioctl or sysfs (Defaulting to Color Bars).\n");
-            }
+    {
+        enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+        if (xioctl(fd, VIDIOC_STREAMON, &type) < 0) {
+            perror("VIDIOC_STREAMON");
+            goto out;
         }
     }
+    printf("[PASS] STREAMON; capturing...\n");
+    start_ms = monotonic_ms();
 
-    // 6.1 Config Hardware Frame Rate Pacer if requested
-    if (target_fps > 0) {
-        printf("--> Setting Hardware Frame Rate Pacer to %d FPS...\n", target_fps);
-
-        struct v4l2_streamparm parm;
-        memset(&parm, 0, sizeof(parm));
-        parm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        parm.parm.capture.timeperframe.numerator = 1;
-        parm.parm.capture.timeperframe.denominator = target_fps;
-
-        if (ioctl(fd, VIDIOC_S_PARM, &parm) == 0) {
-            printf("    Updated Hardware Frame Rate Pacer via standard V4L2 VIDIOC_S_PARM ioctl to %d FPS successfully.\n", target_fps);
-        } else {
-            FILE *sysfs_fp = fopen("/sys/class/video4linux/video0/tpg_fps", "w");
-            if (!sysfs_fp) sysfs_fp = fopen("/sys/bus/pci/devices/0000:01:00.0/tpg_fps", "w");
-
-            if (sysfs_fp) {
-                fprintf(sysfs_fp, "%d\n", target_fps);
-                fclose(sysfs_fp);
-                printf("    Updated Hardware Frame Rate Pacer via sysfs fallback to %d FPS successfully.\n", target_fps);
-            } else {
-                printf("    Note: Could not set frame rate via ioctl or sysfs.\n");
-            }
-        }
-    }
-
-    // 6.2 Subscribe to V4L2_EVENT_FRAME_SYNC for Sub-Frame Low-Latency Slice DMA
-    struct v4l2_event_subscription sub_ev;
-    memset(&sub_ev, 0, sizeof(sub_ev));
-    sub_ev.type = V4L2_EVENT_FRAME_SYNC;
-    if (ioctl(fd, VIDIOC_SUBSCRIBE_EVENT, &sub_ev) == 0) {
-        printf("--> Subscribed to V4L2_EVENT_FRAME_SYNC (Sub-Frame Low-Latency Slice DMA Ready Events) successfully.\n");
-    }
-
-    // Start Streaming
-    enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    if (ioctl(fd, VIDIOC_STREAMON, &type) < 0) {
-        perror("VIDIOC_STREAMON failed");
-        close(fd);
-        return EXIT_FAILURE;
-    }
-
-    printf("--> Stream Started Successfully. Capturing %u frames...\n", num_frames);
-
-    FILE *out_fp = NULL;
-    if (out_filename) {
-        out_fp = fopen(out_filename, "wb");
-        if (!out_fp) perror("Cannot open output file");
-    }
-
-    // 7. Capture Loop
-    double start_time = get_timestamp_ms();
-    uint32_t captured_count = 0;
-
-    while (captured_count < num_frames) {
-        fd_set fds;
-        FD_ZERO(&fds);
-        FD_SET(fd, &fds);
-
-        struct timeval timeout = {.tv_sec = 2, .tv_usec = 0};
-        int r = select(fd + 1, &fds, NULL, NULL, &timeout);
-
-        if (r < 0) {
-            if (errno == EINTR) continue;
-            perror("select failed");
-            break;
-        }
-
-        if (r == 0) {
-            fprintf(stderr, "select timeout (no frame received)\n");
-            break;
-        }
-
+    while (captured < frame_target) {
+        fd_set readfds;
+        struct timeval timeout = { .tv_sec = 3, .tv_usec = 0 };
         struct v4l2_buffer buf;
+        struct v4l2_plane planes[NV12_PLANES];
+        uint64_t y_hash, uv_hash;
+        uint8_t y_min, y_max, uv_min, uv_max;
+        int ready;
+
+        FD_ZERO(&readfds);
+        FD_SET(fd, &readfds);
+        ready = select(fd + 1, &readfds, NULL, NULL, &timeout);
+        if (ready <= 0) {
+            if (ready == 0) fprintf(stderr, "[FAIL] frame timeout\n");
+            else perror("select");
+            break;
+        }
+
         memset(&buf, 0, sizeof(buf));
-        buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        buf.memory = req.memory;
-
-        if (ioctl(fd, VIDIOC_DQBUF, &buf) < 0) {
+        memset(planes, 0, sizeof(planes));
+        buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+        buf.memory = V4L2_MEMORY_MMAP;
+        buf.length = NV12_PLANES;
+        buf.m.planes = planes;
+        if (xioctl(fd, VIDIOC_DQBUF, &buf) < 0) {
             if (errno == EAGAIN) continue;
-            perror("VIDIOC_DQBUF failed");
+            perror("VIDIOC_DQBUF");
             break;
         }
 
-        captured_count++;
+        captured++;
+        if (planes[0].bytesused != DEFAULT_WIDTH * DEFAULT_HEIGHT ||
+            planes[1].bytesused != DEFAULT_WIDTH * DEFAULT_HEIGHT / 2) {
+            fprintf(stderr, "[FAIL] frame %u payload Y=%u UV=%u\n",
+                    captured, planes[0].bytesused, planes[1].bytesused);
+            data_errors++;
+        }
+        if (captured > 1 && buf.sequence != expected_sequence) {
+            fprintf(stderr, "[FAIL] sequence jump: got=%u expected=%u\n",
+                    buf.sequence, expected_sequence);
+            data_errors++;
+        }
+        expected_sequence = buf.sequence + 1;
 
-        // Print Frame Info
-        uint8_t *p = (uint8_t *)buffers[buf.index].start;
-        uint32_t checksum = 0;
-        for (uint32_t i = 0; i < 1024 && i < buf.bytesused; i++) {
-            checksum += p[i];
+        y_hash = fnv1a64(buffers[buf.index].plane[0].addr, planes[0].bytesused);
+        uv_hash = fnv1a64(buffers[buf.index].plane[1].addr, planes[1].bytesused);
+        if (captured == 1) {
+            first_y_hash = y_hash;
+            first_uv_hash = uv_hash;
+            byte_range(buffers[buf.index].plane[0].addr, planes[0].bytesused,
+                       &y_min, &y_max);
+            byte_range(buffers[buf.index].plane[1].addr, planes[1].bytesused,
+                       &uv_min, &uv_max);
+            printf("[FRAME 1] seq=%u Y-hash=%016" PRIx64 " UV-hash=%016" PRIx64
+                   " Y-range=%u..%u UV-range=%u..%u\n",
+                   buf.sequence, y_hash, uv_hash, y_min, y_max, uv_min, uv_max);
+            if (y_min == y_max || uv_min == uv_max) {
+                fprintf(stderr, "[FAIL] color-bars planes have no sample variation\n");
+                data_errors++;
+            }
+            if (output) {
+                fwrite(buffers[buf.index].plane[0].addr, 1, planes[0].bytesused, output);
+                fwrite(buffers[buf.index].plane[1].addr, 1, planes[1].bytesused, output);
+                fflush(output);
+                printf("[PASS] Saved first contiguous NV12 frame to %s\n", output_name);
+            }
+        } else if (y_hash != first_y_hash || uv_hash != first_uv_hash) {
+            fprintf(stderr,
+                    "[FAIL] static color-bars changed at frame %u: Y=%016" PRIx64
+                    " UV=%016" PRIx64 "\n", captured, y_hash, uv_hash);
+            data_errors++;
         }
 
-        printf("  [Frame %03u] Index: %u, Bytes: %u, Checksum (first 1K): 0x%08X\n",
-               captured_count, buf.index, buf.bytesused, checksum);
+        if (captured == 1 || captured % 30 == 0)
+            printf("[FRAME %u] index=%u seq=%u timestamp=%ld.%06ld\n",
+                   captured, buf.index, buf.sequence,
+                   (long)buf.timestamp.tv_sec, (long)buf.timestamp.tv_usec);
 
-        if (out_fp && captured_count == 1) {
-            fwrite(buffers[buf.index].start, 1, buf.bytesused, out_fp);
-            printf("    Saved Frame 1 to file %s\n", out_filename);
-        }
-
-        // Re-queue buffer
-        if (ioctl(fd, VIDIOC_QBUF, &buf) < 0) {
-            perror("VIDIOC_QBUF re-queue failed");
+        if (captured < frame_target && xioctl(fd, VIDIOC_QBUF, &buf) < 0) {
+            perror("VIDIOC_QBUF requeue");
             break;
         }
     }
+    end_ms = monotonic_ms();
 
-    double elapsed_ms = get_timestamp_ms() - start_time;
-    double fps = (captured_count * 1000.0) / elapsed_ms;
-
-    printf("=================================================================\n");
-    printf(" Capture Finished: %u frames in %.2f ms (%.2f FPS)\n",
-           captured_count, elapsed_ms, fps);
-    printf("=================================================================\n");
-
-    // 8. Stop Streaming & Cleanup
-    ioctl(fd, VIDIOC_STREAMOFF, &type);
-
-    if (out_fp) fclose(out_fp);
-
-    for (uint32_t i = 0; i < req.count; i++) {
-        if (mode == MODE_MMAP || mode == MODE_EXPBUF) {
-            if (buffers[i].export_fd > 0) close(buffers[i].export_fd);
-            munmap(buffers[i].start, buffers[i].length);
-        } else if (mode == MODE_USERPTR) {
-            free(buffers[i].start);
-        }
+    {
+        enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+        if (xioctl(fd, VIDIOC_STREAMOFF, &type) < 0)
+            perror("VIDIOC_STREAMOFF");
     }
 
-    free(buffers);
-    close(fd);
+    if (captured) {
+        double elapsed_s = (end_ms - start_ms) / 1000.0;
+        double measured_fps = captured / elapsed_s;
+        double mib_s = captured * (DEFAULT_WIDTH * DEFAULT_HEIGHT * 1.5) /
+                       elapsed_s / (1024.0 * 1024.0);
+        printf("=================================================================\n"
+               " Captured: %u/%u frames, %.3f s, %.3f FPS, %.2f MiB/s\n"
+               " Static-frame errors: %u\n"
+               "=================================================================\n",
+               captured, frame_target, elapsed_s, measured_fps, mib_s, data_errors);
+        if (captured == frame_target && data_errors == 0 &&
+            measured_fps >= 59.0 && measured_fps <= 61.0)
+            rc = EXIT_SUCCESS;
+        else
+            fprintf(stderr, "[FAIL] NV12 correctness or 60 FPS requirement not met\n");
+    }
 
-    return EXIT_SUCCESS;
+out:
+    if (output) fclose(output);
+    if (buffers) {
+        for (i = 0; i < req.count; i++) {
+            for (p = 0; p < NV12_PLANES; p++) {
+                if (buffers[i].plane[p].addr)
+                    munmap(buffers[i].plane[p].addr,
+                           buffers[i].plane[p].length);
+            }
+        }
+        free(buffers);
+    }
+    if (fd >= 0) close(fd);
+    return rc;
 }

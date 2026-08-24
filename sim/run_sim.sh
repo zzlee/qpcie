@@ -32,9 +32,11 @@ TESTS=(
     "tb_c2h_dma_engine rtl/c2h_dma_engine.v tb/tb_c2h_dma_engine.v"
     "tb_interrupt_ctrl rtl/interrupt_ctrl.v tb/tb_interrupt_ctrl.v"
     "tb_sg_dma_engine rtl/sg_dma_engine.v tb/tb_sg_dma_engine.v"
-    "tb_pcie_dma_system rtl/global_timer.v rtl/dma_telemetry.v rtl/video_stream_engine.v rtl/audio_stream_engine.v rtl/axil_reg_space.v rtl/c2h_dma_engine.v rtl/h2c_dma_engine.v rtl/desc_fetch_engine.v rtl/cq_rx_decoder.v rtl/cc_tx_encoder.v rtl/rq_tx_encoder.v rtl/rc_rx_decoder.v rtl/pcie_tag_manager.v rtl/interrupt_ctrl.v rtl/sg_dma_engine.v rtl/custom_pcie_dma_top.v tb/tb_pcie_dma_system.v"
+    "tb_nv12_capture_engine rtl/nv12_capture_engine.v tb/tb_nv12_capture_engine.v"
+    "tb_nv12_capture_performance rtl/nv12_capture_engine.v rtl/rq_tx_encoder.v tb/tb_nv12_capture_performance.v"
+    "tb_pcie_dma_system rtl/global_timer.v rtl/dma_telemetry.v rtl/video_stream_engine.v rtl/nv12_capture_engine.v rtl/audio_stream_engine.v rtl/axil_reg_space.v rtl/c2h_dma_engine.v rtl/h2c_dma_engine.v rtl/desc_fetch_engine.v rtl/cq_rx_decoder.v rtl/cc_tx_encoder.v rtl/rq_tx_encoder.v rtl/rc_rx_decoder.v rtl/pcie_tag_manager.v rtl/interrupt_ctrl.v rtl/sg_dma_engine.v rtl/custom_pcie_dma_top.v tb/tb_pcie_dma_system.v"
     "tb_pcie_7x_axi_bridge rtl/pcie_7x_axi_bridge.v rtl/cq_rx_decoder.v rtl/cc_tx_encoder.v rtl/rq_tx_encoder.v rtl/rc_rx_decoder.v rtl/axil_reg_space.v rtl/desc_fetch_engine.v tb/tb_pcie_7x_axi_bridge.v"
-    "tb_sg_dma_pipeline rtl/global_timer.v rtl/dma_telemetry.v rtl/video_stream_engine.v rtl/audio_stream_engine.v rtl/axil_reg_space.v rtl/c2h_dma_engine.v rtl/h2c_dma_engine.v rtl/desc_fetch_engine.v rtl/cq_rx_decoder.v rtl/cc_tx_encoder.v rtl/rq_tx_encoder.v rtl/rc_rx_decoder.v rtl/pcie_tag_manager.v rtl/interrupt_ctrl.v rtl/sg_dma_engine.v rtl/custom_pcie_dma_top.v rtl/pcie_7x_axi_bridge.v tb/tb_sg_dma_pipeline.v"
+    "tb_sg_dma_pipeline rtl/global_timer.v rtl/dma_telemetry.v rtl/video_stream_engine.v rtl/nv12_capture_engine.v rtl/audio_stream_engine.v rtl/axil_reg_space.v rtl/c2h_dma_engine.v rtl/h2c_dma_engine.v rtl/desc_fetch_engine.v rtl/cq_rx_decoder.v rtl/cc_tx_encoder.v rtl/rq_tx_encoder.v rtl/rc_rx_decoder.v rtl/pcie_tag_manager.v rtl/interrupt_ctrl.v rtl/sg_dma_engine.v rtl/custom_pcie_dma_top.v rtl/pcie_7x_axi_bridge.v tb/tb_sg_dma_pipeline.v"
 )
 
 PASSED=0

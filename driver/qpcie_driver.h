@@ -19,7 +19,7 @@
 #include <media/v4l2-ioctl.h>
 #include <media/v4l2-ctrls.h>
 #include <media/videobuf2-v4l2.h>
-#include <media/videobuf2-dma-sg.h>
+#include <media/videobuf2-dma-contig.h>
 
 #include <sound/core.h>
 #include <sound/control.h>
@@ -65,6 +65,7 @@
 #define REG_HARDWARE_CAPS    0x3C
 #define REG_PACER_CTRL       0x74    /* Video Pacer Bypass Control (0=Bypass, 1=Enable) */
 #define REG_SLICE_HEIGHT     0x78    /* Sub-Frame Slice Height in Lines (0=Full Frame IRQ, >0=Slice IRQ) */
+#define REG_VIDEO_ERRORS     0x7C    /* AXI-video framing/configuration error count */
 
 /* 64-Byte 2D Multi-Planar Extended Descriptor Structure (Hardware Wire Format) */
 struct __packed qpcie_dma_desc_64b {
@@ -117,6 +118,7 @@ struct qpcie_v4l2_channel {
     u32 stride;
     u32 pixelformat;
     u32 current_slice_idx;
+    u32 error_count_start;
 };
 
 struct qpcie_alsa_channel {

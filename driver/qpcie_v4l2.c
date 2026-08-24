@@ -7,6 +7,8 @@
  */
 
 #include "qpcie_driver.h"
+#include <linux/delay.h>
+#include <linux/jiffies.h>
 #include <media/v4l2-event.h>
 
 static const struct v4l2_file_operations qpcie_v4l2_fops = {
@@ -185,10 +187,19 @@ static int qpcie_queue_setup(struct vb2_queue *vq,
                             unsigned int sizes[], struct device *alloc_devs[])
 {
     struct qpcie_v4l2_channel *vch = vb2_get_drv_priv(vq);
-    *nplanes = 2;
-    sizes[0] = vch->stride * vch->height;
-    sizes[1] = vch->stride * (vch->height / 2);
+    unsigned int y_size = vch->stride * vch->height;
+    unsigned int uv_size = vch->stride * (vch->height / 2);
 
+    if (*nplanes) {
+        if (*nplanes != 2 || sizes[0] < y_size || sizes[1] < uv_size)
+            return -EINVAL;
+        return 0;
+    }
+
+    *nplanes = 2;
+    sizes[0] = y_size;
+    sizes[1] = uv_size;
+    *nbuffers = clamp_t(unsigned int, *nbuffers, 2, RING_BUFFER_SIZE / 2);
     return 0;
 }
 
@@ -204,7 +215,8 @@ static int qpcie_buf_prepare(struct vb2_buffer *vb)
                              (vch->stride * (vch->height / 2));
 
         if (vb2_plane_size(vb, i) < size) {
-            v4l2_err(&vch->v4l2_dev, "Plane %d size %lu < required %lu\n",
+            v4l2_err(&vch->qdev->v4l2_dev,
+                     "Plane %d size %lu < required %lu\n",
                      i, vb2_plane_size(vb, i), size);
             return -EINVAL;
         }
@@ -220,55 +232,35 @@ static void qpcie_buf_queue(struct vb2_buffer *vb)
     struct qpcie_v4l2_channel *vch = vb2_get_drv_priv(vb->vb2_queue);
     struct qpcie_dev *qdev = vch->qdev;
     struct qpcie_dma_desc_2d *desc;
-    dma_addr_t plane0_dma, plane1_dma, plane2_dma = 0;
-    bool is_output = V4L2_TYPE_IS_OUTPUT(vb->vb2_queue->type);
+    dma_addr_t plane0_dma, plane1_dma;
+    u32 tail;
 
-    plane0_dma = vb2_dma_sg_plane_desc(vb, 0)->sgl->dma_address;
-    plane1_dma = vb2_dma_sg_plane_desc(vb, 1)->sgl->dma_address;
-    if (vb->num_planes == 3)
-        plane2_dma = vb2_dma_sg_plane_desc(vb, 2)->sgl->dma_address;
+    plane0_dma = vb2_dma_contig_plane_dma_addr(vb, 0);
+    plane1_dma = vb2_dma_contig_plane_dma_addr(vb, 1);
+    tail = qdev->h2c_tail;
+    desc = &qdev->h2c_ring_virt[tail];
+    memset(desc, 0, sizeof(*desc));
 
-    if (is_output) {
-        /* H2C DMA Transfer (Host RAM -> FPGA Output Stream) */
-        desc = &qdev->h2c_ring_virt[qdev->h2c_tail];
-        memset(desc, 0, sizeof(*desc));
+    desc->plane0_dst_addr = plane0_dma;
+    desc->plane1_dst_addr = plane1_dma;
+    desc->line_width      = vch->width;
+    desc->line_count      = vch->height;
+    desc->src_stride      = vch->width;
+    desc->dst_stride      = vch->stride;
+    desc->plane12_width   = vch->width;
+    desc->plane12_count   = vch->height / 2;
+    desc->format          = 0x2; /* NV12M */
+    desc->plane_count     = 2;
+    desc->control         = 0x0B; /* Valid | C2H | IRQ */
 
-        desc->plane0_src_addr = plane0_dma;
-        desc->plane0_dst_addr = 0x0000; /* FPGA Stream Out */
-        desc->plane1_src_addr = plane1_dma;
-        desc->plane2_src_addr = plane2_dma;
-
-        desc->line_width = vch->width;
-        desc->line_count = vch->height;
-        desc->src_stride = vch->stride;
-        desc->dst_stride = vch->width;
-        desc->format     = (vb->num_planes == 3) ? 0x3 : 0x2;
-        desc->plane_count= vb->num_planes;
-        desc->control    = 0x0009; /* Valid=1, Is_C2H=0 (H2C), IRQ_EN=1 */
-
-        qdev->h2c_tail = (qdev->h2c_tail + 1) % RING_BUFFER_SIZE;
-        iowrite32(((u32)qdev->h2c_tail << 16) | RING_BUFFER_SIZE, qdev->bar0_mmio + REG_H2C_RING_CFG);
-    } else {
-        /* C2H DMA Transfer (FPGA Input Stream -> Host RAM) */
-        desc = &qdev->c2h_ring_virt[qdev->c2h_tail];
-        memset(desc, 0, sizeof(*desc));
-
-        desc->plane0_src_addr = 0x0000; /* FPGA Stream In */
-        desc->plane0_dst_addr = plane0_dma;
-        desc->plane1_dst_addr = plane1_dma;
-        desc->plane2_dst_addr = plane2_dma;
-
-        desc->line_width = vch->width;
-        desc->line_count = vch->height;
-        desc->src_stride = vch->width;
-        desc->dst_stride = vch->stride;
-        desc->format     = (vb->num_planes == 3) ? 0x3 : 0x2;
-        desc->plane_count= vb->num_planes;
-        desc->control    = 0x000B; /* Valid=1, Is_C2H=1 (C2H), IRQ_EN=1 */
-
-        qdev->c2h_tail = (qdev->c2h_tail + 1) % RING_BUFFER_SIZE;
-        iowrite32(((u32)qdev->c2h_tail << 16) | RING_BUFFER_SIZE, qdev->bar0_mmio + REG_C2H_RING_CFG);
-    }
+    /* Descriptor data must be globally visible before publishing the shared
+     * hardware-ring tail doorbell. */
+    dma_wmb();
+    qdev->h2c_tail = (tail + 1) % RING_BUFFER_SIZE;
+    qdev->c2h_tail = qdev->h2c_tail;
+    iowrite32((qdev->h2c_tail << 16) | RING_BUFFER_SIZE,
+              qdev->bar0_mmio + REG_H2C_RING_CFG);
+    ioread32(qdev->bar0_mmio + REG_H2C_RING_CFG);
 
     spin_lock_irq(&vch->slock);
     list_add_tail(&buf->list, &vch->active_buffers);
@@ -297,17 +289,67 @@ static void qpcie_return_all_buffers(struct qpcie_v4l2_channel *vch,
 static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
 {
     struct qpcie_v4l2_channel *vch = vb2_get_drv_priv(vq);
+    struct qpcie_dev *qdev = vch->qdev;
 
-    dev_warn(&vch->qdev->pdev->dev,
-             "STREAMON blocked: stage-1 validates V4L2/TPG control only; NV12 RTL data path is not enabled\n");
-    qpcie_return_all_buffers(vch, VB2_BUF_STATE_QUEUED);
-    return -EOPNOTSUPP;
+    if (count < 2) {
+        qpcie_return_all_buffers(vch, VB2_BUF_STATE_QUEUED);
+        return -ENOBUFS;
+    }
+
+    vch->sequence = 0;
+    vch->current_slice_idx = 0;
+    vch->error_count_start = ioread32(qdev->bar0_mmio + REG_VIDEO_ERRORS);
+    iowrite32(0, qdev->bar0_mmio + REG_SLICE_HEIGHT);
+    iowrite32(1, qdev->bar0_mmio + REG_PACER_CTRL);
+    iowrite32(0x3, qdev->bar0_mmio + REG_IRQ_STATUS);
+    dma_wmb();
+    iowrite32(1, qdev->bar0_mmio + REG_DMA_CTRL);
+    ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
+    dev_info(&qdev->pdev->dev,
+             "NV12M STREAMON: %u buffers, ring tail=%u, 1920x1080@60\n",
+             count, qdev->h2c_tail);
+    return 0;
 }
 
 static void qpcie_stop_streaming(struct vb2_queue *vq)
 {
     struct qpcie_v4l2_channel *vch = vb2_get_drv_priv(vq);
+    struct qpcie_dev *qdev = vch->qdev;
+    unsigned long timeout = jiffies + msecs_to_jiffies(500);
+    bool drained = false;
 
+    /* Drain every descriptor already published to hardware. This avoids
+     * returning a vb2 plane while a posted PCIe MWr may still target it. */
+    iowrite32(0, qdev->bar0_mmio + REG_PACER_CTRL);
+    do {
+        u32 status = ioread32(qdev->bar0_mmio + REG_DMA_STATUS);
+        u32 ptr = ioread32(qdev->bar0_mmio + 0x40);
+
+        if (!(status & BIT(0)) && ((ptr & 0xffff) == (ptr >> 16))) {
+            drained = true;
+            break;
+        }
+        usleep_range(1000, 2000);
+    } while (time_before(jiffies, timeout));
+
+    iowrite32(0, qdev->bar0_mmio + REG_DMA_CTRL);
+    ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
+    synchronize_irq(qdev->irq);
+    {
+        u32 errors = ioread32(qdev->bar0_mmio + REG_VIDEO_ERRORS);
+        u32 ptr = ioread32(qdev->bar0_mmio + 0x40);
+
+        if (!drained)
+            dev_err(&qdev->pdev->dev,
+                    "NV12M STREAMOFF timed out while draining DMA\n");
+        if (errors != vch->error_count_start)
+            dev_err(&qdev->pdev->dev,
+                    "NV12M video protocol errors increased: %u -> %u\n",
+                    vch->error_count_start, errors);
+        dev_info(&qdev->pdev->dev,
+                 "NV12M STREAMOFF: drained=%u head=%u tail=%u video_errors=%u\n",
+                 drained, ptr & 0xffff, ptr >> 16, errors);
+    }
     qpcie_return_all_buffers(vch, VB2_BUF_STATE_ERROR);
 }
 
@@ -420,17 +462,18 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
             goto unreg_v4l2;
         }
 
-        /* Enable MMAP, USERPTR, and DMABUF (Import/Export) Modes */
+        /* Stage 2 starts with physically contiguous MMAP planes only. */
         dev_info(&qdev->pdev->dev, "[DEBUG STEP 2.4] Channel %d: Initializing vb2_queue...\n", i);
         vch->queue.type            = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
-        vch->queue.io_modes        = VB2_MMAP | VB2_USERPTR | VB2_DMABUF;
+        vch->queue.io_modes        = VB2_MMAP;
         vch->queue.drv_priv        = vch;
         vch->queue.buf_struct_size = sizeof(struct qpcie_v4l2_buffer);
         vch->queue.ops             = &qpcie_vb2_ops;
-        vch->queue.mem_ops         = &vb2_dma_sg_memops;
+        vch->queue.mem_ops         = &vb2_dma_contig_memops;
         vch->queue.timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
         vch->queue.lock            = &vch->lock;
         vch->queue.dev             = &qdev->pdev->dev;
+        vch->queue.min_queued_buffers = 2;
         ret = vb2_queue_init(&vch->queue);
         if (ret) {
             dev_err(&qdev->pdev->dev, "[DEBUG ERROR] Channel %d: vb2_queue_init failed: %d\n", i, ret);
@@ -465,7 +508,7 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
         dev_info(&qdev->pdev->dev, " -> Channel %d registered as /dev/video%d\n", i, vdev->num);
     }
     dev_info(&qdev->pdev->dev,
-             "[V4L2 STAGE 1] One NV12M capture node initialized (control plane only)\n");
+             "[V4L2 STAGE 2] One NV12M MMAP capture node initialized\n");
     return 0;
 
 unreg_v4l2:
