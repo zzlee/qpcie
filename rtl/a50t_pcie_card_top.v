@@ -39,6 +39,40 @@ module a50t_pcie_card_top #(
 
     assign pcie_user_rst_n = ~pcie_user_reset;
 
+    // The 4-PPC TPG runs at 150 MHz to provide margin above the 497.664
+    // Mpixel/s active-pixel requirement of 4K60. AXI control and video data
+    // cross back to the 125 MHz PCIe user domain through dedicated CDC IP.
+    wire video_clk_150;
+    wire video_clk_locked;
+    wire video_async_rst_n = pcie_user_rst_n && video_clk_locked;
+    (* ASYNC_REG = "TRUE" *) reg video_reset_meta = 1'b0;
+    (* ASYNC_REG = "TRUE" *) reg [1:0] video_reset_sync = 2'b00;
+    wire video_rst_n = video_reset_sync[1];
+
+    video_clock_gen u_video_clock_gen (
+        .clk_125mhz(pcie_user_clk),
+        .reset(pcie_user_reset),
+        .clk_150mhz(video_clk_150),
+        .locked(video_clk_locked)
+    );
+
+    // Only the metastability-capture stage has asynchronous assertion. The
+    // two output stages use synchronous reset/deassertion, so TPG BRAM control
+    // cones are never driven by an asynchronously-reset register.
+    always @(posedge video_clk_150 or negedge video_async_rst_n) begin
+        if (!video_async_rst_n)
+            video_reset_meta <= 1'b0;
+        else
+            video_reset_meta <= 1'b1;
+    end
+
+    always @(posedge video_clk_150) begin
+        if (!video_reset_meta)
+            video_reset_sync <= 2'b00;
+        else
+            video_reset_sync <= {video_reset_sync[0], 1'b1};
+    end
+
     // =========================================================================
     // BAR1 AXI4-Lite Master Interconnect Wires
     // =========================================================================
@@ -64,7 +98,7 @@ module a50t_pcie_card_top #(
     // AXI Crossbar Master Interface Wires (3 Masters)
     // M00: Video TPG (0x0000), M01: Audio Pattern Gen (0x1000), M02: EDID/HPD (0x2000)
     // =========================================================================
-    wire [7:0]  tpg_axi_awaddr, tpg_axi_araddr;
+    // TPG AXI-Lite signals on the 125 MHz crossbar side.
     wire        tpg_axi_awvalid, tpg_axi_awready;
     wire [31:0] tpg_axi_wdata;
     wire [3:0]  tpg_axi_wstrb;
@@ -75,6 +109,19 @@ module a50t_pcie_card_top #(
     wire [31:0] tpg_axi_rdata;
     wire [1:0]  tpg_axi_rresp;
     wire        tpg_axi_rvalid, tpg_axi_rready;
+
+    // TPG AXI-Lite signals after conversion to the 150 MHz IP clock.
+    wire [31:0] tpg_ip_axi_awaddr, tpg_ip_axi_araddr;
+    wire        tpg_ip_axi_awvalid, tpg_ip_axi_awready;
+    wire [31:0] tpg_ip_axi_wdata;
+    wire [3:0]  tpg_ip_axi_wstrb;
+    wire        tpg_ip_axi_wvalid, tpg_ip_axi_wready;
+    wire [1:0]  tpg_ip_axi_bresp;
+    wire        tpg_ip_axi_bvalid, tpg_ip_axi_bready;
+    wire        tpg_ip_axi_arvalid, tpg_ip_axi_arready;
+    wire [31:0] tpg_ip_axi_rdata;
+    wire [1:0]  tpg_ip_axi_rresp;
+    wire        tpg_ip_axi_rvalid, tpg_ip_axi_rready;
 
     wire [7:0]  aud_axi_awaddr, aud_axi_araddr;
     wire        aud_axi_awvalid, aud_axi_awready;
@@ -103,8 +150,6 @@ module a50t_pcie_card_top #(
     wire [31:0] tpg_axi_awaddr_32, tpg_axi_araddr_32;
     wire [31:0] aud_axi_awaddr_32, aud_axi_araddr_32;
 
-    assign tpg_axi_awaddr = tpg_axi_awaddr_32[7:0];
-    assign tpg_axi_araddr = tpg_axi_araddr_32[7:0];
     assign aud_axi_awaddr = aud_axi_awaddr_32[7:0];
     assign aud_axi_araddr = aud_axi_araddr_32[7:0];
 
@@ -153,6 +198,52 @@ module a50t_pcie_card_top #(
         .m_axi_rready({bar1_reg_rready, aud_axi_rready, tpg_axi_rready})
     );
 
+    // AXI-Lite CDC: BAR1 crossbar at 125 MHz -> TPG control at 150 MHz.
+    axi_clock_converter_tpg u_tpg_axil_cdc (
+        .s_axi_aclk(pcie_user_clk),
+        .s_axi_aresetn(pcie_user_rst_n),
+        .s_axi_awaddr(tpg_axi_awaddr_32),
+        .s_axi_awprot(3'b000),
+        .s_axi_awvalid(tpg_axi_awvalid),
+        .s_axi_awready(tpg_axi_awready),
+        .s_axi_wdata(tpg_axi_wdata),
+        .s_axi_wstrb(tpg_axi_wstrb),
+        .s_axi_wvalid(tpg_axi_wvalid),
+        .s_axi_wready(tpg_axi_wready),
+        .s_axi_bresp(tpg_axi_bresp),
+        .s_axi_bvalid(tpg_axi_bvalid),
+        .s_axi_bready(tpg_axi_bready),
+        .s_axi_araddr(tpg_axi_araddr_32),
+        .s_axi_arprot(3'b000),
+        .s_axi_arvalid(tpg_axi_arvalid),
+        .s_axi_arready(tpg_axi_arready),
+        .s_axi_rdata(tpg_axi_rdata),
+        .s_axi_rresp(tpg_axi_rresp),
+        .s_axi_rvalid(tpg_axi_rvalid),
+        .s_axi_rready(tpg_axi_rready),
+        .m_axi_aclk(video_clk_150),
+        .m_axi_aresetn(video_rst_n),
+        .m_axi_awaddr(tpg_ip_axi_awaddr),
+        .m_axi_awprot(),
+        .m_axi_awvalid(tpg_ip_axi_awvalid),
+        .m_axi_awready(tpg_ip_axi_awready),
+        .m_axi_wdata(tpg_ip_axi_wdata),
+        .m_axi_wstrb(tpg_ip_axi_wstrb),
+        .m_axi_wvalid(tpg_ip_axi_wvalid),
+        .m_axi_wready(tpg_ip_axi_wready),
+        .m_axi_bresp(tpg_ip_axi_bresp),
+        .m_axi_bvalid(tpg_ip_axi_bvalid),
+        .m_axi_bready(tpg_ip_axi_bready),
+        .m_axi_araddr(tpg_ip_axi_araddr),
+        .m_axi_arprot(),
+        .m_axi_arvalid(tpg_ip_axi_arvalid),
+        .m_axi_arready(tpg_ip_axi_arready),
+        .m_axi_rdata(tpg_ip_axi_rdata),
+        .m_axi_rresp(tpg_ip_axi_rresp),
+        .m_axi_rvalid(tpg_ip_axi_rvalid),
+        .m_axi_rready(tpg_ip_axi_rready)
+    );
+
     // Xilinx Video TPG IP Core Instance
     wire [95:0] tpg_axis_tdata;
     wire        tpg_axis_tvalid;
@@ -164,25 +255,25 @@ module a50t_pcie_card_top #(
     wire        tpg_interrupt;
 
     v_tpg_0 u_v_tpg (
-        .ap_clk(pcie_user_clk),
-        .ap_rst_n(pcie_user_rst_n),
-        .s_axi_CTRL_AWADDR(tpg_axi_awaddr),
-        .s_axi_CTRL_AWVALID(tpg_axi_awvalid),
-        .s_axi_CTRL_AWREADY(tpg_axi_awready),
-        .s_axi_CTRL_WDATA(tpg_axi_wdata),
-        .s_axi_CTRL_WSTRB(tpg_axi_wstrb),
-        .s_axi_CTRL_WVALID(tpg_axi_wvalid),
-        .s_axi_CTRL_WREADY(tpg_axi_wready),
-        .s_axi_CTRL_BRESP(tpg_axi_bresp),
-        .s_axi_CTRL_BVALID(tpg_axi_bvalid),
-        .s_axi_CTRL_BREADY(tpg_axi_bready),
-        .s_axi_CTRL_ARADDR(tpg_axi_araddr),
-        .s_axi_CTRL_ARVALID(tpg_axi_arvalid),
-        .s_axi_CTRL_ARREADY(tpg_axi_arready),
-        .s_axi_CTRL_RDATA(tpg_axi_rdata),
-        .s_axi_CTRL_RRESP(tpg_axi_rresp),
-        .s_axi_CTRL_RVALID(tpg_axi_rvalid),
-        .s_axi_CTRL_RREADY(tpg_axi_rready),
+        .ap_clk(video_clk_150),
+        .ap_rst_n(video_rst_n),
+        .s_axi_CTRL_AWADDR(tpg_ip_axi_awaddr[7:0]),
+        .s_axi_CTRL_AWVALID(tpg_ip_axi_awvalid),
+        .s_axi_CTRL_AWREADY(tpg_ip_axi_awready),
+        .s_axi_CTRL_WDATA(tpg_ip_axi_wdata),
+        .s_axi_CTRL_WSTRB(tpg_ip_axi_wstrb),
+        .s_axi_CTRL_WVALID(tpg_ip_axi_wvalid),
+        .s_axi_CTRL_WREADY(tpg_ip_axi_wready),
+        .s_axi_CTRL_BRESP(tpg_ip_axi_bresp),
+        .s_axi_CTRL_BVALID(tpg_ip_axi_bvalid),
+        .s_axi_CTRL_BREADY(tpg_ip_axi_bready),
+        .s_axi_CTRL_ARADDR(tpg_ip_axi_araddr[7:0]),
+        .s_axi_CTRL_ARVALID(tpg_ip_axi_arvalid),
+        .s_axi_CTRL_ARREADY(tpg_ip_axi_arready),
+        .s_axi_CTRL_RDATA(tpg_ip_axi_rdata),
+        .s_axi_CTRL_RRESP(tpg_ip_axi_rresp),
+        .s_axi_CTRL_RVALID(tpg_ip_axi_rvalid),
+        .s_axi_CTRL_RREADY(tpg_ip_axi_rready),
         .fid(),
         .fid_in(1'b0),
         .interrupt(tpg_interrupt),
@@ -309,16 +400,69 @@ module a50t_pcie_card_top #(
     wire [NUM_VIDEO_CH-1:0]                    m_video_tuser;
     wire [NUM_VIDEO_CH-1:0]                    m_video_tready;
 
-    assign s_video_tdata[127:0] = {
+    wire [127:0] tpg_padded_tdata = {
         8'hFF, tpg_axis_tdata[95:72],
         8'hFF, tpg_axis_tdata[71:48],
         8'hFF, tpg_axis_tdata[47:24],
         8'hFF, tpg_axis_tdata[23:0]
     };
-    assign s_video_tvalid[0]   = tpg_axis_tvalid;
-    assign s_video_tlast[0]    = tpg_axis_tlast;
-    assign s_video_tuser[0]    = tpg_axis_tuser[0];
-    assign tpg_axis_tready     = s_video_tready[0];
+    wire [127:0] tpg_cdc_tdata;
+    wire         tpg_cdc_tvalid;
+    wire         tpg_cdc_tlast;
+    wire [0:0]   tpg_cdc_tuser;
+
+    xpm_fifo_axis #(
+        .CLOCKING_MODE("independent_clock"),
+        .FIFO_MEMORY_TYPE("block"),
+        .PACKET_FIFO("false"),
+        .FIFO_DEPTH(2048),
+        .TDATA_WIDTH(128),
+        .TID_WIDTH(1),
+        .TDEST_WIDTH(1),
+        .TUSER_WIDTH(1),
+        .CDC_SYNC_STAGES(2),
+        .RELATED_CLOCKS(0),
+        .USE_ADV_FEATURES("0000"),
+        .WR_DATA_COUNT_WIDTH(1),
+        .RD_DATA_COUNT_WIDTH(1)
+    ) u_tpg_axis_cdc (
+        .s_aresetn(video_rst_n),
+        .s_aclk(video_clk_150),
+        .m_aclk(pcie_user_clk),
+        .s_axis_tvalid(tpg_axis_tvalid),
+        .s_axis_tready(tpg_axis_tready),
+        .s_axis_tdata(tpg_padded_tdata),
+        .s_axis_tstrb(16'hffff),
+        .s_axis_tkeep(16'hffff),
+        .s_axis_tlast(tpg_axis_tlast),
+        .s_axis_tid(1'b0),
+        .s_axis_tdest(1'b0),
+        .s_axis_tuser(tpg_axis_tuser),
+        .m_axis_tvalid(tpg_cdc_tvalid),
+        .m_axis_tready(s_video_tready[0]),
+        .m_axis_tdata(tpg_cdc_tdata),
+        .m_axis_tstrb(),
+        .m_axis_tkeep(),
+        .m_axis_tlast(tpg_cdc_tlast),
+        .m_axis_tid(),
+        .m_axis_tdest(),
+        .m_axis_tuser(tpg_cdc_tuser),
+        .prog_full_axis(),
+        .wr_data_count_axis(),
+        .almost_full_axis(),
+        .prog_empty_axis(),
+        .rd_data_count_axis(),
+        .almost_empty_axis(),
+        .injectsbiterr_axis(1'b0),
+        .injectdbiterr_axis(1'b0),
+        .sbiterr_axis(),
+        .dbiterr_axis()
+    );
+
+    assign s_video_tdata[127:0] = tpg_cdc_tdata;
+    assign s_video_tvalid[0]    = tpg_cdc_tvalid;
+    assign s_video_tlast[0]     = tpg_cdc_tlast;
+    assign s_video_tuser[0]     = tpg_cdc_tuser[0];
 
     assign s_video_tdata[511:128] = m_video_tdata[511:128];
     assign s_video_tvalid[3:1]    = m_video_tvalid[3:1];

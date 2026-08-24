@@ -59,7 +59,17 @@ set_property PACKAGE_PIN H1 [get_ports {pci_exp_txn[3]}]
 # set_property IOSTANDARD LVCMOS33 [get_ports hdmi_hpd_out]
 
 # ------------------------------------------------------------------------------
-# 5. Bitstream Configuration Properties
+# 5. Video-domain reset synchronizer
+# ------------------------------------------------------------------------------
+# PCIe user_reset and MMCM LOCKED asynchronously assert the first video-domain
+# reset synchronizer capture stage. Deassertion propagates through two further
+# synchronous stages, so recovery/removal timing is intentionally excluded only
+# at the metastability-capture register CLR pin.
+set_false_path -to [get_pins -quiet -hierarchical -filter \
+    {REF_PIN_NAME == CLR && NAME =~ *video_reset_meta_reg*}]
+
+# ------------------------------------------------------------------------------
+# 6. Bitstream Configuration Properties
 # ------------------------------------------------------------------------------
 set_property CFGBVS VCCO [current_design]
 set_property CONFIG_VOLTAGE 3.3 [current_design]

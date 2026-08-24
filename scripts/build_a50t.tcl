@@ -72,7 +72,20 @@ set_property -dict [list \
 
 generate_target all [get_ips v_tpg_0]
 
-# 5. Generate Xilinx AXI Crossbar IP (axi_crossbar_0)
+# 5. Generate AXI-Lite clock converter for 125 MHz BAR1 -> 150 MHz TPG
+puts "Generating AXI Clock Converter IP Core (axi_clock_converter_tpg)..."
+create_ip -name axi_clock_converter -vendor xilinx.com -library ip -version 2.1 \
+  -module_name axi_clock_converter_tpg
+set_property -dict [list \
+  CONFIG.PROTOCOL {AXI4LITE} \
+  CONFIG.ADDR_WIDTH {32} \
+  CONFIG.DATA_WIDTH {32} \
+  CONFIG.ACLK_ASYNC {1} \
+  CONFIG.SYNCHRONIZATION_STAGES {2} \
+] [get_ips axi_clock_converter_tpg]
+generate_target all [get_ips axi_clock_converter_tpg]
+
+# 6. Generate Xilinx AXI Crossbar IP (axi_crossbar_0)
 puts "Generating AXI Crossbar IP Core (axi_crossbar_0)..."
 create_ip -name axi_crossbar -vendor xilinx.com -library ip -version 2.1 -module_name axi_crossbar_0
 
@@ -92,10 +105,10 @@ set_property -dict [list \
 
 generate_target all [get_ips axi_crossbar_0]
 
-# 6. Update Compile Order
+# 7. Update Compile Order
 update_compile_order -fileset sources_1
 
-# 7. Run Synthesis and Implementation to Bitstream
+# 8. Run Synthesis and Implementation to Bitstream
 puts "Launching Synthesis and Implementation for qpcie top module..."
 launch_runs impl_1 -to_step write_bitstream -jobs 8
 wait_on_run impl_1
