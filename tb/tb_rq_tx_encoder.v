@@ -7,8 +7,8 @@
 
 module tb_rq_tx_encoder;
 
-    parameter DATA_WIDTH = 256;
-    parameter KEEP_WIDTH = DATA_WIDTH / 32;
+    parameter DATA_WIDTH = 128;
+    parameter KEEP_WIDTH = DATA_WIDTH / 8;
 
     reg                  clk;
     reg                  rst_n;
@@ -16,7 +16,7 @@ module tb_rq_tx_encoder;
     wire [DATA_WIDTH-1:0] m_axis_rq_tdata;
     wire                 m_axis_rq_tvalid;
     wire                 m_axis_rq_tlast;
-    wire [59:0]          m_axis_rq_tuser;
+    wire [61:0]          m_axis_rq_tuser;
     wire [KEEP_WIDTH-1:0] m_axis_rq_tkeep;
     reg                  m_axis_rq_tready;
 
@@ -126,6 +126,38 @@ module tb_rq_tx_encoder;
         wait(irq_req_ack);
         @(posedge clk);
         irq_req_valid <= 0;
+
+        #30;
+        $display("[%0t] Test 3: 128-bit C2H MWr under backpressure...", $time);
+        m_axis_rq_tready <= 0;
+        c2h_req_addr <= 64'h1234_5678_9ABC_DEF0;
+        c2h_req_dw_len <= 11'd4;
+        c2h_req_data <= 128'h44444444_33333333_22222222_11111111;
+        c2h_req_last <= 1;
+        c2h_req_valid <= 1;
+        wait(m_axis_rq_tvalid);
+        if (m_axis_rq_tdata[78:75] !== 4'b0001 || m_axis_rq_tlast !== 0) begin
+            $display("FAIL: C2H header beat malformed");
+            $finish;
+        end
+        #20;
+        if (m_axis_rq_tdata[63:0] !== 64'h1234_5678_9ABC_DEF0) begin
+            $display("FAIL: C2H header changed under backpressure");
+            $finish;
+        end
+        m_axis_rq_tready <= 1;
+        #1; @(posedge clk); #1;
+        if (!m_axis_rq_tvalid || !m_axis_rq_tlast ||
+            m_axis_rq_tdata !== 128'h44444444_33333333_22222222_11111111) begin
+            $display("FAIL: C2H payload beat malformed valid=%b last=%b data=%h", m_axis_rq_tvalid, m_axis_rq_tlast, m_axis_rq_tdata);
+            $finish;
+        end
+        @(posedge clk); #1;
+        if (!c2h_req_ack) begin
+            $display("FAIL: C2H acknowledgement missing");
+            $finish;
+        end
+        c2h_req_valid <= 0;
 
         #30;
         $display("[%0t] SUCCESS: RQ TX Encoder Test Completed!", $time);

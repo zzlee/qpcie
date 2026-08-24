@@ -11,6 +11,7 @@ module tb_interrupt_ctrl;
     reg        rst_n;
 
     reg  [31:0] reg_irq_ctrl;
+    reg  [31:0] reg_irq_status_w1c;
     wire [31:0] reg_irq_status;
 
     reg        h2c_done;
@@ -28,6 +29,7 @@ module tb_interrupt_ctrl;
         .clk(clk),
         .rst_n(rst_n),
         .reg_irq_ctrl(reg_irq_ctrl),
+        .reg_irq_status_w1c(reg_irq_status_w1c),
         .reg_irq_status(reg_irq_status),
         .h2c_done(h2c_done),
         .c2h_done(c2h_done),
@@ -44,6 +46,7 @@ module tb_interrupt_ctrl;
         clk = 0;
         rst_n = 0;
         reg_irq_ctrl = 32'h0000_0003; // Enable both H2C and C2H IRQ
+        reg_irq_status_w1c = 0;
         h2c_done = 0;
         c2h_done = 0;
         irq_req_ack = 0;
@@ -66,6 +69,15 @@ module tb_interrupt_ctrl;
         irq_req_ack <= 1;
         @(posedge clk);
         irq_req_ack <= 0;
+        @(posedge clk);
+        reg_irq_status_w1c <= 32'h1;
+        @(posedge clk);
+        reg_irq_status_w1c <= 0;
+        #1;
+        if (reg_irq_status[0] !== 1'b0) begin
+            $display("FAIL: IRQ status W1C did not clear");
+            $finish;
+        end
 
         #30;
         $display("[%0t] SUCCESS: interrupt_ctrl Test Completed!", $time);

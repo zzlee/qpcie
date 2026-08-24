@@ -300,6 +300,68 @@ module tb_pcie_7x_axi_bridge;
 
         #40;
 
+        // Upper-QWORD SOF: split a 3-DW MRd header across two RX beats.
+        $display("\n--- [Test 2b: Upper-QWORD SOF MRd alignment] ---");
+        @(posedge clk);
+        m_axis_rx_tvalid <= 1'b1;
+        m_axis_rx_tlast <= 1'b0;
+        m_axis_rx_tuser <= 22'd0;
+        m_axis_rx_tuser[14:10] <= 5'b11000;
+        m_axis_rx_tuser[2] <= 1'b1;
+        m_axis_rx_tdata <= {32'h0400660F, 32'h00000001, 64'd0};
+        @(posedge clk);
+        while (!m_axis_rx_tready) @(posedge clk);
+        m_axis_rx_tuser <= 22'd0;
+        m_axis_rx_tuser[21:17] <= 5'b10011;
+        m_axis_rx_tuser[2] <= 1'b1;
+        m_axis_rx_tdata <= {96'd0, 32'h00000034};
+        @(posedge clk);
+        while (!m_axis_rx_tready) @(posedge clk);
+        m_axis_rx_tvalid <= 1'b0;
+        m_axis_rx_tuser <= 22'd0;
+        @(posedge s_axis_tx_tvalid);
+        if (s_axis_tx_tdata[79:72] !== 8'h66) begin
+            $display("  ❌ [FAIL] Upper-QWORD MRd tag mismatch: %h", s_axis_tx_tdata[79:72]);
+            $finish;
+        end
+        $display("  ✅ [PASS] Upper-QWORD MRd aligned and tag preserved");
+        #40;
+
+        // A one-DWORD 4-DW MWr ends in the lower QWORD while the next MRd
+        // starts in the upper QWORD of the same physical RX beat.
+        $display("\n--- [Test 2c: Packed EOF plus upper-QWORD SOF] ---");
+        @(posedge clk);
+        m_axis_rx_tvalid <= 1'b1;
+        m_axis_rx_tlast <= 1'b0;
+        m_axis_rx_tkeep <= 16'hFFFF;
+        m_axis_rx_tuser <= 22'd0;
+        m_axis_rx_tuser[2] <= 1'b1;
+        m_axis_rx_tdata <= {32'h28000068, 32'h00000024, 32'h0000000F, 32'h60000001};
+        @(posedge clk);
+        while (!m_axis_rx_tready) @(posedge clk);
+        m_axis_rx_tuser <= 22'd0;
+        m_axis_rx_tuser[2] <= 1'b1;
+        m_axis_rx_tuser[14:10] <= 5'b11000;
+        m_axis_rx_tuser[21:17] <= 5'b10011;
+        m_axis_rx_tdata <= {32'h0400770F, 32'h00000001, 32'd0, 32'hA5A55A5A};
+        @(posedge clk);
+        while (!m_axis_rx_tready) @(posedge clk);
+        m_axis_rx_tuser <= 22'd0;
+        m_axis_rx_tuser[2] <= 1'b1;
+        m_axis_rx_tuser[21:17] <= 5'b10011;
+        m_axis_rx_tdata <= {96'd0, 32'h00000034};
+        @(posedge clk);
+        while (!m_axis_rx_tready) @(posedge clk);
+        m_axis_rx_tvalid <= 1'b0;
+        m_axis_rx_tuser <= 22'd0;
+        @(posedge s_axis_tx_tvalid);
+        if (s_axis_tx_tdata[79:72] !== 8'h77) begin
+            $display("  ❌ [FAIL] Packed upper-QWORD MRd tag mismatch: %h", s_axis_tx_tdata[79:72]);
+            $finish;
+        end
+        $display("  ✅ [PASS] Packed EOF/SOF preserved the following MRd");
+        #40;
+
         // ---------------------------------------------------------------------
         // Test 3: 5-Beat 64-Byte Descriptor CplD Reception (Tag=0)
         // ---------------------------------------------------------------------
@@ -329,13 +391,15 @@ module tb_pcie_7x_axi_bridge;
         @(posedge clk);
         while (!m_axis_rx_tready) @(posedge clk);
 
-        // Beat 4: DW13..DW15 (stride=4096, control=0x02 (C2H), plane_count=1)
-        m_axis_rx_tlast  <= 1'b1;
+        // Beat 4: use pg054 RX EOF in tuser; 128-bit core tlast remains low.
+        m_axis_rx_tlast  <= 1'b0;
+        m_axis_rx_tuser[21:17] <= 5'b11111;
         m_axis_rx_tdata  <= {32'h00000000, 32'h00000210, 32'h00000000, 32'h00011000};
         @(posedge clk);
         while (!m_axis_rx_tready) @(posedge clk);
         m_axis_rx_tvalid <= 1'b0;
         m_axis_rx_tlast  <= 1'b0;
+        m_axis_rx_tuser  <= 22'd0;
 
         @(posedge desc_cpl_valid);
         captured_desc = desc_cpl_data;

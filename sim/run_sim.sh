@@ -5,6 +5,7 @@
 # ============================================================================
 
 set -e
+set -o pipefail
 
 export PATH="/opt/Xilinx/Vivado/2023.2/bin:$PATH"
 
@@ -30,7 +31,10 @@ TESTS=(
     "tb_h2c_dma_engine rtl/h2c_dma_engine.v tb/tb_h2c_dma_engine.v"
     "tb_c2h_dma_engine rtl/c2h_dma_engine.v tb/tb_c2h_dma_engine.v"
     "tb_interrupt_ctrl rtl/interrupt_ctrl.v tb/tb_interrupt_ctrl.v"
-    "tb_pcie_dma_system rtl/global_timer.v rtl/dma_telemetry.v rtl/video_stream_engine.v rtl/audio_stream_engine.v rtl/axil_reg_space.v rtl/c2h_dma_engine.v rtl/h2c_dma_engine.v rtl/desc_fetch_engine.v rtl/cq_rx_decoder.v rtl/cc_tx_encoder.v rtl/rq_tx_encoder.v rtl/rc_rx_decoder.v rtl/pcie_tag_manager.v rtl/interrupt_ctrl.v rtl/custom_pcie_dma_top.v tb/tb_pcie_dma_system.v"
+    "tb_sg_dma_engine rtl/sg_dma_engine.v tb/tb_sg_dma_engine.v"
+    "tb_pcie_dma_system rtl/global_timer.v rtl/dma_telemetry.v rtl/video_stream_engine.v rtl/audio_stream_engine.v rtl/axil_reg_space.v rtl/c2h_dma_engine.v rtl/h2c_dma_engine.v rtl/desc_fetch_engine.v rtl/cq_rx_decoder.v rtl/cc_tx_encoder.v rtl/rq_tx_encoder.v rtl/rc_rx_decoder.v rtl/pcie_tag_manager.v rtl/interrupt_ctrl.v rtl/sg_dma_engine.v rtl/custom_pcie_dma_top.v tb/tb_pcie_dma_system.v"
+    "tb_pcie_7x_axi_bridge rtl/pcie_7x_axi_bridge.v rtl/cq_rx_decoder.v rtl/cc_tx_encoder.v rtl/rq_tx_encoder.v rtl/rc_rx_decoder.v rtl/axil_reg_space.v rtl/desc_fetch_engine.v tb/tb_pcie_7x_axi_bridge.v"
+    "tb_sg_dma_pipeline rtl/global_timer.v rtl/dma_telemetry.v rtl/video_stream_engine.v rtl/audio_stream_engine.v rtl/axil_reg_space.v rtl/c2h_dma_engine.v rtl/h2c_dma_engine.v rtl/desc_fetch_engine.v rtl/cq_rx_decoder.v rtl/cc_tx_encoder.v rtl/rq_tx_encoder.v rtl/rc_rx_decoder.v rtl/pcie_tag_manager.v rtl/interrupt_ctrl.v rtl/sg_dma_engine.v rtl/custom_pcie_dma_top.v rtl/pcie_7x_axi_bridge.v tb/tb_sg_dma_pipeline.v"
 )
 
 PASSED=0
@@ -42,7 +46,11 @@ for TEST in "${TESTS[@]}"; do
 
     echo -n "Running $TB_NAME ... "
     
-    if xvlog $FILES > /dev/null 2>&1 && xelab $TB_NAME -s sim_$TB_NAME > /dev/null 2>&1 && xsim sim_$TB_NAME -R | grep -q "PASSED\|SUCCESS"; then
+    SIM_LOG="work_sim/${TB_NAME}.log"
+    if timeout 120s xvlog $FILES > /dev/null 2>&1 && \
+       timeout 120s xelab $TB_NAME -s sim_$TB_NAME > /dev/null 2>&1 && \
+       timeout 300s xsim sim_$TB_NAME -R > "$SIM_LOG" 2>&1 && \
+       grep -Eq "PASSED|SUCCESS|VERIFIED 100% PASS" "$SIM_LOG"; then
         echo "[PASS]"
         PASSED=$((PASSED + 1))
     else

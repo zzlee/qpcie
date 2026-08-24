@@ -73,6 +73,7 @@ module video_stream_engine #(
     reg [15:0] curr_line;
     reg [PCIE_DATA_WIDTH-1:0] line_buffer;
     reg [31:0] pacer_clk_cnt;
+    reg [15:0] slice_line_count;
 
     // Hardware Frame Pacer Timer (Resets on frame start, counts up every clock)
     always @(posedge clk or negedge rst_n) begin
@@ -106,6 +107,7 @@ module video_stream_engine #(
             line_buffer         <= {PCIE_DATA_WIDTH{1'b0}};
             frame_pts           <= 64'd0;
             frame_drop_count    <= 32'd0;
+            slice_line_count    <= 16'd0;
         end else begin
             case (state)
                 IDLE: begin
@@ -116,6 +118,7 @@ module video_stream_engine #(
                     if (video_start) begin
                         video_busy <= 1'b1;
                         curr_line  <= 16'd0;
+                        slice_line_count <= 16'd0;
                         if (is_c2h) begin
                             if (ring_full) begin
                                 // Ring Full Overflow Protection: Drop frame silently and count
@@ -166,11 +169,14 @@ module video_stream_engine #(
                     if (c2h_req_ack) begin
                         c2h_req_valid <= 1'b0;
 
-                        // Check Sub-Frame Low-Latency Slice DMA Trigger (slice_height > 0)
-                        if (slice_height > 16'd0 && (((curr_line + 1'b1) % slice_height) == 16'd0)) begin
+                        // Incremental slice counter avoids a variable modulo/divider
+                        // in the 125 MHz completion path.
+                        if (slice_height > 16'd0 && (slice_line_count + 1'b1 >= slice_height)) begin
                             video_frame_done <= 1'b1;
+                            slice_line_count <= 16'd0;
                         end else begin
                             video_frame_done <= 1'b0;
+                            slice_line_count <= slice_line_count + 1'b1;
                         end
 
                         if (curr_line + 1'b1 < line_count) begin

@@ -12,6 +12,7 @@ module interrupt_ctrl (
 
     // Interrupt enable & status from Register Space
     input  wire [31:0] reg_irq_ctrl,   // bit 0: H2C IE, bit 1: C2H IE
+    input  wire [31:0] reg_irq_status_w1c,
     output reg  [31:0] reg_irq_status, // bit 0: H2C IRQ, bit 1: C2H IRQ
 
     // Completion triggers from DMA Engines
@@ -41,7 +42,9 @@ module interrupt_ctrl (
             irq_req_code   <= 8'd0;
             usr_irq_req    <= 1'b0;
         end else begin
-            // Track IRQ status flags
+            // Single owner for sticky status; software clear is W1C and
+            // same-cycle completion events take priority over a clear.
+            reg_irq_status <= reg_irq_status & ~reg_irq_status_w1c;
             if (h2c_done) reg_irq_status[0] <= 1'b1;
             if (c2h_done) reg_irq_status[1] <= 1'b1;
 

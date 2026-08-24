@@ -100,7 +100,9 @@ module cc_tx_encoder #(
                         m_axis_cc_tdata[46:44]  <= 3'b000;            // Completion Status: Successful
                         m_axis_cc_tdata[58:51]  <= req_tag_q;         // Tag
                         m_axis_cc_tdata[79:64]  <= req_id_q;          // Requester ID
-                        m_axis_cc_tdata[95:80]  <= 16'h0100;          // Completer ID
+                        // Zero requests dynamic completer BDF insertion by the
+                        // 7-series bridge; UltraScale targets may replace this.
+                        m_axis_cc_tdata[95:80]  <= 16'h0000;
                         m_axis_cc_tdata[127:96] <= req_bar_sel_q ? bar1_axil_rdata : bar0_axil_rdata; // CplD Data
 
                         m_axis_cc_tkeep         <= 8'h0F;             // First 4 DWs valid

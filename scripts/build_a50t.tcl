@@ -94,8 +94,17 @@ puts "Launching Synthesis and Implementation for qpcie top module..."
 launch_runs impl_1 -to_step write_bitstream -jobs 8
 wait_on_run impl_1
 
-if {[get_property PROGRESS [get_runs impl_1]] != "100%"} {
+if {[get_property PROGRESS [get_runs impl_1]] != "100%" ||
+    [string first "ERROR" [get_property STATUS [get_runs impl_1]]] >= 0} {
     puts "ERROR: Implementation failed for qpcie top module!"
+    exit 1
+}
+
+open_run impl_1
+set failing_path [get_timing_paths -quiet -slack_lesser_than 0 -max_paths 1]
+if {[llength $failing_path] != 0} {
+    set worst_slack [get_property SLACK [lindex $failing_path 0]]
+    puts "ERROR: Routed design does not meet timing (worst slack $worst_slack ns)."
     exit 1
 }
 

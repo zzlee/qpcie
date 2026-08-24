@@ -44,7 +44,8 @@ module axil_reg_space (
     output reg  [15:0] reg_c2h_tail_ptr,
 
     output reg  [31:0]           reg_irq_ctrl,
-    output reg  [31:0]           reg_irq_status,
+    input  wire [31:0]           reg_irq_status,
+    output reg  [31:0]           reg_irq_status_w1c,
     output reg  [31:0]           reg_pacer_ctrl,
     output reg  [31:0]           reg_slice_height,
 
@@ -111,7 +112,7 @@ module axil_reg_space (
             reg_c2h_ring_size <= 16'd0;
             reg_c2h_tail_ptr  <= 16'd0;
             reg_irq_ctrl      <= 32'd0;
-            reg_irq_status    <= 32'd0;
+            reg_irq_status_w1c <= 32'd0;
             reg_pacer_ctrl    <= 32'd1; // Default: 1 (Enabled - Internal Clock Pacer Mode)
             reg_slice_height     <= 32'd0; // Default: 0 (Disabled - Full Frame IRQ)
             reg_debug_last_wdata <= 32'd0;
@@ -121,6 +122,7 @@ module axil_reg_space (
             s_axil_bvalid     <= 1'b0;
             s_axil_bresp      <= 2'b00; // OKAY
         end else begin
+            reg_irq_status_w1c <= 32'd0;
             if (s_axil_awvalid && s_axil_wvalid && !s_axil_bvalid) begin
                 s_axil_awready <= 1'b1;
                 s_axil_wready  <= 1'b1;
@@ -141,7 +143,7 @@ module axil_reg_space (
                         reg_c2h_tail_ptr  <= s_axil_wdata[31:16];
                     end
                     ADDR_IRQ_CTRL:        reg_irq_ctrl             <= s_axil_wdata;
-                    ADDR_IRQ_STATUS:      reg_irq_status           <= reg_irq_status & ~s_axil_wdata; // W1C
+                    ADDR_IRQ_STATUS:      reg_irq_status_w1c       <= s_axil_wdata;
                     8'h68:                reg_debug_last_wdata     <= s_axil_wdata;
                     8'h6C:                reg_debug_last_waddr     <= {24'd0, s_axil_awaddr[7:0]};
                     8'h74:                reg_pacer_ctrl           <= s_axil_wdata; // BAR0 0x74: Pacer Control

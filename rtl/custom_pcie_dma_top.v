@@ -117,11 +117,25 @@ module custom_pcie_dma_top #(
     wire [10:0] read_req_tc;
 
     wire [31:0] reg_dma_ctrl, reg_dma_status, reg_irq_ctrl, reg_irq_status;
+    wire [31:0] reg_irq_status_w1c;
     wire [31:0] reg_slice_height;
     wire [63:0] reg_h2c_ring_addr, reg_c2h_ring_addr;
     wire [15:0] reg_h2c_ring_size, reg_h2c_tail_ptr, reg_h2c_head_ptr;
     wire [15:0] reg_c2h_ring_size, reg_c2h_tail_ptr, reg_c2h_head_ptr;
     wire [31:0] completed_h2c_count, completed_c2h_count;
+    reg  [31:0] completed_h2c_count_q, completed_c2h_count_q;
+    wire sg_h2c_done_irq = (completed_h2c_count != completed_h2c_count_q);
+    wire sg_c2h_done_irq = (completed_c2h_count != completed_c2h_count_q);
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            completed_h2c_count_q <= 32'd0;
+            completed_c2h_count_q <= 32'd0;
+        end else begin
+            completed_h2c_count_q <= completed_h2c_count;
+            completed_c2h_count_q <= completed_c2h_count;
+        end
+    end
 
     wire        tag_alloc_req, tag_alloc_valid, tag_full;
     wire [7:0]  tag_alloc_tag, tag_free_val;
@@ -201,52 +215,66 @@ module custom_pcie_dma_top #(
     reg  [PCIE_DATA_WIDTH-1:0] c2h_req_data_mux;
     reg                        c2h_req_last_mux;
     wire                       c2h_req_ack_mux;
-
+    reg [7:0]                  c2h_owner;
+    reg [7:0]                  c2h_selected;
+    wire [NUM_VIDEO_CH-1:0]    v_c2h_req_ack;
+    wire [NUM_AUDIO_CH-1:0]    a_c2h_req_ack;
     integer i_arb;
-    reg     c2h_arb_found;
+    reg c2h_arb_found;
 
     always @(*) begin
-        c2h_req_valid_mux  = 1'b0;
-        c2h_req_addr_mux   = 64'd0;
+        c2h_req_valid_mux = 1'b0; c2h_req_addr_mux = 64'd0;
         c2h_req_dw_len_mux = 11'd0;
-        c2h_req_data_mux   = {PCIE_DATA_WIDTH{1'b0}};
-        c2h_req_last_mux   = 1'b0;
-        c2h_arb_found      = 1'b0;
+        c2h_req_data_mux = {PCIE_DATA_WIDTH{1'b0}};
+        c2h_req_last_mux = 1'b0; c2h_arb_found = 1'b0;
+        c2h_selected = c2h_owner;
 
-        // Priority 1: SG DMA Engine
-        if (sg_c2h_req_valid) begin
-            c2h_req_valid_mux  = 1'b1;
-            c2h_req_addr_mux   = sg_c2h_req_addr;
-            c2h_req_dw_len_mux = sg_c2h_req_dw_len;
-            c2h_req_data_mux   = sg_c2h_req_data;
-            c2h_req_last_mux   = sg_c2h_req_last;
-            c2h_arb_found      = 1'b1;
+        if ((c2h_owner == 8'd1) || ((c2h_owner == 0) && sg_c2h_req_valid)) begin
+            c2h_req_valid_mux = sg_c2h_req_valid; c2h_req_addr_mux = sg_c2h_req_addr;
+            c2h_req_dw_len_mux = sg_c2h_req_dw_len; c2h_req_data_mux = sg_c2h_req_data;
+            c2h_req_last_mux = sg_c2h_req_last; c2h_arb_found = 1'b1;
+            c2h_selected = 8'd1;
         end
-
         for (i_arb = 0; i_arb < NUM_VIDEO_CH; i_arb = i_arb + 1) begin
-            if (!c2h_arb_found && v_c2h_req_valid[i_arb]) begin
-                c2h_req_valid_mux = 1'b1;
-                c2h_req_addr_mux   = v_c2h_req_addr[(i_arb*64) +: 64];
-                c2h_req_dw_len_mux = v_c2h_req_dw_len[(i_arb*11) +: 11];
-                c2h_req_data_mux   = v_c2h_req_data[(i_arb*PCIE_DATA_WIDTH) +: PCIE_DATA_WIDTH];
-                c2h_req_last_mux   = v_c2h_req_last[i_arb];
-                c2h_arb_found      = 1'b1;
+            if (((c2h_owner == (8'd2+i_arb)) ||
+                 ((c2h_owner == 0) && !c2h_arb_found && v_c2h_req_valid[i_arb]))) begin
+                c2h_req_valid_mux = v_c2h_req_valid[i_arb];
+                c2h_req_addr_mux = v_c2h_req_addr[(i_arb*64)+:64];
+                c2h_req_dw_len_mux = v_c2h_req_dw_len[(i_arb*11)+:11];
+                c2h_req_data_mux = v_c2h_req_data[(i_arb*PCIE_DATA_WIDTH)+:PCIE_DATA_WIDTH];
+                c2h_req_last_mux = v_c2h_req_last[i_arb]; c2h_arb_found = 1'b1;
+                c2h_selected = 8'd2+i_arb;
             end
         end
-
         for (i_arb = 0; i_arb < NUM_AUDIO_CH; i_arb = i_arb + 1) begin
-            if (!c2h_arb_found && a_c2h_req_valid[i_arb]) begin
-                c2h_req_valid_mux = 1'b1;
-                c2h_req_addr_mux   = a_c2h_req_addr[(i_arb*64) +: 64];
-                c2h_req_dw_len_mux = a_c2h_req_dw_len[(i_arb*11) +: 11];
-                c2h_req_data_mux   = a_c2h_req_data[(i_arb*PCIE_DATA_WIDTH) +: PCIE_DATA_WIDTH];
-                c2h_req_last_mux   = a_c2h_req_last[i_arb];
-                c2h_arb_found      = 1'b1;
+            if (((c2h_owner == (8'd2+NUM_VIDEO_CH+i_arb)) ||
+                 ((c2h_owner == 0) && !c2h_arb_found && a_c2h_req_valid[i_arb]))) begin
+                c2h_req_valid_mux = a_c2h_req_valid[i_arb];
+                c2h_req_addr_mux = a_c2h_req_addr[(i_arb*64)+:64];
+                c2h_req_dw_len_mux = a_c2h_req_dw_len[(i_arb*11)+:11];
+                c2h_req_data_mux = a_c2h_req_data[(i_arb*PCIE_DATA_WIDTH)+:PCIE_DATA_WIDTH];
+                c2h_req_last_mux = a_c2h_req_last[i_arb]; c2h_arb_found = 1'b1;
+                c2h_selected = 8'd2+NUM_VIDEO_CH+i_arb;
             end
         end
     end
 
-    assign sg_c2h_req_ack = sg_c2h_req_valid ? c2h_req_ack_mux : 1'b0;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) c2h_owner <= 8'd0;
+        else if (c2h_owner == 0 && c2h_req_valid_mux) c2h_owner <= c2h_selected;
+        else if (c2h_owner != 0 && c2h_req_ack_mux) c2h_owner <= 8'd0;
+    end
+
+    assign sg_c2h_req_ack = (c2h_owner == 8'd1) && c2h_req_ack_mux;
+    genvar v_ack_i, a_ack_i;
+    generate
+        for (v_ack_i=0; v_ack_i<NUM_VIDEO_CH; v_ack_i=v_ack_i+1) begin : gen_v_ack
+            assign v_c2h_req_ack[v_ack_i] = (c2h_owner == (8'd2+v_ack_i)) && c2h_req_ack_mux;
+        end
+        for (a_ack_i=0; a_ack_i<NUM_AUDIO_CH; a_ack_i=a_ack_i+1) begin : gen_a_ack
+            assign a_c2h_req_ack[a_ack_i] = (c2h_owner == (8'd2+NUM_VIDEO_CH+a_ack_i)) && c2h_req_ack_mux;
+        end
+    endgenerate
 
     assign reg_dma_status = {16'd0, sg_c2h_busy, sg_h2c_busy, 6'd0, a_done[0], v_done[0], a_busy[0], v_busy[0]};
 
@@ -375,6 +403,7 @@ module custom_pcie_dma_top #(
         .reg_c2h_tail_ptr(reg_c2h_tail_ptr),
         .reg_irq_ctrl(reg_irq_ctrl),
         .reg_irq_status(reg_irq_status),
+        .reg_irq_status_w1c(reg_irq_status_w1c),
         .completed_h2c_count(completed_h2c_count),
         .completed_c2h_count(completed_c2h_count),
         .reg_h2c_head_ptr(reg_h2c_head_ptr),
@@ -439,8 +468,9 @@ module custom_pcie_dma_top #(
         .m_axis_rq_tuser(m_axis_rq_tuser),
         .m_axis_rq_tkeep(m_axis_rq_tkeep),
         .m_axis_rq_tready(m_axis_rq_tready),
-        .irq_req_valid(irq_req_valid),
-        .irq_req_code(irq_req_code),
+        // MSI is delivered through the 7-series cfg_interrupt interface.
+        .irq_req_valid(1'b0),
+        .irq_req_code(8'd0),
         .irq_req_ack(irq_req_ack),
         .desc_req_valid(desc_req_valid),
         .desc_req_addr(desc_req_addr),
@@ -600,7 +630,7 @@ module custom_pcie_dma_top #(
                 .c2h_req_dw_len(v_c2h_req_dw_len[(v_idx*11) +: 11]),
                 .c2h_req_data(v_c2h_req_data[(v_idx*PCIE_DATA_WIDTH) +: PCIE_DATA_WIDTH]),
                 .c2h_req_last(v_c2h_req_last[v_idx]),
-                .c2h_req_ack(c2h_req_ack_mux),
+                .c2h_req_ack(v_c2h_req_ack[v_idx]),
                 .h2c_fifo_wvalid(h2c_fifo_wvalid),
                 .h2c_fifo_wdata(h2c_fifo_wdata),
                 .h2c_fifo_wlast(h2c_fifo_wlast),
@@ -643,7 +673,7 @@ module custom_pcie_dma_top #(
                 .c2h_req_dw_len(a_c2h_req_dw_len[(a_idx*11) +: 11]),
                 .c2h_req_data(a_c2h_req_data[(a_idx*PCIE_DATA_WIDTH) +: PCIE_DATA_WIDTH]),
                 .c2h_req_last(a_c2h_req_last[a_idx]),
-                .c2h_req_ack(c2h_req_ack_mux),
+                .c2h_req_ack(a_c2h_req_ack[a_idx]),
                 .h2c_fifo_wvalid(h2c_fifo_wvalid),
                 .h2c_fifo_wdata(h2c_fifo_wdata),
                 .h2c_fifo_wlast(h2c_fifo_wlast),
@@ -659,9 +689,10 @@ module custom_pcie_dma_top #(
         .clk(clk),
         .rst_n(rst_n),
         .reg_irq_ctrl(reg_irq_ctrl),
+        .reg_irq_status_w1c(reg_irq_status_w1c),
         .reg_irq_status(reg_irq_status),
-        .h2c_done(v_done[0]),
-        .c2h_done(a_done[0]),
+        .h2c_done(sg_h2c_done_irq | v_done[0]),
+        .c2h_done(sg_c2h_done_irq | a_done[0]),
         .irq_req_valid(irq_req_valid),
         .irq_req_code(irq_req_code),
         .irq_req_ack(irq_req_ack),

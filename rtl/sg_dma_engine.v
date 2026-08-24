@@ -66,8 +66,11 @@ module sg_dma_engine #(
     reg [63:0] h2c_cur_addr;
     reg [15:0] h2c_rem_bytes;
     reg [10:0] h2c_burst_dw;
-    reg [15:0] h2c_cpl_dw_cnt;
-    reg [15:0] h2c_total_dw_req;
+    reg [10:0] h2c_burst_recv_dw;
+    reg        h2c_cpl_in_packet;
+    wire [10:0] h2c_cpl_step_dw = !h2c_cpl_in_packet ? 11'd1 :
+        ((h2c_burst_dw - h2c_burst_recv_dw) < (PCIE_DATA_WIDTH/32)) ?
+        (h2c_burst_dw - h2c_burst_recv_dw) : (PCIE_DATA_WIDTH/32);
 
     assign h2c_busy = (h2c_state != H2C_IDLE);
 
@@ -84,8 +87,8 @@ module sg_dma_engine #(
             h2c_cur_addr          <= 64'd0;
             h2c_rem_bytes         <= 16'd0;
             h2c_burst_dw          <= 11'd0;
-            h2c_cpl_dw_cnt        <= 16'd0;
-            h2c_total_dw_req      <= 16'd0;
+            h2c_burst_recv_dw     <= 11'd0;
+            h2c_cpl_in_packet     <= 1'b0;
         end else begin
             case (h2c_state)
                 H2C_IDLE: begin
@@ -95,8 +98,8 @@ module sg_dma_engine #(
                         h2c_desc_ready   <= 1'b1;
                         h2c_cur_addr     <= h2c_plane0_src;
                         h2c_rem_bytes    <= (h2c_line_width > 16'd0) ? h2c_line_width : 16'd4096;
-                        h2c_cpl_dw_cnt   <= 16'd0;
-                        h2c_total_dw_req <= (h2c_line_width > 16'd0) ? (h2c_line_width >> 2) : 16'd1024;
+                        h2c_burst_recv_dw <= 11'd0;
+                        h2c_cpl_in_packet <= 1'b0;
                         h2c_state        <= H2C_ISSUE_MRD;
                     end
                 end
@@ -116,30 +119,42 @@ module sg_dma_engine #(
                         h2c_req_valid <= 1'b1;
                         h2c_state     <= H2C_WAIT_ACK;
                     end else begin
-                        h2c_state <= H2C_WAIT_CPLD;
+                        completed_h2c_count <= completed_h2c_count + 1'b1;
+                        h2c_desc_ready <= 1'b1;
+                        h2c_state <= H2C_IDLE;
                     end
                 end
 
                 H2C_WAIT_ACK: begin
                     if (h2c_req_ack) begin
                         h2c_req_valid   <= 1'b0;
-                        h2c_cur_addr    <= h2c_cur_addr + (h2c_burst_dw << 2);
-                        h2c_rem_bytes   <= h2c_rem_bytes - (h2c_burst_dw << 2);
-                        h2c_state       <= H2C_ISSUE_MRD;
+                        h2c_cur_addr        <= h2c_cur_addr + (h2c_burst_dw << 2);
+                        h2c_rem_bytes       <= h2c_rem_bytes - (h2c_burst_dw << 2);
+                        h2c_burst_recv_dw   <= 11'd0;
+                        h2c_cpl_in_packet   <= 1'b0;
+                        // Serialize tag 1: issue the next MRd only after every
+                        // payload DWORD for this request has arrived.
+                        h2c_state           <= H2C_WAIT_CPLD;
                     end
                 end
 
                 H2C_WAIT_CPLD: begin
                     if (h2c_cpl_valid) begin
-                        h2c_cpl_dw_cnt        <= h2c_cpl_dw_cnt + (PCIE_DATA_WIDTH / 32);
-                        h2c_bytes_transferred <= h2c_bytes_transferred + (PCIE_DATA_WIDTH / 8);
-                    end
-
-                    // Once all requested DWs received or timeout/last
-                    if (h2c_cpl_dw_cnt >= h2c_total_dw_req || h2c_total_dw_req == 16'd0) begin
-                        completed_h2c_count <= completed_h2c_count + 1'b1;
-                        h2c_desc_ready      <= 1'b1;
-                        h2c_state           <= H2C_IDLE;
+                        h2c_cpl_in_packet <= !h2c_cpl_last;
+                        if ((h2c_burst_recv_dw + h2c_cpl_step_dw) >= h2c_burst_dw) begin
+                            h2c_burst_recv_dw <= 11'd0;
+                            h2c_cpl_in_packet <= 1'b0;
+                            h2c_bytes_transferred <= h2c_bytes_transferred + (h2c_burst_dw << 2);
+                            if (h2c_rem_bytes == 16'd0) begin
+                                completed_h2c_count <= completed_h2c_count + 1'b1;
+                                h2c_desc_ready <= 1'b1;
+                                h2c_state <= H2C_IDLE;
+                            end else begin
+                                h2c_state <= H2C_ISSUE_MRD;
+                            end
+                        end else begin
+                            h2c_burst_recv_dw <= h2c_burst_recv_dw + h2c_cpl_step_dw;
+                        end
                     end
                 end
             endcase

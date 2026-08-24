@@ -86,20 +86,49 @@ module pcie_7x_axi_bridge #(
     // 1. RX Path: 7-Series PCIe RX AXI-Stream -> UltraScale CQ / RC Interfaces
     // -------------------------------------------------------------------------
 
-    // 7-Series RX Header Decode
-    wire [1:0]  rx_fmt       = m_axis_rx_tdata[30:29];
-    wire [4:0]  rx_type      = m_axis_rx_tdata[28:24];
-    wire [9:0]  rx_length    = m_axis_rx_tdata[9:0];
+    // 7-Series RX Header Decode. An upper-QWORD SOF is completed with
+    // the following lower QWORD before the common decoder consumes it.
+    localparam RX_IDLE = 2'd0, RX_MWR4_BEAT1 = 2'd1,
+               RX_PASS_RC = 2'd2, RX_ALIGN_UPPER = 2'd3;
+    reg [1:0] rx_state;
+    reg [63:0] reg_upper_header;
+    wire [127:0] rx_data = (rx_state == RX_ALIGN_UPPER) ?
+                            {m_axis_rx_tdata[63:0], reg_upper_header} :
+                            m_axis_rx_tdata;
+    wire [1:0]  rx_fmt       = rx_data[30:29];
+    wire [4:0]  rx_type      = rx_data[28:24];
+    wire [9:0]  rx_length    = rx_data[9:0];
     wire        rx_is_3dw    = (rx_fmt == 2'b00 || rx_fmt == 2'b10);
     wire        rx_is_4dw    = (rx_fmt == 2'b01 || rx_fmt == 2'b11);
     wire        rx_is_mrd    = (rx_type == 5'b00000 && (rx_fmt == 2'b00 || rx_fmt == 2'b01));
     wire        rx_is_mwr    = (rx_type == 5'b00000 && (rx_fmt == 2'b10 || rx_fmt == 2'b11));
     wire        rx_is_cpl    = (rx_type == 5'b01010);
 
-    wire [15:0] rx_req_id    = m_axis_rx_tdata[63:48];
-    wire [7:0]  rx_tag       = m_axis_rx_tdata[47:40];
-    wire [31:0] rx_addr_lo   = rx_is_4dw ? m_axis_rx_tdata[127:96] : m_axis_rx_tdata[95:64];
-    wire [31:0] rx_addr_hi   = rx_is_4dw ? m_axis_rx_tdata[95:64]  : 32'h0;
+    // The 128-bit 7-series RX interface reports packet boundaries in tuser;
+    // tlast is tied low by the core. Keep tlast as a simulation fallback.
+    wire [4:0]  rx_eof_info  = m_axis_rx_tuser[21:17];
+    wire        rx_eof       = rx_eof_info[4] | m_axis_rx_tlast;
+    wire        rx_sof_upper = m_axis_rx_tuser[14] && (m_axis_rx_tuser[13:10] == 4'd8);
+    wire [15:0] rx_packet_keep = m_axis_rx_tlast ? m_axis_rx_tkeep :
+                                 !rx_eof_info[4] ? 16'hFFFF :
+                                 (rx_eof_info[3:0] == 4'd3)  ? 16'h000F :
+                                 (rx_eof_info[3:0] == 4'd7)  ? 16'h00FF :
+                                 (rx_eof_info[3:0] == 4'd11) ? 16'h0FFF : 16'hFFFF;
+
+    function [127:0] keep_to_mask;
+        input [15:0] keep;
+        integer keep_idx;
+        begin
+            for (keep_idx = 0; keep_idx < 16; keep_idx = keep_idx + 1)
+                keep_to_mask[(keep_idx*8) +: 8] = {8{keep[keep_idx]}};
+        end
+    endfunction
+    wire [127:0] rx_packet_data = m_axis_rx_tdata & keep_to_mask(rx_packet_keep);
+
+    wire [15:0] rx_req_id    = rx_data[63:48];
+    wire [7:0]  rx_tag       = rx_data[47:40];
+    wire [31:0] rx_addr_lo   = rx_is_4dw ? rx_data[127:96] : rx_data[95:64];
+    wire [31:0] rx_addr_hi   = rx_is_4dw ? rx_data[95:64]  : 32'h0;
     wire [63:0] rx_addr_64   = {rx_addr_hi, rx_addr_lo};
     wire [2:0]  rx_bar_id    = m_axis_rx_tuser[3] ? 3'b001 :
                                m_axis_rx_tuser[4] ? 3'b010 :
@@ -107,21 +136,14 @@ module pcie_7x_axi_bridge #(
                                m_axis_rx_tuser[6] ? 3'b100 :
                                m_axis_rx_tuser[7] ? 3'b101 : 3'b000;
 
-    // RC Header Fields (pg054 Table 2-8 / PCIe Base Spec Section 2.2.8.2)
-    // DW1: [63:32] -> ByteCount[31:20]=[63:52], CplStatus[18:16]=[50:48], ComplID[15:0]=[47:32]
-    // DW2: [95:64] -> LowerAddr[30:24]=[94:88], Tag[23:16]=[87:80], ReqID[15:0]=[79:64]
-    wire [6:0]  rc_lower_addr = m_axis_rx_tdata[94:88];
-    wire [11:0] rc_byte_count = m_axis_rx_tdata[63:52];
-    wire [2:0]  rc_cpl_status = m_axis_rx_tdata[50:48];
-    wire [7:0]  rc_tag        = m_axis_rx_tdata[87:80];
-    wire [15:0] rc_req_id     = m_axis_rx_tdata[79:64];
+    // Physical Cpl/CplD header fields after pg054 AXI byte ordering.
+    // DW1={CompleterID,Status,BCM,ByteCount}; DW2={RequesterID,Tag,R,LowerAddr}.
+    wire [6:0]  rc_lower_addr = rx_data[70:64];
+    wire [11:0] rc_byte_count = rx_data[43:32];
+    wire [2:0]  rc_cpl_status = rx_data[47:45];
+    wire [7:0]  rc_tag        = rx_data[79:72];
+    wire [15:0] rc_req_id     = rx_data[95:80];
 
-    // State machine to handle 4-DW MWr TLPs
-    localparam RX_IDLE       = 2'd0;
-    localparam RX_MWR4_BEAT1 = 2'd1;
-    localparam RX_PASS_RC    = 2'd2;
-
-    reg [1:0]  rx_state;
     reg [63:0] reg_mwr4_addr;
     reg [9:0]  reg_mwr4_length;
     reg [15:0] reg_mwr4_req_id;
@@ -144,15 +166,17 @@ module pcie_7x_axi_bridge #(
         m_axis_rc_tuser  = 75'd0;
 
         case (rx_state)
-            RX_IDLE: begin
+            RX_IDLE, RX_ALIGN_UPPER: begin
                 if (m_axis_rx_tvalid) begin
-                    if (rx_is_mrd) begin // MRd (3-DW or 4-DW Memory Read)
+                    if (rx_state == RX_IDLE && rx_sof_upper) begin
+                        m_axis_rx_tready = 1'b1;
+                    end else if (rx_is_mrd) begin // MRd (3-DW or 4-DW Memory Read)
                         m_axis_cq_tvalid = 1'b1;
                         m_axis_cq_tlast  = 1'b1;
                         m_axis_cq_tkeep  = {KEEP_WIDTH{1'b1}};
                         m_axis_cq_tuser  = {85'd0, rx_bar_id};
                         m_axis_cq_tdata  = {
-                            32'd0,                        // [127:96]: Unused in MRd
+                            {24'd0, rx_tag},              // [127:96]: Request tag
                             rx_req_id,                    // [95:80]: Requester ID
                             1'b0,                         // [79]
                             4'b0000,                      // [78:75]: ReqType (0000 = MRd)
@@ -161,13 +185,22 @@ module pcie_7x_axi_bridge #(
                         };
                         m_axis_rx_tready = m_axis_cq_tready;
                     end else if (rx_is_mwr) begin
-                        if (!rx_is_4dw) begin // 3-DW MWr: Payload data is at [127:96]
+                        if (rx_state == RX_ALIGN_UPPER && rx_is_4dw && rx_length == 10'd1 && rx_eof) begin
+                            // Header DW2/DW3 occupy the lower QWORD and the
+                            // one-DWORD payload occupies raw AXI bits [95:64].
+                            m_axis_cq_tvalid = 1'b1; m_axis_cq_tlast = 1'b1;
+                            m_axis_cq_tkeep = {KEEP_WIDTH{1'b1}};
+                            m_axis_cq_tuser = {85'd0, rx_bar_id};
+                            m_axis_cq_tdata = {m_axis_rx_tdata[95:64], rx_req_id,
+                                1'b0, 4'b0001, 1'b0, rx_length, rx_addr_64};
+                            m_axis_rx_tready = m_axis_cq_tready;
+                        end else if (!rx_is_4dw) begin // 3-DW MWr: Payload data is at [127:96]
                             m_axis_cq_tvalid = 1'b1;
                             m_axis_cq_tlast  = 1'b1;
                             m_axis_cq_tkeep  = {KEEP_WIDTH{1'b1}};
                             m_axis_cq_tuser  = {85'd0, rx_bar_id};
                             m_axis_cq_tdata  = {
-                                m_axis_rx_tdata[127:96],      // [127:96]: Write Data Payload for 3-DW
+                                rx_data[127:96],              // [127:96]: Write Data Payload for 3-DW
                                 rx_req_id,                    // [95:80]: Requester ID
                                 1'b0,                         // [79]
                                 4'b0001,                      // [78:75]: ReqType (0001 = MWr)
@@ -180,10 +213,12 @@ module pcie_7x_axi_bridge #(
                         end
                     end else if (rx_is_cpl) begin
                         m_axis_rc_tvalid = 1'b1;
-                        m_axis_rc_tlast  = m_axis_rx_tlast;
-                        m_axis_rc_tkeep  = {KEEP_WIDTH{1'b1}};
+                        m_axis_rc_tlast  = rx_eof;
+                        m_axis_rc_tkeep  = (rx_state == RX_ALIGN_UPPER && rx_eof_info[4] &&
+                                             rx_eof_info[3:0] == 4'd3) ? 16'h0FFF :
+                                            (rx_state == RX_ALIGN_UPPER ? 16'hFFFF : rx_packet_keep);
                         m_axis_rc_tdata  = {
-                            m_axis_rx_tdata[127:96],  // [127:96]: Payload DW0
+                            rx_data[127:96],          // [127:96]: Payload DW0
                             8'd0,                     // [95:88]: Reserved
                             rc_req_id,                // [87:72]: Requester ID (16 bits)
                             rc_tag,                   // [71:64]: Tag (8 bits)
@@ -220,9 +255,11 @@ module pcie_7x_axi_bridge #(
 
             RX_PASS_RC: begin
                 m_axis_rc_tvalid = m_axis_rx_tvalid;
-                m_axis_rc_tlast  = m_axis_rx_tlast;
-                m_axis_rc_tkeep  = {KEEP_WIDTH{1'b1}};
-                m_axis_rc_tdata  = m_axis_rx_tdata;
+                m_axis_rc_tlast  = rx_eof;
+                m_axis_rc_tkeep  = rx_packet_keep;
+                // A following TLP can start in the upper QWORD of this same
+                // physical beat. Mask it out of the current completion.
+                m_axis_rc_tdata  = rx_packet_data;
                 m_axis_rx_tready = m_axis_rc_tready;
             end
         endcase
@@ -231,6 +268,7 @@ module pcie_7x_axi_bridge #(
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             rx_state        <= RX_IDLE;
+            reg_upper_header <= 64'd0;
             reg_mwr4_addr   <= 64'd0;
             reg_mwr4_length <= 10'd0;
             reg_mwr4_req_id <= 16'd0;
@@ -240,27 +278,64 @@ module pcie_7x_axi_bridge #(
             case (rx_state)
                 RX_IDLE: begin
                     if (m_axis_rx_tvalid && m_axis_rx_tready) begin
-                        if (rx_is_mwr && rx_is_4dw && !m_axis_rx_tlast) begin
+                        if (rx_sof_upper) begin
+                            reg_upper_header <= m_axis_rx_tdata[127:64];
+                            rx_state <= RX_ALIGN_UPPER;
+                        end else if (rx_is_mwr && rx_is_4dw && !rx_eof) begin
                             reg_mwr4_addr   <= rx_addr_64;
                             reg_mwr4_length <= rx_length;
                             reg_mwr4_req_id <= rx_req_id;
                             reg_mwr4_tag    <= rx_tag;
                             reg_mwr4_bar_id <= rx_bar_id;
                             rx_state        <= RX_MWR4_BEAT1;
-                        end else if (rx_is_cpl && !m_axis_rx_tlast) begin
+                        end else if (rx_is_cpl && !rx_eof) begin
                             rx_state        <= RX_PASS_RC;
                         end
                     end
                 end
 
+                RX_ALIGN_UPPER: begin
+                    if (m_axis_rx_tvalid && m_axis_rx_tready) begin
+                        if (rx_is_mwr && rx_is_4dw && !rx_eof) begin
+                            reg_mwr4_addr <= rx_addr_64;
+                            reg_mwr4_length <= rx_length;
+                            reg_mwr4_req_id <= rx_req_id;
+                            reg_mwr4_tag <= rx_tag;
+                            reg_mwr4_bar_id <= rx_bar_id;
+                            rx_state <= RX_MWR4_BEAT1;
+                        end else if (rx_is_cpl && !rx_eof) begin
+                            rx_state <= RX_PASS_RC;
+                        end else if (rx_sof_upper) begin
+                            // The aligned packet ended in the lower QWORD and
+                            // another packet begins in this beat's upper QWORD.
+                            reg_upper_header <= m_axis_rx_tdata[127:64];
+                            rx_state <= RX_ALIGN_UPPER;
+                        end else begin
+                            rx_state <= RX_IDLE;
+                        end
+                    end
+                end
+
                 RX_MWR4_BEAT1: begin
-                    if (m_axis_rx_tvalid && m_axis_cq_tready)
-                        rx_state <= RX_IDLE;
+                    if (m_axis_rx_tvalid && m_axis_cq_tready) begin
+                        if (rx_sof_upper) begin
+                            reg_upper_header <= m_axis_rx_tdata[127:64];
+                            rx_state <= RX_ALIGN_UPPER;
+                        end else begin
+                            rx_state <= RX_IDLE;
+                        end
+                    end
                 end
 
                 RX_PASS_RC: begin
-                    if (m_axis_rx_tvalid && m_axis_rc_tready && m_axis_rx_tlast)
-                        rx_state <= RX_IDLE;
+                    if (m_axis_rx_tvalid && m_axis_rc_tready && rx_eof) begin
+                        if (rx_sof_upper) begin
+                            reg_upper_header <= m_axis_rx_tdata[127:64];
+                            rx_state <= RX_ALIGN_UPPER;
+                        end else begin
+                            rx_state <= RX_IDLE;
+                        end
+                    end
                 end
             endcase
         end

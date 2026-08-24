@@ -8,6 +8,31 @@
 #include "qpcie_driver.h"
 #include <linux/delay.h>
 
+static irqreturn_t qpcie_irq_handler(int irq, void *data)
+{
+    struct qpcie_dev *qdev = data;
+    u32 status = ioread32(qdev->bar0_mmio + REG_IRQ_STATUS);
+
+    if (!(status & 0x3))
+        return IRQ_NONE;
+    iowrite32(status & 0x3, qdev->bar0_mmio + REG_IRQ_STATUS);
+    return IRQ_HANDLED;
+}
+
+static int qpcie_wait_dma(struct qpcie_dev *qdev, u32 count_reg, u32 target)
+{
+    int retry;
+
+    for (retry = 0; retry < 500; retry++) {
+        u32 count = ioread32(qdev->bar0_mmio + count_reg);
+        u32 status = ioread32(qdev->bar0_mmio + REG_DMA_STATUS);
+        if (count >= target && !(status & 0x00000c00))
+            return 0;
+        usleep_range(1000, 2000);
+    }
+    return -ETIMEDOUT;
+}
+
 static const struct pci_device_id qpcie_id_table[] = {
     { PCI_DEVICE(QPCIE_VENDOR_ID, QPCIE_DEVICE_ID) },
     { 0, }
@@ -130,6 +155,23 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
     }
     pci_set_master(pdev);
 
+    /* The FPGA drives the 7-series MSI cfg_interrupt handshake. Do not
+     * silently fall back to legacy INTx, which requires a separate
+     * assert/deassert sequence on cfg_interrupt_assert. */
+    ret = pci_alloc_irq_vectors(pdev, 1, 1, PCI_IRQ_MSI);
+    if (ret < 0) {
+        dev_err(&pdev->dev, "[ERROR] Cannot allocate PCI IRQ: %d\n", ret);
+        goto unmap_mmio;
+    }
+    qdev->irq = pci_irq_vector(pdev, 0);
+    ret = request_irq(qdev->irq, qpcie_irq_handler, 0,
+                      "qpcie-dma", qdev);
+    if (ret) {
+        dev_err(&pdev->dev, "[ERROR] Cannot request PCI IRQ: %d\n", ret);
+        goto free_irq_vectors;
+    }
+    iowrite32(0x3, qdev->bar0_mmio + REG_IRQ_CTRL);
+
     /* --------------------------------------------------------------------
      * 3. Scatter-Gather (SG List) DMA Verification: 4x H2C + 4x C2H Pages
      * -------------------------------------------------------------------- */
@@ -137,16 +179,17 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
     #define SG_PAGES 4
     dma_addr_t desc_ring_dma;
-    dma_addr_t h2c_page_dma[SG_PAGES];
-    dma_addr_t c2h_page_dma[SG_PAGES];
-    u32 *h2c_pages[SG_PAGES];
-    u32 *c2h_pages[SG_PAGES];
+    dma_addr_t h2c_page_dma[SG_PAGES] = { 0 };
+    dma_addr_t c2h_page_dma[SG_PAGES] = { 0 };
+    u32 *h2c_pages[SG_PAGES] = { NULL };
+    u32 *c2h_pages[SG_PAGES] = { NULL };
     int p, w;
 
     struct qpcie_dma_desc_64b *desc_ring = dma_alloc_coherent(&pdev->dev, 64 * 16, &desc_ring_dma, GFP_KERNEL);
 
     if (!desc_ring) {
         dev_err(&pdev->dev, "[ERROR] dma_alloc_coherent failed for Descriptor Ring!\n");
+        ret = -ENOMEM;
     } else {
         memset(desc_ring, 0, 64 * 16);
         dev_info(&pdev->dev, "  Allocated Coherent Ring: Phys=0x%llX (Virt=%p)\n", (u64)desc_ring_dma, desc_ring);
@@ -154,14 +197,14 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
         for (p = 0; p < SG_PAGES; p++) {
             h2c_pages[p] = dma_alloc_coherent(&pdev->dev, 4096, &h2c_page_dma[p], GFP_KERNEL);
             c2h_pages[p] = dma_alloc_coherent(&pdev->dev, 4096, &c2h_page_dma[p], GFP_KERNEL);
-            if (h2c_pages[p]) {
-                for (w = 0; w < 1024; w++) {
-                    h2c_pages[p][w] = 0xAA000000 | (p << 16) | w;
-                }
+            if (!h2c_pages[p] || !c2h_pages[p]) {
+                dev_err(&pdev->dev, "[ERROR] SG page allocation %d failed\n", p);
+                ret = -ENOMEM;
+                goto free_diag_dma;
             }
-            if (c2h_pages[p]) {
-                memset(c2h_pages[p], 0x00, 4096);
-            }
+            for (w = 0; w < 1024; w++)
+                h2c_pages[p][w] = 0xAA000000 | (p << 16) | w;
+            memset(c2h_pages[p], 0x00, 4096);
             dev_info(&pdev->dev, "  [SG Page %d] H2C Phys=0x%llX (Pattern: 0x%08X), C2H Phys=0x%llX\n",
                      p, (u64)h2c_page_dma[p], h2c_pages[p] ? h2c_pages[p][0] : 0, (u64)c2h_page_dma[p]);
         }
@@ -200,10 +243,15 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
         iowrite32((4 << 16) | 16, qdev->bar0_mmio + REG_H2C_RING_CFG);
 
         /* Trigger DMA Start */
+        u32 start_c2h = ioread32(qdev->bar0_mmio + REG_COMPLETED_C2H);
         iowrite32(0x00000001, qdev->bar0_mmio + REG_DMA_CTRL);
         dev_info(&pdev->dev, "--- [3.1 Step 1: C2H 4-Page SG List DMA Write Test] ---\n");
-        dev_info(&pdev->dev, "  Triggered C2H SG Run (Tail=4, Size=16)... Waiting 20ms\n");
-        msleep(20);
+        dev_info(&pdev->dev, "  Triggered C2H SG Run (Tail=4, Size=16)...\n");
+        ret = qpcie_wait_dma(qdev, REG_COMPLETED_C2H, start_c2h + 4);
+        if (ret) {
+            dev_err(&pdev->dev, "[ERROR] C2H diagnostic DMA timed out\n");
+            goto stop_diag_dma;
+        }
 
         u32 dma_stat = ioread32(qdev->bar0_mmio + REG_DMA_STATUS);
         u32 comp_c2h = ioread32(qdev->bar0_mmio + REG_COMPLETED_C2H);
@@ -214,9 +262,14 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
         /* Advance Tail Pointer to 8 (Trigger 4x H2C Descriptors) */
         dev_info(&pdev->dev, "--- [3.2 Step 2: H2C 4-Page SG List DMA Read Test] ---\n");
+        u32 start_h2c = ioread32(qdev->bar0_mmio + REG_COMPLETED_H2C);
         iowrite32((8 << 16) | 16, qdev->bar0_mmio + REG_H2C_RING_CFG);
-        dev_info(&pdev->dev, "  Triggered H2C SG Run (Tail=8, Size=16)... Waiting 20ms\n");
-        msleep(20);
+        dev_info(&pdev->dev, "  Triggered H2C SG Run (Tail=8, Size=16)...\n");
+        ret = qpcie_wait_dma(qdev, REG_COMPLETED_H2C, start_h2c + 4);
+        if (ret) {
+            dev_err(&pdev->dev, "[ERROR] H2C diagnostic DMA timed out\n");
+            goto stop_diag_dma;
+        }
 
         dma_stat = ioread32(qdev->bar0_mmio + REG_DMA_STATUS);
         u32 comp_h2c = ioread32(qdev->bar0_mmio + REG_COMPLETED_H2C);
@@ -236,10 +289,13 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
             }
         }
 
-        /* Stop DMA */
+stop_diag_dma:
         iowrite32(0x00000000, qdev->bar0_mmio + REG_DMA_CTRL);
-
-        /* Free DMA Buffers */
+        ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
+        if (ret)
+            pci_clear_master(pdev);
+        msleep(20);
+free_diag_dma:
         dma_free_coherent(&pdev->dev, 64 * 16, desc_ring, desc_ring_dma);
         for (p = 0; p < SG_PAGES; p++) {
             if (h2c_pages[p]) dma_free_coherent(&pdev->dev, 4096, h2c_pages[p], h2c_page_dma[p]);
@@ -247,11 +303,18 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
         }
     }
 
+    if (ret)
+        goto free_irq;
     dev_info(&pdev->dev, "=======================================================\n");
     dev_info(&pdev->dev, "🎉 [DMA STEP-BY-STEP DIAGNOSTIC TEST COMPLETED]\n");
     dev_info(&pdev->dev, "=======================================================\n");
     return 0;
 
+free_irq:
+    iowrite32(0, qdev->bar0_mmio + REG_IRQ_CTRL);
+    free_irq(qdev->irq, qdev);
+free_irq_vectors:
+    pci_free_irq_vectors(pdev);
 unmap_mmio:
     if (qdev->bar1_mmio) pci_iounmap(pdev, qdev->bar1_mmio);
     pci_iounmap(pdev, qdev->bar0_mmio);
@@ -268,6 +331,12 @@ static void qpcie_remove(struct pci_dev *pdev)
 
     dev_info(&pdev->dev, "Removing QPCIe Driver (Minimal Diagnostic Mode)...\n");
 
+    iowrite32(0, qdev->bar0_mmio + REG_DMA_CTRL);
+    ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
+    pci_clear_master(pdev);
+    iowrite32(0, qdev->bar0_mmio + REG_IRQ_CTRL);
+    free_irq(qdev->irq, qdev);
+    pci_free_irq_vectors(pdev);
     if (qdev->bar1_mmio) pci_iounmap(pdev, qdev->bar1_mmio);
     if (qdev->bar0_mmio) pci_iounmap(pdev, qdev->bar0_mmio);
     pci_release_regions(pdev);

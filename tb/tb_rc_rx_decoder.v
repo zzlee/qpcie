@@ -74,8 +74,8 @@ module tb_rc_rx_decoder;
         s_axis_rc_tlast  <= 1;
         // DW0: Byte Count=32, DW1: Tag=0x00, DW2: Completer ID=0x0100
         s_axis_rc_tdata[31:0]   <= 32'h0020_0000;
-        s_axis_rc_tdata[58:51]  <= 8'h00; // Tag 0x00
-        s_axis_rc_tdata[79:64]  <= 16'h0100;
+        s_axis_rc_tdata[71:64]  <= 8'h00; // RC descriptor tag
+        s_axis_rc_tdata[87:72]  <= 16'h0100;
         s_axis_rc_tdata[255:96] <= 160'h11223344_55667788_99AABBCC_DDEEFF00;
 
         wait(desc_cpl_valid);
@@ -89,8 +89,8 @@ module tb_rc_rx_decoder;
         s_axis_rc_tvalid <= 1;
         s_axis_rc_tlast  <= 1;
         s_axis_rc_tdata[31:0]   <= 32'h0040_0000;
-        s_axis_rc_tdata[58:51]  <= 8'h03; // Tag 0x03
-        s_axis_rc_tdata[79:64]  <= 16'h0100;
+        s_axis_rc_tdata[71:64]  <= 8'h03; // RC descriptor tag
+        s_axis_rc_tdata[87:72]  <= 16'h0100;
         s_axis_rc_tdata[255:96] <= 160'hA5A5A5A5_5A5A5A5A_12345678_87654321;
 
         wait(h2c_fifo_wvalid);

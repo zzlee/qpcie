@@ -234,13 +234,20 @@ module a50t_pcie_card_top #(
 
     // Dynamic EDID RAM Instance
     wire [7:0] edid_rdata_byte;
+    reg [7:0] edid_awaddr_q;
+    reg [7:0] edid_wdata_q;
+    reg edid_aw_pending, edid_w_pending;
+    reg edid_bvalid_q, edid_rvalid_q;
+    reg [31:0] edid_rdata_q;
+    wire edid_write_en = edid_aw_pending && edid_w_pending && !edid_bvalid_q;
+    wire [7:0] edid_mem_addr = edid_write_en ? edid_awaddr_q : bar1_reg_araddr[7:0];
 
     hdmi_edid_ram u_hdmi_edid_ram (
         .clk(pcie_user_clk),
         .rst_n(pcie_user_rst_n),
-        .axil_addr(bar1_reg_awaddr[7:0]),
-        .axil_write_en(bar1_reg_wvalid && bar1_reg_wready),
-        .axil_wdata(bar1_reg_wdata[7:0]),
+        .axil_addr(edid_mem_addr),
+        .axil_write_en(edid_write_en),
+        .axil_wdata(edid_wdata_q),
         .axil_rdata(edid_rdata_byte),
         .hpd_ctrl_en(1'b1),
         .hdmi_hpd_out(hdmi_hpd_out),
@@ -248,14 +255,46 @@ module a50t_pcie_card_top #(
         .i2c_sda()
     );
 
-    assign bar1_reg_rdata   = {24'd0, edid_rdata_byte};
-    assign bar1_reg_awready = 1'b1;
-    assign bar1_reg_wready  = 1'b1;
-    assign bar1_reg_bvalid  = bar1_reg_wvalid;
+    assign bar1_reg_awready = !edid_aw_pending && !edid_bvalid_q;
+    assign bar1_reg_wready  = !edid_w_pending && !edid_bvalid_q;
+    assign bar1_reg_bvalid  = edid_bvalid_q;
     assign bar1_reg_bresp   = 2'b00;
-    assign bar1_reg_arready = 1'b1;
-    assign bar1_reg_rvalid  = bar1_reg_arvalid;
+    assign bar1_reg_arready = !edid_rvalid_q;
+    assign bar1_reg_rvalid  = edid_rvalid_q;
+    assign bar1_reg_rdata   = edid_rdata_q;
     assign bar1_reg_rresp   = 2'b00;
+
+    // Use a synchronous reset for logic driving the inferred EDID BRAM address;
+    // asynchronous reset sources on BRAM address/control cones trigger REQP-1840.
+    always @(posedge pcie_user_clk) begin
+        if (!pcie_user_rst_n) begin
+            edid_awaddr_q <= 8'd0; edid_wdata_q <= 8'd0;
+            edid_aw_pending <= 1'b0; edid_w_pending <= 1'b0;
+            edid_bvalid_q <= 1'b0; edid_rvalid_q <= 1'b0;
+            edid_rdata_q <= 32'd0;
+        end else begin
+            if (bar1_reg_awvalid && bar1_reg_awready) begin
+                edid_awaddr_q <= bar1_reg_awaddr[7:0];
+                edid_aw_pending <= 1'b1;
+            end
+            if (bar1_reg_wvalid && bar1_reg_wready) begin
+                edid_wdata_q <= bar1_reg_wdata[7:0];
+                edid_w_pending <= 1'b1;
+            end
+            if (edid_write_en) begin
+                edid_aw_pending <= 1'b0; edid_w_pending <= 1'b0;
+                edid_bvalid_q <= 1'b1;
+            end else if (edid_bvalid_q && bar1_reg_bready) begin
+                edid_bvalid_q <= 1'b0;
+            end
+            if (bar1_reg_arvalid && bar1_reg_arready) begin
+                edid_rdata_q <= {24'd0, edid_rdata_byte};
+                edid_rvalid_q <= 1'b1;
+            end else if (edid_rvalid_q && bar1_reg_rready) begin
+                edid_rvalid_q <= 1'b0;
+            end
+        end
+    end
 
     // Multi-Channel Video Streams
     wire [(NUM_VIDEO_CH*VIDEO_DATA_WIDTH)-1:0] s_video_tdata;
@@ -340,6 +379,10 @@ module a50t_pcie_card_top #(
     wire                       m_axis_rc_tready;
 
     wire usr_irq_req, usr_irq_ack;
+    wire cfg_interrupt_rdy;
+    wire cfg_interrupt_msienable;
+    wire [2:0] cfg_interrupt_mmenable;
+    assign usr_irq_ack = cfg_interrupt_rdy;
 
     // Differential Reference Clock Input Buffer for Artix-7 GTP Transceiver (sys_clk_p/n D6/D5)
     wire sys_clk;
@@ -365,6 +408,9 @@ module a50t_pcie_card_top #(
     wire         s_axis_tx_tvalid;
     wire         s_axis_tx_tready;
     wire [3:0]   s_axis_tx_tuser;
+    wire [7:0] cfg_bus_number;
+    wire [4:0] cfg_device_number;
+    wire [2:0] cfg_function_number;
 
     // Instantiate Xilinx 7-Series Integrated PCIe Block (pg054) - Gen2 x4, 128-bit AXI-Stream
     pcie_7x_0 u_pcie_ip (
@@ -424,6 +470,8 @@ module a50t_pcie_card_top #(
         .cfg_aer_interrupt_msgnum(5'b0),
 
         .tx_cfg_gnt(1'b1),
+        .fc_sel(3'b000),
+        .int_pclk_sel_slave(4'b0000),
         .rx_np_ok(1'b1),
         .rx_np_req(1'b1),
         .cfg_trn_pending(1'b0),
@@ -443,12 +491,17 @@ module a50t_pcie_card_top #(
         .cfg_device_number(cfg_device_number),
         .cfg_function_number(cfg_function_number),
 
-        .cfg_interrupt(1'b0),
+        .cfg_interrupt(usr_irq_req),
+        .cfg_interrupt_rdy(cfg_interrupt_rdy),
         .cfg_interrupt_assert(1'b0),
         .cfg_interrupt_di(8'b0),
-        .cfg_interrupt_stat(1'b0),
+        .cfg_interrupt_stat(usr_irq_req),
+        .cfg_interrupt_mmenable(cfg_interrupt_mmenable),
+        .cfg_interrupt_msienable(cfg_interrupt_msienable),
         .cfg_pciecap_interrupt_msgnum(5'b0),
 
+        .pl_transmit_hot_rst(1'b0),
+        .pl_downstream_deemph_source(1'b0),
         .pl_directed_link_change(2'b00),
         .pl_directed_link_width(2'b00),
         .pl_directed_link_speed(1'b0),
@@ -461,10 +514,6 @@ module a50t_pcie_card_top #(
         .pcie_drp_addr(9'h0),
         .pcie_drp_di(16'h0)
     );
-
-    wire [7:0] cfg_bus_number;
-    wire [4:0] cfg_device_number;
-    wire [2:0] cfg_function_number;
 
     // Instantiate 7-Series PCIe AXI-Stream Protocol Bridge (256-bit internal CQ descriptor bus)
     pcie_7x_axi_bridge #(
