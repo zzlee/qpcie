@@ -222,6 +222,13 @@ module tb_pcie_7x_axi_bridge;
     reg [31:0] captured_tx_cpld;
     reg [511:0] captured_desc;
 
+    function [31:0] host_payload_dw;
+        input [31:0] value;
+        begin
+            host_payload_dw = {value[7:0], value[15:8], value[23:16], value[31:24]};
+        end
+    endfunction
+
     // Test Sequence
     initial begin
         $display("=================================================================");
@@ -258,7 +265,7 @@ module tb_pcie_7x_axi_bridge;
         m_axis_rx_tvalid <= 1'b1;
         m_axis_rx_tlast  <= 1'b1;
         m_axis_rx_tkeep  <= 16'h000F;
-        m_axis_rx_tdata  <= {96'd0, 32'h12345678};
+        m_axis_rx_tdata  <= {96'd0, host_payload_dw(32'h12345678)};
         @(posedge clk);
         while (!m_axis_rx_tready) @(posedge clk);
         m_axis_rx_tvalid <= 1'b0;
@@ -284,18 +291,19 @@ module tb_pcie_7x_axi_bridge;
         m_axis_rx_tkeep  <= 16'h0FFF;
         m_axis_rx_tuser  <= 22'b0000000000000000000100; // BAR0 Hit
         // Fmt=0(3DW MRd), Type=0, Len=1, Tag=0x55, ReqID=0x0400, Addr=0x00000034
-        m_axis_rx_tdata  <= {32'h00000034, 32'h0400550F, 32'h00000000, 32'h00000001};
+        m_axis_rx_tdata  <= {32'h00000000, 32'h00000034, 32'h0400550F, 32'h00000001};
         @(posedge clk);
         while (!m_axis_rx_tready) @(posedge clk);
         m_axis_rx_tvalid <= 1'b0;
         m_axis_rx_tlast  <= 1'b0;
 
         @(posedge s_axis_tx_tvalid);
-        captured_tx_cpld = s_axis_tx_tdata[127:96];
-        if (captured_tx_cpld !== 32'd0) begin
+        captured_tx_cpld = host_payload_dw(s_axis_tx_tdata[127:96]);
+        if (captured_tx_cpld === 32'h01D6_A9C5) begin
             $display("  ✅ [PASS] 3-DW MRd Completion CplD Generated: Read Data=0x%08X", captured_tx_cpld);
         end else begin
-            $display("  ❌ [FAIL] 3-DW MRd Completion Failed: TX Data=0x%08X", captured_tx_cpld);
+            $display("  ❌ [FAIL] 3-DW MRd Completion Failed: Host Data=0x%08X", captured_tx_cpld);
+            $finish;
         end
 
         #40;
@@ -343,7 +351,8 @@ module tb_pcie_7x_axi_bridge;
         m_axis_rx_tuser[2] <= 1'b1;
         m_axis_rx_tuser[14:10] <= 5'b11000;
         m_axis_rx_tuser[21:17] <= 5'b10011;
-        m_axis_rx_tdata <= {32'h0400770F, 32'h00000001, 32'd0, 32'hA5A55A5A};
+        m_axis_rx_tdata <= {32'h0400770F, 32'h00000001, 32'd0,
+                            host_payload_dw(32'hA5A55A5A)};
         @(posedge clk);
         while (!m_axis_rx_tready) @(posedge clk);
         m_axis_rx_tuser <= 22'd0;
@@ -372,12 +381,14 @@ module tb_pcie_7x_axi_bridge;
         m_axis_rx_tlast  <= 1'b0;
         m_axis_rx_tkeep  <= 16'hFFFF;
         // CplD: Fmt=2(3DW w/Data), Type=01010, Len=16(64B), Tag=0x00, ByteCount=64
-        m_axis_rx_tdata  <= {32'hAA001000, 32'h00010000, 32'h00000040, 32'h4A000010};
+        m_axis_rx_tdata  <= {host_payload_dw(32'hAA001000), 32'h00010000,
+                            32'h00000040, 32'h4A000010};
         @(posedge clk);
         while (!m_axis_rx_tready) @(posedge clk);
 
         // Beat 1: DW1..DW4 (src_addr_hi=0x00, dst_addr_lo=0xBB002000, dst_addr_hi=0x00, plane1_src=0x00)
-        m_axis_rx_tdata  <= {32'h00000000, 32'h00000000, 32'hBB002000, 32'h00000000};
+        m_axis_rx_tdata  <= {host_payload_dw(32'h00000000), host_payload_dw(32'h00000000),
+                            host_payload_dw(32'hBB002000), host_payload_dw(32'h00000000)};
         @(posedge clk);
         while (!m_axis_rx_tready) @(posedge clk);
 
@@ -387,14 +398,16 @@ module tb_pcie_7x_axi_bridge;
         while (!m_axis_rx_tready) @(posedge clk);
 
         // Beat 3: DW9..DW12 (line_count=1, line_width=4096 = 0x1000)
-        m_axis_rx_tdata  <= {32'h00011000, 32'h00000000, 32'h00000000, 32'h00000000};
+        m_axis_rx_tdata  <= {host_payload_dw(32'h00011000), host_payload_dw(32'h00000000),
+                            host_payload_dw(32'h00000000), host_payload_dw(32'h00000000)};
         @(posedge clk);
         while (!m_axis_rx_tready) @(posedge clk);
 
         // Beat 4: use pg054 RX EOF in tuser; 128-bit core tlast remains low.
         m_axis_rx_tlast  <= 1'b0;
         m_axis_rx_tuser[21:17] <= 5'b11111;
-        m_axis_rx_tdata  <= {32'h00000000, 32'h00000210, 32'h00000000, 32'h00011000};
+        m_axis_rx_tdata  <= {host_payload_dw(32'h00000000), host_payload_dw(32'h00000210),
+                            host_payload_dw(32'h00000000), host_payload_dw(32'h00011000)};
         @(posedge clk);
         while (!m_axis_rx_tready) @(posedge clk);
         m_axis_rx_tvalid <= 1'b0;

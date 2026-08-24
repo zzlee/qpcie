@@ -33,6 +33,23 @@ static int qpcie_wait_dma(struct qpcie_dev *qdev, u32 count_reg, u32 target)
     return -ETIMEDOUT;
 }
 
+static void qpcie_dump_dma_state(struct qpcie_dev *qdev, const char *phase)
+{
+    u32 status = ioread32(qdev->bar0_mmio + REG_DMA_STATUS);
+    u32 h2c = ioread32(qdev->bar0_mmio + REG_COMPLETED_H2C);
+    u32 c2h = ioread32(qdev->bar0_mmio + REG_COMPLETED_C2H);
+    u32 hptr = ioread32(qdev->bar0_mmio + 0x40);
+    u32 hcfg = ioread32(qdev->bar0_mmio + REG_H2C_RING_CFG);
+    u32 rlo = ioread32(qdev->bar0_mmio + REG_H2C_RING_ADDR_L);
+    u32 rhi = ioread32(qdev->bar0_mmio + REG_H2C_RING_ADDR_H);
+
+    dev_err(&qdev->pdev->dev,
+            "[%s] DMA_STATUS=0x%08X H2C_DONE=%u C2H_DONE=%u "
+            "RING=0x%08X%08X CFG(size=%u tail=%u) PTR(head=%u tail=%u)\n",
+            phase, status, h2c, c2h, rhi, rlo,
+            hcfg & 0xffff, hcfg >> 16, hptr & 0xffff, hptr >> 16);
+}
+
 static const struct pci_device_id qpcie_id_table[] = {
     { PCI_DEVICE(QPCIE_VENDOR_ID, QPCIE_DEVICE_ID) },
     { 0, }
@@ -105,10 +122,10 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
              ver, (ver >> 24) & 0xFF, (ver >> 16) & 0xFF, (ver >> 8) & 0xFF, ver & 0xFF);
 
     git = ioread32(qdev->bar0_mmio + REG_GIT_COMMIT_HASH);
-    dev_info(&pdev->dev, "  BAR0 [0x34] Git Commit Hash: 0x%08X (Raw: 0x%08X)\n", swab32(git), git);
+    dev_info(&pdev->dev, "  BAR0 [0x34] Git Commit Hash: 0x%08X\n", git);
 
     date = ioread32(qdev->bar0_mmio + REG_BUILD_TIMESTAMP);
-    dev_info(&pdev->dev, "  BAR0 [0x38] Build Timestamp: 20%06X (Raw: 0x%08X)\n", swab32(date), date);
+    dev_info(&pdev->dev, "  BAR0 [0x38] Build Timestamp: %08X\n", date);
 
     caps = ioread32(qdev->bar0_mmio + REG_HARDWARE_CAPS);
     dev_info(&pdev->dev, "  BAR0 [0x3C] Hardware Caps  : 0x%08X (VideoCh=%u, AudioCh=%u, Flags=0x%X)\n",
@@ -250,15 +267,15 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
         ret = qpcie_wait_dma(qdev, REG_COMPLETED_C2H, start_c2h + 4);
         if (ret) {
             dev_err(&pdev->dev, "[ERROR] C2H diagnostic DMA timed out\n");
+            qpcie_dump_dma_state(qdev, "C2H timeout");
             goto stop_diag_dma;
         }
 
         u32 dma_stat = ioread32(qdev->bar0_mmio + REG_DMA_STATUS);
         u32 comp_c2h = ioread32(qdev->bar0_mmio + REG_COMPLETED_C2H);
         u32 ptr_dbg  = ioread32(qdev->bar0_mmio + 0x40);
-        u32 ptr_fmt  = swab32(ptr_dbg);
-        dev_info(&pdev->dev, "  C2H SG Status: DMA_STATUS=0x%08X, Completed Count=%u, Pointers: Tail=%u, Head=%u (Raw: 0x%08X)\n",
-                 dma_stat, comp_c2h, (ptr_fmt >> 16) & 0xFFFF, ptr_fmt & 0xFFFF, ptr_dbg);
+        dev_info(&pdev->dev, "  C2H SG Status: DMA_STATUS=0x%08X, Completed Count=%u, Pointers: Tail=%u, Head=%u\n",
+                 dma_stat, comp_c2h, (ptr_dbg >> 16) & 0xFFFF, ptr_dbg & 0xFFFF);
 
         /* Advance Tail Pointer to 8 (Trigger 4x H2C Descriptors) */
         dev_info(&pdev->dev, "--- [3.2 Step 2: H2C 4-Page SG List DMA Read Test] ---\n");
@@ -268,15 +285,15 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
         ret = qpcie_wait_dma(qdev, REG_COMPLETED_H2C, start_h2c + 4);
         if (ret) {
             dev_err(&pdev->dev, "[ERROR] H2C diagnostic DMA timed out\n");
+            qpcie_dump_dma_state(qdev, "H2C timeout");
             goto stop_diag_dma;
         }
 
         dma_stat = ioread32(qdev->bar0_mmio + REG_DMA_STATUS);
         u32 comp_h2c = ioread32(qdev->bar0_mmio + REG_COMPLETED_H2C);
         ptr_dbg  = ioread32(qdev->bar0_mmio + 0x40);
-        ptr_fmt  = swab32(ptr_dbg);
-        dev_info(&pdev->dev, "  H2C SG Status: DMA_STATUS=0x%08X, Completed Count=%u, Pointers: Tail=%u, Head=%u (Raw: 0x%08X)\n",
-                 dma_stat, comp_h2c, (ptr_fmt >> 16) & 0xFFFF, ptr_fmt & 0xFFFF, ptr_dbg);
+        dev_info(&pdev->dev, "  H2C SG Status: DMA_STATUS=0x%08X, Completed Count=%u, Pointers: Tail=%u, Head=%u\n",
+                 dma_stat, comp_h2c, (ptr_dbg >> 16) & 0xFFFF, ptr_dbg & 0xFFFF);
 
         /* Ensure CPU observes all DMA writes from FPGA */
         dma_rmb();

@@ -82,6 +82,27 @@ module pcie_7x_axi_bridge #(
 
     wire [15:0] compl_id = {cfg_bus_number, cfg_device_number, cfg_function_number};
 
+    // pg054 places PCIe byte 0 on AXI bits [31:24]. Header fields are decoded
+    // in their documented bit positions, but payload DWORDs must be byte-swapped
+    // at the boundary so internal AXI-Lite/DMA values use normal little-endian
+    // CPU numeric representation.
+    function [31:0] payload_bswap32;
+        input [31:0] value;
+        begin
+            payload_bswap32 = {value[7:0], value[15:8], value[23:16], value[31:24]};
+        end
+    endfunction
+
+    function [127:0] payload_bswap128;
+        input [127:0] value;
+        begin
+            payload_bswap128 = {
+                payload_bswap32(value[127:96]), payload_bswap32(value[95:64]),
+                payload_bswap32(value[63:32]), payload_bswap32(value[31:0])
+            };
+        end
+    endfunction
+
     // -------------------------------------------------------------------------
     // 1. RX Path: 7-Series PCIe RX AXI-Stream -> UltraScale CQ / RC Interfaces
     // -------------------------------------------------------------------------
@@ -123,7 +144,8 @@ module pcie_7x_axi_bridge #(
                 keep_to_mask[(keep_idx*8) +: 8] = {8{keep[keep_idx]}};
         end
     endfunction
-    wire [127:0] rx_packet_data = m_axis_rx_tdata & keep_to_mask(rx_packet_keep);
+    wire [127:0] rx_packet_data = payload_bswap128(
+        m_axis_rx_tdata & keep_to_mask(rx_packet_keep));
 
     wire [15:0] rx_req_id    = rx_data[63:48];
     wire [7:0]  rx_tag       = rx_data[47:40];
@@ -191,7 +213,7 @@ module pcie_7x_axi_bridge #(
                             m_axis_cq_tvalid = 1'b1; m_axis_cq_tlast = 1'b1;
                             m_axis_cq_tkeep = {KEEP_WIDTH{1'b1}};
                             m_axis_cq_tuser = {85'd0, rx_bar_id};
-                            m_axis_cq_tdata = {m_axis_rx_tdata[95:64], rx_req_id,
+                            m_axis_cq_tdata = {payload_bswap32(m_axis_rx_tdata[95:64]), rx_req_id,
                                 1'b0, 4'b0001, 1'b0, rx_length, rx_addr_64};
                             m_axis_rx_tready = m_axis_cq_tready;
                         end else if (!rx_is_4dw) begin // 3-DW MWr: Payload data is at [127:96]
@@ -200,7 +222,7 @@ module pcie_7x_axi_bridge #(
                             m_axis_cq_tkeep  = {KEEP_WIDTH{1'b1}};
                             m_axis_cq_tuser  = {85'd0, rx_bar_id};
                             m_axis_cq_tdata  = {
-                                rx_data[127:96],              // [127:96]: Write Data Payload for 3-DW
+                                payload_bswap32(rx_data[127:96]), // [127:96]: Little-endian write payload
                                 rx_req_id,                    // [95:80]: Requester ID
                                 1'b0,                         // [79]
                                 4'b0001,                      // [78:75]: ReqType (0001 = MWr)
@@ -218,7 +240,7 @@ module pcie_7x_axi_bridge #(
                                              rx_eof_info[3:0] == 4'd3) ? 16'h0FFF :
                                             (rx_state == RX_ALIGN_UPPER ? 16'hFFFF : rx_packet_keep);
                         m_axis_rc_tdata  = {
-                            rx_data[127:96],          // [127:96]: Payload DW0
+                            payload_bswap32(rx_data[127:96]), // [127:96]: Little-endian payload DW0
                             8'd0,                     // [95:88]: Reserved
                             rc_req_id,                // [87:72]: Requester ID (16 bits)
                             rc_tag,                   // [71:64]: Tag (8 bits)
@@ -242,7 +264,7 @@ module pcie_7x_axi_bridge #(
                     m_axis_cq_tkeep  = {KEEP_WIDTH{1'b1}};
                     m_axis_cq_tuser  = {85'd0, reg_mwr4_bar_id};
                     m_axis_cq_tdata  = {
-                        m_axis_rx_tdata[31:0],                        // [127:96]: Write Data Payload from Beat 1
+                        payload_bswap32(m_axis_rx_tdata[31:0]),       // [127:96]: Little-endian payload from Beat 1
                         reg_mwr4_req_id,                              // [95:80]: Requester ID
                         1'b0,                                         // [79]
                         4'b0001,                                      // [78:75]: ReqType (0001 = MWr)
@@ -356,7 +378,7 @@ module pcie_7x_axi_bridge #(
     wire [31:0] tx_cpld_dw0 = {1'b0, 2'b10, 5'b01010, 1'b0, 3'b000, 4'b0000, 2'b00, 2'b00, 2'b00, cc_dword_len};
     wire [31:0] tx_cpld_dw1 = {cc_compl_id, 3'b000, 1'b0, 12'd4};
     wire [31:0] tx_cpld_dw2 = {cc_req_id, cc_tag, 1'b0, cc_lower_addr};
-    wire [31:0] tx_cpld_dw3 = cc_reg_rdata;
+    wire [31:0] tx_cpld_dw3 = payload_bswap32(cc_reg_rdata);
 
     // Decoding RQ Descriptor
     wire [63:0] rq_target_addr = s_axis_rq_tdata[63:0];
@@ -415,7 +437,7 @@ module pcie_7x_axi_bridge #(
 
                     if (!rq_is_4dw) begin // 3-DW TLP
                         s_axis_tx_tdata = {
-                            (rq_is_mwr ? s_axis_rq_tdata[127:96] : 32'd0), // DW3: Payload for 3-DW MWr
+                            (rq_is_mwr ? payload_bswap32(s_axis_rq_tdata[127:96]) : 32'd0), // DW3 payload
                             rq_target_addr[31:0],                         // DW2: 32-bit Address
                             tx_rq_dw1,                                    // DW1: ReqID + Tag + BE
                             (rq_is_mwr ? tx_mwr3_dw0 : tx_mrd3_dw0)       // DW0: Header
@@ -436,7 +458,7 @@ module pcie_7x_axi_bridge #(
                 s_axis_tx_tvalid = s_axis_rq_tvalid;
                 s_axis_tx_tlast  = s_axis_rq_tlast;
                 s_axis_tx_tkeep  = 16'hFFFF;
-                s_axis_tx_tdata  = s_axis_rq_tdata[127:0];
+                s_axis_tx_tdata  = payload_bswap128(s_axis_rq_tdata[127:0]);
             end
         endcase
     end

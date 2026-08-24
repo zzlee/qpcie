@@ -157,6 +157,13 @@ module tb_sg_dma_pipeline;
 
     always #4.0 clk = ~clk; // 125 MHz
 
+    function [31:0] host_payload_dw;
+        input [31:0] value;
+        begin
+            host_payload_dw = {value[7:0], value[15:8], value[23:16], value[31:24]};
+        end
+    endfunction
+
     task mmio_write_bar0;
         input [31:0] reg_addr;
         input [31:0] reg_data;
@@ -175,7 +182,7 @@ module tb_sg_dma_pipeline;
             m_axis_rx_tvalid <= 1'b1;
             m_axis_rx_tlast  <= 1'b1;
             m_axis_rx_tkeep  <= 16'h000F;
-            m_axis_rx_tdata  <= {96'd0, reg_data};
+            m_axis_rx_tdata  <= {96'd0, host_payload_dw(reg_data)};
             @(posedge clk);
             while (!m_axis_rx_tready) @(posedge clk);
             m_axis_rx_tvalid <= 1'b0;
@@ -218,12 +225,21 @@ module tb_sg_dma_pipeline;
         $display("--- [Step 4: Host MMIO Updates Tail Pointer = 1 & Size = 16 (BAR0 0x10)] ---");
         mmio_write_bar0(32'h00000010, (32'd1 << 16) | 32'd16);
 
-        // 5. Expect Hardware to issue RQ MRd to fetch descriptor at 0xFFFFE000
+        // 5. Expect Hardware to issue a 4-DW MRd descriptor fetch at 0xFFFFE000.
         $display("--- [Step 5: Waiting for Hardware RQ Descriptor Fetch Request...] ---");
-        @(posedge s_axis_tx_tvalid);
-        $display("  ✅ [PASS] Hardware MRd Request Detected on TX Bus!");
-        $display("     - TX TLP Header: Addr=0x%08X, Len=%d DWs, Tag=0x%02X",
-                 s_axis_tx_tdata[95:64], s_axis_tx_tdata[9:0], s_axis_tx_tdata[47:40]);
+        @(posedge clk);
+        while (!(s_axis_tx_tvalid && s_axis_tx_tdata[30:29] == 2'b01 &&
+                 s_axis_tx_tdata[28:24] == 5'b00000)) @(posedge clk);
+        if ({s_axis_tx_tdata[95:64], s_axis_tx_tdata[127:96]} !== 64'h0000_0000_FFFF_E000 ||
+            s_axis_tx_tdata[9:0] !== 10'd16 || s_axis_tx_tdata[47:40] !== 8'h00) begin
+            $display("  ❌ [FAIL] Descriptor MRd malformed: Addr=0x%016X Len=%0d Tag=0x%02X",
+                     {s_axis_tx_tdata[95:64], s_axis_tx_tdata[127:96]},
+                     s_axis_tx_tdata[9:0], s_axis_tx_tdata[47:40]);
+            $finish;
+        end
+        $display("  ✅ [PASS] Descriptor MRd Addr=0x%016X Len=%0d DW Tag=0x%02X",
+                 {s_axis_tx_tdata[95:64], s_axis_tx_tdata[127:96]},
+                 s_axis_tx_tdata[9:0], s_axis_tx_tdata[47:40]);
 
         #40;
         // 6. Return Host CplD with 64-byte Descriptor (C2H to Phys=0xFFFFC000, Len=4096)
@@ -237,12 +253,14 @@ module tb_sg_dma_pipeline;
         m_axis_rx_tvalid <= 1'b1;
         m_axis_rx_tlast  <= 1'b0;
         m_axis_rx_tkeep  <= 16'hFFFF;
-        m_axis_rx_tdata  <= {32'hAA001000, 32'h00000000, 32'h04000000, 32'h4A000010};
+        m_axis_rx_tdata  <= {host_payload_dw(32'hAA001000), 32'h00000000,
+                            32'h04000000, 32'h4A000010};
         @(posedge clk);
         while (!m_axis_rx_tready) @(posedge clk);
 
         // Beat 1: DW1..DW4 (dst_addr_lo = 0xFFFFC000)
-        m_axis_rx_tdata  <= {32'h00000000, 32'h00000000, 32'hFFFFC000, 32'h00000000};
+        m_axis_rx_tdata  <= {host_payload_dw(32'h00000000), host_payload_dw(32'h00000000),
+                            host_payload_dw(32'hFFFFC000), host_payload_dw(32'h00000000)};
         @(posedge clk);
         while (!m_axis_rx_tready) @(posedge clk);
 
@@ -252,13 +270,15 @@ module tb_sg_dma_pipeline;
         while (!m_axis_rx_tready) @(posedge clk);
 
         // Beat 3: DW9..DW12 (line_count=1, line_width=4096 = 0x1000)
-        m_axis_rx_tdata  <= {32'h00011000, 32'h00000000, 32'h00000000, 32'h00000000};
+        m_axis_rx_tdata  <= {host_payload_dw(32'h00011000), host_payload_dw(32'h00000000),
+                            host_payload_dw(32'h00000000), host_payload_dw(32'h00000000)};
         @(posedge clk);
         while (!m_axis_rx_tready) @(posedge clk);
 
         // Beat 4: DW13..DW15 (control=0x02 (C2H))
         m_axis_rx_tlast  <= 1'b1;
-        m_axis_rx_tdata  <= {32'h00000000, 32'h00000210, 32'h00000000, 32'h00011000};
+        m_axis_rx_tdata  <= {host_payload_dw(32'h00000000), host_payload_dw(32'h00000210),
+                            host_payload_dw(32'h00000000), host_payload_dw(32'h00011000)};
         @(posedge clk);
         while (!m_axis_rx_tready) @(posedge clk);
         m_axis_rx_tvalid <= 1'b0;
@@ -285,10 +305,10 @@ module tb_sg_dma_pipeline;
             end
 
             // Record into Host Memory Model
-            host_mem[(burst_cnt * 4) + 0] = s_axis_tx_tdata[31:0];
-            host_mem[(burst_cnt * 4) + 1] = s_axis_tx_tdata[63:32];
-            host_mem[(burst_cnt * 4) + 2] = s_axis_tx_tdata[95:64];
-            host_mem[(burst_cnt * 4) + 3] = s_axis_tx_tdata[127:96];
+            host_mem[(burst_cnt * 4) + 0] = host_payload_dw(s_axis_tx_tdata[31:0]);
+            host_mem[(burst_cnt * 4) + 1] = host_payload_dw(s_axis_tx_tdata[63:32]);
+            host_mem[(burst_cnt * 4) + 2] = host_payload_dw(s_axis_tx_tdata[95:64]);
+            host_mem[(burst_cnt * 4) + 3] = host_payload_dw(s_axis_tx_tdata[127:96]);
         end
 
         // 8. Verify all 1024 DWs (4096 Bytes) Golden Pattern
