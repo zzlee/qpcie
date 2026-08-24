@@ -68,6 +68,11 @@ set_property PACKAGE_PIN H1 [get_ports {pci_exp_txn[3]}]
 set_false_path -to [get_pins -quiet -hierarchical -filter \
     {REF_PIN_NAME == CLR && NAME =~ *video_reset_meta_reg*}]
 
+# BAR0 video_pipeline_reset originates in the 125 MHz PCIe domain and is
+# sampled by the first stage of an ASYNC_REG synchronizer at 150 MHz.
+set_false_path -to [get_pins -quiet -hierarchical -regexp \
+    {.*video_pipeline_reset_sync_reg\[0\]/D}]
+
 # ------------------------------------------------------------------------------
 # 6. Bitstream Configuration Properties
 # ------------------------------------------------------------------------------

@@ -48,6 +48,7 @@ module axil_reg_space (
     output reg  [31:0]           reg_irq_status_w1c,
     output reg  [31:0]           reg_pacer_ctrl,
     output reg  [31:0]           reg_slice_height,
+    output reg  [31:0]           reg_video_ctrl,
 
     input  wire [31:0] completed_h2c_count,
     input  wire [31:0] completed_c2h_count,
@@ -113,8 +114,9 @@ module axil_reg_space (
             reg_c2h_tail_ptr  <= 16'd0;
             reg_irq_ctrl      <= 32'd0;
             reg_irq_status_w1c <= 32'd0;
-            reg_pacer_ctrl    <= 32'd1; // Default: 1 (Enabled - Internal Clock Pacer Mode)
+            reg_pacer_ctrl      <= 32'd1; // Default: 1 (Enabled - Internal Clock Pacer Mode)
             reg_slice_height     <= 32'd0; // Default: 0 (Disabled - Full Frame IRQ)
+            reg_video_ctrl       <= 32'd0; // Bit 0: reset TPG and video CDC FIFO
             reg_debug_last_wdata <= 32'd0;
             reg_debug_last_waddr <= 32'd0;
             s_axil_awready       <= 1'b0;
@@ -148,6 +150,7 @@ module axil_reg_space (
                     8'h6C:                reg_debug_last_waddr     <= {24'd0, s_axil_awaddr[7:0]};
                     8'h74:                reg_pacer_ctrl           <= s_axil_wdata; // BAR0 0x74: Pacer Control
                     8'h78:                reg_slice_height         <= s_axil_wdata; // BAR0 0x78: Sub-Frame Slice Height
+                    8'h80:                reg_video_ctrl           <= s_axil_wdata; // BAR0 0x80: Video Pipeline Control
                     default: ; // Ignore writes to read-only registers
                 endcase
                 reg_debug_last_wdata <= s_axil_wdata;
@@ -211,6 +214,7 @@ module axil_reg_space (
                     8'h74:                s_axil_rdata <= reg_pacer_ctrl;
                     8'h78:                s_axil_rdata <= reg_slice_height;
                     8'h7C:                s_axil_rdata <= reg_frame_drop_count;
+                    8'h80:                s_axil_rdata <= reg_video_ctrl;
 
                     default:              s_axil_rdata <= 32'hDEAD_BEEF;
                 endcase

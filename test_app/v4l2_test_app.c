@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * QPCIe Stage-2 V4L2 tester: one 1920x1080@60 NV12M MMAP capture channel.
+ * QPCIe V4L2 tester: discrete 1080p60/4K60 NV12M MMAP capture.
  * The FPGA source is Xilinx TPG YUV444; RTL performs only 2x2 chroma
  * subsampling and writes separate Y and UV planes through PCIe DMA.
  */
@@ -28,9 +28,11 @@
 #define DEFAULT_BENCHMARK_FRAMES 600U
 #define BENCHMARK_WARMUP_FRAMES  8U
 #define NV12_PLANES              2U
-#define NV12_FRAME_BYTES         (DEFAULT_WIDTH * DEFAULT_HEIGHT * 3U / 2U)
 #define NV12_MWR_PAYLOAD_BYTES   128U
-#define NV12_MWR_PER_FRAME       (NV12_FRAME_BYTES / NV12_MWR_PAYLOAD_BYTES)
+#define FOUR_K_WIDTH             3840U
+#define FOUR_K_HEIGHT            2160U
+#define FOUR_K_60_MIB_S          \
+    ((double)FOUR_K_WIDTH * FOUR_K_HEIGHT * 3.0 / 2.0 * 60.0 / (1024.0 * 1024.0))
 
 /* Must match the private control ID in driver/qpcie_driver.h. */
 #define V4L2_CID_QPCIE_PACER_ENABLE (V4L2_CID_USER_BASE + 0x1000)
@@ -92,11 +94,14 @@ static void usage(const char *program)
            "  -f, --frames COUNT     frames to capture (default %u)\n"
            "  -p, --pattern ID       TPG ID: 1 ramp, 9 color bars, 10 zone plate\n"
            "  -r, --fps FPS          requested rate (fixed to 60)\n"
+           "  -w, --width PIXELS     1920 or 3840 (default %u)\n"
+           "  -h, --height LINES     1080 or 2160 (default %u)\n"
            "  -o, --out FILE         save first frame as contiguous NV12\n"
            "  -b, --benchmark        disable the 60 FPS pacer and measure maximum DMA rate\n"
            "      --probe            control-plane probe only, no STREAMON\n"
            "      --help             show this help\n",
-           program, DEFAULT_DEVICE, DEFAULT_FRAMES);
+           program, DEFAULT_DEVICE, DEFAULT_FRAMES,
+           DEFAULT_WIDTH, DEFAULT_HEIGHT);
 }
 
 int main(int argc, char **argv)
@@ -106,10 +111,12 @@ int main(int argc, char **argv)
     unsigned int frame_target = DEFAULT_FRAMES;
     unsigned int width = DEFAULT_WIDTH, height = DEFAULT_HEIGHT;
     int pattern = 9, fps = 60, probe_only = 0;
-    int benchmark_mode = 0, frames_set = 0;
+    int benchmark_mode = 0, frames_set = 0, streamoff_ok = 0;
     int fd = -1, opt, rc = EXIT_FAILURE;
     struct v4l2_capability cap;
     struct v4l2_fmtdesc desc;
+    struct v4l2_frmsizeenum fsize;
+    struct v4l2_frmivalenum fival;
     struct v4l2_format fmt;
     struct v4l2_streamparm parm;
     struct v4l2_control ctrl;
@@ -118,6 +125,8 @@ int main(int argc, char **argv)
     FILE *output = NULL;
     unsigned int i, p, captured = 0, data_errors = 0;
     uint64_t first_y_hash = 0, first_uv_hash = 0;
+    uint64_t y_frame_bytes, uv_frame_bytes, nv12_frame_bytes;
+    uint64_t nv12_mwr_per_frame;
     unsigned int expected_sequence = 0;
     double start_ms, benchmark_start_ms = 0.0, last_frame_ms = 0.0, end_ms;
 
@@ -153,6 +162,21 @@ int main(int argc, char **argv)
 
     if (benchmark_mode && !frames_set)
         frame_target = DEFAULT_BENCHMARK_FRAMES;
+
+    if (!((width == DEFAULT_WIDTH && height == DEFAULT_HEIGHT) ||
+          (width == FOUR_K_WIDTH && height == FOUR_K_HEIGHT))) {
+        fprintf(stderr,
+                "Only 1920x1080 and 3840x2160 NV12M modes are supported\n");
+        return EXIT_FAILURE;
+    }
+    if (fps != 60) {
+        fprintf(stderr, "Only 60 FPS is supported\n");
+        return EXIT_FAILURE;
+    }
+    y_frame_bytes = (uint64_t)width * height;
+    uv_frame_bytes = y_frame_bytes / 2;
+    nv12_frame_bytes = y_frame_bytes + uv_frame_bytes;
+    nv12_mwr_per_frame = nv12_frame_bytes / NV12_MWR_PAYLOAD_BYTES;
 
     printf("=================================================================\n"
            " QPCIe YUV444 -> NV12M Capture Test%s\n"
@@ -195,6 +219,41 @@ int main(int argc, char **argv)
            desc.pixelformat & 0xff, (desc.pixelformat >> 8) & 0xff,
            (desc.pixelformat >> 16) & 0xff, (desc.pixelformat >> 24) & 0xff);
 
+    for (i = 0; i < 2; i++) {
+        static const unsigned int expected_width[] = {
+            DEFAULT_WIDTH, FOUR_K_WIDTH
+        };
+        static const unsigned int expected_height[] = {
+            DEFAULT_HEIGHT, FOUR_K_HEIGHT
+        };
+
+        memset(&fsize, 0, sizeof(fsize));
+        fsize.index = i;
+        fsize.pixel_format = V4L2_PIX_FMT_NV12M;
+        if (xioctl(fd, VIDIOC_ENUM_FRAMESIZES, &fsize) < 0 ||
+            fsize.type != V4L2_FRMSIZE_TYPE_DISCRETE ||
+            fsize.discrete.width != expected_width[i] ||
+            fsize.discrete.height != expected_height[i]) {
+            fprintf(stderr, "[FAIL] discrete frame-size enumeration index %u\n", i);
+            goto out;
+        }
+
+        memset(&fival, 0, sizeof(fival));
+        fival.index = 0;
+        fival.pixel_format = V4L2_PIX_FMT_NV12M;
+        fival.width = expected_width[i];
+        fival.height = expected_height[i];
+        if (xioctl(fd, VIDIOC_ENUM_FRAMEINTERVALS, &fival) < 0 ||
+            fival.type != V4L2_FRMIVAL_TYPE_DISCRETE ||
+            fival.discrete.numerator != 1 ||
+            fival.discrete.denominator != 60) {
+            fprintf(stderr, "[FAIL] frame-interval enumeration for %ux%u\n",
+                    expected_width[i], expected_height[i]);
+            goto out;
+        }
+    }
+    printf("[PASS] Discrete modes: 1920x1080@60, 3840x2160@60\n");
+
     memset(&fmt, 0, sizeof(fmt));
     fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
     fmt.fmt.pix_mp.width = width;
@@ -205,11 +264,15 @@ int main(int argc, char **argv)
         perror("VIDIOC_S_FMT");
         goto out;
     }
-    if (fmt.fmt.pix_mp.width != DEFAULT_WIDTH ||
-        fmt.fmt.pix_mp.height != DEFAULT_HEIGHT ||
+    if (fmt.fmt.pix_mp.width != width ||
+        fmt.fmt.pix_mp.height != height ||
         fmt.fmt.pix_mp.pixelformat != V4L2_PIX_FMT_NV12M ||
-        fmt.fmt.pix_mp.num_planes != NV12_PLANES) {
-        fprintf(stderr, "[FAIL] Driver did not select fixed 1920x1080 NV12M/2-plane mode\n");
+        fmt.fmt.pix_mp.num_planes != NV12_PLANES ||
+        fmt.fmt.pix_mp.plane_fmt[0].bytesperline != width ||
+        fmt.fmt.pix_mp.plane_fmt[1].bytesperline != width ||
+        fmt.fmt.pix_mp.plane_fmt[0].sizeimage != y_frame_bytes ||
+        fmt.fmt.pix_mp.plane_fmt[1].sizeimage != uv_frame_bytes) {
+        fprintf(stderr, "[FAIL] Driver did not select requested NV12M/2-plane mode\n");
         goto out;
     }
     printf("[PASS] Mode: %ux%u NV12M planes=%u Y=%u UV=%u bytes\n",
@@ -224,6 +287,11 @@ int main(int argc, char **argv)
     parm.parm.capture.timeperframe.denominator = fps;
     if (xioctl(fd, VIDIOC_S_PARM, &parm) < 0) {
         perror("VIDIOC_S_PARM");
+        goto out;
+    }
+    if (parm.parm.capture.timeperframe.numerator != 1 ||
+        parm.parm.capture.timeperframe.denominator != 60) {
+        fprintf(stderr, "[FAIL] Driver did not return fixed 1/60 frame interval\n");
         goto out;
     }
     printf("[PASS] Frame interval: %u/%u s\n",
@@ -358,8 +426,8 @@ int main(int argc, char **argv)
         }
 
         captured++;
-        if (planes[0].bytesused != DEFAULT_WIDTH * DEFAULT_HEIGHT ||
-            planes[1].bytesused != DEFAULT_WIDTH * DEFAULT_HEIGHT / 2) {
+        if (planes[0].bytesused != y_frame_bytes ||
+            planes[1].bytesused != uv_frame_bytes) {
             fprintf(stderr, "[FAIL] frame %u payload Y=%u UV=%u\n",
                     captured, planes[0].bytesused, planes[1].bytesused);
             data_errors++;
@@ -429,6 +497,8 @@ int main(int argc, char **argv)
         enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
         if (xioctl(fd, VIDIOC_STREAMOFF, &type) < 0)
             perror("VIDIOC_STREAMOFF");
+        else
+            streamoff_ok = 1;
     }
 
     if (captured) {
@@ -442,7 +512,7 @@ int main(int argc, char **argv)
         }
         elapsed_s = (end_ms - rate_start_ms) / 1000.0;
         measured_fps = measured_frames / elapsed_s;
-        mib_s = measured_frames * (double)NV12_FRAME_BYTES /
+        mib_s = measured_frames * (double)nv12_frame_bytes /
                 elapsed_s / (1024.0 * 1024.0);
 
         printf("=================================================================\n"
@@ -452,18 +522,21 @@ int main(int argc, char **argv)
                captured, frame_target, measured_frames, elapsed_s,
                measured_fps, mib_s);
         if (benchmark_mode) {
-            double mwr_per_s = measured_frames * (double)NV12_MWR_PER_FRAME /
-                               elapsed_s;
+            double mwr_per_s = measured_frames *
+                               (double)nv12_mwr_per_frame / elapsed_s;
             printf(" 128-byte PCIe MWr rate: %.3f million requests/s\n"
+                   " 4K60 payload requirement: %.2f MiB/s (%s)\n"
                    " Warm-up excluded: %u frames\n",
-                   mwr_per_s / 1000000.0, BENCHMARK_WARMUP_FRAMES);
+                   mwr_per_s / 1000000.0, FOUR_K_60_MIB_S,
+                   mib_s >= FOUR_K_60_MIB_S ? "PASS" : "FAIL",
+                   BENCHMARK_WARMUP_FRAMES);
         }
         printf(" Data errors: %u\n"
                "=================================================================\n",
                data_errors);
 
-        if (captured == frame_target && data_errors == 0 &&
-            ((benchmark_mode && measured_fps >= 60.0) ||
+        if (streamoff_ok && captured == frame_target && data_errors == 0 &&
+            ((benchmark_mode && mib_s >= FOUR_K_60_MIB_S) ||
              (!benchmark_mode && measured_fps >= 59.0 && measured_fps <= 61.0)))
             rc = EXIT_SUCCESS;
         else

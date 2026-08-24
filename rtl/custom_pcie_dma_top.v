@@ -97,6 +97,9 @@ module custom_pcie_dma_top #(
     output wire [NUM_AUDIO_CH-1:0]                          m_axis_audio_tlast,
     input  wire [NUM_AUDIO_CH-1:0]                          m_axis_audio_tready,
 
+    // Video pipeline control exported to the board-level clock/CDC logic.
+    output wire                                             video_pipeline_reset,
+
     // Interrupt Pins
     output wire                                             usr_irq_req,
     input  wire                                             usr_irq_ack
@@ -119,6 +122,8 @@ module custom_pcie_dma_top #(
     wire [31:0] reg_dma_ctrl, reg_dma_status, reg_irq_ctrl, reg_irq_status;
     wire [31:0] reg_irq_status_w1c;
     wire [31:0] reg_slice_height;
+    wire [31:0] reg_video_ctrl;
+    assign video_pipeline_reset = reg_video_ctrl[0];
     wire [63:0] reg_h2c_ring_addr, reg_c2h_ring_addr;
     wire [15:0] reg_h2c_ring_size, reg_h2c_tail_ptr, reg_h2c_head_ptr;
     wire [15:0] reg_c2h_ring_size, reg_c2h_tail_ptr, reg_c2h_head_ptr;
@@ -429,7 +434,8 @@ module custom_pcie_dma_top #(
         .reg_bandwidth_bps(reg_bandwidth_bps),
         .reg_latency_max_ns(reg_latency_max_ns),
         .reg_pacer_ctrl(reg_pacer_ctrl),
-        .reg_slice_height(reg_slice_height)
+        .reg_slice_height(reg_slice_height),
+        .reg_video_ctrl(reg_video_ctrl)
     );
 
     // 3.1 Hardware AV Sync Global Precision Timestamp Generator (64-bit @ 125MHz, 8ns resolution)

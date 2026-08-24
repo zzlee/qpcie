@@ -48,6 +48,9 @@ module a50t_pcie_card_top #(
     (* ASYNC_REG = "TRUE" *) reg video_reset_meta = 1'b0;
     (* ASYNC_REG = "TRUE" *) reg [1:0] video_reset_sync = 2'b00;
     wire video_rst_n = video_reset_sync[1];
+    wire video_pipeline_reset;
+    (* ASYNC_REG = "TRUE" *) reg [1:0] video_pipeline_reset_sync = 2'b00;
+    wire video_pipeline_rst_n = video_rst_n && !video_pipeline_reset_sync[1];
 
     video_clock_gen u_video_clock_gen (
         .clk_125mhz(pcie_user_clk),
@@ -67,10 +70,14 @@ module a50t_pcie_card_top #(
     end
 
     always @(posedge video_clk_150) begin
-        if (!video_reset_meta)
+        if (!video_reset_meta) begin
             video_reset_sync <= 2'b00;
-        else
+            video_pipeline_reset_sync <= 2'b00;
+        end else begin
             video_reset_sync <= {video_reset_sync[0], 1'b1};
+            video_pipeline_reset_sync <=
+                {video_pipeline_reset_sync[0], video_pipeline_reset};
+        end
     end
 
     // =========================================================================
@@ -256,7 +263,7 @@ module a50t_pcie_card_top #(
 
     v_tpg_0 u_v_tpg (
         .ap_clk(video_clk_150),
-        .ap_rst_n(video_rst_n),
+        .ap_rst_n(video_pipeline_rst_n),
         .s_axi_CTRL_AWADDR(tpg_ip_axi_awaddr[7:0]),
         .s_axi_CTRL_AWVALID(tpg_ip_axi_awvalid),
         .s_axi_CTRL_AWREADY(tpg_ip_axi_awready),
@@ -426,7 +433,7 @@ module a50t_pcie_card_top #(
         .WR_DATA_COUNT_WIDTH(1),
         .RD_DATA_COUNT_WIDTH(1)
     ) u_tpg_axis_cdc (
-        .s_aresetn(video_rst_n),
+        .s_aresetn(video_pipeline_rst_n),
         .s_aclk(video_clk_150),
         .m_aclk(pcie_user_clk),
         .s_axis_tvalid(tpg_axis_tvalid),
@@ -792,6 +799,7 @@ module a50t_pcie_card_top #(
         .m_axis_audio_tlast(m_audio_tlast),
         .m_axis_audio_tready(m_audio_tready),
 
+        .video_pipeline_reset(video_pipeline_reset),
         .usr_irq_req(usr_irq_req),
         .usr_irq_ack(usr_irq_ack)
     );

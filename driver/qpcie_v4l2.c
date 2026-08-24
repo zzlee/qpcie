@@ -39,36 +39,173 @@ static int qpcie_vidioc_enum_fmt_vid_cap_mplane(struct file *file, void *priv, s
     return 0;
 }
 
-static int qpcie_vidioc_g_fmt_vid_cap_mplane(struct file *file, void *priv, struct v4l2_format *f)
+struct qpcie_video_mode {
+    u32 width;
+    u32 height;
+};
+
+static const struct qpcie_video_mode qpcie_video_modes[] = {
+    { 1920, 1080 },
+    { 3840, 2160 },
+};
+
+static const struct qpcie_video_mode *qpcie_find_video_mode(u32 width,
+                                                              u32 height)
 {
-    struct qpcie_v4l2_channel *vch = video_drvdata(file);
+    const struct qpcie_video_mode *best = &qpcie_video_modes[0];
+    u32 best_distance = U32_MAX;
+    unsigned int i;
 
-    f->fmt.pix_mp.width        = vch->width;
-    f->fmt.pix_mp.height       = vch->height;
-    f->fmt.pix_mp.pixelformat  = vch->pixelformat;
-    f->fmt.pix_mp.field        = V4L2_FIELD_NONE;
-    f->fmt.pix_mp.colorspace   = V4L2_COLORSPACE_REC709;
-    f->fmt.pix_mp.num_planes   = 2;
+    for (i = 0; i < ARRAY_SIZE(qpcie_video_modes); i++) {
+        const struct qpcie_video_mode *mode = &qpcie_video_modes[i];
+        u32 width_delta = width > mode->width ? width - mode->width :
+                                                    mode->width - width;
+        u32 height_delta = height > mode->height ? height - mode->height :
+                                                       mode->height - height;
+        u32 distance = width_delta + height_delta;
 
-    f->fmt.pix_mp.plane_fmt[0].bytesperline = vch->stride;
-    f->fmt.pix_mp.plane_fmt[0].sizeimage    = vch->stride * vch->height;
-    f->fmt.pix_mp.plane_fmt[1].bytesperline = vch->stride;
-    f->fmt.pix_mp.plane_fmt[1].sizeimage    = vch->stride * (vch->height / 2);
+        if (distance < best_distance) {
+            best = mode;
+            best_distance = distance;
+        }
+    }
+    return best;
+}
 
+static void qpcie_fill_pix_format(struct v4l2_pix_format_mplane *pix,
+                                  const struct qpcie_video_mode *mode)
+{
+    memset(pix, 0, sizeof(*pix));
+    pix->width = mode->width;
+    pix->height = mode->height;
+    pix->pixelformat = V4L2_PIX_FMT_NV12M;
+    pix->field = V4L2_FIELD_NONE;
+    pix->colorspace = V4L2_COLORSPACE_REC709;
+    pix->num_planes = 2;
+    pix->plane_fmt[0].bytesperline = mode->width;
+    pix->plane_fmt[0].sizeimage = mode->width * mode->height;
+    pix->plane_fmt[1].bytesperline = mode->width;
+    pix->plane_fmt[1].sizeimage = mode->width * (mode->height / 2);
+}
+
+static u32 qpcie_tpg_pattern_id(int menu_value)
+{
+    if (menu_value == 0)
+        return 9;  /* Pass-through is unavailable without a TPG input stream. */
+    if (menu_value == 3)
+        return 9;  /* Color Bars */
+    if (menu_value == 4)
+        return 10; /* Zone Plate */
+    return menu_value;
+}
+
+static int qpcie_program_tpg(struct qpcie_v4l2_channel *vch, u32 pattern_id,
+                             bool reset_pipeline)
+{
+    struct qpcie_dev *qdev = vch->qdev;
+    void __iomem *tpg;
+    u32 rb_width, rb_height, rb_pattern, rb_format, rb_ctrl;
+
+    if (!qdev || !qdev->bar0_mmio || !qdev->bar1_mmio)
+        return -ENODEV;
+
+    tpg = qdev->bar1_mmio + (vch->channel_id * 0x100);
+    if (reset_pipeline) {
+        iowrite32(1, qdev->bar0_mmio + REG_VIDEO_CTRL);
+        if (ioread32(qdev->bar0_mmio + REG_VIDEO_CTRL) != 1)
+            return -EIO;
+        usleep_range(1000, 2000);
+        iowrite32(0, qdev->bar0_mmio + REG_VIDEO_CTRL);
+        if (ioread32(qdev->bar0_mmio + REG_VIDEO_CTRL) != 0)
+            return -EIO;
+        usleep_range(1000, 2000);
+    }
+
+    iowrite32(vch->height, tpg + 0x10);
+    iowrite32(vch->width, tpg + 0x18);
+    iowrite32(pattern_id, tpg + 0x20);
+    iowrite32(1, tpg + 0x40);    /* XVIDC_CSF_YCRCB_444 */
+    iowrite32(0x81, tpg + 0x00); /* AP_START | AUTO_RESTART */
+    rb_ctrl = ioread32(tpg + 0x00);
+    rb_width = ioread32(tpg + 0x18);
+    rb_height = ioread32(tpg + 0x10);
+    rb_pattern = ioread32(tpg + 0x20);
+    rb_format = ioread32(tpg + 0x40);
+
+    dev_info(&qdev->pdev->dev,
+             "TPG%u readback: %ux%u YUV444 pattern=%u format=%u ctrl=0x%08X\n",
+             vch->channel_id, rb_width, rb_height, rb_pattern,
+             rb_format, rb_ctrl);
+    if (rb_width != vch->width || rb_height != vch->height ||
+        rb_pattern != pattern_id || rb_format != 1 ||
+        !(rb_ctrl & BIT(7))) {
+        dev_err(&qdev->pdev->dev,
+                "TPG%u BAR1 control readback mismatch\n",
+                vch->channel_id);
+        return -EIO;
+    }
     return 0;
 }
 
-static int qpcie_vidioc_s_fmt_vid_cap_mplane(struct file *file, void *priv, struct v4l2_format *f)
+static int qpcie_vidioc_g_fmt_vid_cap_mplane(struct file *file, void *priv,
+                                              struct v4l2_format *f)
 {
     struct qpcie_v4l2_channel *vch = video_drvdata(file);
+    struct qpcie_video_mode mode = { vch->width, vch->height };
 
-    /* Stage 2 deliberately exposes only the validated target mode. */
-    vch->width       = 1920;
-    vch->height      = 1080;
+    qpcie_fill_pix_format(&f->fmt.pix_mp, &mode);
+    return 0;
+}
+
+static int qpcie_vidioc_try_fmt_vid_cap_mplane(struct file *file, void *priv,
+                                                struct v4l2_format *f)
+{
+    const struct qpcie_video_mode *mode;
+
+    mode = qpcie_find_video_mode(f->fmt.pix_mp.width,
+                                 f->fmt.pix_mp.height);
+    qpcie_fill_pix_format(&f->fmt.pix_mp, mode);
+    return 0;
+}
+
+static int qpcie_vidioc_s_fmt_vid_cap_mplane(struct file *file, void *priv,
+                                              struct v4l2_format *f)
+{
+    struct qpcie_v4l2_channel *vch = video_drvdata(file);
+    const struct qpcie_video_mode *mode;
+    struct v4l2_ctrl *pattern_ctrl;
+    u32 pattern_id;
+    u32 old_width, old_height, old_stride, old_pixelformat;
+    int ret;
+
+    mode = qpcie_find_video_mode(f->fmt.pix_mp.width,
+                                 f->fmt.pix_mp.height);
+    if (vb2_is_busy(&vch->queue))
+        return -EBUSY;
+
+    old_width = vch->width;
+    old_height = vch->height;
+    old_stride = vch->stride;
+    old_pixelformat = vch->pixelformat;
+    vch->width = mode->width;
+    vch->height = mode->height;
     vch->pixelformat = V4L2_PIX_FMT_NV12M;
-    vch->stride      = 1920;
+    vch->stride = mode->width;
 
-    return qpcie_vidioc_g_fmt_vid_cap_mplane(file, priv, f);
+    pattern_ctrl = v4l2_ctrl_find(&vch->ctrl_handler,
+                                  V4L2_CID_TEST_PATTERN);
+    pattern_id = qpcie_tpg_pattern_id(pattern_ctrl ? pattern_ctrl->val : 3);
+    ret = qpcie_program_tpg(vch, pattern_id, true);
+    if (ret) {
+        vch->width = old_width;
+        vch->height = old_height;
+        vch->stride = old_stride;
+        vch->pixelformat = old_pixelformat;
+        return ret;
+    }
+
+    qpcie_fill_pix_format(&f->fmt.pix_mp, mode);
+    return 0;
 }
 
 static int qpcie_vidioc_g_parm(struct file *file, void *priv, struct v4l2_streamparm *a)
@@ -95,25 +232,22 @@ static int qpcie_vidioc_s_parm(struct file *file, void *priv, struct v4l2_stream
     a->parm.capture.timeperframe.denominator = 60;
     vch->pacer_enable = true;
     dev_info(&vch->qdev->pdev->dev,
-             "V4L2 channel %u fixed at 1920x1080@60 NV12M\n",
-             vch->channel_id);
+             "V4L2 channel %u configured for %ux%u@60 NV12M\n",
+             vch->channel_id, vch->width, vch->height);
     return 0;
 }
-
-static const struct v4l2_frmsize_discrete supported_framesizes[] = {
-    { 1920, 1080 },
-};
 
 static int qpcie_vidioc_enum_framesizes(struct file *file, void *priv, struct v4l2_frmsizeenum *fsize)
 {
     if (fsize->pixel_format != V4L2_PIX_FMT_NV12M)
         return -EINVAL;
 
-    if (fsize->index >= ARRAY_SIZE(supported_framesizes))
+    if (fsize->index >= ARRAY_SIZE(qpcie_video_modes))
         return -EINVAL;
 
     fsize->type = V4L2_FRMSIZE_TYPE_DISCRETE;
-    fsize->discrete = supported_framesizes[fsize->index];
+    fsize->discrete.width = qpcie_video_modes[fsize->index].width;
+    fsize->discrete.height = qpcie_video_modes[fsize->index].height;
     return 0;
 }
 
@@ -127,6 +261,9 @@ static int qpcie_vidioc_enum_frameintervals(struct file *file, void *priv, struc
         return -EINVAL;
 
     if (fival->index >= ARRAY_SIZE(supported_frameintervals))
+        return -EINVAL;
+    if ((fival->width != 1920 || fival->height != 1080) &&
+        (fival->width != 3840 || fival->height != 2160))
         return -EINVAL;
 
     fival->type = V4L2_FRMIVAL_TYPE_DISCRETE;
@@ -151,10 +288,12 @@ static const struct v4l2_ioctl_ops qpcie_v4l2_ioctl_ops = {
     .vidioc_querycap                = qpcie_vidioc_querycap,
     .vidioc_enum_fmt_vid_cap        = qpcie_vidioc_enum_fmt_vid_cap_mplane,
     .vidioc_g_fmt_vid_cap_mplane    = qpcie_vidioc_g_fmt_vid_cap_mplane,
+    .vidioc_try_fmt_vid_cap_mplane  = qpcie_vidioc_try_fmt_vid_cap_mplane,
     .vidioc_s_fmt_vid_cap_mplane    = qpcie_vidioc_s_fmt_vid_cap_mplane,
 
     .vidioc_enum_fmt_vid_out        = qpcie_vidioc_enum_fmt_vid_cap_mplane,
     .vidioc_g_fmt_vid_out_mplane    = qpcie_vidioc_g_fmt_vid_cap_mplane,
+    .vidioc_try_fmt_vid_out_mplane  = qpcie_vidioc_try_fmt_vid_cap_mplane,
     .vidioc_s_fmt_vid_out_mplane    = qpcie_vidioc_s_fmt_vid_cap_mplane,
 
     .vidioc_enum_framesizes         = qpcie_vidioc_enum_framesizes,
@@ -308,10 +447,10 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
     iowrite32(1, qdev->bar0_mmio + REG_DMA_CTRL);
     ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
     dev_info(&qdev->pdev->dev,
-             "NV12M STREAMON: %u buffers, ring tail=%u, mode=%s\n",
-             count, qdev->h2c_tail,
-             vch->pacer_enable ? "1920x1080@60 paced" :
-                                 "1920x1080 uncapped DMA benchmark");
+             "NV12M STREAMON: %u buffers, ring tail=%u, mode=%ux%u %s\n",
+             count, qdev->h2c_tail, vch->width, vch->height,
+             vch->pacer_enable ? "60 FPS paced" :
+                                 "uncapped DMA benchmark");
     return 0;
 }
 
@@ -390,40 +529,9 @@ static int qpcie_s_ctrl(struct v4l2_ctrl *ctrl)
         }
         break;
     case V4L2_CID_TEST_PATTERN:
-        if (qdev && qdev->bar1_mmio) {
-            void __iomem *tpg = qdev->bar1_mmio +
-                                (vch->channel_id * 0x100);
-            u32 pat_id = ctrl->val;
-            u32 rb_width, rb_height, rb_pattern, rb_format, rb_ctrl;
-
-            if (pat_id == 3) pat_id = 9;  /* Color Bars */
-            if (pat_id == 4) pat_id = 10; /* Zone Plate */
-
-            iowrite32(vch->height, tpg + 0x10);
-            iowrite32(vch->width, tpg + 0x18);
-
-            iowrite32(pat_id, tpg + 0x20);
-            iowrite32(1, tpg + 0x40);    /* XVIDC_CSF_YCRCB_444 */
-            iowrite32(0x81, tpg + 0x00); /* AP_START | AUTO_RESTART */
-            rb_ctrl = ioread32(tpg + 0x00); /* Flush posted writes. */
-            rb_width = ioread32(tpg + 0x18);
-            rb_height = ioread32(tpg + 0x10);
-            rb_pattern = ioread32(tpg + 0x20);
-            rb_format = ioread32(tpg + 0x40);
-
-            dev_info(&qdev->pdev->dev,
-                     "TPG%u readback: %ux%u YUV444 pattern=%u format=%u ctrl=0x%08X\n",
-                     vch->channel_id, rb_width, rb_height, rb_pattern,
-                     rb_format, rb_ctrl);
-            if (rb_width != vch->width || rb_height != vch->height ||
-                rb_pattern != pat_id || rb_format != 1) {
-                dev_err(&qdev->pdev->dev,
-                        "TPG%u BAR1 control readback mismatch\n",
-                        vch->channel_id);
-                return -EIO;
-            }
-        }
-        break;
+        if (vb2_is_streaming(&vch->queue))
+            return -EBUSY;
+        return qpcie_program_tpg(vch, qpcie_tpg_pattern_id(ctrl->val), true);
     }
     return 0;
 }
@@ -479,7 +587,7 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
         v4l2_ctrl_handler_init(&vch->ctrl_handler, 2);
         v4l2_ctrl_new_std_menu_items(&vch->ctrl_handler, &qpcie_ctrl_ops,
                                      V4L2_CID_TEST_PATTERN,
-                                     4, 0, 3, qpcie_tpg_pattern_strings);
+                                     4, BIT(0), 3, qpcie_tpg_pattern_strings);
         v4l2_ctrl_new_custom(&vch->ctrl_handler,
                              &qpcie_pacer_ctrl_config, NULL);
         if (vch->ctrl_handler.error) {
@@ -538,7 +646,7 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
         dev_info(&qdev->pdev->dev, " -> Channel %d registered as /dev/video%d\n", i, vdev->num);
     }
     dev_info(&qdev->pdev->dev,
-             "[V4L2 STAGE 2] One NV12M MMAP capture node initialized\n");
+             "[V4L2] One NV12M MMAP capture node initialized (1080p60/4K60)\n");
     return 0;
 
 unreg_v4l2:

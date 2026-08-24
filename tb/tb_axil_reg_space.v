@@ -40,7 +40,7 @@ module tb_axil_reg_space;
     wire [15:0] reg_c2h_tail_ptr;
     wire [31:0] reg_irq_ctrl;
     wire [31:0] reg_irq_status;
-    wire [31:0] reg_pacer_ctrl, reg_slice_height;
+    wire [31:0] reg_pacer_ctrl, reg_slice_height, reg_video_ctrl;
     reg  [31:0] completed_h2c_count;
     reg  [31:0] completed_c2h_count;
 
@@ -77,6 +77,7 @@ module tb_axil_reg_space;
         .reg_irq_status(reg_irq_status),
         .reg_pacer_ctrl(reg_pacer_ctrl),
         .reg_slice_height(reg_slice_height),
+        .reg_video_ctrl(reg_video_ctrl),
         .completed_h2c_count(completed_h2c_count),
         .completed_c2h_count(completed_c2h_count)
     );
@@ -167,6 +168,20 @@ module tb_axil_reg_space;
         $display("[%0t] Test 5: Read Hardware Capabilities Register (0x3C)...", $time);
         axil_read(32'h3C, read_val);
         $display("[%0t] Read REG_HARDWARE_CAPS (0x3C): 0x%h (Expect 0x0004040F)", $time, read_val);
+
+        $display("[%0t] Test 6: Toggle Video Pipeline Reset (0x80)...", $time);
+        axil_write(32'h80, 32'h00000001);
+        axil_read(32'h80, read_val);
+        if (read_val !== 32'h00000001 || reg_video_ctrl !== 32'h00000001) begin
+            $display("FAIL: VIDEO_CTRL set/readback mismatch");
+            $fatal(1);
+        end
+        axil_write(32'h80, 32'h00000000);
+        axil_read(32'h80, read_val);
+        if (read_val !== 32'h00000000 || reg_video_ctrl !== 32'h00000000) begin
+            $display("FAIL: VIDEO_CTRL clear/readback mismatch");
+            $fatal(1);
+        end
 
         #30;
         $display("[%0t] SUCCESS: axil_reg_space Version & Control Test Completed!", $time);

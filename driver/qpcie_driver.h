@@ -69,6 +69,7 @@
 #define REG_PACER_CTRL       0x74    /* Video Pacer Bypass Control (0=Bypass, 1=Enable) */
 #define REG_SLICE_HEIGHT     0x78    /* Sub-Frame Slice Height in Lines (0=Full Frame IRQ, >0=Slice IRQ) */
 #define REG_VIDEO_ERRORS     0x7C    /* AXI-video framing/configuration error count */
+#define REG_VIDEO_CTRL       0x80    /* Bit 0: reset TPG and video CDC FIFO */
 
 /* 64-Byte 2D Multi-Planar Extended Descriptor Structure (Hardware Wire Format) */
 struct __packed qpcie_dma_desc_64b {

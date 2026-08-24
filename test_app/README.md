@@ -1,17 +1,23 @@
-# QPCIe Stage-2 V4L2 Test Application
+# QPCIe NV12M V4L2 Test Application
 
-The validated Stage-2 configuration exposes one capture node with a fixed
-`1920x1080@60 NV12M` format. The FPGA pipeline is:
+The capture node exposes two discrete 60 FPS modes:
+
+- `1920x1080 NV12M` — Y 2,073,600 bytes, UV 1,036,800 bytes;
+- `3840x2160 NV12M` — Y 8,294,400 bytes, UV 4,147,200 bytes.
+
+The FPGA pipeline is:
 
 ```text
-Xilinx TPG YUV444 (4 pixels/clock)
-  -> rounded 2x2 chroma downsample
+Xilinx TPG YUV444, 4 pixels/clock @ 150 MHz
+  -> asynchronous AXI-Stream CDC FIFO
+  -> rounded 2x2 chroma downsample @ 125 MHz
   -> NV12M Y and UV planes
-  -> PCIe C2H DMA
+  -> 128-byte PCIe C2H MWr DMA
 ```
 
-Only `V4L2_MEMORY_MMAP` is enabled during this bring-up stage. ALSA and the
-additional video channels remain intentionally disabled.
+Only `V4L2_MEMORY_MMAP` is enabled during bring-up. ALSA and additional video
+channels remain disabled. Format changes reset the TPG and video CDC FIFO so a
+partial frame from the previous mode cannot enter the next DMA buffer.
 
 ## Build
 
@@ -19,62 +25,72 @@ additional video channels remain intentionally disabled.
 make -C test_app v4l2_test_app
 ```
 
-## Control-plane probe
+## Enumerate modes
 
 ```bash
-./test_app/v4l2_test_app \
-    --dev /dev/video0 --probe --pattern 9 --fps 60
+v4l2-ctl -d /dev/video0 --list-formats-ext
 ```
 
-## Paced 60 FPS correctness test
+Expected discrete modes are `1920x1080@60` and `3840x2160@60`, format `NM12`.
+
+## Control-plane probes
 
 ```bash
-./test_app/v4l2_test_app \
-    --dev /dev/video0 \
-    --frames 60 \
-    --pattern 9 \
-    --fps 60 \
-    --out /tmp/qpcie-tpg-nv12.yuv
+./test_app/v4l2_test_app --dev /dev/video0 \
+    --width 1920 --height 1080 --probe --pattern 9 --fps 60
+
+./test_app/v4l2_test_app --dev /dev/video0 \
+    --width 3840 --height 2160 --probe --pattern 9 --fps 60
 ```
 
-The output file contains one contiguous NV12 frame and must be exactly
-3,110,400 bytes. The test validates two-plane payload sizes, buffer sequence,
-static-frame hashes, sample variation, frame rate, and DMA drain behavior.
+The kernel log must report matching TPG dimensions, YUV444 format `1`, and the
+selected hardware pattern.
 
-## Uncapped C2H DMA write benchmark
+## Paced correctness tests
 
-The benchmark disables only the NV12 engine's 60 FPS frame pacer. Resolution,
-pixel conversion and descriptor format remain unchanged. The pipelined engine
-packs eight 16-byte FIFO beats into each 128-byte PCIe Memory Write, so this
-measures the maximum sustained payload rate of the current capture/DMA
-implementation rather than the theoretical Gen2 x4 link rate.
+1080p60:
 
 ```bash
-./test_app/v4l2_test_app \
-    --dev /dev/video0 \
-    --benchmark \
-    --frames 600 \
-    --pattern 9
+./test_app/v4l2_test_app --dev /dev/video0 \
+    --width 1920 --height 1080 --frames 60 --pattern 9 --fps 60 \
+    --out /tmp/qpcie-1080p-nv12.yuv
+```
+
+The output file must be exactly 3,110,400 bytes.
+
+4K60:
+
+```bash
+./test_app/v4l2_test_app --dev /dev/video0 \
+    --width 3840 --height 2160 --frames 60 --pattern 9 --fps 60 \
+    --out /tmp/qpcie-4k-nv12.yuv
+```
+
+The output file must be exactly 12,441,600 bytes. The tests validate two-plane
+payload sizes, continuous sequences, static-frame hashes, sample variation,
+frame rate, and complete STREAMOFF drain behavior.
+
+## Uncapped DMA benchmark
+
+```bash
+./test_app/v4l2_test_app --dev /dev/video0 \
+    --width 1920 --height 1080 --benchmark --frames 600 --pattern 9
+
+./test_app/v4l2_test_app --dev /dev/video0 \
+    --width 3840 --height 2160 --benchmark --frames 600 --pattern 9
 ```
 
 The first eight frames are excluded as warm-up. Full-frame hashing is skipped
-after the first frame in benchmark mode so userspace checksum work does not
-limit buffer recycling. The report includes:
+after the first frame so userspace work does not limit buffer recycling. The
+4K60 payload requirement is 746,496,000 bytes/s, or approximately 711.91
+MiB/s. The application reports an explicit pass/fail against that threshold.
 
-- frames per second;
-- NV12 payload write throughput in MiB/s;
-- 128-byte PCIe MWr requests per second;
-- payload/sequence errors.
-
-RTL simulation completes an uncapped 1080p frame in 518,425 PCIe user clocks
-(4.147 ms), corresponding to approximately 241.1 FPS, 715.2 MiB/s of NV12
-payload, and 5.86 million 128-byte MWr requests/s before physical PCIe
-backpressure. A 4K frame completes in 2,073,636 clocks (16.589 ms) under the
-simulated random-ready profile, within the 2,083,333-clock 60 FPS budget.
-
-After testing, verify the driver drained the ring and saw no video errors:
+After every run, verify the ring drained and no video protocol or SMMU errors
+occurred:
 
 ```bash
 dmesg | grep 'NV12M STREAMOFF' | tail -1
 dmesg | grep -Ei 'smmu|context fault|decode error|protocol errors'
 ```
+
+Required STREAMOFF state: `drained=1`, `head == tail`, and `video_errors=0`.
