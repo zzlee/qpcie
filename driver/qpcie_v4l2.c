@@ -473,7 +473,11 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
         vch->queue.timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
         vch->queue.lock            = &vch->lock;
         vch->queue.dev             = &qdev->pdev->dev;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0)
         vch->queue.min_queued_buffers = 2;
+#else
+        vch->queue.min_buffers_needed = 2;
+#endif
         ret = vb2_queue_init(&vch->queue);
         if (ret) {
             dev_err(&qdev->pdev->dev, "[DEBUG ERROR] Channel %d: vb2_queue_init failed: %d\n", i, ret);
@@ -552,13 +556,14 @@ void qpcie_v4l2_irq_handler(struct qpcie_dev *qdev)
             if (slice_height > 0) {
                 /* Sub-Frame Low-Latency Slice DMA Mode */
                 u32 total_slices = (vch->height + slice_height - 1) / slice_height;
-                vch->current_slice_idx++;
-
-                /* Fire Sub-Frame Slice Ready V4L2 Event to Userspace */
                 struct v4l2_event ev = {
                     .type = V4L2_EVENT_FRAME_SYNC,
                     .u.frame_sync.frame_sequence = vch->sequence,
                 };
+
+                vch->current_slice_idx++;
+
+                /* Fire Sub-Frame Slice Ready V4L2 Event to Userspace */
                 v4l2_event_queue(&vch->vdev, &ev);
 
                 /* Complete frame when all slices land in Host DDR/VRAM */

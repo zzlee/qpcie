@@ -8,6 +8,8 @@
 #include "qpcie_driver.h"
 #include <linux/delay.h>
 
+#define SG_PAGES 4
+
 static irqreturn_t qpcie_irq_handler(int irq, void *data)
 {
     struct qpcie_dev *qdev = data;
@@ -65,8 +67,18 @@ MODULE_DEVICE_TABLE(pci, qpcie_id_table);
 static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
     struct qpcie_dev *qdev;
-    int ret;
+    struct qpcie_dma_desc_64b *desc_ring;
+    dma_addr_t desc_ring_dma;
+    dma_addr_t h2c_page_dma[SG_PAGES] = { 0 };
+    dma_addr_t c2h_page_dma[SG_PAGES] = { 0 };
+    u32 *h2c_pages[SG_PAGES] = { NULL };
+    u32 *c2h_pages[SG_PAGES] = { NULL };
+    int ret, p, w;
     u32 ver, git, date, caps, ctrl, stat, readback;
+    u32 dbg_wdata, dbg_waddr;
+    u32 ring_head, c2h_tail, h2c_tail;
+    u32 start_c2h, start_h2c;
+    u32 dma_stat, comp_c2h, comp_h2c, ptr_dbg;
 
     dev_info(&pdev->dev, "=======================================================\n");
     dev_info(&pdev->dev, "=== [MINIMAL DIAGNOSTIC MODE] QPCIe BAR MMIO Test ===\n");
@@ -147,7 +159,6 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
      * 2. BAR0 Write & Read-back Test
      * ------------------------------------------------------------------------ */
     dev_info(&pdev->dev, "--- [2. BAR0 Write & Readback Test] ---\n");
-    u32 dbg_wdata, dbg_waddr;
 
     iowrite32(0x12345678, qdev->bar0_mmio + REG_H2C_RING_ADDR_L); // offset 0x08
     readback = ioread32(qdev->bar0_mmio + REG_H2C_RING_ADDR_L);
@@ -200,17 +211,8 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
      * -------------------------------------------------------------------- */
     dev_info(&pdev->dev, "--- [3. Scatter-Gather (SG List) DMA Verification] ---\n");
 
-    #define SG_PAGES 4
-    dma_addr_t desc_ring_dma;
-    dma_addr_t h2c_page_dma[SG_PAGES] = { 0 };
-    dma_addr_t c2h_page_dma[SG_PAGES] = { 0 };
-    u32 *h2c_pages[SG_PAGES] = { NULL };
-    u32 *c2h_pages[SG_PAGES] = { NULL };
-    int p, w;
-    u32 ring_head, c2h_tail, h2c_tail;
-    u32 start_c2h, start_h2c;
-
-    struct qpcie_dma_desc_64b *desc_ring = dma_alloc_coherent(&pdev->dev, 64 * 16, &desc_ring_dma, GFP_KERNEL);
+    desc_ring = dma_alloc_coherent(&pdev->dev, 64 * 16,
+                                   &desc_ring_dma, GFP_KERNEL);
 
     if (!desc_ring) {
         dev_err(&pdev->dev, "[ERROR] dma_alloc_coherent failed for Descriptor Ring!\n");
@@ -302,9 +304,9 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
             goto stop_diag_dma;
         }
 
-        u32 dma_stat = ioread32(qdev->bar0_mmio + REG_DMA_STATUS);
-        u32 comp_c2h = ioread32(qdev->bar0_mmio + REG_COMPLETED_C2H);
-        u32 ptr_dbg  = ioread32(qdev->bar0_mmio + 0x40);
+        dma_stat = ioread32(qdev->bar0_mmio + REG_DMA_STATUS);
+        comp_c2h = ioread32(qdev->bar0_mmio + REG_COMPLETED_C2H);
+        ptr_dbg  = ioread32(qdev->bar0_mmio + 0x40);
         dev_info(&pdev->dev, "  C2H SG Status: DMA_STATUS=0x%08X, Completed Count=%u, Pointers: Tail=%u, Head=%u\n",
                  dma_stat, comp_c2h, (ptr_dbg >> 16) & 0xFFFF, ptr_dbg & 0xFFFF);
         if (comp_c2h != start_c2h + SG_PAGES ||
@@ -347,7 +349,7 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
         }
 
         dma_stat = ioread32(qdev->bar0_mmio + REG_DMA_STATUS);
-        u32 comp_h2c = ioread32(qdev->bar0_mmio + REG_COMPLETED_H2C);
+        comp_h2c = ioread32(qdev->bar0_mmio + REG_COMPLETED_H2C);
         ptr_dbg  = ioread32(qdev->bar0_mmio + 0x40);
         dev_info(&pdev->dev, "  H2C SG Status: DMA_STATUS=0x%08X, Completed Count=%u, Pointers: Tail=%u, Head=%u\n",
                  dma_stat, comp_h2c, (ptr_dbg >> 16) & 0xFFFF, ptr_dbg & 0xFFFF);
