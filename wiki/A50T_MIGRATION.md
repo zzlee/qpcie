@@ -1,42 +1,47 @@
-# 📊 AMD/Xilinx Artix-7 A50T (`pg054`) 移植與專案組件共用分析 Wiki
+# Artix-7 A50T pg054 移植完成記錄
 
-本文件評估專案移植至 **Artix-7 `XC7A50T`** 並採用 **7 Series Integrated Block for PCIe IP (`pg054` v3.3)** 之組件共用性與改動維度。
+本文件由早期可行性分析更新為實際移植結果。詳細現況見 [A50T NV12M 實作總結](A50T-NV12M-Implementation-and-Results.md)。
 
----
+## 1. 已完成項目
 
-## 1. 核心組件可共用性總表
+| 項目 | 結果 |
+|---|---|
+| `xc7a50t-csg325-2` Vivado build | 完成，timing clean |
+| pg054 Gen2 x4 / 128-bit bridge | 完成 |
+| BAR0/BAR1 decode | 實機通過 |
+| MWr/MRd/CplD endian/header adaptation | 實機通過 |
+| Descriptor fetch 與 SG C2H/H2C | 實機通過 |
+| MSI completion | 實機通過 |
+| Xilinx TPG YUV444 | 實機通過 |
+| 1080p60 NV12M | 實機通過 |
+| 4K60 RTL/V4L2 modes | 已完成，待最新實機 gate |
 
-| 專案層級 / 模組名稱 | 共用狀態 | 說明與需求 |
-| :--- | :---: | :--- |
-| **Linux 核心驅動程式 (`driver/`)** | 🟢 **100% 完整共用** | 免修改 C 語言程式碼。V4L2, ALSA, DMABUF P2P, Sysfs 100% 相容。 |
-| **User App 測試生態 (`test_app/`)** | 🟢 **100% 完整共用** | `v4l2_test_app`, `alsa_test_app`, `dmabuf_p2p_test_app`, `loopback_test_app` 相容。 |
-| **BAR0 暫存器空間 (`axil_reg_space.v`)** | 🟢 **100% 完整共用** | 暫存器 Offsets, DMA Ring 控制, PTS, Pacer Control 100% 相同。 |
-| **2D 描述子抓取引擎 (`desc_fetch_engine.v`)** | 🟢 **100% 完整共用** | 64-Byte 2D 多平面 DMA 描述子解析邏輯完全相同。 |
-| **DMA 傳輸引擎 (`h2c_dma_engine.v`, `c2h_dma_engine.v`)**| 🟢 **100% 完整共用** | 內部 AXI-Stream Burst 傳輸機制與 Ring Buffer 控制邏輯 100% 相同。 |
-| **AES3 音訊串流引擎 (`audio_stream_engine.v`)** | 🟢 **100% 完整共用** | 音訊 Pattern 生成與 32-bit AES3 串流打包邏輯完全共用。 |
-| **64-bit PTS 時間戳記 (`global_timer.v`)** | 🟢 **100% 完整共用** | 8ns 高精度主計時器 100% 可直接於 Artix-7 運作。 |
-| **Telemetry 頻寬/延遲計量 (`dma_telemetry.v`)** | 🟢 **100% 完整共用** | 即時 PCIe Bps/MBs 吞吐量與 ACK Latency 記錄器 100% 共用。 |
-| **動態 EDID RAM & HPD (`hdmi_edid_ram.v`)** | 🟢 **100% 完整共用** | 256-Byte Dual-Port EDID RAM 與 HPD 脈衝控制 100% 共用。 |
-| **PCIe TLP 封裝轉譯層** | 🟡 **新增 7-Series Wrapper** | 將 UltraScale+ CQ/CC/RQ/RC 格式包裝成 7-Series `pg054` 64-bit AXI-Stream RX/TX 介面。 |
+## 2. 實際需要的 A50T-specific 工作
 
----
+早期預估「只需新增 wrapper」過度樂觀。實際完成項目包括：
 
-## 2. 結論
+1. pg054 RX/TX byte-lane ordering 修正。
+2. 64-bit address 4-DW MWr 的雙 beat payload handling。
+3. RC CplD Tag/Requester/Lower Address 切片修正。
+4. BAR hit sideband 與 BAR-relative address normalization。
+5. 7-Series RQ multi-beat 128-byte MWr streamer。
+6. 4 KiB boundary split。
+7. A50T resource-aware chroma BRAM/Y-UV FIFOs。
+8. 125→150 MHz video MMCM、AXI-Lite CDC、AXIS async FIFO。
+9. Reset recovery/CDC constraints 與 timing closure。
+10. Jetson ARM64 retained ring state、memory barriers、SMMU safety。
 
-> **結論: 高度可行且高度共用 (Highly Feasible & 90%+ Reusable)**
+## 3. 可共用與目前停用
 
-> 1. **90% 以上的 RTL 核心邏輯與 100% 的 Linux 驅動/應用程式** 可直接復用，無須修改軟體層。
-> 2. 只需針對 Artix-7 A50T 新增 **7-Series AXI-Stream TLP 轉譯層 (Bridge Wrapper)** 與 `build_a50t.tcl` 即可完成建置！
+共用核心包含 descriptor format、SG engine、BAR0 registers、timer、interrupt controller 與 Linux PCI skeleton。但目前 A50T bring-up 特別收斂為：
 
----
+- 一個 V4L2 capture channel。
+- NV12M。
+- DMA-contiguous MMAP。
+- 1080p60/4K60。
 
-## 3. 測試驗證狀態
+ALSA、多通道、DMABUF/P2P、slice DMA 雖有歷史 source/design，尚未完成本輪 A50T physical qualification。
 
-> **✅ A50T TLP Loopback 測試已通過** (2026-08-20)
+## 4. 歷史 loopback
 
-- 最小化設計 (`pcie_7x_tlp_loopback.v` + `a50t_pcie_tlp_test_top.v`) 已成功建置並燒錄
-- Host `lspci` 正確枚舉 Vendor 0x12AB / Device 0xE380
-- `dmesg` 無 TIMEOUT_ERR、AER error、probe failed
-- MRd → CplD 回覆邏輯驗證通過
-
-> 詳見 **[A50T TLP Loopback Test](A50T-TLP-Loopback-Test.md)**
+最初 `pcie_7x_tlp_loopback.v` checkpoint 驗證 `12AB:E380` 枚舉與基本 BAR MRd/MWr。後續已逐步加入完整 SG DMA、V4L2、NV12 engine 與 150 MHz video CDC；loopback 文件只保留作早期除錯參考。

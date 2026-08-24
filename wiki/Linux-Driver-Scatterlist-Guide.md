@@ -1,5 +1,7 @@
 # Wiki - Linux Kernel Scatterlist 轉置至 PCIe DMA Descriptor 範例
 
+> **狀態：通用/未啟用路徑。** 目前 A50T V4L2 bring-up 使用 `vb2_dma_contig_memops` 與 MMAP，沒有啟用 USERPTR/DMABUF scatterlist。本文保留作未來 SG memory support 參考，不代表目前 driver 的 capture 實作。
+
 在 Linux Kernel PCIe 驅動程式中，系統記憶體通常以不連續的頁面 (Pages) 形式存在，並透過 Linux Kernel 的 **`struct scatterlist` (SG List / `struct sg_table`)** 來描述實體記憶體分段。
 
 本文說明如何撰寫 Linux 驅動程式 C 語言程式碼，將 `scatterlist` 經過 DMA 映射後，填入本專案的 **PCIe DMA Descriptor 環形佇列 (Ring Buffer)**。

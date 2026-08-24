@@ -1,81 +1,140 @@
-# Wiki - Linux V4L2 (MMAP/USERPTR/DMABUF/EXPBUF) 與 ALSA PCIe 驅動程式指南
+# Linux V4L2 Driver 與 NV12M 測試指南
 
-本專案之 Linux V4L2 視訊驅動程式在 [`driver/qpcie_v4l2.c`](file:///home/zzlee/qpcie/driver/qpcie_v4l2.c) 中完整實作並支援四大記憶體傳輸模式：
+> 目前 A50T bring-up 只啟用一個 V4L2 capture node、MMAP 與 DMA-contiguous planes。ALSA、USERPTR、DMABUF import/export 及 video channel 1–3 暫停。舊文件中的多通道/零拷貝命令不代表目前已驗證能力。
 
-1. **`MMAP` (Memory-Mapped)**：驅動程式 Kernel 空間分配記憶體並映射給 User 空間。
-2. **`USERPTR` (User Pointer)**：User 空間應用程式 (如 malloc / posix_memalign) 分配記憶體指標，由驅動進行 IOMMU 映射。
-3. **`DMABUF` (DMA-BUF Import)**：匯入其他硬體驅動 (如 GPU / DRM / VPU) 導出之 `dma-buf` file descriptor (fd)。
-4. **`EXPBUF` (Export Buffer)**：本驅動程式作為 exporter，將內部分配的 buffer 導出為 `dma-buf` fd 供 GPU / DRM 零拷貝 (Zero-Copy) 存取。
-
----
-
-## 1. 驅動程式實作細節 (`io_modes` 與 `vidioc_*` IOCTLs)
-
-### 1.1 Videobuf2 佇列設定 (`vb2_queue_init`)
-```c
-vch->queue.type     = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
-vch->queue.io_modes = VB2_MMAP | VB2_USERPTR | VB2_DMABUF; /* 啟用 MMAP, USERPTR, DMABUF */
-vch->queue.ops      = &qpcie_vb2_ops;
-vch->queue.mem_ops  = &vb2_dma_sg_memops;
-```
-
-### 1.2 支持之 IOCTLs (`qpcie_v4l2_ioctl_ops`)
-```c
-.vidioc_reqbufs     = vb2_ioctl_reqbufs,
-.vidioc_querybuf    = vb2_ioctl_querybuf,
-.vidioc_qbuf        = vb2_ioctl_qbuf,
-.vidioc_dqbuf       = vb2_ioctl_dqbuf,
-.vidioc_prepare_buf = vb2_ioctl_prepare_buf,
-.vidioc_create_bufs = vb2_ioctl_create_bufs,
-
-/* 導出 DMA-BUF fd IOCTL */
-.vidioc_expbuf      = vb2_ioctl_expbuf,
-```
-
----
-
-## 2. 四大模式 `v4l2-ctl` 測試命令列範例
-
-### 2.1 測試 MMAP 模式 (Memory-Mapped)
+## 1. Driver build/load
 
 ```bash
-v4l2-ctl -d /dev/video0 \
-  --set-fmt-video=width=1920,height=1080,pixelformat=YUV420M \
-  --stream-mmap \
-  --stream-count=100
+cd /home/zzlee/qpcie
+make -C driver clean && make -C driver
+sudo insmod driver/custom_pcie_av.ko
+dmesg | tail -n 180
 ```
 
-### 2.2 測試 USERPTR 模式 (User Pointer)
+核心檔案：
+
+- `driver/qpcie_main.c`：PCI probe、BAR map、IRQ、SG diagnostic、retained ring state。
+- `driver/qpcie_v4l2.c`：V4L2/VB2、TPG controls、descriptors、STREAMON/OFF。
+- `driver/qpcie_driver.h`：register map 與 64-byte descriptor wire format。
+
+## 2. Current V4L2 capabilities
+
+- Device：`/dev/video0`。
+- Type：`V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE`。
+- Pixel format：`V4L2_PIX_FMT_NV12M` (`NM12`)。
+- Memory：`V4L2_MEMORY_MMAP`。
+- Memory ops：`vb2_dma_contig_memops`。
+- Planes：2。
+- Modes：1920×1080@60、3840×2160@60。
 
 ```bash
-v4l2-ctl -d /dev/video0 \
-  --set-fmt-video=width=1920,height=1080,pixelformat=YUV420M \
-  --stream-user \
-  --stream-count=100
+v4l2-ctl -d /dev/video0 --list-formats-ext
 ```
 
-### 2.3 測試 DMABUF / EXPBUF 模式 (DMA-BUF 零拷貝)
+## 3. Mode negotiation
+
+Driver 實作 `ENUM_FRAMESIZES`、`ENUM_FRAMEINTERVALS`、`TRY_FMT`、`S_FMT`、`G_FMT`。只有 queue 尚未配置/streaming 時可切換 mode。
+
+`S_FMT` 會 reset TPG/CDC FIFO、重新設定 width/height/pattern/YUV444/AUTO_RESTART 並驗證 readback。若失敗，ioctl 回傳 error，不允許繼續 capture。
+
+## 4. VB2 buffer 與 descriptor
+
+每個 MMAP buffer 有兩個 DMA-contiguous planes：
+
+```text
+1080p: Y=2,073,600, UV=1,036,800
+4K:    Y=8,294,400, UV=4,147,200
+```
+
+`buf_prepare` 檢查 plane allocation size 並設定 bytesused。`buf_queue` 取得兩個 DMA addresses、填入 NV12M 64-byte descriptor，再用 `dma_wmb()` 發布 tail doorbell。
+
+Linux API compatibility：
+
+- `<6.8`：`min_buffers_needed=2`。
+- `>=6.8`：`min_queued_buffers=2`。
+
+## 5. Controls
+
+### Test pattern
+
+標準 `V4L2_CID_TEST_PATTERN` 提供 generated patterns。Color Bars menu value 3 映射到 hardware pattern 9；Zone Plate menu value 4 映射到 10。TPG 沒有 input stream，所以 pass-through item 0 被 skip。
+
+### Pacer
+
+Private `V4L2_CID_QPCIE_PACER_ENABLE`：
+
+- 1：60 FPS paced correctness mode。
+- 0：uncapped DMA benchmark。
+
+一般應用只需 `VIDIOC_S_PARM=1/60`；private control 僅供 `v4l2_test_app --benchmark`。
+
+## 6. Build test app
 
 ```bash
-# Export buffer 並透過 dma-buf 傳遞串流
-v4l2-ctl -d /dev/video0 \
-  --set-fmt-video=width=1920,height=1080,pixelformat=NV12M \
-  --stream-dmabuf \
-  --stream-count=100
+make -C test_app clean
+make -C test_app v4l2_test_app
 ```
 
----
+App 會驗證：capabilities、format、兩個 discrete modes、1/60 interval、plane sizes、sequence、bytesused、first-frame hashes/ranges、static-frame consistency、throughput 與 STREAMOFF ioctl。
 
-## 3. GStreamer / FFmpeg 零拷貝 (Zero-Copy) Pipeline 範例
+## 7. 1080p tests
 
-### GStreamer DMA-BUF 零拷貝管線：
+Control-only：
+
 ```bash
-gst-launch-1.0 v4l2src device=/dev/video0 io-mode=dmabuf ! \
-  video/x-raw,format=NV12,width=1920,height=1080 ! \
-  waylandsink sync=false
+./test_app/v4l2_test_app --dev /dev/video0 \
+  --width 1920 --height 1080 --probe --pattern 9 --fps 60
 ```
 
-### FFmpeg MMAP 擷取：
+Paced correctness：
+
 ```bash
-ffmpeg -f v4l2 -input_format YUV420M -video_size 1920x1080 -i /dev/video0 output.mp4
+./test_app/v4l2_test_app --dev /dev/video0 \
+  --width 1920 --height 1080 --frames 60 --pattern 9 --fps 60 \
+  --out /tmp/qpcie-1080p-nv12.yuv
 ```
+
+輸出大小應為 3,110,400 bytes。
+
+## 8. 4K tests
+
+Control/mode-switch probe：
+
+```bash
+./test_app/v4l2_test_app --dev /dev/video0 \
+  --width 3840 --height 2160 --probe --pattern 9 --fps 60
+```
+
+Paced correctness：
+
+```bash
+./test_app/v4l2_test_app --dev /dev/video0 \
+  --width 3840 --height 2160 --frames 60 --pattern 9 --fps 60 \
+  --out /tmp/qpcie-4k-nv12.yuv
+```
+
+輸出大小應為 12,441,600 bytes。
+
+600-frame benchmark：
+
+```bash
+./test_app/v4l2_test_app --dev /dev/video0 \
+  --width 3840 --height 2160 --benchmark --frames 600 --pattern 9
+```
+
+門檻是 711.91 MiB/s。最新 4K checkpoint 尚待此實機驗證。
+
+## 9. STREAMOFF 與 kernel log
+
+Driver 會先關 pacer，最多等待 500 ms 讓 active descriptors、posted MWr、head/tail 全部 drain，再停止 DMA並 `synchronize_irq()`。
+
+```bash
+dmesg | grep 'NV12M STREAMOFF' | tail -2
+dmesg | grep -Ei 'smmu|context fault|decode error|protocol errors'
+```
+
+必須看到 `drained=1`、head=tail、`video_errors=0`。V4L2 STREAMOFF ioctl 成功仍需搭配 kernel log 判定硬體 drain 狀態。
+
+## 10. ALSA 狀態
+
+Audio RTL/driver source 仍在 repository，但 A50T 視訊 bring-up 中不初始化 ALSA。完成 4K60 前，不把 ALSA 或多通道音訊列為已驗證功能。

@@ -1,73 +1,76 @@
-# Custom PCIe DMA Controller Wiki - 系統總覽 (Overview)
+# QPCIe A50T 系統總覽
 
-本專案實作了一套基於 **Xilinx UltraScale+ / PCIe Gen3/Gen4 原生 4 個 AXI4-Stream 介面（CQ, CC, RQ, RC）** 的客製化 PCIe Scatter-Gather DMA 控制器，支援 AXI4-Lite 控制暫存器空間與 AXI4 Memory Mapped 主控（Master）資料通道。
+## 1. 現行交付目標
 
----
+QPCIe 目前以 Artix-7 A50T + pg054 PCIe Gen2 x4 為主要平台，實作一個可靠的 V4L2 NV12M capture pipeline：
 
-## 1. 系統整體架構圖 (Architecture Diagram)
-
-```
-+---------------------------------------------------------------------------------------------------+
-|                                        custom_pcie_dma_top                                        |
-|                                                                                                   |
-|   +--------------------------+   +--------------------------+   +-----------------------------+   |
-|   |      CQ RX Decoder       |   |      RQ TX Encoder       |   |    Interrupt Controller     |   |
-|   | (Completer Request RX)   |   | (Requester Request TX)   |   |   (MSI / MSI-X / Legacy)    |   |
-|   +------------+-------------+   +------------+-------------+   +--------------+--------------+   |
-|                |                              ^                                ^                  |
-|                v                              |                                |                  |
-|   +------------+-------------+                |                                |                  |
-|   |     AXI4-Lite Slave      |                |                                |                  |
-|   |  Register Space (BAR0)   |                |                                |                  |
-|   +------------+-------------+                |                                |                  |
-|                |                              |                                |                  |
-|                v                              |                                |                  |
-|   +------------+-------------+   +------------+-------------+                  |                  |
-|   |     Descriptor Fetch     |-->|     pcie_tag_manager     |                  |                  |
-|   |          Engine          |   |   (Tag Alloc & Recycle)  |                  |                  |
-|   +------------+-------------+   +------------+-------------+                  |                  |
-|                |                              |                                |                  |
-|                v                              v                                |                  |
-|   +------------+-------------+   +------------+-------------+                  |                  |
-|   |      H2C DMA Engine      |   |      C2H DMA Engine      |------------------+                  |
-|   |      (Host -> FPGA)      |   |      (FPGA -> Host)      |                                     |
-|   +------------+-------------+   +------------+-------------+                                     |
-|                ^                              ^                                                   |
-|                |                              |                                                   |
-|   +------------+------------------------------+-------------+                                     |
-|   |                    RC RX Decoder / Demux                |                                     |
-|   |                (Requester Completion RX / CplD)         |                                     |
-|   +---------------------------------------------------------+                                     |
-|                                                                                                   |
-|   AXI4-Lite Slave                 AXI4 MM Master                   PCIe IRQ                       |
-|  (Control Registers)           (FPGA Memory Mapped)           (Interrupt Request)                 |
-+---------------------------------------------------------------------------------------------------+
+```text
+TPG YUV444 @150 MHz
+→ 4 PPC async CDC
+→ rounded YUV444-to-NV12M @125 MHz
+→ 128-byte C2H MWr
+→ Host V4L2 MMAP buffers
 ```
 
----
+1080p60 已實機通過；4K60 RTL、driver、timing 已完成，commit `2450dcb7` 等待最新實機 gate。
 
-## 2. 四大核心介面對照表
+## 2. 分層架構
 
-| 介面名稱 | 全名 | 方向 (主體為 FPGA) | 主要作用 / 處理 TLP 類型 |
-| :--- | :--- | :--- | :--- |
-| **CQ** | Completer Request | PCIe IP → FPGA User Logic | 接收 Host 發起存取 BAR0 暫存器的讀寫請求（MRd, MWr） |
-| **CC** | Completer Completion | FPGA User Logic → PCIe IP | 回應 Host 對 BAR0 讀取請求，回傳 Completion 封包（CplD） |
-| **RQ** | Requester Request | FPGA User Logic → PCIe IP | FPGA 主動發起對 Host Memory 的讀寫請求（MRd, MWr）與中斷訊息 (Msg) |
-| **RC** | Requester Completion | PCIe IP → FPGA User Logic | 接收 Host 回應對 RQ Read 請求的資料封包（CplD），根據 Tag 派發資料 |
+```text
++--------------------------------------------------------------+
+| a50t_pcie_card_top                                            |
+|  pcie_7x_0 / pg054, Gen2 x4                                  |
+|  video_clock_gen, TPG, AXI-Lite CDC, AXIS CDC FIFO           |
++-------------------------------+------------------------------+
+                                |
++-------------------------------v------------------------------+
+| pcie_7x_axi_bridge                                            |
+|  pg054 RX/TX byte order、4-DW MWr、internal CQ/CC/RQ/RC      |
++-------------------------------+------------------------------+
+                                |
++-------------------------------v------------------------------+
+| custom_pcie_dma_top                                           |
+|  CQ decoder / CC encoder / BAR0 regs / BAR1 master           |
+|  descriptor fetch / SG DMA / RQ requester / RC decoder       |
+|  nv12_capture_engine / interrupt controller / timer          |
++-------------------------------+------------------------------+
+                                |
++-------------------------------v------------------------------+
+| Linux custom_pcie_av.ko                                       |
+|  PCI probe + SG self-test + one V4L2 NV12M MMAP node          |
++--------------------------------------------------------------+
+```
 
----
+## 3. PCIe interfaces
 
-## 3. Wiki 目錄結構 (Wiki Navigation)
+A50T physical core uses 7-Series RX/TX interfaces；`pcie_7x_axi_bridge.v` 提供 internal CQ/CC/RQ/RC-like separation：
 
-- [1. 系統總覽 (Overview)](Overview.md)
-- [2. TLP 封包解析與組裝層 (TLP Layer)](TLP-Layer.md)
-- [3. 控制與暫存器層 (Control Layer)](Control-Layer.md)
-- [4. DMA 資料搬移核心層 (DMA Core Layer)](DMA-Core-Layer.md)
-- [5. 中斷與頂層整合 (System Support Layer)](System-Support-Layer.md)
-- [6. 透過 Control-Layer 控制其他 IP Cores (Controlling Other IP Cores)](Controlling-Other-IP-Cores.md)
-- [7. Linux Scatterlist 填入 Descriptor 範例指南 (Linux Driver Scatterlist Guide)](Linux-Driver-Scatterlist-Guide.md)
-- [8. 多路 2D Video 搭配多路 Audio 系統配置指南 (Multi-Channel Video & Audio Config)](Multi-Channel-Video-Audio-Config.md)
-- [9. 多路 2D Video 及 AES3 Audio AXI4-Stream 原生架構 (Multi-Channel Stream Architecture)](Multi-Channel-Stream-Architecture.md)
-- [10. Linux V4L2 視訊與 ALSA 音訊 PCIe 驅動程式指南 (Linux V4L2 & ALSA Driver Guide)](Linux-V4L2-ALSA-Driver-Guide.md)
-- [11. Kintex UltraScale+ PCIe 卡建構指南 (FPGA Build Guide)](FPGA-Build-Guide.md)
-- [12. 仿真驗證與測試指南 (Verification Guide)](Verification-and-Simulation.md)
+- CQ：host BAR MRd/MWr。
+- CC：BAR MRd completion。
+- RQ：descriptor MRd、C2H MWr、MSI。
+- RC：descriptor/H2C CplD。
+
+所有 pg054-specific byte order 與 header adaptation 都集中在 bridge boundary，核心 RTL 與軟體維持正常 little-endian semantics。
+
+## 4. 現行功能矩陣
+
+| 功能 | RTL | 仿真 | 實機 |
+|---|:---:|:---:|:---:|
+| BAR0/BAR1 | ✅ | ✅ | ✅ |
+| SG C2H/H2C | ✅ | ✅ | ✅ |
+| 128-byte requester | ✅ | ✅ | ✅ |
+| 1080p60 NV12M | ✅ | ✅ | ✅ |
+| 150 MHz TPG CDC | ✅ | timing clean | ✅ |
+| 4K60 NV12M | ✅ | ✅ | ⏳ |
+| Video ch1–3 | parameter/stub | 非目標 | 停用 |
+| ALSA | source 保留 | 非目標 | 停用 |
+| USERPTR/DMABUF/P2P | 歷史/規劃 | 非目標 | 未驗證 |
+
+## 5. 重要指標
+
+- 4K60 payload：746.496 MB/s = 711.91 MiB/s。
+- 最新 1080p 等效 benchmark：713.47 MiB/s。
+- 最新 timing：WNS +0.069 ns。
+- 最新 bitstream SHA256：`52b4b02c6fa747bd9f5e1a340e395c18322b4fb5adf884654a36730eb61f7a81`。
+
+完整內容：[A50T NV12M 實作總結與驗證結果](A50T-NV12M-Implementation-and-Results.md)。

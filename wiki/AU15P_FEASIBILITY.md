@@ -1,5 +1,7 @@
 # 📊 AMD/Xilinx Artix UltraScale+ AU15P Cost-Down 可行性評估 Wiki
 
+> **狀態：平台可行性分析。** 目前已建置與實機驗證平台是 Artix-7 A50T；本文不代表 AU15P 已完成 bitstream 或硬體驗證。
+
 本文件為專案 Cost-Down 版本評估：將 FPGA 晶片由 Kintex UltraScale+ `XCKU3P` 切換為 Artix UltraScale+ `XCAU15P` 之可行性分析與硬體規格對比。
 
 ---

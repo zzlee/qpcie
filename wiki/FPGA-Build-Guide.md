@@ -1,40 +1,101 @@
-# Wiki - Kintex UltraScale+ (XCKU3P) PCIe 卡建構指南
+# Artix-7 A50T FPGA Build 與 SPI Flash 指南
 
-本指南說明如何透過 Vivado 自動化 TCL 腳本整合所有 RTL 模組，建構基於 **AMD/Xilinx Kintex UltraScale+ XCKU3P (`xcku3p-ffva676-2-e`)** 的 PCIe 擴充卡專案並產生 Bitstream 檔。
+## 1. 目標
 
----
+- Part：`xc7a50t-csg325-2`。
+- PCIe：7-Series Integrated Block (`pcie_7x_0`)，Gen2 x4，128-bit stream。
+- SPI flash：Macronix MX25L12872F。
+- Vivado：2023.2。
+- Top：`rtl/a50t_pcie_card_top.v`。
 
-## 1. 硬體晶片與 PCIe IP 規格
+## 2. 產生的主要 IP
 
-- **目標晶片 Part Number**：`xcku3p-ffva676-2-e` (Kintex UltraScale+)
-- **PCIe 硬體 IP Core**：`pcie4_uscale_plus` (Gen3 x4, 256-bit AXI4-Stream Interface)
-- **PCIe 介面頻寬**：Gen3 x4 (Line Rate: 8.0 GT/s per lane, 實測頻寬約 3.2 GB/s)
-- **Dual-BAR 設定**：
-  - **BAR0**：64-KB 64-bit AXI4-Lite (DMA 控制暫存器與 64B 2D Descriptor 引擎)
-  - **BAR1**：64-KB 64-bit AXI4-Lite (User IP Cores 內部匯流排外設控制)
+`scripts/build_a50t.tcl` 會建立：
 
----
+1. `pcie_7x_0`。
+2. `v_tpg_0`：4 PPC、max 3840×2160、YUV444 capable。
+3. `axi_clock_converter_tpg`：BAR1 AXI-Lite 125→150 MHz。
+4. RTL MMCM wrapper `video_clock_gen.v`：125→150 MHz。
 
-## 2. 專案建構腳本說明 (`scripts/build_project.tcl`)
+視訊 payload CDC 使用 RTL 內的 `xpm_fifo_axis`，depth 2048、128-bit、independent clocks。
 
-建構腳本位於 [`scripts/build_project.tcl`](file:///home/zzlee/qpcie/scripts/build_project.tcl)，執行內容包含：
-
-1. 自動建立 Vivado 專案 (`build/qpcie_ku3p_proj`) 並指定 `xcku3p-ffva676-2-e`。
-2. 自動匯入 `rtl/*.v` 所有原生 AXI4-Stream Video 及 AES3 Audio 模組。
-3. 自動引進 Constraints 設定 [`constraints/ku3p_pcie_pinout.xdc`](file:///home/zzlee/qpcie/constraints/ku3p_pcie_pinout.xdc)。
-4. 自動設定並生成 `pcie4_uscale_plus` IP Core（開立 256-bit AXI4-Stream CQ/CC/RQ/RC 數據通道）。
-5. 自動執行 Synthesis (`synth_1`)、Implementation (`impl_1`) 與 Bitstream 產生 (`write_bitstream`)。
-
----
-
-## 3. Vivado 一鍵編譯指令 (Build Commands)
-
-在 Linux 終端機執行：
+## 3. Clean build
 
 ```bash
-# 一鍵批次模式編譯 (Vivado Batch Mode)
-vivado -mode batch -source scripts/build_project.tcl
+cd /home/zzlee/qpcie
+rm -rf build/qpcie_a50t_proj
+/opt/Xilinx/Vivado/2023.2/bin/vivado \
+  -mode batch -source scripts/build_a50t.tcl
 ```
 
-編譯完成後 Bitstream 檔案位置：
-`build/qpcie_ku3p_proj/qpcie_ku3p_card.runs/impl_1/custom_pcie_dma_top.bit`
+Bitstream：
+
+```text
+build/qpcie_a50t_proj/qpcie_a50t_card.runs/impl_1/a50t_pcie_card_top.bit
+```
+
+Build script 會在 BAR0 `0x34` 注入目前 Git short hash，因此正式 checkpoint 應在 commit 後重新 clean build。
+
+## 4. Signoff
+
+Build success 不等於可燒錄；還需確認：
+
+- `WNS >= 0`、`TNS=0`。
+- `WHS >= 0`、`THS=0`。
+- 沒有 critical warning/error。
+- route status 無 unrouted nets。
+- bitstream SHA256 已記錄。
+
+commit `2450dcb7`：
+
+```text
+WNS +0.069 ns
+WHS +0.041 ns
+LUT 31.33%
+FF 16.01%
+BRAM 36.67%
+DSP 31.67%
+SHA256 52b4b02c6fa747bd9f5e1a340e395c18322b4fb5adf884654a36730eb61f7a81
+```
+
+## 5. SPI flash
+
+硬體燒錄只由使用者執行：
+
+```bash
+cd /home/zzlee/qpcie
+./scripts/flash_a50t.sh
+```
+
+腳本會呼叫 `scripts/program_flash_a50t.tcl`：
+
+1. 將 bitstream 轉成 SPI image。
+2. 連線 hw_server/JTAG。
+3. program MX25L12872F。
+4. 以 `PROGRAM.VERIFY=1` verify 已寫入的 flash 內容（script 明確停用獨立 `PROGRAM.CHECKSUM`）。
+
+燒錄完成後必須完整斷電重啟，確保 PCIe endpoint 從新 image cold boot；只 reload driver 不會重載 FPGA。
+
+## 6. Driver 與 smoke test
+
+```bash
+make -C driver clean && make -C driver
+make -C test_app v4l2_test_app
+sudo insmod driver/custom_pcie_av.ko
+dmesg | tail -n 180
+```
+
+必要 readback：
+
+```text
+Version 0x02010001
+Firmware Git 0x2450DCB7
+Caps 0x0004040F
+TPG0 readback ... YUV444 ... format=1 ... AUTO_RESTART
+```
+
+## 7. 注意事項
+
+- FPGA head/counters 會跨 module reload 保留；driver 已從 retained head 接續，不可用舊 driver。
+- 最新 image 新增 BAR0 `0x80` video pipeline reset；新版 driver 搭配舊 bitstream 會因 readback 失敗而拒絕 V4L2 init，這是刻意的安全檢查。
+- Kintex UltraScale+ build flow 屬歷史/其他平台，不是目前 A50T checkpoint 的建置方式。

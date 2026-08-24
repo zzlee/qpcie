@@ -1,5 +1,7 @@
 # Wiki - 中斷與頂層整合 (System Support Layer)
 
+> **目前 A50T 狀態：** 使用 PCIe core MSI 與 full-frame video completion；MSI-X、ALSA period IRQ、slice IRQ 與 multi-channel IRQ 尚未列入本輪實機 qualification。
+
 ## 1. `interrupt_ctrl.v` (中斷控制器)
 - **檔案位置**：[`rtl/interrupt_ctrl.v`](file:///home/zzlee/qpcie/rtl/interrupt_ctrl.v)
 - **主要用途**：

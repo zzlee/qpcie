@@ -1,5 +1,7 @@
 # Wiki - 多路 2D Multi-Planar 視訊與多路 Audio 系統配置指南
 
+> **狀態：設計指南/未完成 qualification。** 現行 A50T checkpoint 只啟用單一 NV12M V4L2 capture channel；ALSA與其他 video channels 停用。本文描述的 multi-channel arbitration/AV sync 是延伸方向，不代表目前實機結果。
+
 在多通道影音擷取/處理卡（例如 **4 路或 8 路 PCIe HDMI/SDI 擷取卡、視訊會議卡、IP Camera NVR 處理卡**）中，系統需要同時處理多路的高頻寬 2D Multi-Planar 視訊（YUV420P/NV12）與低延遲多路 PCM 音訊 (Audio)。
 
 本文說明如何在 PCIe DMA 架構中配置多路 Video 與 Audio 佇列、仲裁策略、記憶體對齊與 **硬件 A/V 影音同步 (AV Sync / PTS)**。

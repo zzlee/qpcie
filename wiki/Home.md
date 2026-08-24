@@ -1,35 +1,53 @@
 # QPCIe Project Wiki
 
-Welcome to the **QPCIe Multi-Channel 4K60 Video & AES3 Audio PCIe Capture Card Wiki**.
-This directory contains complete technical documentation covering FPGA RTL hardware logic, PCIe Gen3 x4 DMA engines, Vivado bitstream synthesis, Linux kernel drivers (V4L2 & ALSA), and user-mode test applications.
+QPCIe 是以 Artix-7 A50T 為目前主要驗證平台的 PCIe Gen2 x4 視訊 DMA 專案。現行 bring-up 交付範圍是：
 
----
+```text
+單一 V4L2 capture channel
+Xilinx TPG YUV444 → rounded 2×2 chroma downsample → NV12M
+1920×1080@60 與 3840×2160@60
+128-byte PCIe C2H MWr
+```
 
-## 📑 Documentation Sitemap
+> **先讀：[A50T NV12M 實作總結與驗證結果](A50T-NV12M-Implementation-and-Results.md)**
+> 這是目前 commit、架構、效能、bitstream 與待驗證項目的權威摘要。注意：1080p60 已實機通過；最新 4K60 mode 尚待直接實機驗證。
 
-### 1. 📘 System Overview & Build Guides
-* **[Overview](Overview.md)** - Comprehensive project architecture, feature matrix, and technical highlights.
-* **[FPGA Build Guide](FPGA-Build-Guide.md)** - Step-by-step Vivado batch compilation, bitstream synthesis, and XDC pinout constraints.
-* **[A50T Hardware Verification Log](A50T-Hardware-Verification-Log.md)** - Artix-7 A50T 實機測試進度、除錯歷程、CplD 標頭校正與 4096-Byte 仿真驗證成果。
-* **[A50T TLP Loopback Test](A50T-TLP-Loopback-Test.md)** - Artix-7 A50T 最小化 PCIe TLP 驗證：MRd/MWr TLP 正常處理、lspci 枚舉、dmesg 無 error。
+## 文件導覽
 
-### 2. 🎬 Video & Audio Datapath Architecture
-* **[AV Datapath & Hardware Architecture](AV_DATAPATH_WIKI.md)** - Complete end-to-end dataflow description for 4K60 4 PPC Video and 32-bit AES3 Audio from hardware IP cores down to Host DDR RAM.
-* **[Artix UltraScale+ AU15P Cost-Down Feasibility Analysis](AU15P_FEASIBILITY.md)**
-* **[Artix-7 A50T pg054 PCIe IP Migration & Reusability Analysis](A50T_MIGRATION.md)**
-* **[Low-Latency Sub-5ms Capture & PCIe Interrupt Architecture](Low-Latency-Capture-Guide.md)**
-* **[Multi-Channel Stream Architecture](Multi-Channel-Stream-Architecture.md)** - Architecture of 4-Channel 2D Video Engine (YUV420M, NV12M, Mono, AYUV) and 4-Channel AES3 Audio Engine.
-* **[Multi-Channel Video & Audio Config](Multi-Channel-Video-Audio-Config.md)** - Hardware stream configurations, frame pacing, and clocking.
+### 目前實作與驗證
 
-### 3. ⚡ FPGA RTL & PCIe DMA Core Layer
-* **[DMA Core Layer](DMA-Core-Layer.md)** - 64-Byte 2D Multi-Planar Extended Descriptor structure and ring buffer logic.
-* **[TLP Layer](TLP-Layer.md)** - PCIe Gen3 x4 256-bit TLP encoding, CQ/CC/RQ/RC decoders, and tag management.
-* **[Control Layer](Control-Layer.md)** - BAR0 Register Space (DMA control, ring base addresses, Version ID, Git commit hash, build timestamp).
-* **[BAR1 Interconnect & IP Cores](Controlling-Other-IP-Cores.md)** - BAR1 AXI-Lite 1x3 Crossbar routing to Video TPG IP (`0x0000`), Audio Pattern Gen (`0x0100`), and User Regs (`0x0200`).
+- [A50T NV12M 實作總結與驗證結果](A50T-NV12M-Implementation-and-Results.md)
+- [A50T 實機測試與除錯日誌](A50T-Hardware-Verification-Log.md)
+- [AV Datapath](AV_DATAPATH_WIKI.md)
+- [仿真、timing 與硬體測試](Verification-and-Simulation.md)
+- [A50T FPGA 建置與 SPI Flash](FPGA-Build-Guide.md)
+- [Linux V4L2 Driver 與測試程式](Linux-V4L2-ALSA-Driver-Guide.md)
 
-### 4. 🐧 Linux Kernel Driver & User Applications
-* **[Linux V4L2 & ALSA Driver Guide](Linux-V4L2-ALSA-Driver-Guide.md)** - Linux kernel driver (`custom_pcie_av.ko`), V4L2 Control Framework (`V4L2_CID_TEST_PATTERN`), ALSA Mixer Controls (`snd_kcontrol`), and Sysfs device attributes.
-* **[Linux Driver Scatterlist & DMA Guide](Linux-Driver-Scatterlist-Guide.md)** - Coherent DMA ring allocations (`dma_alloc_coherent`), videobuf2 sg memory operations, and MSI interrupts.
+### RTL 與協定
 
-### 5. 🧪 Simulation & Verification
-* **[Verification and Simulation](Verification-and-Simulation.md)** - 11 Verilog Testbenches suite (`sim/run_sim.sh`) and verification methodology.
+- [系統總覽](Overview.md)
+- [TLP Layer：pg054 bridge、CQ/CC/RQ/RC](TLP-Layer.md)
+- [DMA Core：SG、128-byte requester、NV12 engine](DMA-Core-Layer.md)
+- [Control Layer：BAR0/BAR1 register map](Control-Layer.md)
+- [BAR1 IP 控制](Controlling-Other-IP-Cores.md)
+- [A50T pg054 移植記錄](A50T_MIGRATION.md)
+- [歷史 A50T TLP Loopback](A50T-TLP-Loopback-Test.md)
+
+### 設計延伸與歷史文件
+
+下列文件描述可參數化架構或未來方向，不代表目前 A50T bring-up 已啟用：
+
+- [Multi-Channel Stream Architecture](Multi-Channel-Stream-Architecture.md)
+- [Multi-Channel Video/Audio Config](Multi-Channel-Video-Audio-Config.md)
+- [Linux Scatterlist Guide](Linux-Driver-Scatterlist-Guide.md)
+- [Low-Latency Slice Capture](Low-Latency-Capture-Guide.md)
+- [System Support Layer](System-Support-Layer.md)
+- [AU15P Feasibility](AU15P_FEASIBILITY.md)
+
+## 目前明確限制
+
+- 只註冊 `/dev/video0`；channel 1–3 停用。
+- 只啟用 V4L2 MMAP + DMA-contiguous planes。
+- ALSA 暫停 bring-up。
+- USERPTR、DMABUF、EXPBUF、GPU P2P 與 slice DMA 尚未列入目前實體通過範圍。
+- 不可把仿真通過或等效吞吐量達標寫成「4K60 實機已通過」。

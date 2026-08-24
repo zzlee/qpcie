@@ -1,57 +1,59 @@
-# Wiki - 透過 Control-Layer 控制其他 FPGA 端 IP Cores 指南
+# BAR1 User-IP 控制指南
 
-在專案最新架構中，系統已實現 **BAR0 / BAR1 雙通道獨立控制架構 (Dual-BAR Architecture)**。
+## 1. 現行 A50T map
 
----
-
-## 1. 架構特色 (Architecture Highlights)
-
-1. **BAR0 (DMA Control Channel)**：
-   - 專用於 DMA 控制暫存器、 Descriptor Ring 指標與中斷暫存器存取。
-2. **BAR1 (User IP Cores Interconnect Channel)**：
-   - 頂層模組 [`custom_pcie_dma_top.v`](file:///home/zzlee/qpcie/rtl/custom_pcie_dma_top.v) 獨立引出 **`m_axil_bar1_*` AXI4-Lite Master 介面**。
-   - 可在 Vivado Block Design 中將此介面直接連接至 **AXI Interconnect / Crossbar IP**，延伸控制多個外設 IP Cores (如 I2C, UART, SPI, GPIO, Timer 等)。
-
----
-
-## 2. 系統接線示意圖 (Block Design Connection)
-
-```
-+------------------------------------+
-|        custom_pcie_dma_top         |
-|                                    |
-|  [BAR1 AXI4-Lite Master]           |
-|  - m_axil_bar1_awaddr              |
-|  - m_axil_bar1_wdata               |          +--------------------------+
-|  - m_axil_bar1_araddr   --------------------> | AXI Interconnect / Cross |
-|  - m_axil_bar1_rdata               |          +----+---------+-----------+
-+------------------------------------+               |         |
-                                                     v         v
-                                                +---------+ +---------+
-                                                | I2C Core| |UART Core|
-                                                +---------+ +---------+
+```text
+Host BAR1
+  ├─ 0x0000–0x0FFF → Xilinx Video TPG
+  ├─ 0x1000–0x1FFF → Audio Pattern Generator
+  └─ 0x2000–0x2FFF → EDID/HPD
 ```
 
----
+`cq_rx_decoder.v` 依 pg054 BAR hit 將 PCIe absolute address 轉成 BAR-relative address，再交給 AXI-Lite crossbar。舊文件中的 I2C/UART/SPI 範例並非目前 A50T map。
 
-## 3. Host 端 Linux 驅動程式存取範例
+## 2. Clock domains
 
-在 Linux 驅動程式中，透過 `pci_iomap()` 分別映射 BAR0 與 BAR1：
+BAR1 crossbar 位於 PCIe `user_clk=125 MHz`。TPG 位於 150 MHz，因此 TPG branch 經 `axi_clock_converter_tpg`；audio/EDID 仍位於 125 MHz domain。
+
+```text
+BAR1 MWr/MRd @125
+        │
+        ├─ audio / EDID @125
+        │
+        └─ AXI Clock Converter → TPG AXI-Lite @150
+```
+
+## 3. TPG registers
+
+| TPG-relative offset | 功能 | 目前值 |
+|---:|---|---|
+| `0x00` | HLS control | `0x81` START + AUTO_RESTART |
+| `0x10` | active rows | 1080 或 2160 |
+| `0x18` | active columns | 1920 或 3840 |
+| `0x20` | pattern ID | color bars = 9 |
+| `0x40` | color format | 1 = YUV444 |
+
+正常使用應透過 V4L2 ioctls，而不是 user space 直接 mmap BAR1。`qpcie_v4l2.c` 會執行 posted-write flush 與 fatal readback validation。
+
+## 4. Mode switch
+
+單純改 TPG dimensions 不足以安全切換模式，因 async FIFO 可能仍有舊解析度半幀。Driver 會先透過 BAR0 `0x80` reset TPG/FIFO，再重新寫 BAR1 TPG registers。
+
+## 5. Kernel example
 
 ```c
-void __iomem *bar0_mmio; /* DMA 控制暫存器 */
-void __iomem *bar1_mmio; /* 外設 IP Cores 暫存器 */
+void __iomem *tpg = qdev->bar1_mmio;
 
-/* 1. 映射 BAR0 與 BAR1 */
-bar0_mmio = pci_iomap(pdev, 0, 0); // BAR0
-bar1_mmio = pci_iomap(pdev, 1, 0); // BAR1
-
-/* 2. 透過 BAR0 啟動 DMA Engine */
-iowrite32(0x00000001, bar0_mmio + 0x00); // Start H2C DMA
-
-/* 3. 透過 BAR1 存取 I2C IP Core (例如 Base 0x0000) */
-iowrite32(0x00000045, bar1_mmio + 0x0000); // I2C Control Register
-
-/* 4. 透過 BAR1 存取 UART IP Core (例如 Base 0x1000) */
-iowrite32('H', bar1_mmio + 0x1000); // UART TX Register
+iowrite32(height,    tpg + 0x10);
+iowrite32(width,     tpg + 0x18);
+iowrite32(pattern,   tpg + 0x20);
+iowrite32(1,         tpg + 0x40); /* YUV444 */
+iowrite32(0x81,      tpg + 0x00); /* start + auto restart */
+ctrl = ioread32(tpg + 0x00);      /* flush/readback */
 ```
+
+必須同時驗證 width、height、pattern、format 與 AUTO_RESTART；`0xDEC0DE1C`/`0xDEADBEEF` 類值代表 decode 錯誤，不得繼續 STREAMON。
+
+## 6. Bring-up 範圍
+
+Audio Pattern Generator 與 EDID/HPD RTL 保留，但本輪實體 qualification 專注 video channel 0；ALSA與外部 HDMI/I2C 功能不列為已驗證交付。

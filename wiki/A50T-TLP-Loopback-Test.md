@@ -1,5 +1,7 @@
 # A50T PCIe TLP Loopback 測試驗證
 
+> **狀態：歷史 bring-up checkpoint。** 此最小設計已被完整 SG DMA/NV12M top 取代；保留作 pg054 初期除錯紀錄。最新結果見 [A50T NV12M 實作總結](A50T-NV12M-Implementation-and-Results.md)。
+
 Artix-7 A50T 最小化 PCIe TLP Loopback 測試，驗證 7-Series native AXI-Stream TLP 格式之 MRd/MWr 正常處理。
 
 ---
@@ -167,4 +169,4 @@ setpci -s <BDF> BAR0.W
 3. MWr posted write 正常接收
 4. 最小化設計 (PCIe IP + TLP loopback) 已驗證 PCIe link + TLP 基礎功能正常
 
-**下一步**：在 TLP loopback 基礎上逐步加入 DMA engine、暫存器空間、V4L2/ALSA 功能。
+**後續狀態**：DMA engine、BAR register、V4L2 NV12M 與 150 MHz video CDC 已加入主設計；ALSA仍停用，4K60等待最新實機 gate。

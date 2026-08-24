@@ -1,260 +1,147 @@
-# QPCIe Multi-Channel Video & Audio Dataflow Wiki (TPG/AudioGen ➔ Host DDR RAM)
+# A50T AV Datapath：TPG YUV444 → NV12M → Host DDR
 
-This document provides a comprehensive end-to-end architectural description of how Video (4K60 4 PPC) and Audio (32-bit AES3) streams are generated, packed, transferred over PCIe Gen3 x4, and delivered into Host DDR RAM buffers for consumption by Linux V4L2 and ALSA applications.
+> 本文描述 commit `2450dcb7` 的目前 A50T 視訊路徑。ALSA 與額外 video channels 在 bring-up 階段停用；歷史 multi-channel/audio 架構不是目前實體交付範圍。
 
----
+## 1. Clock 與資料流
 
-## 📑 Table of Contents
-1. [End-to-End System Dataflow Diagram](#1-end-to-end-system-dataflow-diagram)
-2. [Video Dataflow Pipeline (TPG ➔ Host DDR RAM)](#2-video-dataflow-pipeline-tpg--host-ddr-ram)
-3. [Audio Dataflow Pipeline (AudioGen ➔ Host DDR RAM)](#3-audio-dataflow-pipeline-audiogen--host-ddr-ram)
-4. [Memory Layout & Little-Endian Byte Order](#4-memory-layout--little-endian-byte-order)
-5. [Interrupt & Buffer Completion Lifecycle](#5-interrupt--buffer-completion-lifecycle)
-6. [BAR1 Control & Configuration Path](#6-bar1-control--configuration-path)
+```text
+PCIe user clock 125 MHz
+ ├─ BAR0 DMA/register logic
+ ├─ BAR1 AXI crossbar
+ ├─ NV12 converter / C2H packetizer
+ └─ PCIe requester
 
----
-
-## 1. End-to-End System Dataflow Diagram
-
-```
-==================================================================================================
-                                    FPGA HARDWARE LOGIC (xcku3p)
-==================================================================================================
-
- [Video Source: Xilinx Video TPG]              [Audio Source: Audio Pattern Generator]
- 4 PPC @ 125MHz (4K60 4:4:4)                   32-bit AES3 Subframe Stream @ 48kHz/96kHz
- 96-bit AXI4-Stream (m_axis_video)             32-bit AXI4-Stream (m_axis_audio)
-             │                                             │
-             ▼                                             ▼
- [Pixel Packer (ku3p_pcie_card_top)]           [Direct Channel Mapping]
- Padded to 128-bit AYUV/V444                   Direct 32-bit Subframe Mapping
- [Pix3][Pix2][Pix1][Pix0]                      [Preamble][24-bit PCM][V][U][C][P]
-             │                                             │
-             ▼                                             ▼
- [2D Video Stream Engine]                      [Audio Stream Engine]
- (video_stream_engine.v)                       (audio_stream_engine.v)
- SOF (tuser) & EOL (tlast) Detection           Subframe Counter & Buffer Manager
-             │                                             │
-             └──────────────────────┬──────────────────────┘
-                                    │ Internal AXI-Stream C2H Requests
-                                    ▼
-                     [Custom PCIe DMA Top Controller]
-                     (custom_pcie_dma_top.v)
-                                    │
-                                    ▼
-                     [PCIe RQ Encoder (rq_tx_encoder.v)]
-                     Constructs PCIe 256-bit Memory Write (MWr) TLPs
-                                    │
-                                    ▼
-                     [Xilinx PCIe Core (pcie4_uscale_plus_0)]
-                     4 Lanes @ 8.0 GT/s (Gen3 x4, 3.2 GB/s Effective Throughput)
-                                    │
-====================================│=============================================================
-                                    │ Physical PCIe Transceiver Lanes
-====================================│=============================================================
-                                    ▼
-                               HOST COMPUTER
-==================================================================================================
- [Host PCIe Root Complex & IOMMU System]
- Direct Memory Access (DMA) Memory Write TLPs into Host DDR RAM
-                                    │
-                                    ▼
- [Host DDR RAM Physical Memory Buffers]
- Allocated via dma_alloc_coherent() / vb2-dma-sg
- ├── Video Ring Buffers  : 3840x2160 AYUV / V444 Frames
- └── Audio Ring Buffers  : 32-bit AES3 PCM Subframes
-                                    │
-                                    ▼
- [Linux Kernel Driver Subsystem (custom_pcie_av.ko)]
- MSI Interrupt Handler (qpcie_irq_handler)
- ├── qpcie_v4l2.c : vb2_buffer_done() ➔ Signals Frame Completion to V4L2
- └── qpcie_alsa.c : snd_pcm_period_elapsed() ➔ Signals Audio Period to ALSA
-                                    │
-                                    ▼
- [User Space Applications & Multimedia Tools]
- ├── V4L2 App  : v4l2_test_app / GStreamer / FFmpeg / OBS Studio (via /dev/video0..3)
- └── ALSA App  : alsa_test_app / amixer / PulseAudio / PipeWire (via /dev/snd/pcmC0D0c)
+125 MHz ──MMCM──> 150 MHz video clock
+                     ├─ AXI-Lite clock converter downstream
+                     └─ Xilinx v_tpg_0, 4 PPC, YUV444
 ```
 
----
+完整視訊流：
 
-## 2. Video Dataflow Pipeline (TPG ➔ Host DDR RAM)
-
-### Step 2.1: Video Generation (`v_tpg_0` IP Core)
-- **Clock Domain**: `pcie_user_clk` ($125.0\text{ MHz}$).
-- **Configuration**: `SAMPLES_PER_CLOCK = 4` (4 PPC), `MAX_COLS = 3840`, `MAX_ROWS = 2160`.
-- **Output Interface**: `m_axis_video` (96-bit TDATA, TVALID, TREADY, TLAST, TUSER, TKEEP, TSTRB).
-- **Pixel Output Rate**: $125\text{ MHz} \times 4\text{ pixels/cycle} = \mathbf{500.0\text{ Mpixels/sec}}$, which covers 4K60 ($497.66\text{ Mpixels/sec}$) with zero clock bottlenecks.
-
-### Step 2.2: Top-Level Pixel Packing (`ku3p_pcie_card_top.v`)
-- The 96-bit 4 PPC stream (`tpg_axis_tdata[95:0]`) is padded with Alpha/Dummy bytes (`8'hFF`) to form a **128-bit AXI-Stream** (`s_video_tdata[127:0]`):
-  ```verilog
-  assign s_video_tdata[127:0] = {
-      8'hFF, tpg_axis_tdata[95:72], // [127:96] -> Pixel 3 (32-bit AYUV)
-      8'hFF, tpg_axis_tdata[71:48], // [95:64]  -> Pixel 2 (32-bit AYUV)
-      8'hFF, tpg_axis_tdata[47:24], // [63:32]  -> Pixel 1 (32-bit AYUV)
-      8'hFF, tpg_axis_tdata[23:0]   // [31:0]   -> Pixel 0 (32-bit AYUV)
-  };
-  ```
-
-### Step 2.3: 2D Stream Engine Processing (`video_stream_engine.v`)
-- Detects **SOF (Start of Frame)** via `tuser[0]` and **EOL (End of Line)** via `tlast`.
-- Tracks current horizontal line index and vertical line count.
-- Packs 128-bit stream cycles into **256-bit PCIe MWr payloads** (`c2h_req_data[255:0]`).
-
-### Step 2.4: PCIe TLP Construction & Bus Transmission (`rq_tx_encoder.v` & `pcie4_uscale_plus_0`)
-- Reads destination host physical memory address from active 64-Byte 2D Descriptor.
-- Formats PCIe Gen3 x4 **64-bit Memory Write (MWr64)** Transaction Layer Packets (TLPs).
-- Transmits over PCIe Gen3 x4 lanes ($3.2\text{ GB/s}$ effective bandwidth).
-
----
-
-## 3. Audio Dataflow Pipeline (AudioGen ➔ Host DDR RAM)
-
-### Step 3.1: Subframe Generation (`audio_pattern_gen.v`)
-- **Clock Domain**: `pcie_user_clk` ($125.0\text{ MHz}$).
-- **Sample Rate**: Divider logic (`REG_DIVISOR = 2604`) generates exact $48\text{ kHz}$ or $96\text{ kHz}$ sample ticks.
-- **AES3 Subframe Encoding (32-bit)**:
-  - `Bits [3:0]`   : Preamble (`4'hB` for Block Start, `4'hE` for Left/M, `4'hC` for Right/W).
-  - `Bits [27:4]`  : 24-bit PCM Audio Sample (1kHz Sine Wave, Sawtooth, or 440Hz Tone).
-  - `Bit 28`       : Validity Bit (V = 0).
-  - `Bit 29`       : User Data Bit (U = 0).
-  - `Bit 30`       : Channel Status Bit (C).
-  - `Bit 31`       : Parity Bit (Even Parity P over Bits 4-30).
-
-### Step 3.2: Audio Stream Engine & PCIe Transfer (`audio_stream_engine.v`)
-- Transfers 32-bit subframes directly into Channel 0 Audio C2H DMA engine.
-- Generates PCIe MWr TLPs targeting Host ALSA PCM ring buffers.
-
----
-
-## 4. Memory Layout & Little-Endian Byte Order
-
-When 128-bit video data (`s_video_tdata[127:0]`) is written to Host DDR RAM over Little-Endian PCIe MWr:
-
-```
-Host DDR RAM Memory Address (Increasing Offset ➔)
-┌──────────────────┬──────────────────┬──────────────────┬──────────────────┐
-│ Byte 0 .. 3      │ Byte 4 .. 7      │ Byte 8 .. 11     │ Byte 12 .. 15    │
-├──────────────────┼──────────────────┼──────────────────┼──────────────────┤
-│ Pixel 0 (32-bit) │ Pixel 1 (32-bit) │ Pixel 2 (32-bit) │ Pixel 3 (32-bit) │
-│ [Comp0,1,2,Pad]  │ [Comp0,1,2,Pad]  │ [Comp0,1,2,Pad]  │ [Comp0,1,2,Pad]  │
-└──────────────────┴──────────────────┴──────────────────┴──────────────────┘
+```text
+Host V4L2 controls
+  │
+  ├─ BAR1 @125 MHz → AXI Clock Converter → TPG AXI-Lite @150 MHz
+  │
+  ▼
+Xilinx TPG YUV444, 4 PPC @150 MHz
+  │ 96-bit: 4 × 24-bit pixels
+  ▼
+Top-level pad/pack → 128-bit: 4 × {Y,Cb,Cr,pad}
+  │
+  ▼
+2048-entry xpm_fifo_axis, independent clocks
+  │ 150 MHz write / 125 MHz read
+  ▼
+nv12_capture_engine
+  ├─ Y extraction
+  ├─ 2-line chroma processing
+  ├─ rounded 2×2 Cb/Cr box filter
+  ├─ Y/UV decoupling FIFOs
+  └─ stride-aware address generators
+  │
+  ▼
+128-byte MWr packetizer → rq_tx_encoder → pg054 bridge
+  │
+  ▼
+PCIe Gen2 x4 → Host VB2 DMA-contiguous NV12M planes
 ```
 
-- **Pixel Order**: Pixel 0 $\rightarrow$ Pixel 1 $\rightarrow$ Pixel 2 $\rightarrow$ Pixel 3 are stored **100% sequentially** in memory.
-- **V4L2 Format Compatibility**: Maps directly to standard Linux V4L2 32-bit packed formats:
-  - `V4L2_PIX_FMT_RGB32` / `V4L2_PIX_FMT_BGR32`
-  - `V4L2_PIX_FMT_V444` (YUV 4:4:4 32-bit packed)
+## 2. 為何 TPG 使用 150 MHz
 
----
+4K60 active pixel rate：
 
-## 5. Hardware Video Frame Rate Pacer Mechanism
-
-To deliver exact, zero-jitter frame rates (e.g. 60.00 fps, 59.94 fps, 50.00 fps, 30.00 fps, 24.00 fps), the 2D Video Stream Engine (`video_stream_engine.v`) integrates an active **Hardware Frame Rate Pacer** module.
-
-### 5.1 Hardware Calculation & Pacing Formula
-The total clock duration of each frame is governed by the 32-bit register `frame_interval_clks` (`REG_FRAME_INTERVAL_CLKS` at BAR1 Offset `0x0030`):
-
-$$\text{REG\_FRAME\_INTERVAL\_CLKS} = \frac{F_{clk}}{\text{Target FPS}}$$
-
-At FPGA Clock $F_{clk} = 125.0\text{ MHz}$, exact clock count values are configured as:
-
-| Target Video Standard | Target FPS | `REG_FRAME_INTERVAL_CLKS` (125MHz) | Accuracy |
-| :--- | :---: | :---: | :---: |
-| **4K / 1080p Standard 60Hz** | **60.000 fps** | **`2,083,333`** | **99.999%** |
-| **Broadcast NTSC 60Hz** | **59.940 fps** | **`2,085,417`** | **99.999%** |
-| **European PAL 50Hz** | **50.000 fps** | **`2,500,000`** | **100.000%** |
-| **Standard 30Hz** | **30.000 fps** | **`4,166,667`** | **100.000%** |
-| **Broadcast NTSC 30Hz** | **29.970 fps** | **`4,170,833`** | **99.999%** |
-| **Cinema 24Hz** | **24.000 fps** | **`5,208,333`** | **100.000%** |
-
-### 5.2 RTL Finite State Machine (FSM) Implementation (`video_stream_engine.v`)
-- **Timer Counter (`pacer_clk_cnt`)**: Resets to zero on Frame Start (`SOF`), counts up every clock cycle ($125\text{ MHz}$).
-- **State Transition (`C2H_SEND` ➔ `C2H_PACE` ➔ `IDLE`)**:
-  - Upon completing line transfers of a frame (`curr_line + 1 == line_count`), the state machine checks if `pacer_clk_cnt < frame_interval_clks`.
-  - If true, it transitions to `C2H_PACE` to hold `video_frame_done` until `pacer_clk_cnt >= frame_interval_clks`.
-  - This guarantees microsecond-accurate, zero-jitter frame spacing regardless of TPG burst processing speed!
-
-```
- FSM States:
- [IDLE] ──► [C2H_LINE (Collect Line)] ──► [C2H_SEND (PCIe MWr)] ──► [C2H_PACE (Wait Clks)] ──► [IDLE (Frame Done)]
+```text
+3840 × 2160 × 60 = 497.664 Mpixel/s
 ```
 
-### 5.3 Driver & V4L2 Control API Integration
-- **V4L2 Standard `VIDIOC_S_PARM` ioctl**:
-  Calling `v4l2-ctl -d /dev/video0 --set-parm=60` calculates `target_clks = 125000000 / FPS` and writes directly to BAR1 `0x0030`.
-- **Sysfs Node (`tpg_fps`)**:
-  Reading `/sys/bus/pci/devices/.../tpg_fps` reports current FPS (e.g. `60 fps (Interval Clks: 2083333)`).
-  Writing `echo 30 > /sys/bus/pci/devices/.../tpg_fps` updates pacing in real time.
+4 PPC @125 MHz 的理論值僅 500 Mpixel/s，幾乎沒有 backpressure/blanking/控制餘裕。實機只達 683.68 MiB/s。改成 150 MHz 後 source 上限為 600 Mpixel/s，實測 NV12 payload 提升至 713.47 MiB/s。
 
----
+`video_clock_gen.v` 以 MMCM 產生 150 MHz。TPG control 經 Xilinx AXI Clock Converter；video payload 經 2048-entry XPM asynchronous AXI-Stream FIFO 回到 PCIe 125 MHz domain。
 
-## 6. Interrupt & Buffer Completion Lifecycle
+Reset 採同步解除；BAR0 `VIDEO_CTRL(0x80).bit0` 經兩級 synchronizer 後，同步 reset TPG 與 video CDC FIFO，供 mode switch 清除舊半幀。
 
+## 3. TPG 格式與 pixel packing
+
+TPG 設定：
+
+- `SAMPLES_PER_CLOCK=4`。
+- `MAX_COLS=3840`。
+- `MAX_ROWS=2160`。
+- `colorFormat=1`：`XVIDC_CSF_YCRCB_444`。
+- `tuser[0]`：SOF。
+- `tlast`：EOL。
+
+Top-level 把四個 24-bit YUV444 pixels 補成四個 32-bit pixels。`nv12_capture_engine` 看到的每 pixel byte order 為：
+
+```text
+byte 0 = Y
+byte 1 = Cb
+byte 2 = Cr
+byte 3 = padding
 ```
- FPGA Hardware                                 Linux Kernel Driver (`custom_pcie_av.ko`)
- ─────────────                                 ──────────────────────────────────────────
- DMA Write Finished ──► MSI Interrupt ───────► qpcie_irq_handler()
-                                                     │
-                                                     ├──► qpcie_v4l2_irq_handler()
-                                                     │    ├── Updates vb2_buffer timestamp
-                                                     │    └── Calls vb2_buffer_done(VB2_BUF_STATE_DONE)
-                                                     │        └── Wakes up select()/poll() in V4L2 App
-                                                     │
-                                                     └──► qpcie_alsa_irq_handler()
-                                                          ├── Updates PCM period position
-                                                          └── Calls snd_pcm_period_elapsed()
-                                                              └── Wakes up read() in ALSA App
+
+## 4. YUV444 → NV12M
+
+### 4.1 Y plane
+
+每個 input pixel 的 Y byte 直接依序寫入 Y plane。四個 input beats（16 pixels）組成一個 128-bit Y FIFO word。
+
+### 4.2 UV plane
+
+Even row 的水平 chroma sums 存進 `960×36` block RAM。Odd row 到達時，對同一 2×2 pixel block 計算：
+
+```text
+Cb_out = (Cb00 + Cb01 + Cb10 + Cb11 + 2) >> 2
+Cr_out = (Cr00 + Cr01 + Cr10 + Cr11 + 2) >> 2
 ```
 
----
+四捨五入後輸出 interleaved `Cb,Cr` bytes。Y 與 UV 各有一個 `128×128-bit` FIFO，讓 converter 每 clock 接收一個 4-PPC beat，同時讓 PCIe packetizer 獨立 drain。
 
-## 7. BAR1 Control & Configuration Path
+## 5. PCIe output
 
-User space applications configure hardware IP cores without direct MMIO by calling standard Linux kernel subsystem frameworks:
+每個 MWr payload 為 128 bytes：
 
-- **Video TPG Control Path**:
-  - `v4l2-ctl --set-ctrl=test_pattern=3` ➔ `ioctl(VIDIOC_S_CTRL)` ➔ `qpcie_s_ctrl()` ➔ `iowrite32()` to BAR1 `0x0000 + 0x0020` (TPG Pattern ID).
-- **Video Frame Pacer Control Path**:
-  - `v4l2-ctl --set-parm=60` ➔ `ioctl(VIDIOC_S_PARM)` ➔ `qpcie_vidioc_s_parm()` ➔ `iowrite32()` to BAR1 `0x0000 + 0x0030` (Frame Pacer Clks).
-- **Audio AudGen Control Path**:
-  - `amixer set 'Audio Pattern' '1kHz Sine Wave'` ➔ `snd_ctl_elem_write` ➔ `qpcie_alsa_pattern_put()` ➔ `iowrite32()` to BAR1 `0x0100 + 0x0000` (AudGen Ctrl).
+```text
+32 DW = 8 × 128-bit AXI payload beats
+```
 
----
+packetizer 只在 FIFO 至少有完整 8 beats 時啟動，避免 underflow。Y/UV 都 ready 時使用 round-robin；各 plane 有獨立 line、offset、address counter，支援 `stride >= width`。Requester 在整個 TLP 期間鎖定 owner，並遵守 RQ backpressure。
 
-## 8. Advanced Telemetry, PTS & Frame Dropper Architecture
+## 6. NV12M memory layout
 
-### 8.1 Hardware AV Sync PTS Timestamping (`global_timer.v`)
-- **64-bit Master Timer**: Driven by `pcie_user_clk` ($125.0\text{ MHz}$, 8 ns resolution).
-- **SOF & Block Latching**:
-  - **Video**: Latches `global_timestamp` on Video SOF (`tuser[0] == 1`).
-  - **Audio**: Latches `global_timestamp` on AES3 Block Start Preamble (`4'hB`).
-- **Sysfs Monitoring**: `/sys/bus/pci/devices/.../timestamp` outputs real-time AV sync delta ($V_{pts} - A_{pts}$) in nanoseconds and milliseconds.
+### 1080p
 
-### 8.2 Hardware Automatic Frame Dropper & Ring Overflow Protection
-- **Ring Full Detection**: When Host Ring Buffer is full (`ring_full == 1`), `video_stream_engine.v` enters `C2H_DROP` state.
-- **Silent Drain & Counter**: Drains stream without issuing PCIe MWr requests, preventing AXI4-Stream pipeline freeze, and increments BAR0 `0x68` (`REG_FRAME_DROP_COUNT`).
+```text
+Y:  1920 × 1080 = 2,073,600 bytes
+UV: 1920 ×  540 = 1,036,800 bytes
+Total:             3,110,400 bytes
+```
 
-### 8.3 Real-time PCIe Telemetry Profiler (`dma_telemetry.v`)
-- **Throughput Profiler**: Counts total C2H MWr Bytes per 1-second interval (`REG_BANDWIDTH_BPS` at BAR0 `0x6C`).
-- **ACK Latency Profiler**: Measures peak PCIe MWr ACK round-trip latency in nanoseconds (`REG_LATENCY_MAX_NS` at BAR0 `0x70`).
+### 4K
 
-### 8.4 GPU Direct / DMABUF P2P Zero-Copy Pipeline (`qpcie_dmabuf.c`)
-- **V4L2 Exporter API (`VIDIOC_EXPBUF`)**: Exports 4K60 capture buffers as anonymous DMA-BUF file descriptors (`expbuf.fd`).
-- **Peer-to-Peer PCIe DMA**: Passes `expbuf.fd` directly to NVIDIA CUDA (`cuMemImportExternalMemory`) or VA-API hardware video encoders.
-- **Zero CPU Overhead**: Achieve 3.2 GB/s 4K60 video streaming with 0% CPU RAM copy overhead!
+```text
+Y:  3840 × 2160 = 8,294,400 bytes
+UV: 3840 × 1080 = 4,147,200 bytes
+Total:            12,441,600 bytes
+```
 
-### 8.5 Dynamic EDID Simulation & HDMI Hot-Plug Detect (HPD) (`hdmi_edid_ram.v`)
-- **256-Byte Dual-Port EDID RAM**: Accessible via BAR1 AXI4-Lite (Offset `0x0300` to `0x03FF`) and I2C DDC Slave (`0xA0`/`0x50`).
-- **HDMI HPD Pin Control**: Register bit at BAR1 `0x0034` controls physical HDMI HPD pin.
-- **Sysfs Dynamic Update**: Writing to `/sys/bus/pci/devices/.../edid` pulses HPD low, updates EDID RAM, and pulses HPD high to trigger HDMI resolution re-enumeration without unbinding driver.
+V4L2 format 為 `V4L2_PIX_FMT_NV12M`：Y、UV 是兩個獨立 DMA planes，不是單一 contiguous allocation 的 NV12。
 
-### 8.7 Hardware Video Pacer Bypass & External Sync Control (`pacer_enable`)
-- **BAR0 Register Offset `0x74` (`REG_PACER_CTRL`)**:
-  - Bit 0 (`pacer_enable`): `1` = Internal Clock Pacer Mode (for TPG/Generator testing at fixed 60FPS), `0` = External Sync Mode (bypasses clock pacer; frame flow is controlled 100% natively by external HDMI/SDI video source `s_axis_video_tvalid`/`tuser`).
-- **Sysfs Control**:
-  - Read: `cat /sys/bus/pci/devices/.../pacer_enable` -> `1 (Enabled)` or `0 (Disabled)`
-  - Write: `echo 0 > /sys/bus/pci/devices/.../pacer_enable` (Switch to External Signal Mode)
-- **User App Option**:
-  - `./v4l2_test_app --pacer 0` (Bypasses pacer for external live video source).
+## 7. Buffer completion 與 pacing
+
+- Descriptor 接受後，engine 等待下一個 SOF。
+- frontend 完成後仍需等待 Y/UV FIFO 與目前 MWr 全部 drain。
+- 完整 frame DMA 完成後產生 IRQ，driver 設 timestamp/sequence 並呼叫 `vb2_buffer_done()`。
+- paced mode 使用 125 MHz domain 的 `2,083,333 clocks/frame`。
+- benchmark mode 透過 private pacer control 關閉等待，但不改解析度、格式或 TLP 大小。
+- STREAMOFF 先關 pacer並等待 hardware idle、head=tail，再停止 descriptor fetch 與回收 buffers。
+
+## 8. 已驗證結果與邊界
+
+- 1080p60 correctness：實機通過，彩條正確。
+- 150 MHz checkpoint：實機 713.47 MiB/s，data errors 0。
+- 4K performance simulation：16.589 ms/frame、random RQ ready、input stalls 0。
+- 最新 4K V4L2 checkpoint：尚待實機 600-frame gate。
+
+Audio pattern generator、ALSA、channel 1–3、DMABUF/GPU P2P 與 slice DMA 仍保留於專案，但目前不應列為已驗證功能。

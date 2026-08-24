@@ -1,79 +1,73 @@
-# Wiki - 控制與暫存器層 (Control Layer & Dual-BAR Architecture)
+# A50T Control Layer：BAR0 / BAR1
 
-本專案採用 **Dual-BAR (雙 BAR) 獨立映射架構**，將 **PCIe DMA 控制通道** 與 **User IP Core 控制通道** 在硬體規格層級進行完全隔離與解耦：
+本文件以 commit `2450dcb7` 的實際 register decode 為準。
 
----
+## 1. BAR hit 與 address normalization
 
-## 1. Dual-BAR 記憶體空間重新規劃 (Dual-BAR Mapping)
+7-Series core 提供 `m_axis_rx_tuser[9:2]` one-hot BAR hit：
 
-```
-                       Host PCIe BAR Space
-                               |
-         +---------------------+---------------------+
-         | (bar_id == 0)                             | (bar_id == 1)
-         v                                           v
-+------------------+                       +-------------------+
-|  PCIe BAR 0      |                       |  PCIe BAR 1       |
-|  (DMA Control)   |                       |  (User IP Cores)  |
-+--------+---------+                       +---------+---------+
-         |                                           |
-         v                                           v
-+------------------+                       +-------------------+
-| axil_reg_space.v |                       | Top AXI4-Lite     |
-| (DMA Reg Block)  |                       | Master Interface  |
-+------------------+                       +---------+---------+
-                                                     |
-                                                     v
-                                           +-------------------+
-                                           | AXI Interconnect  |
-                                           | / Crossbar IP     |
-                                           +----+----+----+----+
-                                                |    |    |
-                                                v    v    v
-                                              I2C  UART GPIO ...
-```
+- `tuser[2]`：BAR0 DMA/register space。
+- `tuser[3]`：BAR1 user-IP space。
 
-### 1.1 BAR 職責區分
-- **BAR0 (DMA Control Register Block)**：
-  - **解碼位址**：`bar_id == 3'b000` (BAR0)
-  - **對接模組**：內部 [`axil_reg_space.v`](file:///home/zzlee/qpcie/rtl/axil_reg_space.v)
-  - **功能**：設定 DMA 環形佇列位址、Tail Pointer、啟動引擎與讀取中斷狀態。
+`cq_rx_decoder.v` 會先把 host absolute PCIe address 轉成 BAR-relative offset，再送給各 AXI-Lite slave/master。這避免 BAR1 peripheral 收到含 BAR base 的錯誤地址。
 
-- **BAR1 (User IP Cores Interconnect)**：
-  - **解碼位址**：`bar_id == 3'b001` (BAR1)
-  - **對接端口**：頂層 [`custom_pcie_dma_top.v`](file:///home/zzlee/qpcie/rtl/custom_pcie_dma_top.v) 的 **`m_axil_bar1_*` AXI4-Lite Master 介面**。
-  - **功能**：直接透過 AXI Interconnect / Crossbar 存取外接的 IP Cores（例如 I2C, UART, SPI, Timer, System GPIO）。
+## 2. BAR0 register map
 
----
+| Offset | 名稱 | 權限 | 目前用途 |
+|---:|---|:---:|---|
+| `0x00` | `DMA_CTRL` | R/W | bit0：SG/video DMA run；bit1：audio start（audio 目前停用） |
+| `0x04` | `DMA_STATUS` | R | bit0 video busy、bit1 audio busy、bit2 video done、bit3 audio done、bit10 SG H2C busy、bit11 SG C2H busy |
+| `0x08` | `H2C_RING_ADDR_L` | R/W | descriptor ring base `[31:0]` |
+| `0x0C` | `H2C_RING_ADDR_H` | R/W | descriptor ring base `[63:32]` |
+| `0x10` | `H2C_RING_CFG` | R/W | `[15:0] ring_size`、`[31:16] tail` |
+| `0x14` | `C2H_RING_ADDR_L` | R/W | C2H ring base `[31:0]` |
+| `0x18` | `C2H_RING_ADDR_H` | R/W | C2H ring base `[63:32]` |
+| `0x1C` | `C2H_RING_CFG` | R/W | `[15:0] ring_size`、`[31:16] tail` |
+| `0x20` | `IRQ_CTRL` | R/W | bit0：legacy H2C / SG-H2C 或 video-frame-done enable；bit1：legacy C2H / SG-C2H 或 audio-done enable |
+| `0x24` | `IRQ_STATUS` | W1C/R | bit0：SG H2C 或 video completion；bit1：SG C2H 或 audio completion |
+| `0x28` | `COMPLETED_H2C` | R | retained H2C completion count |
+| `0x2C` | `COMPLETED_C2H` | R | retained C2H completion count |
+| `0x30` | `VERSION_ID` | R | `0x02010001` |
+| `0x34` | `GIT_COMMIT_HASH` | R | build 時注入；最新 `0x2450DCB7` |
+| `0x38` | `BUILD_TIMESTAMP` | R | build date |
+| `0x3C` | `HARDWARE_CAPS` | R | `0x0004040F` |
+| `0x40` | `H2C_RING_PTR` | R | `[15:0] head`、`[31:16] tail` |
+| `0x44` | `C2H_RING_PTR` | R | `[15:0] head`、`[31:16] tail` |
+| `0x50/54` | `GLOBAL_TIMESTAMP` | R | 64-bit 125 MHz global timer |
+| `0x58/5C` | `LAST_VIDEO_PTS` | R | 64-bit video SOF timestamp |
+| `0x60/64` | `LAST_AUDIO_PTS` | R | 64-bit audio timestamp |
+| `0x68` | `DEBUG_LAST_WDATA` | R | 最近 BAR0 write data |
+| `0x6C` | `DEBUG_LAST_WADDR` | R | 最近 BAR0 write offset |
+| `0x70` | `LATENCY_MAX_NS` | R | telemetry peak request latency |
+| `0x74` | `PACER_CTRL` | R/W | bit0：1=60 FPS pacer，0=uncapped benchmark |
+| `0x78` | `SLICE_HEIGHT` | R/W | 0=full-frame IRQ；slice mode 目前未驗證 |
+| `0x7C` | `VIDEO_ERRORS` | R | NV12 AXI-video framing/configuration error counter |
+| `0x80` | `VIDEO_CTRL` | R/W | bit0：reset TPG 與 video CDC FIFO |
 
-## 2. BAR0 AXI4-Lite 暫存器映射表 (BAR0 Reg Map)
+> 歷史文件曾把 `0x68/0x6C/0x7C` 標成 frame-drop/bandwidth；上述表格才是目前 RTL 實際 decode。
 
-| 暫存器名稱 (Register) | Offset 位址 | 存取權限 | 位元欄位說明 (Bit Fields) |
-| :--- | :--- | :--- | :--- |
-| **`DMA_CTRL`** | `0x00` | R/W | Bit 0: `h2c_start`, Bit 1: `c2h_start`, Bit 31: `sw_reset` |
-| **`DMA_STATUS`** | `0x04` | R | Bit 0: `h2c_busy`, Bit 1: `c2h_busy`, Bit 2: `h2c_done`, Bit 3: `c2h_done` |
-| **`H2C_RING_ADDR_L`** | `0x08` | R/W | Host 側 H2C Descriptor Ring 64-bit 基底位址 [31:0] |
-| **`H2C_RING_ADDR_H`** | `0x0C` | R/W | Host 側 H2C Descriptor Ring 64-bit 基底位址 [63:32] |
-| **`H2C_RING_CFG`** | `0x10` | R/W | Bits [15:0]: `ring_size`, Bits [31:16]: `tail_ptr` |
-| **`C2H_RING_ADDR_L`** | `0x14` | R/W | Host 側 C2H Descriptor Ring 64-bit 基底位址 [31:0] |
-| **`C2H_RING_ADDR_H`** | `0x18` | R/W | Host 側 C2H Descriptor Ring 64-bit 基底位址 [63:32] |
-| **`C2H_RING_CFG`** | `0x1C` | R/W | Bits [15:0]: `ring_size`, Bits [31:16]: `tail_ptr` |
-| **`IRQ_CTRL`** | `0x20` | R/W | Bit 0: `irq_enable`, Bit 1: `msi_mode` |
-| **`IRQ_STATUS`** | `0x24` | R/W1C | Bit 0: `h2c_irq`, Bit 1: `c2h_irq` |
-| **`COMPLETED_H2C_COUNT`** | `0x28` | R | 硬體自動累加之 H2C Descriptor 完成總數 |
-| **`COMPLETED_C2H_COUNT`** | `0x2C` | R | 硬體自動累加之 C2H Descriptor 完成總數 |
-| **`REG_VERSION_ID`** | `0x30` | R | 硬體版本號 (Bits[31:24]=Major, [23:16]=Minor, [15:8]=Patch, [7:0]=Variant) |
-| **`REG_GIT_COMMIT_HASH`** | `0x34` | R | 韌體 Git Commit Hash (Lower 32-bit: `0x01D6A9C5`) |
-| **`REG_BUILD_TIMESTAMP`** | `0x38` | R | 韌體建置日期時間戳記 (BCD Date: `0x20260812`) |
-| **`REG_HARDWARE_CAPS`** | `0x3C` | R | 硬體規格 Flag (Bits[23:16]=Audio通道數, [15:8]=Video通道數, [3:0]=功能選配) |
+## 3. BAR1 map
 
----
+| Range | IP | 說明 |
+|---:|---|---|
+| `0x0000–0x0FFF` | Xilinx Video TPG | 透過 AXI Clock Converter 進入 150 MHz domain |
+| `0x1000–0x1FFF` | Audio Pattern Generator | RTL 存在，ALSA bring-up 停用 |
+| `0x2000–0x2FFF` | EDID/HPD register/RAM | 實驗性 peripheral |
 
-## 3. BAR1 User IP Cores 記憶體規劃 (BAR1 Memory Map)
+TPG 重要 offsets：
 
-在 Host 側存取 PCIe BAR1 時，位址將直接映射至 FPGA 側的 AXI Interconnect：
+| Offset | 欄位 |
+|---:|---|
+| `0x00` | AP control；`0x81` = START + AUTO_RESTART |
+| `0x10` | active rows / height |
+| `0x18` | active columns / width |
+| `0x20` | pattern ID |
+| `0x40` | color format；目前必須為 1 (YUV444) |
 
-- `BAR1 + 0x0000_0000` - `0x0000_0FFF` ➔ **I2C Core**
-- `BAR1 + 0x0000_1000` - `0x0000_1FFF` ➔ **UART Core**
-- `BAR1 + 0x0000_2000` - `0x0000_2FFF` ➔ **SPI Core**
-- `BAR1 + 0x0000_3000` - `0x0000_3FFF` ➔ **System GPIO / Timer Core**
+## 4. Mode switch reset
+
+Driver 在 `S_FMT` 或 test-pattern 變更前寫 `VIDEO_CTRL.bit0=1`，維持至少 1 ms，再清為 0。此 request 從 125 MHz 經兩級 ASYNC_REG synchronizer 進入 150 MHz，並共同 reset TPG 與 XPM AXIS FIFO。解除 reset 後 driver 重新設定 TPG並驗證 width、height、pattern、format 與 AUTO_RESTART。
+
+## 5. Retained register 注意事項
+
+FPGA 不會因 Linux module reload 自動 reset head/completion counters。driver 必須從 `0x40/0x44` 讀出 retained head，以它作為新 descriptor/tail 起點；不可假設 head 為 0。

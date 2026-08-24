@@ -1,54 +1,78 @@
-# Wiki - TLP 封包解析與組裝層 (TLP Layer)
+# A50T TLP Layer：pg054 Bridge 與 128-byte Requester
 
-TLP Layer 負責 PCIe AXI4-Stream 介面（256-bit 位寬）與內部邏輯訊號間的轉譯與處理。
+## 1. 7-Series boundary
 
----
+A50T `pcie_7x_0` 提供 128-bit RX/TX AXI-Stream，而共用 DMA core 使用內部分離的 CQ/CC/RQ/RC signals。`pcie_7x_axi_bridge.v` 負責：
 
-## 1. `pcie_tag_manager.v` (PCIe Tag 管理器)
-- **檔案位置**：[`rtl/pcie_tag_manager.v`](file:///home/zzlee/qpcie/rtl/pcie_tag_manager.v)
-- **主要用途**：
-  - PCIe 為非同步 Read 機制，FPGA 發起 Non-Posted Memory Read (MRd) 請求時需指派獨立 Tag。
-  - 此模組動態管理可用的 Tag 池（預設保留 Tag 0 供 Descriptor Fetch 使用，Tag 1~63 供 DMA 資料傳輸使用）。
-  - 支援同時分配 (`alloc_req`) 與回收 (`free_req`) 動作，具備溢位與 Full 狀態保護。
+- RX TLP type/header decode。
+- BAR hit sideband forwarding。
+- TX arbitration/adaptation。
+- pg054 byte ordering conversion。
+- 4-DW MWr 跨 beat payload handling。
+- CplD header field extraction。
 
----
+byte swap 只在 bridge boundary 進行，避免 driver/核心 RTL 出現重複 workaround。
 
-## 2. `cq_rx_decoder.v` (CQ RX 解碼模組)
-- **檔案位置**：[`rtl/cq_rx_decoder.v`](file:///home/zzlee/qpcie/rtl/cq_rx_decoder.v)
-- **主要用途**：
-  - 監聽並解析 PCIe IP 送入的 CQ (Completer Request) 封包。
-  - 當 Host 發起對 FPGA BAR0 的存取時，判斷 TLP 類型：
-    - **Memory Write (MWr)**：轉譯為 AXI4-Lite Write Transaction（`awaddr`, `wdata`）寫入暫存器。
-    - **Memory Read (MRd)**：轉譯為 AXI4-Lite Read Transaction（`araddr`），並透過 Sideband 訊號通知 `cc_tx_encoder` 準備組裝 Completion 封包。
+## 2. CQ / BAR requests
 
----
+`cq_rx_decoder.v` 支援 host BAR MRd/MWr：
 
-## 3. `cc_tx_encoder.v` (CC TX 組包模組)
-- **檔案位置**：[`rtl/cc_tx_encoder.v`](file:///home/zzlee/qpcie/rtl/cc_tx_encoder.v)
-- **主要用途**：
-  - 當 Host 讀取 FPGA 控制暫存器時，`cc_tx_encoder` 接收 AXI4-Lite 讀取回應資料 (`rdata`)。
-  - 將資料與解碼資訊（Tag, Requester ID, Lower Address, Byte Count）組裝成符合 PCIe Spec 的 CplD (Completion with Data) TLP。
-  - 透過 256-bit CC 介面將回應封包傳送回 PCIe IP。
+- BAR0 → `axil_reg_space.v`。
+- BAR1 → top-level AXI-Lite crossbar。
+- 依 BAR hit 正規化 absolute address 為 relative offset。
+- AXI read `rvalid` 或 write `bvalid` 出現後立即回 IDLE/ready，支援 back-to-back MMIO。
 
----
+64-bit host 的 4-DW MWr beat 0 是 address header，beat 1 才是 32-bit payload；bridge 會正確重組。
 
-## 4. `rq_tx_encoder.v` (RQ TX 發送仲裁與組包模組)
-- **檔案位置**：[`rtl/rq_tx_encoder.v`](file:///home/zzlee/qpcie/rtl/rq_tx_encoder.v)
-- **主要用途**：
-  - 負責將 FPGA 發起的 DMA 請求與中斷訊息組裝成 Request TLP。
-  - 內建 4 路固定優先權仲裁器（Arbitrator）：
-    1. **Priority 1 (最高)**：中斷訊息 (Msg TLP)
-    2. **Priority 2**：Descriptor 抓取讀取請求 (MRd TLP)
-    3. **Priority 3**：H2C DMA 資料讀取請求 (MRd TLP)
-    4. **Priority 4**：C2H DMA 資料寫入請求 (MWr TLP)
-  - 處理多 Beat 封包 (Payload Data Stream) 的發送控制。
+## 3. CC / BAR read completion
 
----
+`cc_tx_encoder.v` 使用 Requester ID、Tag、Lower Address、Byte Count 與 AXI read data 組出 CplD。BAR readback 實機已驗證 version `0x02010001`、caps `0x0004040F`。
 
-## 5. `rc_rx_decoder.v` (RC RX 解碼與分流模組)
-- **檔案位置**：[`rtl/rc_rx_decoder.v`](file:///home/zzlee/qpcie/rtl/rc_rx_decoder.v)
-- **主要用途**：
-  - 接收 Host 回應的 RC (Requester Completion) 封包。
-  - 解析 DW1 標頭中的 **Tag 欄位** 進行精確分流：
-    - **Tag == 8'h00**：資料判定為 Descriptor 內容，剔除 96-bit RC 標頭後路由至 `desc_fetch_engine`。
-    - **Tag > 8'h00**：資料判定為 H2C DMA payload，路由至 H2C Data FIFO，並同時向 `pcie_tag_manager` 發起 Tag 回收通知。
+## 4. RQ requester
+
+`rq_tx_encoder.v` 接收：
+
+- Descriptor MRd。
+- H2C data MRd。
+- C2H SG/video MWr。
+- MSI request。
+
+C2H MWr 支援 multi-beat payload streaming；目前驗證值為 128 bytes：
+
+```text
+32 DW / request
+8 × 128-bit payload beats
+```
+
+`c2h_req_data_ready` 形成真正的 beat-level backpressure。仲裁 owner 在整個 TLP 完成前鎖定，不能在 payload 中途切換 SG/video/audio source。
+
+## 5. RC completion decode
+
+Bridge 完成 pg054 AXI byte ordering 正規化後，raw Cpl/CplD header 欄位為：
+
+```verilog
+lower_addr = rx_data[70:64];
+byte_count = rx_data[43:32];
+status     = rx_data[47:45];
+tag        = rx_data[79:72];
+requester  = rx_data[95:80];
+```
+
+Bridge 再把這些欄位 repack 到 internal RC sideband；下游 `rc_rx_decoder` 不應重新套用 raw pg054 slices。
+
+- Tag 0：descriptor completion。
+- 其他 Tag：H2C payload/tag recycle。
+
+錯誤切片曾造成 descriptor completion 永遠無法到達 fetch engine；此問題已仿真及實機修正。
+
+## 6. 4 KiB boundary
+
+PCIe request 不得跨越 4 KiB boundary。SG engine 會依目前 address 計算 boundary 剩餘 bytes 並縮短 request；測試包含 `64B + 128B + 64B` split。
+
+## 7. 實測效益
+
+舊 16-byte MWr：237.71 MiB/s、15.578M requests/s。
+
+新 128-byte MWr：713.47 MiB/s、5.845M requests/s。
+
+提升來自較低 header/ack/arbiter overhead，而非更換 PCIe link；Gen2 x4 原本就足以承載單路 4K60 NV12 payload。

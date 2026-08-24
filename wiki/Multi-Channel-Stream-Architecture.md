@@ -1,5 +1,7 @@
 # Wiki - 多路 2D Video 及 AES3 Audio AXI4-Stream 原生架構
 
+> **狀態：參數化架構/後續規劃。** 目前 A50T bring-up 只例化並驗證 video channel 0 的 `nv12_capture_engine`；channel 1–3 與 ALSA 停用。本文的多通道 generate 架構不可解讀為多通道實機已通過。現況見 [A50T NV12M 實作總結](A50T-NV12M-Implementation-and-Results.md)。
+
 本專案已成功重構頂層架構，**完全取消原本的 AXI Memory Mapped (AXI MM) 記憶體對接方式**，改採用 **原生 AXI4-Stream 影音串流 (Native AXI4-Stream Video & AES3 Audio)**。
 
 並且透過 Verilog `parameter` 與 `generate` 迴圈控制硬體例化，實現任意路數之 Multi-Channel 彈性配置。

@@ -1,5 +1,7 @@
 # ⏱️ 低延遲採集架構 (Sub-5ms Latency) 與 PCIe 中斷技術 Wiki
 
+> **狀態：未驗證的延伸設計。** 現行 A50T capture 在 STREAMON 寫入 `SLICE_HEIGHT=0`，使用 full-frame IRQ；本文不代表目前已量測到 <5 ms。
+
 本文件介紹如何在 FPGA + Linux 驅動架構下，實現 **5ms 以下的超低延遲視訊採集與傳輸**。
 
 ---

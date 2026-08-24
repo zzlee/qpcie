@@ -1,100 +1,134 @@
-# Wiki - Artix-7 A50T 實機測試進度與硬體驗證日誌 (A50T Hardware Verification Log)
+# A50T 實機測試進度與硬體驗證日誌
 
-本文件完整記錄 **QPCIe Artix-7 A50T 多通道 PCIe DMA 擷取卡** 在實體硬體（ARM64 Jetson Orin NX 主機）上的測試進度、除錯歷程、硬體協定修正與 4096-Byte 端到端仿真驗證成果。
+本文件記錄 QPCIe Artix-7 A50T 在 Jetson Orin NX 上的實體 bring-up、失敗現象、修正方式與量測數據。最新整體狀態請搭配 [A50T NV12M 實作總結](A50T-NV12M-Implementation-and-Results.md)。
 
----
+## 1. 實機驗證矩陣
 
-## 📅 測試里程碑與驗證狀態總覽
+| 項目 | 狀態 | 實機結果 |
+|---|---:|---|
+| PCIe Gen2 x4 / `12AB:E380` | ✅ | Link up、枚舉正常 |
+| BAR0 version/caps | ✅ | `0x02010001` / `0x0004040F` |
+| BAR0/BAR1 MMIO | ✅ | 4-DW MWr/MRd 與 relative BAR decode 正確 |
+| SG C2H/H2C | ✅ | 4 pages × 4096 bytes，完整 golden pattern |
+| 1080p60 paced NV12M | ✅ | 60/60、59.394 FPS、sequence 0..59、彩條正確 |
+| 128-byte requester | ✅ | SG 與 video benchmark 實機通過 |
+| 150 MHz TPG + CDC | ✅ | 240.526 FPS / 713.47 MiB/s / data errors 0 |
+| 最新 1080p/4K mode switch | ⏳ | commit `2450dcb7` 等待實機 |
+| 4K60 600 frames | ⏳ | 尚待直接實機驗證 |
 
-| 驗證項目 | 狀態 | 驗證環境 | 成果與細節 |
-| :--- | :---: | :---: | :--- |
-| **1. PCIe Link Up & 枚舉** | 🟢 **100% PASS** | 實機 (Jetson Orin NX) | PCIe Gen2 x4 鏈路正常建立，Vendor ID `0x12AB`, Device ID `0xE380` |
-| **2. BAR0/BAR1 128-bit MMIO 讀寫** | 🟢 **100% PASS** | 實機 (Jetson Orin NX) | 64-bit 4-DW MWr/MRd 正確解碼，暫存器寫入回讀 `0x12345678` 100% 正確 |
-| **3. 韌體動態版本與 Commit Hash** | 🟢 **100% PASS** | 實機 (Jetson Orin NX) | BAR0 `0x34` (Commit Hash) 與 `0x38` (Timestamp) 正確讀出並端序校準 |
-| **4. 4-DW MWr 雙拍數據傳輸修復** | 🟢 **100% PASS** | 仿真 & 實機 | 首拍 Header (`tlast=0`) + 次拍 128-bit Payload (`tlast=1`) 傳輸機制建立 |
-| **5. 7-Series CplD 標頭欄位校正** | 🟢 **100% PASS** | 仿真 & 實機 | 修正 `pg054` 規範之 `rc_tag [87:80]`、`rc_req_id [79:64]`，打通描述符抓取 |
-| **6. 4096-Byte 全域 DMA 仿真驗證** | 🟢 **100% PASS** | Icarus Verilog | 256 次 Burst / 1024 個 DWORD 全域 Golden 比對 100% 正確無誤 |
+## 2. 重大除錯歷程
 
----
+### 2.1 pg054 byte order
 
-## 🔍 重大技術突破與除錯歷程 (Technical Deep-Dive)
+修正前 BAR0 version 讀為 `0x01000102`。原因是 pg054 將 PCIe byte 0 放在 AXI `[31:24]`。最後在 `pcie_7x_axi_bridge.v` 邊界統一 byte swap，driver 不再做 `swab32()`。修正後 version 為 `0x02010001`。
 
-### 1. 128-bit 4-DW MWr 跨拍數據載荷發送機制
-* **問題現象**：在 128-bit 模式下，主機發起 4-DW MWr（64-bit 位址寫入）時，首拍即帶有 `tlast=1` 且無數據載荷，導致硬體丟包。
-* **原因分析**：
-  * 7-Series PCIe 規範中，4-DW MWr 標頭佔滿 128-bit（Beat 0: DW0 Header, DW1 ReqID/Tag, DW2 AddrHigh, DW3 AddrLow）。
-  * 數據載荷必須在 **Beat 1（第 2 拍）** 輸出，且 `tlast` 必須在 Beat 1 才能拉高。
-* **修復方案**：
-  * 在 `rtl/rq_tx_encoder.v` 與 `rtl/pcie_7x_axi_bridge.v` 實作雙拍發送狀態機，首拍輸出 4-DW Header (`tlast=0`)，次拍即時鎖存並輸出 128-bit Payload (`tlast=1`)。
+### 2.2 64-bit host 的 4-DW MWr
 
----
+Jetson `iowrite32()` 使用 4-DW MWr：beat 0 只有 64-bit address header，payload 位於 beat 1。Bridge 現在保存 address beat，並把 beat 1 payload 正確送到 CQ/AXI-Lite。
 
-### 2. 7-Series PCIe CplD 標頭位元切片重大修正 (`pg054` Table 2-8)
-* **問題現象**：實機執行 Scatter-Gather DMA 時，`desc_fetch_engine` 發出描述符讀取請求（MRd）後，主機回覆 CplD，但硬體始終卡在 `WAIT_CPLD` 態。
-* **根本原因剖析**：
-  * 原先 `rtl/pcie_7x_axi_bridge.v` 對 CplD 封包的欄位解析位元有誤：
-    * 誤將 `rc_tag` 定為 `m_axis_rx_tdata[79:72]`（此位元為 Requester ID 高字節 `0x01`）。
-    * 導致硬體接收到主機回覆時，誤判 `rc_tag == 0x01`（非 `0x00`），將描述符數據誤當作 H2C 影像數據丟入 FIFO，造成 `desc_cpl_valid` 永遠無法觸發。
-* **標準位元切片校正**：
-  ```verilog
-  // 符合 pg054 Table 2-8 及 PCIe Base Spec 2.2.8.2:
-  wire [6:0]  rc_lower_addr = m_axis_rx_tdata[94:88]; // DW2[30:24]
-  wire [7:0]  rc_tag        = m_axis_rx_tdata[87:80]; // DW2[23:16]
-  wire [15:0] rc_req_id     = m_axis_rx_tdata[79:64]; // DW2[15:0]
-  wire [11:0] rc_byte_count = m_axis_rx_tdata[63:52]; // DW1[31:20]
-  wire [2:0]  rc_cpl_status = m_axis_rx_tdata[50:48]; // DW1[18:16]
-  ```
+### 2.3 CplD Tag/Requester ID
 
----
+錯誤的 pg054 RC 欄位切片曾讓 descriptor CplD 被誤當 H2C payload，DMA 永遠停在 descriptor wait。修正 Tag、Requester ID、Lower Address、Byte Count 後，64-byte descriptor fetch 通過。
 
-### 3. ARM64 記憶體屏障與主機端快取一致性 (`dma_wmb` / `dma_rmb`)
-* **問題現象**：ARM64 CPU 填寫完 64-Byte DMA 描述符後，FPGA 讀取到的記憶體可能為全零。
-* **修復方案**：
-  * 在 `driver/qpcie_main.c` 中，在寫入 BAR0 通知硬體啟動前加入 `dma_wmb()`（CPU 寫入屏障），確保 Store Buffer 數據全數 Flush 至實體記憶體。
-  * 在檢查 C2H 接收頁面數據前加入 `dma_rmb()`，確保 CPU 觀察到 FPGA 寫入的最新資料。
+### 2.4 ARM64 cache ordering
 
----
+CPU 填好 descriptor 後必須在 doorbell 前執行 `dma_wmb()`；讀取 FPGA 回寫資料前使用 `dma_rmb()`。否則 ARM store buffer/cache ordering 可能讓 FPGA 讀到尚未發布的 descriptor。
 
-## 🧪 4096-Byte 端到端硬體仿真驗證成果
+### 2.5 Retained head 造成 SMMU fault
 
-透過全功能端到端自我檢查測試檔 `tb/tb_sg_dma_pipeline.v`，模擬了包含 Root Complex Host BFM 與 4096-Byte 實體記憶體的完整傳輸鏈路：
+Linux module reload 不會重置 FPGA head/counters。舊 driver 把新 tail 固定設為 4，可能形成 retained `head=8`、`tail=4`，讓 FPGA 讀取無效 descriptor，Jetson 回報：
 
 ```text
-=================================================================
- Starting End-to-End SG DMA Pipeline Testbench (128-bit Native)
-=================================================================
-
---- [Step 1: Host MMIO Configures Ring Base Low = 0xFFFFE000] ---
---- [Step 2: Host MMIO Configures Ring Base High = 0x00000000] ---
---- [Step 3: Host MMIO Enables DMA (BAR0 0x00 = 0x01)] ---
---- [Step 4: Host MMIO Updates Tail Pointer = 1 & Size = 16 (BAR0 0x10)] ---
---- [Step 5: Waiting for Hardware RQ Descriptor Fetch Request...] ---
-  ✅ [PASS] Hardware MRd Request Detected on TX Bus!
-     - TX TLP Header: Addr=0x00000000, Len=   0 DWs, Tag=0x00
---- [Step 6: Host Returns 64-Byte CplD Descriptor] ---
---- [Step 7: Verifying Full 4096-Byte (256 Bursts / 1024 DWs) C2H Transmission] ---
---- [Step 8: Golden Pattern Check for All 1024 DWs (4096 Bytes)] ---
-  ✅ [PASS] 100% of 4096 Bytes (1024 DWs) Verified Perfectly Against Golden Pattern!
-     - First 4 DWs: 0xc2000000, 0xc2000001, 0xc2000002, 0xc2000003
-     - Last  4 DWs: 0xc20003fc, 0xc20003fd, 0xc20003fe, 0xc20003ff
-
-=================================================================
- 🎉 FULL END-TO-END SG DMA 4096-BYTE HARDWARE PIPELINE VERIFIED 100% PASS!
-=================================================================
+arm-smmu ... Unhandled context fault
 ```
 
----
+現在 descriptor 與 tail 都從硬體 retained head 起算，並以 retained completion counter 為 baseline。
 
-## 🛠️ 實機快速驗證指令
+### 2.6 BAR1 absolute address
 
-在測試機（Jetson Orin NX 等）上執行：
+BAR1 曾回讀：
 
-```bash
-cd ~/qpcie
-git pull origin master
-cd driver
-make clean && make
-sudo rmmod custom_pcie_av 2>/dev/null || true
-sudo insmod custom_pcie_av.ko
-dmesg | tail -n 45
+```text
+TPG0 readback: 3737181724x3737181724 ... ctrl=0xDEC0DE1C
 ```
+
+`cq_rx_decoder.v` 現在依 BAR hit 將 absolute PCIe address 正規化為 BAR-relative offset；TPG/audio/EDID 分別映射到 `0x0000/0x1000/0x2000`。
+
+### 2.7 TPG color format
+
+TPG 必須設定 `XVIDC_CSF_YCRCB_444` (`colorFormat=1`)。driver 對 width、height、pattern、format 與 AUTO_RESTART readback 做 fatal validation；不再允許錯誤 readback 後繼續 STREAMON。
+
+## 3. SG DMA 實機結果
+
+完整驗證四個 4096-byte pages；C2H pattern 開頭包含：
+
+```text
+page 0: 0xC2000000 ... 0xC2000003
+page 1: 0xC2010000 ... 0xC2010003
+page 2: 0xC2020000 ... 0xC2020003
+page 3: 0xC2030000 ... 0xC2030003
+```
+
+descriptor address、length、tag、completion count、head/tail 與全部 payload bytes 均通過，沒有 DMA timeout 或 SMMU fault。
+
+## 4. 視訊實機結果
+
+### 4.1 初版 1080p60 correctness
+
+```text
+Captured: 60/60
+Sequence: 0..59
+Measured: 59.394 FPS
+Payload: 176.18 MiB/s
+Frame bytes: 3,110,400
+Static-frame errors: 0
+STREAMOFF: drained=1, head=7, tail=7, video_errors=0
+```
+
+使用者目視確認彩條正常。
+
+### 4.2 舊 16-byte MWr benchmark
+
+```text
+600/600
+80.135 FPS
+237.71 MiB/s
+15.578 million 16-byte MWr/s
+Data errors: 0
+```
+
+此數據促成 requester 改為 128-byte multi-beat TLP。
+
+### 4.3 128-byte pipeline，125 MHz source
+
+```text
+230.482 FPS
+683.68 MiB/s
+Data errors: 0
+```
+
+仍低於 4K60 所需 711.91 MiB/s，因此新增 150 MHz TPG domain。
+
+### 4.4 150 MHz TPG + async CDC
+
+```text
+Captured: 600/600
+Measured: 592 frames in 2.461 s
+240.526 FPS
+713.47 MiB/s
+5.845 million 128-byte MWr/s
+Data errors: 0
+```
+
+已超過 4K60 payload 門檻，但只有 0.22% 餘裕，仍必須測試真正 3840×2160 buffers。
+
+## 5. 最新待驗證 checkpoint
+
+```text
+Commit: 2450dcb7
+Bitstream SHA256:
+52b4b02c6fa747bd9f5e1a340e395c18322b4fb5adf884654a36730eb61f7a81
+Firmware hash: 0x2450DCB7
+```
+
+實機 gate：600/600 frames、`>=711.91 MiB/s`、sequence 連續、data errors 0、`drained=1`、head=tail、`video_errors=0`、無 SMMU fault。
