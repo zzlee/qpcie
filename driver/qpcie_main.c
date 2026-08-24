@@ -393,7 +393,7 @@ free_diag_dma:
     dev_info(&pdev->dev, "=======================================================\n");
 
     /* --------------------------------------------------------------------
-     * 4. Stage-1 V4L2-only control-plane bring-up (ALSA intentionally off)
+     * 4. Stage-2 V4L2 NV12M capture bring-up (ALSA intentionally off)
      * --------------------------------------------------------------------
      * The hardware descriptor engine owns one shared ring. Preserve its
      * current head position after the diagnostic run and start the persistent
@@ -437,7 +437,7 @@ free_diag_dma:
     }
     qdev->v4l2_registered = true;
     dev_info(&pdev->dev,
-             "Stage-1 V4L2 control plane ready; ALSA is intentionally disabled\n");
+             "Stage-2 V4L2 NV12M capture ready; ALSA is intentionally disabled\n");
     return 0;
 
 free_video_ring:

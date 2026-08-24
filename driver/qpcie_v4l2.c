@@ -62,7 +62,7 @@ static int qpcie_vidioc_s_fmt_vid_cap_mplane(struct file *file, void *priv, stru
 {
     struct qpcie_v4l2_channel *vch = video_drvdata(file);
 
-    /* Stage 1 deliberately exposes only the target mode. */
+    /* Stage 2 deliberately exposes only the validated target mode. */
     vch->width       = 1920;
     vch->height      = 1080;
     vch->pixelformat = V4L2_PIX_FMT_NV12M;
@@ -93,6 +93,7 @@ static int qpcie_vidioc_s_parm(struct file *file, void *priv, struct v4l2_stream
      * bring-up mode fixed at 60 fps without corrupting TPG configuration. */
     a->parm.capture.timeperframe.numerator = 1;
     a->parm.capture.timeperframe.denominator = 60;
+    vch->pacer_enable = true;
     dev_info(&vch->qdev->pdev->dev,
              "V4L2 channel %u fixed at 1920x1080@60 NV12M\n",
              vch->channel_id);
@@ -300,14 +301,17 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
     vch->current_slice_idx = 0;
     vch->error_count_start = ioread32(qdev->bar0_mmio + REG_VIDEO_ERRORS);
     iowrite32(0, qdev->bar0_mmio + REG_SLICE_HEIGHT);
-    iowrite32(1, qdev->bar0_mmio + REG_PACER_CTRL);
+    iowrite32(vch->pacer_enable ? 1 : 0,
+              qdev->bar0_mmio + REG_PACER_CTRL);
     iowrite32(0x3, qdev->bar0_mmio + REG_IRQ_STATUS);
     dma_wmb();
     iowrite32(1, qdev->bar0_mmio + REG_DMA_CTRL);
     ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
     dev_info(&qdev->pdev->dev,
-             "NV12M STREAMON: %u buffers, ring tail=%u, 1920x1080@60\n",
-             count, qdev->h2c_tail);
+             "NV12M STREAMON: %u buffers, ring tail=%u, mode=%s\n",
+             count, qdev->h2c_tail,
+             vch->pacer_enable ? "1920x1080@60 paced" :
+                                 "1920x1080 uncapped DMA benchmark");
     return 0;
 }
 
@@ -377,6 +381,14 @@ static int qpcie_s_ctrl(struct v4l2_ctrl *ctrl)
     struct qpcie_dev *qdev = vch->qdev;
 
     switch (ctrl->id) {
+    case V4L2_CID_QPCIE_PACER_ENABLE:
+        vch->pacer_enable = !!ctrl->val;
+        if (qdev && qdev->bar0_mmio && vb2_is_streaming(&vch->queue)) {
+            iowrite32(vch->pacer_enable ? 1 : 0,
+                      qdev->bar0_mmio + REG_PACER_CTRL);
+            ioread32(qdev->bar0_mmio + REG_PACER_CTRL);
+        }
+        break;
     case V4L2_CID_TEST_PATTERN:
         if (qdev && qdev->bar1_mmio) {
             void __iomem *tpg = qdev->bar1_mmio +
@@ -420,6 +432,17 @@ static const struct v4l2_ctrl_ops qpcie_ctrl_ops = {
     .s_ctrl = qpcie_s_ctrl,
 };
 
+static const struct v4l2_ctrl_config qpcie_pacer_ctrl_config = {
+    .ops  = &qpcie_ctrl_ops,
+    .id   = V4L2_CID_QPCIE_PACER_ENABLE,
+    .name = "QPCIe Frame Pacer Enable",
+    .type = V4L2_CTRL_TYPE_BOOLEAN,
+    .min  = 0,
+    .max  = 1,
+    .step = 1,
+    .def  = 1,
+};
+
 int qpcie_v4l2_init(struct qpcie_dev *qdev)
 {
     int i, ret;
@@ -445,6 +468,7 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
         vch->height     = 1080;
         vch->stride     = 1920;
         vch->pixelformat= V4L2_PIX_FMT_NV12M;
+        vch->pacer_enable = true;
 
         mutex_init(&vch->lock);
         spin_lock_init(&vch->slock);
@@ -456,6 +480,8 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
         v4l2_ctrl_new_std_menu_items(&vch->ctrl_handler, &qpcie_ctrl_ops,
                                      V4L2_CID_TEST_PATTERN,
                                      4, 0, 3, qpcie_tpg_pattern_strings);
+        v4l2_ctrl_new_custom(&vch->ctrl_handler,
+                             &qpcie_pacer_ctrl_config, NULL);
         if (vch->ctrl_handler.error) {
             ret = vch->ctrl_handler.error;
             dev_err(&qdev->pdev->dev, "[DEBUG ERROR] Channel %d: Control handler error: %d\n", i, ret);

@@ -46,6 +46,9 @@
 #define NUM_AUDIO_CHANNELS 4
 #define RING_BUFFER_SIZE   16
 
+/* Private V4L2 control used only for controlled DMA throughput testing. */
+#define V4L2_CID_QPCIE_PACER_ENABLE (V4L2_CID_USER_BASE + 0x1000)
+
 /* BAR0 DMA Register Offsets */
 #define REG_DMA_CTRL         0x00
 #define REG_DMA_STATUS       0x04
@@ -119,6 +122,7 @@ struct qpcie_v4l2_channel {
     u32 pixelformat;
     u32 current_slice_idx;
     u32 error_count_start;
+    bool pacer_enable;
 };
 
 struct qpcie_alsa_channel {

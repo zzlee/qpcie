@@ -24,8 +24,15 @@
 #define DEFAULT_WIDTH   1920U
 #define DEFAULT_HEIGHT  1080U
 #define DEFAULT_BUFFERS 4U
-#define DEFAULT_FRAMES  120U
-#define NV12_PLANES     2U
+#define DEFAULT_FRAMES           120U
+#define DEFAULT_BENCHMARK_FRAMES 600U
+#define BENCHMARK_WARMUP_FRAMES  8U
+#define NV12_PLANES              2U
+#define NV12_FRAME_BYTES         (DEFAULT_WIDTH * DEFAULT_HEIGHT * 3U / 2U)
+#define NV12_MWR_PER_FRAME       194400U
+
+/* Must match the private control ID in driver/qpcie_driver.h. */
+#define V4L2_CID_QPCIE_PACER_ENABLE (V4L2_CID_USER_BASE + 0x1000)
 
 struct plane_map {
     void *addr;
@@ -85,6 +92,7 @@ static void usage(const char *program)
            "  -p, --pattern ID       TPG ID: 1 ramp, 9 color bars, 10 zone plate\n"
            "  -r, --fps FPS          requested rate (fixed to 60)\n"
            "  -o, --out FILE         save first frame as contiguous NV12\n"
+           "  -b, --benchmark        disable the 60 FPS pacer and measure maximum DMA rate\n"
            "      --probe            control-plane probe only, no STREAMON\n"
            "      --help             show this help\n",
            program, DEFAULT_DEVICE, DEFAULT_FRAMES);
@@ -97,6 +105,7 @@ int main(int argc, char **argv)
     unsigned int frame_target = DEFAULT_FRAMES;
     unsigned int width = DEFAULT_WIDTH, height = DEFAULT_HEIGHT;
     int pattern = 9, fps = 60, probe_only = 0;
+    int benchmark_mode = 0, frames_set = 0;
     int fd = -1, opt, rc = EXIT_FAILURE;
     struct v4l2_capability cap;
     struct v4l2_fmtdesc desc;
@@ -109,7 +118,7 @@ int main(int argc, char **argv)
     unsigned int i, p, captured = 0, data_errors = 0;
     uint64_t first_y_hash = 0, first_uv_hash = 0;
     unsigned int expected_sequence = 0;
-    double start_ms, end_ms;
+    double start_ms, benchmark_start_ms = 0.0, last_frame_ms = 0.0, end_ms;
 
     static const struct option options[] = {
         {"dev", required_argument, NULL, 'd'},
@@ -119,31 +128,38 @@ int main(int argc, char **argv)
         {"width", required_argument, NULL, 'w'},
         {"height", required_argument, NULL, 'h'},
         {"out", required_argument, NULL, 'o'},
+        {"benchmark", no_argument, NULL, 'b'},
         {"probe", no_argument, NULL, 'P'},
         {"help", no_argument, NULL, 'H'},
         {NULL, 0, NULL, 0}
     };
 
-    while ((opt = getopt_long(argc, argv, "d:f:p:r:w:h:o:", options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "d:f:p:r:w:h:o:b", options, NULL)) != -1) {
         switch (opt) {
         case 'd': device = optarg; break;
-        case 'f': frame_target = strtoul(optarg, NULL, 0); break;
+        case 'f': frame_target = strtoul(optarg, NULL, 0); frames_set = 1; break;
         case 'p': pattern = strtol(optarg, NULL, 0); break;
         case 'r': fps = strtol(optarg, NULL, 0); break;
         case 'w': width = strtoul(optarg, NULL, 0); break;
         case 'h': height = strtoul(optarg, NULL, 0); break;
         case 'o': output_name = optarg; break;
+        case 'b': benchmark_mode = 1; break;
         case 'P': probe_only = 1; break;
         case 'H': usage(argv[0]); return EXIT_SUCCESS;
         default: usage(argv[0]); return EXIT_FAILURE;
         }
     }
 
+    if (benchmark_mode && !frames_set)
+        frame_target = DEFAULT_BENCHMARK_FRAMES;
+
     printf("=================================================================\n"
-           " QPCIe YUV444 -> NV12M Capture Test\n"
-           " Device: %s, Mode: %ux%u@%d, Frames: %u, Memory: MMAP\n"
+           " QPCIe YUV444 -> NV12M Capture Test%s\n"
+           " Device: %s, Mode: %ux%u%s, Frames: %u, Memory: MMAP\n"
            "=================================================================\n",
-           device, width, height, fps, frame_target);
+           benchmark_mode ? " [UNCAPPED DMA BENCHMARK]" : "",
+           device, width, height,
+           benchmark_mode ? " uncapped" : "@60", frame_target);
 
     fd = open(device, O_RDWR | O_NONBLOCK);
     if (fd < 0) {
@@ -223,14 +239,28 @@ int main(int argc, char **argv)
     }
     printf("[PASS] TPG menu value=%d (hardware pattern %d)\n", ctrl.value, pattern);
 
+    memset(&ctrl, 0, sizeof(ctrl));
+    ctrl.id = V4L2_CID_QPCIE_PACER_ENABLE;
+    ctrl.value = benchmark_mode ? 0 : 1;
+    if (xioctl(fd, VIDIOC_S_CTRL, &ctrl) < 0 ||
+        xioctl(fd, VIDIOC_G_CTRL, &ctrl) < 0 ||
+        ctrl.value != (benchmark_mode ? 0 : 1)) {
+        perror("QPCIe pacer VIDIOC_S/G_CTRL");
+        goto out;
+    }
+    printf("[PASS] Hardware frame pacer: %s\n",
+           ctrl.value ? "enabled (60 FPS)" : "disabled (uncapped benchmark)");
+
     if (probe_only) {
         printf("[PASS] Control-plane probe complete; STREAMON was not issued.\n");
         rc = EXIT_SUCCESS;
         goto out;
     }
 
-    if (!frame_target) {
-        fprintf(stderr, "Frame count must be non-zero\n");
+    if (!frame_target ||
+        (benchmark_mode && frame_target <= BENCHMARK_WARMUP_FRAMES)) {
+        fprintf(stderr, "Frame count must be non-zero and benchmark count must exceed %u warm-up frames\n",
+                BENCHMARK_WARMUP_FRAMES);
         goto out;
     }
 
@@ -339,10 +369,16 @@ int main(int argc, char **argv)
             data_errors++;
         }
         expected_sequence = buf.sequence + 1;
+        last_frame_ms = buf.timestamp.tv_sec * 1000.0 +
+                        buf.timestamp.tv_usec / 1000.0;
+        if (benchmark_mode && captured == BENCHMARK_WARMUP_FRAMES)
+            benchmark_start_ms = last_frame_ms;
 
-        y_hash = fnv1a64(buffers[buf.index].plane[0].addr, planes[0].bytesused);
-        uv_hash = fnv1a64(buffers[buf.index].plane[1].addr, planes[1].bytesused);
         if (captured == 1) {
+            y_hash = fnv1a64(buffers[buf.index].plane[0].addr,
+                             planes[0].bytesused);
+            uv_hash = fnv1a64(buffers[buf.index].plane[1].addr,
+                              planes[1].bytesused);
             first_y_hash = y_hash;
             first_uv_hash = uv_hash;
             byte_range(buffers[buf.index].plane[0].addr, planes[0].bytesused,
@@ -362,14 +398,21 @@ int main(int argc, char **argv)
                 fflush(output);
                 printf("[PASS] Saved first contiguous NV12 frame to %s\n", output_name);
             }
-        } else if (y_hash != first_y_hash || uv_hash != first_uv_hash) {
-            fprintf(stderr,
-                    "[FAIL] static color-bars changed at frame %u: Y=%016" PRIx64
-                    " UV=%016" PRIx64 "\n", captured, y_hash, uv_hash);
-            data_errors++;
+        } else if (!benchmark_mode) {
+            y_hash = fnv1a64(buffers[buf.index].plane[0].addr,
+                             planes[0].bytesused);
+            uv_hash = fnv1a64(buffers[buf.index].plane[1].addr,
+                              planes[1].bytesused);
+            if (y_hash != first_y_hash || uv_hash != first_uv_hash) {
+                fprintf(stderr,
+                        "[FAIL] static color-bars changed at frame %u: Y=%016" PRIx64
+                        " UV=%016" PRIx64 "\n", captured, y_hash, uv_hash);
+                data_errors++;
+            }
         }
 
-        if (captured == 1 || captured % 30 == 0)
+        if (captured == 1 ||
+            captured % (benchmark_mode ? 100U : 30U) == 0)
             printf("[FRAME %u] index=%u seq=%u timestamp=%ld.%06ld\n",
                    captured, buf.index, buf.sequence,
                    (long)buf.timestamp.tv_sec, (long)buf.timestamp.tv_usec);
@@ -379,7 +422,7 @@ int main(int argc, char **argv)
             break;
         }
     }
-    end_ms = monotonic_ms();
+    end_ms = benchmark_mode ? last_frame_ms : monotonic_ms();
 
     {
         enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
@@ -388,20 +431,42 @@ int main(int argc, char **argv)
     }
 
     if (captured) {
-        double elapsed_s = (end_ms - start_ms) / 1000.0;
-        double measured_fps = captured / elapsed_s;
-        double mib_s = captured * (DEFAULT_WIDTH * DEFAULT_HEIGHT * 1.5) /
-                       elapsed_s / (1024.0 * 1024.0);
+        unsigned int measured_frames = captured;
+        double rate_start_ms = start_ms;
+        double elapsed_s, measured_fps, mib_s;
+
+        if (benchmark_mode && captured > BENCHMARK_WARMUP_FRAMES) {
+            measured_frames -= BENCHMARK_WARMUP_FRAMES;
+            rate_start_ms = benchmark_start_ms;
+        }
+        elapsed_s = (end_ms - rate_start_ms) / 1000.0;
+        measured_fps = measured_frames / elapsed_s;
+        mib_s = measured_frames * (double)NV12_FRAME_BYTES /
+                elapsed_s / (1024.0 * 1024.0);
+
         printf("=================================================================\n"
-               " Captured: %u/%u frames, %.3f s, %.3f FPS, %.2f MiB/s\n"
-               " Static-frame errors: %u\n"
+               " Captured: %u/%u frames\n"
+               " Measured: %u frames in %.3f s, %.3f FPS\n"
+               " DMA payload write throughput: %.2f MiB/s\n",
+               captured, frame_target, measured_frames, elapsed_s,
+               measured_fps, mib_s);
+        if (benchmark_mode) {
+            double mwr_per_s = measured_frames * (double)NV12_MWR_PER_FRAME /
+                               elapsed_s;
+            printf(" 16-byte PCIe MWr rate: %.3f million requests/s\n"
+                   " Warm-up excluded: %u frames\n",
+                   mwr_per_s / 1000000.0, BENCHMARK_WARMUP_FRAMES);
+        }
+        printf(" Data errors: %u\n"
                "=================================================================\n",
-               captured, frame_target, elapsed_s, measured_fps, mib_s, data_errors);
+               data_errors);
+
         if (captured == frame_target && data_errors == 0 &&
-            measured_fps >= 59.0 && measured_fps <= 61.0)
+            ((benchmark_mode && measured_fps >= 60.0) ||
+             (!benchmark_mode && measured_fps >= 59.0 && measured_fps <= 61.0)))
             rc = EXIT_SUCCESS;
         else
-            fprintf(stderr, "[FAIL] NV12 correctness or 60 FPS requirement not met\n");
+            fprintf(stderr, "[FAIL] NV12 correctness or DMA rate requirement not met\n");
     }
 
 out:
