@@ -340,21 +340,34 @@ static int qpcie_s_ctrl(struct v4l2_ctrl *ctrl)
             void __iomem *tpg = qdev->bar1_mmio +
                                 (vch->channel_id * 0x100);
             u32 pat_id = ctrl->val;
+            u32 rb_width, rb_height, rb_pattern, rb_format, rb_ctrl;
+
             if (pat_id == 3) pat_id = 9;  /* Color Bars */
             if (pat_id == 4) pat_id = 10; /* Zone Plate */
 
             iowrite32(vch->height, tpg + 0x10);
             iowrite32(vch->width, tpg + 0x18);
+
             iowrite32(pat_id, tpg + 0x20);
-            iowrite32(0, tpg + 0x40);    /* XVIDC_CSF_RGB */
+            iowrite32(1, tpg + 0x40);    /* XVIDC_CSF_YCRCB_444 */
             iowrite32(0x81, tpg + 0x00); /* AP_START | AUTO_RESTART */
-            ioread32(tpg + 0x00);        /* Flush posted MMIO writes. */
+            rb_ctrl = ioread32(tpg + 0x00); /* Flush posted writes. */
+            rb_width = ioread32(tpg + 0x18);
+            rb_height = ioread32(tpg + 0x10);
+            rb_pattern = ioread32(tpg + 0x20);
+            rb_format = ioread32(tpg + 0x40);
 
             dev_info(&qdev->pdev->dev,
-                     "TPG%u readback: %ux%u RGB pattern=%u ctrl=0x%08X\n",
-                     vch->channel_id, ioread32(tpg + 0x18),
-                     ioread32(tpg + 0x10), ioread32(tpg + 0x20),
-                     ioread32(tpg + 0x00));
+                     "TPG%u readback: %ux%u YUV444 pattern=%u format=%u ctrl=0x%08X\n",
+                     vch->channel_id, rb_width, rb_height, rb_pattern,
+                     rb_format, rb_ctrl);
+            if (rb_width != vch->width || rb_height != vch->height ||
+                rb_pattern != pat_id || rb_format != 1) {
+                dev_err(&qdev->pdev->dev,
+                        "TPG%u BAR1 control readback mismatch\n",
+                        vch->channel_id);
+                return -EIO;
+            }
         }
         break;
     }
@@ -443,7 +456,12 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
             goto unreg_v4l2;
         }
 
-        v4l2_ctrl_handler_setup(&vch->ctrl_handler);
+        ret = v4l2_ctrl_handler_setup(&vch->ctrl_handler);
+        if (ret) {
+            dev_err(&qdev->pdev->dev,
+                    "Channel %d: TPG control setup failed: %d\n", i, ret);
+            goto unreg_v4l2;
+        }
         dev_info(&qdev->pdev->dev, " -> Channel %d registered as /dev/video%d\n", i, vdev->num);
     }
     dev_info(&qdev->pdev->dev,

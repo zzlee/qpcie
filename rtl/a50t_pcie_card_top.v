@@ -62,7 +62,7 @@ module a50t_pcie_card_top #(
 
     // =========================================================================
     // AXI Crossbar Master Interface Wires (3 Masters)
-    // M00: Video TPG (0x0000), M01: Audio Pattern Gen (0x0100), M02: EDID/HPD (0x0300)
+    // M00: Video TPG (0x0000), M01: Audio Pattern Gen (0x1000), M02: EDID/HPD (0x2000)
     // =========================================================================
     wire [7:0]  tpg_axi_awaddr, tpg_axi_araddr;
     wire        tpg_axi_awvalid, tpg_axi_awready;

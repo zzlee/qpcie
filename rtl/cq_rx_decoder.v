@@ -131,7 +131,11 @@ module cq_rx_decoder #(
                     if (s_axis_cq_tvalid && s_axis_cq_tready) begin
                         if (req_type == 4'b0001) begin // Memory Write (MWr)
                             if (bar_id == 3'b001) begin // BAR1
-                                m_axil_bar1_awaddr  <= req_addr[31:0];
+                                /* PCIe requests carry the host-assigned BAR
+                                 * address. BAR1 is a 64-KiB aperture, so pass
+                                 * only its BAR-relative offset to the AXI
+                                 * crossbar. */
+                                m_axil_bar1_awaddr  <= {16'd0, req_addr[15:0]};
                                 m_axil_bar1_awvalid <= 1'b1;
                                 m_axil_bar1_wdata   <= (DATA_WIDTH >= 256) ? s_axis_cq_tdata[159:128] : s_axis_cq_tdata[127:96];
                                 m_axil_bar1_wstrb   <= 4'hF;
@@ -147,7 +151,7 @@ module cq_rx_decoder #(
                             state            <= WRITE_AXIL;
                         end else if (req_type == 4'b0000) begin // Memory Read (MRd)
                             if (bar_id == 3'b001) begin // BAR1
-                                m_axil_bar1_araddr  <= req_addr[31:0];
+                                m_axil_bar1_araddr  <= {16'd0, req_addr[15:0]};
                                 m_axil_bar1_arvalid <= 1'b1;
                                 read_req_bar_sel    <= 1'b1;
                             end else begin // BAR0

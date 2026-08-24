@@ -173,22 +173,47 @@ module tb_cq_rx_decoder;
         m_axil_bar0_bvalid <= 0;
 
         #30;
-        $display("[%0t] Test 2: BAR1 Memory Write (User IP UART Addr 0x1000)...", $time);
+        $display("[%0t] Test 2: BAR1 absolute-address Memory Write (offset 0x1000)...", $time);
         @(posedge clk);
         s_axis_cq_tvalid <= 1;
         s_axis_cq_tlast  <= 1;
-        s_axis_cq_tdata[63:0]    <= 64'h0000_1000;
+        s_axis_cq_tdata[63:0]    <= 64'h0000_0024_2810_1000;
         s_axis_cq_tdata[78:75]   <= 4'b0001; // MWr
         s_axis_cq_tdata[114:112] <= 3'b001;  // BAR1
         s_axis_cq_tdata[159:128] <= 32'h1234_5678;
 
         wait(m_axil_bar1_awvalid && m_axil_bar1_wvalid);
-        $display("[%0t] CQ Decoder demuxed MWr to BAR1! Addr: 0x%h Data: 0x%h", $time, m_axil_bar1_awaddr, m_axil_bar1_wdata);
+        if (m_axil_bar1_awaddr !== 32'h0000_1000)
+            $fatal(1, "BAR1 write address was not normalized: 0x%h", m_axil_bar1_awaddr);
+        $display("[%0t] CQ Decoder normalized BAR1 MWr to offset 0x%h", $time, m_axil_bar1_awaddr);
         @(posedge clk);
         s_axis_cq_tvalid <= 0;
         m_axil_bar1_bvalid <= 1;
         @(posedge clk);
         m_axil_bar1_bvalid <= 0;
+
+        #30;
+        $display("[%0t] Test 3: BAR1 absolute-address Memory Read (TPG offset 0x20)...", $time);
+        @(posedge clk);
+        s_axis_cq_tdata <= {DATA_WIDTH{1'b0}};
+        s_axis_cq_tvalid <= 1;
+        s_axis_cq_tlast  <= 1;
+        s_axis_cq_tdata[63:0]    <= 64'h0000_0024_2810_0020;
+        s_axis_cq_tdata[78:75]   <= 4'b0000; // MRd
+        s_axis_cq_tdata[114:112] <= 3'b001;  // BAR1
+
+        wait(m_axil_bar1_arvalid);
+        if (m_axil_bar1_araddr !== 32'h0000_0020)
+            $fatal(1, "BAR1 read address was not normalized: 0x%h", m_axil_bar1_araddr);
+        @(posedge clk);
+        s_axis_cq_tvalid <= 0;
+        m_axil_bar1_rvalid <= 1;
+        @(posedge clk);
+        m_axil_bar1_rvalid <= 0;
+        wait(read_req_valid && read_req_bar_sel);
+        read_req_ack <= 1;
+        @(posedge clk);
+        read_req_ack <= 0;
 
         #30;
         $display("[%0t] SUCCESS: Dual-BAR CQ RX Decoder Test Completed!", $time);
