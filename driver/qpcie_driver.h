@@ -138,6 +138,7 @@ struct qpcie_dev {
     void __iomem *bar1_mmio;
 
     int irq;
+    bool v4l2_registered;
 
     /* Descriptor Ring Buffer Handles */
     struct qpcie_dma_desc_2d *h2c_ring_virt;

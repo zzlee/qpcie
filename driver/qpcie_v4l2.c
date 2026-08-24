@@ -22,22 +22,19 @@ static const struct v4l2_file_operations qpcie_v4l2_fops = {
 static int qpcie_vidioc_querycap(struct file *file, void *priv, struct v4l2_capability *cap)
 {
     strscpy(cap->driver, "qpcie-v4l2", sizeof(cap->driver));
-    strscpy(cap->card, "QPCIe Multi-Planar Video Capture & Output", sizeof(cap->card));
+    strscpy(cap->card, "QPCIe NV12M Video Capture", sizeof(cap->card));
     strscpy(cap->bus_info, "PCIe:custom-dma", sizeof(cap->bus_info));
-    cap->capabilities = V4L2_CAP_VIDEO_CAPTURE_MPLANE | V4L2_CAP_VIDEO_OUTPUT_MPLANE | V4L2_CAP_STREAMING | V4L2_CAP_DEVICE_CAPS;
+    cap->capabilities = V4L2_CAP_VIDEO_CAPTURE_MPLANE |
+                        V4L2_CAP_STREAMING | V4L2_CAP_DEVICE_CAPS;
     return 0;
 }
 
 static int qpcie_vidioc_enum_fmt_vid_cap_mplane(struct file *file, void *priv, struct v4l2_fmtdesc *f)
 {
-    if (f->index == 0) {
-        f->pixelformat = V4L2_PIX_FMT_YUV420M;
-        return 0;
-    } else if (f->index == 1) {
-        f->pixelformat = V4L2_PIX_FMT_NV12M;
-        return 0;
-    }
-    return -EINVAL;
+    if (f->index != 0)
+        return -EINVAL;
+    f->pixelformat = V4L2_PIX_FMT_NV12M;
+    return 0;
 }
 
 static int qpcie_vidioc_g_fmt_vid_cap_mplane(struct file *file, void *priv, struct v4l2_format *f)
@@ -49,20 +46,12 @@ static int qpcie_vidioc_g_fmt_vid_cap_mplane(struct file *file, void *priv, stru
     f->fmt.pix_mp.pixelformat  = vch->pixelformat;
     f->fmt.pix_mp.field        = V4L2_FIELD_NONE;
     f->fmt.pix_mp.colorspace   = V4L2_COLORSPACE_REC709;
-    f->fmt.pix_mp.num_planes   = (vch->pixelformat == V4L2_PIX_FMT_YUV420M) ? 3 : 2;
+    f->fmt.pix_mp.num_planes   = 2;
 
     f->fmt.pix_mp.plane_fmt[0].bytesperline = vch->stride;
     f->fmt.pix_mp.plane_fmt[0].sizeimage    = vch->stride * vch->height;
-
-    if (vch->pixelformat == V4L2_PIX_FMT_YUV420M) {
-        f->fmt.pix_mp.plane_fmt[1].bytesperline = vch->stride / 2;
-        f->fmt.pix_mp.plane_fmt[1].sizeimage    = (vch->stride / 2) * (vch->height / 2);
-        f->fmt.pix_mp.plane_fmt[2].bytesperline = vch->stride / 2;
-        f->fmt.pix_mp.plane_fmt[2].sizeimage    = (vch->stride / 2) * (vch->height / 2);
-    } else { /* NV12M */
-        f->fmt.pix_mp.plane_fmt[1].bytesperline = vch->stride;
-        f->fmt.pix_mp.plane_fmt[1].sizeimage    = vch->stride * (vch->height / 2);
-    }
+    f->fmt.pix_mp.plane_fmt[1].bytesperline = vch->stride;
+    f->fmt.pix_mp.plane_fmt[1].sizeimage    = vch->stride * (vch->height / 2);
 
     return 0;
 }
@@ -71,31 +60,23 @@ static int qpcie_vidioc_s_fmt_vid_cap_mplane(struct file *file, void *priv, stru
 {
     struct qpcie_v4l2_channel *vch = video_drvdata(file);
 
-    vch->width       = f->fmt.pix_mp.width;
-    vch->height      = f->fmt.pix_mp.height;
-    vch->pixelformat = f->fmt.pix_mp.pixelformat;
-    vch->stride      = ALIGN(vch->width, 64); /* 64-byte alignment */
+    /* Stage 1 deliberately exposes only the target mode. */
+    vch->width       = 1920;
+    vch->height      = 1080;
+    vch->pixelformat = V4L2_PIX_FMT_NV12M;
+    vch->stride      = 1920;
 
     return qpcie_vidioc_g_fmt_vid_cap_mplane(file, priv, f);
 }
 
 static int qpcie_vidioc_g_parm(struct file *file, void *priv, struct v4l2_streamparm *a)
 {
-    struct qpcie_v4l2_channel *vch = video_drvdata(file);
-    struct qpcie_dev *qdev = vch->qdev;
-    u32 clks = 2083333;
-
-    if (a->type != V4L2_BUF_TYPE_VIDEO_CAPTURE && a->type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)
+    if (a->type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)
         return -EINVAL;
-
-    if (qdev && qdev->bar1_mmio) {
-        clks = ioread32(qdev->bar1_mmio + 0x0000 + 0x30);
-        if (clks == 0) clks = 2083333;
-    }
 
     a->parm.capture.capability = V4L2_CAP_TIMEPERFRAME;
     a->parm.capture.timeperframe.numerator = 1;
-    a->parm.capture.timeperframe.denominator = 125000000 / (clks ? clks : 2083333);
+    a->parm.capture.timeperframe.denominator = 60;
 
     return 0;
 }
@@ -103,36 +84,26 @@ static int qpcie_vidioc_g_parm(struct file *file, void *priv, struct v4l2_stream
 static int qpcie_vidioc_s_parm(struct file *file, void *priv, struct v4l2_streamparm *a)
 {
     struct qpcie_v4l2_channel *vch = video_drvdata(file);
-    struct qpcie_dev *qdev = vch->qdev;
-
-    if (a->type != V4L2_BUF_TYPE_VIDEO_CAPTURE && a->type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)
+    if (a->type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)
         return -EINVAL;
 
-    u32 num = a->parm.capture.timeperframe.numerator;
-    u32 den = a->parm.capture.timeperframe.denominator;
-
-    if (num == 0 || den == 0) return -EINVAL;
-
-    u64 target_clks = (125000000ULL * (u64)num) / (u64)den;
-
-    if (qdev && qdev->bar1_mmio) {
-        iowrite32((u32)target_clks, qdev->bar1_mmio + 0x0000 + 0x30);
-        dev_info(&qdev->pdev->dev, "V4L2 VIDIOC_S_PARM: Set Hardware Frame Rate Pacer FPS %u/%u -> Clks %llu\n",
-                 den, num, target_clks);
-    }
-
-    return qpcie_vidioc_g_parm(file, priv, a);
+    /* v_tpg offset 0x30 is maskId, not a frame-pacer register. Keep the
+     * bring-up mode fixed at 60 fps without corrupting TPG configuration. */
+    a->parm.capture.timeperframe.numerator = 1;
+    a->parm.capture.timeperframe.denominator = 60;
+    dev_info(&vch->qdev->pdev->dev,
+             "V4L2 channel %u fixed at 1920x1080@60 NV12M\n",
+             vch->channel_id);
+    return 0;
 }
 
 static const struct v4l2_frmsize_discrete supported_framesizes[] = {
-    { 3840, 2160 },
     { 1920, 1080 },
-    { 1280, 720 },
 };
 
 static int qpcie_vidioc_enum_framesizes(struct file *file, void *priv, struct v4l2_frmsizeenum *fsize)
 {
-    if (fsize->pixel_format != V4L2_PIX_FMT_YUV420M && fsize->pixel_format != V4L2_PIX_FMT_NV12M)
+    if (fsize->pixel_format != V4L2_PIX_FMT_NV12M)
         return -EINVAL;
 
     if (fsize->index >= ARRAY_SIZE(supported_framesizes))
@@ -145,16 +116,11 @@ static int qpcie_vidioc_enum_framesizes(struct file *file, void *priv, struct v4
 
 static const struct v4l2_fract supported_frameintervals[] = {
     { 1, 60 },
-    { 1001, 60000 }, /* 59.94 FPS */
-    { 1, 50 },
-    { 1, 30 },
-    { 1, 25 },
-    { 1, 24 },
 };
 
 static int qpcie_vidioc_enum_frameintervals(struct file *file, void *priv, struct v4l2_frmivalenum *fival)
 {
-    if (fival->pixel_format != V4L2_PIX_FMT_YUV420M && fival->pixel_format != V4L2_PIX_FMT_NV12M)
+    if (fival->pixel_format != V4L2_PIX_FMT_NV12M)
         return -EINVAL;
 
     if (fival->index >= ARRAY_SIZE(supported_frameintervals))
@@ -219,17 +185,9 @@ static int qpcie_queue_setup(struct vb2_queue *vq,
                             unsigned int sizes[], struct device *alloc_devs[])
 {
     struct qpcie_v4l2_channel *vch = vb2_get_drv_priv(vq);
-    int num_planes = (vch->pixelformat == V4L2_PIX_FMT_YUV420M) ? 3 : 2;
-
-    *nplanes = num_planes;
+    *nplanes = 2;
     sizes[0] = vch->stride * vch->height;
-
-    if (num_planes == 3) {
-        sizes[1] = (vch->stride / 2) * (vch->height / 2);
-        sizes[2] = (vch->stride / 2) * (vch->height / 2);
-    } else {
-        sizes[1] = vch->stride * (vch->height / 2);
-    }
+    sizes[1] = vch->stride * (vch->height / 2);
 
     return 0;
 }
@@ -317,10 +275,48 @@ static void qpcie_buf_queue(struct vb2_buffer *vb)
     spin_unlock_irq(&vch->slock);
 }
 
+static void qpcie_return_all_buffers(struct qpcie_v4l2_channel *vch,
+                                      enum vb2_buffer_state state)
+{
+    for (;;) {
+        struct qpcie_v4l2_buffer *buf;
+
+        spin_lock_irq(&vch->slock);
+        if (list_empty(&vch->active_buffers)) {
+            spin_unlock_irq(&vch->slock);
+            break;
+        }
+        buf = list_first_entry(&vch->active_buffers,
+                               struct qpcie_v4l2_buffer, list);
+        list_del(&buf->list);
+        spin_unlock_irq(&vch->slock);
+        vb2_buffer_done(&buf->vb.vb2_buf, state);
+    }
+}
+
+static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
+{
+    struct qpcie_v4l2_channel *vch = vb2_get_drv_priv(vq);
+
+    dev_warn(&vch->qdev->pdev->dev,
+             "STREAMON blocked: stage-1 validates V4L2/TPG control only; NV12 RTL data path is not enabled\n");
+    qpcie_return_all_buffers(vch, VB2_BUF_STATE_QUEUED);
+    return -EOPNOTSUPP;
+}
+
+static void qpcie_stop_streaming(struct vb2_queue *vq)
+{
+    struct qpcie_v4l2_channel *vch = vb2_get_drv_priv(vq);
+
+    qpcie_return_all_buffers(vch, VB2_BUF_STATE_ERROR);
+}
+
 static const struct vb2_ops qpcie_vb2_ops = {
-    .queue_setup = qpcie_queue_setup,
-    .buf_prepare = qpcie_buf_prepare,
-    .buf_queue   = qpcie_buf_queue,
+    .queue_setup    = qpcie_queue_setup,
+    .buf_prepare    = qpcie_buf_prepare,
+    .buf_queue      = qpcie_buf_queue,
+    .start_streaming = qpcie_start_streaming,
+    .stop_streaming = qpcie_stop_streaming,
 };
 
 /* V4L2 Control Framework Integration (V4L2_CID_TEST_PATTERN) */
@@ -341,16 +337,24 @@ static int qpcie_s_ctrl(struct v4l2_ctrl *ctrl)
     switch (ctrl->id) {
     case V4L2_CID_TEST_PATTERN:
         if (qdev && qdev->bar1_mmio) {
+            void __iomem *tpg = qdev->bar1_mmio +
+                                (vch->channel_id * 0x100);
             u32 pat_id = ctrl->val;
             if (pat_id == 3) pat_id = 9;  /* Color Bars */
             if (pat_id == 4) pat_id = 10; /* Zone Plate */
 
-            /* Write Pattern ID to BAR1 Offset 0x0020 */
-            iowrite32(pat_id, qdev->bar1_mmio + 0x0000 + 0x20);
-            /* Trigger AP_START & Auto-Restart on TPG Control Reg (0x0000) */
-            iowrite32(0x81, qdev->bar1_mmio + 0x0000 + 0x00);
-            dev_info(&qdev->pdev->dev, "V4L2 Ctrl: Set Video TPG Pattern Menu Val %d -> HW Pattern %u\n",
-                     ctrl->val, pat_id);
+            iowrite32(vch->height, tpg + 0x10);
+            iowrite32(vch->width, tpg + 0x18);
+            iowrite32(pat_id, tpg + 0x20);
+            iowrite32(0, tpg + 0x40);    /* XVIDC_CSF_RGB */
+            iowrite32(0x81, tpg + 0x00); /* AP_START | AUTO_RESTART */
+            ioread32(tpg + 0x00);        /* Flush posted MMIO writes. */
+
+            dev_info(&qdev->pdev->dev,
+                     "TPG%u readback: %ux%u RGB pattern=%u ctrl=0x%08X\n",
+                     vch->channel_id, ioread32(tpg + 0x18),
+                     ioread32(tpg + 0x10), ioread32(tpg + 0x20),
+                     ioread32(tpg + 0x00));
         }
         break;
     }
@@ -373,7 +377,9 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
         return ret;
     }
 
-    for (i = 0; i < NUM_VIDEO_CHANNELS; i++) {
+    /* Bring up one capture channel first; additional channels and OUTPUT are
+     * intentionally deferred until channel 0 passes physical NV12 testing. */
+    for (i = 0; i < 1; i++) {
         struct qpcie_v4l2_channel *vch = &qdev->v4l2_ch[i];
         struct video_device *vdev = &vch->vdev;
 
@@ -382,8 +388,8 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
         vch->channel_id = i;
         vch->width      = 1920;
         vch->height     = 1080;
-        vch->stride     = 2048;
-        vch->pixelformat= V4L2_PIX_FMT_YUV420M;
+        vch->stride     = 1920;
+        vch->pixelformat= V4L2_PIX_FMT_NV12M;
 
         mutex_init(&vch->lock);
         spin_lock_init(&vch->slock);
@@ -394,7 +400,7 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
         v4l2_ctrl_handler_init(&vch->ctrl_handler, 2);
         v4l2_ctrl_new_std_menu_items(&vch->ctrl_handler, &qpcie_ctrl_ops,
                                      V4L2_CID_TEST_PATTERN,
-                                     4, 0, 0, qpcie_tpg_pattern_strings);
+                                     4, 0, 3, qpcie_tpg_pattern_strings);
         if (vch->ctrl_handler.error) {
             ret = vch->ctrl_handler.error;
             dev_err(&qdev->pdev->dev, "[DEBUG ERROR] Channel %d: Control handler error: %d\n", i, ret);
@@ -440,7 +446,8 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
         v4l2_ctrl_handler_setup(&vch->ctrl_handler);
         dev_info(&qdev->pdev->dev, " -> Channel %d registered as /dev/video%d\n", i, vdev->num);
     }
-    dev_info(&qdev->pdev->dev, "🎉 [DEBUG STEP 2 COMPLETE] All V4L2 Channels Initialized Successfully!\n");
+    dev_info(&qdev->pdev->dev,
+             "[V4L2 STAGE 1] One NV12M capture node initialized (control plane only)\n");
     return 0;
 
 unreg_v4l2:
@@ -456,7 +463,7 @@ unreg_v4l2:
 void qpcie_v4l2_remove(struct qpcie_dev *qdev)
 {
     int i;
-    for (i = 0; i < NUM_VIDEO_CHANNELS; i++) {
+    for (i = 0; i < 1; i++) {
         if (video_is_registered(&qdev->v4l2_ch[i].vdev))
             video_unregister_device(&qdev->v4l2_ch[i].vdev);
         v4l2_ctrl_handler_free(&qdev->v4l2_ch[i].ctrl_handler);
@@ -473,7 +480,7 @@ void qpcie_v4l2_irq_handler(struct qpcie_dev *qdev)
         slice_height = ioread32(qdev->bar0_mmio + REG_SLICE_HEIGHT);
     }
 
-    for (i = 0; i < NUM_VIDEO_CHANNELS; i++) {
+    for (i = 0; i < 1; i++) {
         struct qpcie_v4l2_channel *vch = &qdev->v4l2_ch[i];
         struct qpcie_v4l2_buffer *buf;
 

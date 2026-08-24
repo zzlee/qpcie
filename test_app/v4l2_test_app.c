@@ -54,6 +54,7 @@ static void print_usage(const char *prog_name) {
     printf("  -w, --width <pixels>   Frame width (default: %d)\n", DEFAULT_WIDTH);
     printf("  -h, --height <pixels>  Frame height (default: %d)\n", DEFAULT_HEIGHT);
     printf("  -o, --out <file>       Save captured frames to file\n");
+    printf("      --probe             Stage-1 control-plane probe only (no STREAMON)\n");
     printf("  -help                  Show this help message\n");
 }
 
@@ -74,6 +75,7 @@ int main(int argc, char **argv) {
     int target_fps = -1;
     int pacer_mode = -1;
     int slice_height = -1;
+    int probe_only = 0;
 
     static struct option long_options[] = {
         {"dev",     required_argument, 0, 'd'},
@@ -86,6 +88,7 @@ int main(int argc, char **argv) {
         {"width",   required_argument, 0, 'w'},
         {"height",  required_argument, 0, 'h'},
         {"out",     required_argument, 0, 'o'},
+        {"probe",   no_argument,       0, 'P'},
         {"help",    no_argument,       0, '?'},
         {0, 0, 0, 0}
     };
@@ -112,6 +115,7 @@ int main(int argc, char **argv) {
             case 'w': width = atoi(optarg); break;
             case 'h': height = atoi(optarg); break;
             case 'o': out_filename = optarg; break;
+            case 'P': probe_only = 1; break;
             case '?': print_usage(argv[0]); return EXIT_SUCCESS;
             default: break;
         }
@@ -159,6 +163,89 @@ int main(int argc, char **argv) {
     }
 
     printf("[V4L2 Cap] Driver: %s, Card: %s, Bus: %s\n", cap.driver, cap.card, cap.bus_info);
+
+    if (probe_only) {
+        struct v4l2_fmtdesc desc;
+        struct v4l2_format probe_fmt;
+        struct v4l2_streamparm parm;
+        struct v4l2_control ctrl;
+        uint32_t dev_caps = cap.capabilities & V4L2_CAP_DEVICE_CAPS ?
+                            cap.device_caps : cap.capabilities;
+
+        if (!(dev_caps & V4L2_CAP_VIDEO_CAPTURE_MPLANE) ||
+            !(dev_caps & V4L2_CAP_STREAMING)) {
+            fprintf(stderr, "[FAIL] Device lacks CAPTURE_MPLANE or STREAMING\n");
+            close(fd);
+            return EXIT_FAILURE;
+        }
+
+        memset(&desc, 0, sizeof(desc));
+        desc.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+        if (ioctl(fd, VIDIOC_ENUM_FMT, &desc) < 0) {
+            perror("VIDIOC_ENUM_FMT(CAPTURE_MPLANE) failed");
+            close(fd);
+            return EXIT_FAILURE;
+        }
+        printf("[PASS] Format[0]: %c%c%c%c\n",
+               desc.pixelformat & 0xff, (desc.pixelformat >> 8) & 0xff,
+               (desc.pixelformat >> 16) & 0xff,
+               (desc.pixelformat >> 24) & 0xff);
+        if (desc.pixelformat != V4L2_PIX_FMT_NV12M) {
+            fprintf(stderr, "[FAIL] Expected NV12M\n");
+            close(fd);
+            return EXIT_FAILURE;
+        }
+
+        memset(&probe_fmt, 0, sizeof(probe_fmt));
+        probe_fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+        probe_fmt.fmt.pix_mp.width = width;
+        probe_fmt.fmt.pix_mp.height = height;
+        probe_fmt.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_NV12M;
+        probe_fmt.fmt.pix_mp.field = V4L2_FIELD_NONE;
+        if (ioctl(fd, VIDIOC_S_FMT, &probe_fmt) < 0) {
+            perror("VIDIOC_S_FMT(CAPTURE_MPLANE) failed");
+            close(fd);
+            return EXIT_FAILURE;
+        }
+        printf("[PASS] Mode: %ux%u NV12M, planes=%u, Y=%u, UV=%u bytes\n",
+               probe_fmt.fmt.pix_mp.width, probe_fmt.fmt.pix_mp.height,
+               probe_fmt.fmt.pix_mp.num_planes,
+               probe_fmt.fmt.pix_mp.plane_fmt[0].sizeimage,
+               probe_fmt.fmt.pix_mp.plane_fmt[1].sizeimage);
+
+        memset(&parm, 0, sizeof(parm));
+        parm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+        parm.parm.capture.timeperframe.numerator = 1;
+        parm.parm.capture.timeperframe.denominator =
+            target_fps > 0 ? target_fps : 60;
+        if (ioctl(fd, VIDIOC_S_PARM, &parm) < 0) {
+            perror("VIDIOC_S_PARM failed");
+            close(fd);
+            return EXIT_FAILURE;
+        }
+        printf("[PASS] Frame interval: %u/%u s\n",
+               parm.parm.capture.timeperframe.numerator,
+               parm.parm.capture.timeperframe.denominator);
+
+        memset(&ctrl, 0, sizeof(ctrl));
+        ctrl.id = V4L2_CID_TEST_PATTERN;
+        if (tpg_pattern == 10)
+            ctrl.value = 4;
+        else if (tpg_pattern == 9 || tpg_pattern < 0)
+            ctrl.value = 3;
+        else
+            ctrl.value = tpg_pattern;
+        if (ioctl(fd, VIDIOC_S_CTRL, &ctrl) < 0 ||
+            ioctl(fd, VIDIOC_G_CTRL, &ctrl) < 0) {
+            perror("TPG VIDIOC_S/G_CTRL failed");
+            close(fd);
+            return EXIT_FAILURE;
+        }
+        printf("[PASS] TPG test-pattern menu value: %d\n", ctrl.value);
+        printf("[PASS] Stage-1 V4L2/TPG control-plane probe complete; streaming was not started.\n");
+        close(fd);
+        return EXIT_SUCCESS;
+    }
 
     // 3. Set Video Format
     struct v4l2_format fmt;

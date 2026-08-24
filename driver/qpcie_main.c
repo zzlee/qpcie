@@ -15,6 +15,12 @@ static irqreturn_t qpcie_irq_handler(int irq, void *data)
 
     if (!(status & 0x3))
         return IRQ_NONE;
+
+    /* Video frame completion is IRQ status bit 0. ALSA remains disabled
+     * during the staged V4L2-only bring-up. */
+    if ((status & BIT(0)) && qdev->v4l2_registered)
+        qpcie_v4l2_irq_handler(qdev);
+
     iowrite32(status & 0x3, qdev->bar0_mmio + REG_IRQ_STATUS);
     return IRQ_HANDLED;
 }
@@ -325,8 +331,61 @@ free_diag_dma:
     dev_info(&pdev->dev, "=======================================================\n");
     dev_info(&pdev->dev, "🎉 [DMA STEP-BY-STEP DIAGNOSTIC TEST COMPLETED]\n");
     dev_info(&pdev->dev, "=======================================================\n");
+
+    /* --------------------------------------------------------------------
+     * 4. Stage-1 V4L2-only control-plane bring-up (ALSA intentionally off)
+     * --------------------------------------------------------------------
+     * The hardware descriptor engine owns one shared ring. Preserve its
+     * current head position after the diagnostic run and start the persistent
+     * V4L2 ring at that same index so head/tail remain coherent.
+     */
+    qdev->h2c_ring_virt = dma_alloc_coherent(&pdev->dev,
+                              sizeof(*qdev->h2c_ring_virt) * RING_BUFFER_SIZE,
+                              &qdev->h2c_ring_dma, GFP_KERNEL);
+    if (!qdev->h2c_ring_virt) {
+        ret = -ENOMEM;
+        dev_err(&pdev->dev, "[ERROR] Cannot allocate persistent V4L2 descriptor ring\n");
+        goto free_irq;
+    }
+    memset(qdev->h2c_ring_virt, 0,
+           sizeof(*qdev->h2c_ring_virt) * RING_BUFFER_SIZE);
+    qdev->c2h_ring_virt = qdev->h2c_ring_virt;
+    qdev->c2h_ring_dma = qdev->h2c_ring_dma;
+
+    {
+        u32 hw_ptr = ioread32(qdev->bar0_mmio + 0x40);
+        u32 hw_head = hw_ptr & 0xffff;
+
+        qdev->h2c_tail = hw_head;
+        qdev->c2h_tail = hw_head;
+        dma_wmb();
+        iowrite32(lower_32_bits(qdev->h2c_ring_dma),
+                  qdev->bar0_mmio + REG_H2C_RING_ADDR_L);
+        iowrite32(upper_32_bits(qdev->h2c_ring_dma),
+                  qdev->bar0_mmio + REG_H2C_RING_ADDR_H);
+        iowrite32((hw_head << 16) | RING_BUFFER_SIZE,
+                  qdev->bar0_mmio + REG_H2C_RING_CFG);
+        dev_info(&pdev->dev,
+                 "V4L2 shared descriptor ring: DMA=0x%llX, head=tail=%u\n",
+                 (u64)qdev->h2c_ring_dma, hw_head);
+    }
+
+    ret = qpcie_v4l2_init(qdev);
+    if (ret) {
+        dev_err(&pdev->dev, "[ERROR] V4L2-only initialization failed: %d\n", ret);
+        goto free_video_ring;
+    }
+    qdev->v4l2_registered = true;
+    dev_info(&pdev->dev,
+             "Stage-1 V4L2 control plane ready; ALSA is intentionally disabled\n");
     return 0;
 
+free_video_ring:
+    dma_free_coherent(&pdev->dev,
+                      sizeof(*qdev->h2c_ring_virt) * RING_BUFFER_SIZE,
+                      qdev->h2c_ring_virt, qdev->h2c_ring_dma);
+    qdev->h2c_ring_virt = NULL;
+    qdev->c2h_ring_virt = NULL;
 free_irq:
     iowrite32(0, qdev->bar0_mmio + REG_IRQ_CTRL);
     free_irq(qdev->irq, qdev);
@@ -350,8 +409,21 @@ static void qpcie_remove(struct pci_dev *pdev)
 
     iowrite32(0, qdev->bar0_mmio + REG_DMA_CTRL);
     ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
-    pci_clear_master(pdev);
     iowrite32(0, qdev->bar0_mmio + REG_IRQ_CTRL);
+
+    if (qdev->v4l2_registered) {
+        qpcie_v4l2_remove(qdev);
+        qdev->v4l2_registered = false;
+    }
+    if (qdev->h2c_ring_virt) {
+        dma_free_coherent(&pdev->dev,
+                          sizeof(*qdev->h2c_ring_virt) * RING_BUFFER_SIZE,
+                          qdev->h2c_ring_virt, qdev->h2c_ring_dma);
+        qdev->h2c_ring_virt = NULL;
+        qdev->c2h_ring_virt = NULL;
+    }
+
+    pci_clear_master(pdev);
     free_irq(qdev->irq, qdev);
     pci_free_irq_vectors(pdev);
     if (qdev->bar1_mmio) pci_iounmap(pdev, qdev->bar1_mmio);
