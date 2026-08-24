@@ -17,7 +17,7 @@ module tb_sg_dma_engine;
         .h2c_req_addr(h2c_req_addr), .h2c_req_dw_len(h2c_req_dw_len),
         .h2c_req_tag(h2c_req_tag), .h2c_req_ack(h2c_req_ack),
         .c2h_req_valid(), .c2h_req_addr(), .c2h_req_dw_len(), .c2h_req_data(),
-        .c2h_req_last(), .c2h_req_ack(1'b0),
+        .c2h_req_last(), .c2h_req_data_ready(1'b0), .c2h_req_ack(1'b0),
         .h2c_cpl_valid(h2c_cpl_valid), .h2c_cpl_data(128'd0),
         .h2c_cpl_last(h2c_cpl_last),
         .completed_h2c_count(completed_h2c_count), .completed_c2h_count(),

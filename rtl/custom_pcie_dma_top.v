@@ -186,6 +186,7 @@ module custom_pcie_dma_top #(
     wire [(NUM_VIDEO_CH*11)-1:0]               v_c2h_req_dw_len;
     wire [(NUM_VIDEO_CH*PCIE_DATA_WIDTH)-1:0]   v_c2h_req_data;
     wire [NUM_VIDEO_CH-1:0]                    v_c2h_req_last;
+    wire [NUM_VIDEO_CH-1:0]                    v_c2h_req_data_ready;
     wire [NUM_VIDEO_CH-1:0]                    v_busy, v_done;
 
     wire [NUM_AUDIO_CH-1:0]                    a_c2h_req_valid;
@@ -208,6 +209,7 @@ module custom_pcie_dma_top #(
     wire [10:0] sg_h2c_req_dw_len;
     wire [7:0]  sg_h2c_req_tag;
     wire        sg_c2h_req_valid, sg_c2h_req_ack, sg_c2h_req_last;
+    wire        sg_c2h_req_data_ready;
     wire [63:0] sg_c2h_req_addr;
     wire [10:0] sg_c2h_req_dw_len;
     wire [PCIE_DATA_WIDTH-1:0] sg_c2h_req_data;
@@ -220,6 +222,7 @@ module custom_pcie_dma_top #(
     reg  [10:0]                c2h_req_dw_len_mux;
     reg  [PCIE_DATA_WIDTH-1:0] c2h_req_data_mux;
     reg                        c2h_req_last_mux;
+    wire                       c2h_req_data_ready_mux;
     wire                       c2h_req_ack_mux;
     reg [7:0]                  c2h_owner;
     reg [7:0]                  c2h_selected;
@@ -271,11 +274,16 @@ module custom_pcie_dma_top #(
         else if (c2h_owner != 0 && c2h_req_ack_mux) c2h_owner <= 8'd0;
     end
 
+    assign sg_c2h_req_data_ready =
+        (c2h_owner == 8'd1) && c2h_req_data_ready_mux;
     assign sg_c2h_req_ack = (c2h_owner == 8'd1) && c2h_req_ack_mux;
     genvar v_ack_i, a_ack_i;
     generate
         for (v_ack_i=0; v_ack_i<NUM_VIDEO_CH; v_ack_i=v_ack_i+1) begin : gen_v_ack
-            assign v_c2h_req_ack[v_ack_i] = (c2h_owner == (8'd2+v_ack_i)) && c2h_req_ack_mux;
+            assign v_c2h_req_data_ready[v_ack_i] =
+                (c2h_owner == (8'd2+v_ack_i)) && c2h_req_data_ready_mux;
+            assign v_c2h_req_ack[v_ack_i] =
+                (c2h_owner == (8'd2+v_ack_i)) && c2h_req_ack_mux;
         end
         for (a_ack_i=0; a_ack_i<NUM_AUDIO_CH; a_ack_i=a_ack_i+1) begin : gen_a_ack
             assign a_c2h_req_ack[a_ack_i] = (c2h_owner == (8'd2+NUM_VIDEO_CH+a_ack_i)) && c2h_req_ack_mux;
@@ -493,6 +501,7 @@ module custom_pcie_dma_top #(
         .c2h_req_dw_len(c2h_req_dw_len_mux),
         .c2h_req_data(c2h_req_data_mux),
         .c2h_req_last(c2h_req_last_mux),
+        .c2h_req_data_ready(c2h_req_data_ready_mux),
         .c2h_req_ack(c2h_req_ack_mux)
     );
 
@@ -581,6 +590,7 @@ module custom_pcie_dma_top #(
         .c2h_req_dw_len(sg_c2h_req_dw_len),
         .c2h_req_data(sg_c2h_req_data),
         .c2h_req_last(sg_c2h_req_last),
+        .c2h_req_data_ready(sg_c2h_req_data_ready),
         .c2h_req_ack(sg_c2h_req_ack),
         .h2c_cpl_valid(h2c_fifo_wvalid),
         .h2c_cpl_data(h2c_fifo_wdata),
@@ -625,6 +635,7 @@ module custom_pcie_dma_top #(
         .c2h_req_dw_len(v_c2h_req_dw_len[10:0]),
         .c2h_req_data(v_c2h_req_data[PCIE_DATA_WIDTH-1:0]),
         .c2h_req_last(v_c2h_req_last[0]),
+        .c2h_req_data_ready(v_c2h_req_data_ready[0]),
         .c2h_req_ack(v_c2h_req_ack[0]),
         .video_busy(v_busy[0]),
         .video_frame_done(v_done[0]),

@@ -38,6 +38,7 @@ module nv12_capture_engine #(
     output reg  [10:0]                  c2h_req_dw_len,
     output reg  [PCIE_DATA_WIDTH-1:0]   c2h_req_data,
     output reg                          c2h_req_last,
+    input  wire                         c2h_req_data_ready,
     input  wire                         c2h_req_ack,
 
     output reg                          video_busy,

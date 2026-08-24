@@ -41,7 +41,9 @@ module tb_rq_tx_encoder;
     reg  [10:0]          c2h_req_dw_len;
     reg  [DATA_WIDTH-1:0] c2h_req_data;
     reg                  c2h_req_last;
+    wire                 c2h_req_data_ready;
     wire                 c2h_req_ack;
+    reg                  burst_mode;
 
     // Instantiate uut
     rq_tx_encoder #(
@@ -73,10 +75,19 @@ module tb_rq_tx_encoder;
         .c2h_req_dw_len(c2h_req_dw_len),
         .c2h_req_data(c2h_req_data),
         .c2h_req_last(c2h_req_last),
+        .c2h_req_data_ready(c2h_req_data_ready),
         .c2h_req_ack(c2h_req_ack)
     );
 
     always #5 clk = ~clk;
+
+    always @(posedge clk) begin
+        if (burst_mode && c2h_req_data_ready)
+            c2h_req_data <= c2h_req_data + 1'b1;
+    end
+
+    integer burst_beat;
+    reg [127:0] held_data;
 
     initial begin
         clk = 0;
@@ -97,6 +108,7 @@ module tb_rq_tx_encoder;
         c2h_req_dw_len = 0;
         c2h_req_data = 0;
         c2h_req_last = 0;
+        burst_mode = 0;
 
         #20;
         rst_n = 1;
@@ -157,6 +169,49 @@ module tb_rq_tx_encoder;
             $display("FAIL: C2H acknowledgement missing");
             $finish;
         end
+        c2h_req_valid <= 0;
+
+        #30;
+        $display("[%0t] Test 4: 128-byte/8-beat C2H MWr with payload backpressure...", $time);
+        c2h_req_addr <= 64'h0000_0001_2345_6780;
+        c2h_req_dw_len <= 11'd32;
+        c2h_req_data <= 128'hA5A5_0000_0000_0000_0000_0000_0000_0000;
+        c2h_req_last <= 1;
+        c2h_req_valid <= 1;
+        burst_mode <= 1;
+
+        wait(m_axis_rq_tvalid);
+        if (m_axis_rq_tdata[78:75] !== 4'b0001 ||
+            m_axis_rq_tdata[74:64] !== 11'd32 || m_axis_rq_tlast !== 0)
+            $fatal(1, "128-byte MWr header malformed");
+        @(posedge clk); #1;
+
+        for (burst_beat = 0; burst_beat < 8; burst_beat = burst_beat + 1) begin
+            wait(m_axis_rq_tvalid);
+            if (m_axis_rq_tdata !==
+                (128'hA5A5_0000_0000_0000_0000_0000_0000_0000 + burst_beat))
+                $fatal(1, "Burst payload beat %0d mismatch: %h", burst_beat,
+                       m_axis_rq_tdata);
+            if (m_axis_rq_tlast !== (burst_beat == 7))
+                $fatal(1, "Burst TLAST mismatch on beat %0d", burst_beat);
+            if (m_axis_rq_tkeep !== 16'hffff)
+                $fatal(1, "Burst TKEEP mismatch on beat %0d", burst_beat);
+
+            if (burst_beat == 3) begin
+                held_data = m_axis_rq_tdata;
+                m_axis_rq_tready <= 0;
+                repeat (3) begin
+                    @(posedge clk); #1;
+                    if (!m_axis_rq_tvalid || m_axis_rq_tdata !== held_data)
+                        $fatal(1, "Burst payload changed under backpressure");
+                end
+                m_axis_rq_tready <= 1;
+            end
+            @(posedge clk); #1;
+        end
+        if (!c2h_req_ack)
+            $fatal(1, "128-byte MWr acknowledgement missing");
+        burst_mode <= 0;
         c2h_req_valid <= 0;
 
         #30;

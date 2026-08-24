@@ -38,6 +38,7 @@ module sg_dma_engine #(
     output reg  [10:0]                   c2h_req_dw_len,
     output reg  [PCIE_DATA_WIDTH-1:0]    c2h_req_data,
     output reg                           c2h_req_last,
+    input  wire                          c2h_req_data_ready,
     input  wire                          c2h_req_ack,
 
     // Interface from RC RX Decoder (H2C CplD Stream Consumer)
@@ -164,38 +165,60 @@ module sg_dma_engine #(
     // =========================================================================
     // C2H (FPGA -> Host) DMA Execution State Machine
     // =========================================================================
-    localparam C2H_IDLE     = 2'd0;
-    localparam C2H_SEND_BEAT= 2'd1;
-    localparam C2H_WAIT_ACK = 2'd2;
-    localparam C2H_COMPLETE = 2'd3;
+    // Diagnostic traffic uses 128-byte MWr payloads by default.  Bursts are
+    // shortened at the descriptor end and may never cross a 4-KiB boundary.
+    localparam C2H_IDLE       = 2'd0;
+    localparam C2H_ISSUE_MWR  = 2'd1;
+    localparam C2H_WAIT_ACK   = 2'd2;
+    localparam C2H_COMPLETE   = 2'd3;
+    localparam [15:0] C2H_MAX_BURST_BYTES = 16'd128;
 
     reg [1:0]  c2h_state;
     reg [63:0] c2h_cur_addr;
     reg [15:0] c2h_rem_bytes;
     reg [15:0] c2h_word_idx;
+    reg [15:0] c2h_burst_bytes;
+    reg [5:0]  c2h_payload_beats_to_load;
+
+    wire [12:0] c2h_bytes_to_4k = 13'd4096 - {1'b0, c2h_cur_addr[11:0]};
+    wire [15:0] c2h_desc_limited_bytes =
+        (c2h_rem_bytes < C2H_MAX_BURST_BYTES) ?
+        c2h_rem_bytes : C2H_MAX_BURST_BYTES;
+    wire [15:0] c2h_next_burst_bytes =
+        (c2h_desc_limited_bytes < c2h_bytes_to_4k) ?
+        c2h_desc_limited_bytes : c2h_bytes_to_4k;
+    wire [10:0] c2h_next_burst_dw = c2h_next_burst_bytes >> 2;
+    wire [5:0] c2h_next_payload_beats =
+        (c2h_next_burst_dw + (PCIE_DATA_WIDTH/32) - 1) /
+        (PCIE_DATA_WIDTH/32);
 
     assign c2h_busy = (c2h_state != C2H_IDLE);
 
-    // Identifiable Test Pattern Generator for 128-bit Beats (4 DWs per beat)
-    wire [31:0] p_dw0 = 32'hC200_0000 | (completed_c2h_count[7:0] << 16) | c2h_word_idx;
-    wire [31:0] p_dw1 = 32'hC200_0000 | (completed_c2h_count[7:0] << 16) | (c2h_word_idx + 16'd1);
-    wire [31:0] p_dw2 = 32'hC200_0000 | (completed_c2h_count[7:0] << 16) | (c2h_word_idx + 16'd2);
-    wire [31:0] p_dw3 = 32'hC200_0000 | (completed_c2h_count[7:0] << 16) | (c2h_word_idx + 16'd3);
+    function [31:0] c2h_pattern_dw;
+        input [15:0] word_index;
+        begin
+            c2h_pattern_dw = 32'hC200_0000 |
+                             (completed_c2h_count[7:0] << 16) |
+                             word_index;
+        end
+    endfunction
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            c2h_state             <= C2H_IDLE;
-            c2h_desc_ready        <= 1'b0;
-            c2h_req_valid         <= 1'b0;
-            c2h_req_addr          <= 64'd0;
-            c2h_req_dw_len        <= 11'd0;
-            c2h_req_data          <= {PCIE_DATA_WIDTH{1'b0}};
-            c2h_req_last          <= 1'b0;
-            completed_c2h_count   <= 32'd0;
-            c2h_bytes_transferred <= 32'd0;
-            c2h_cur_addr          <= 64'd0;
-            c2h_rem_bytes         <= 16'd0;
-            c2h_word_idx          <= 16'd0;
+            c2h_state                 <= C2H_IDLE;
+            c2h_desc_ready            <= 1'b0;
+            c2h_req_valid             <= 1'b0;
+            c2h_req_addr              <= 64'd0;
+            c2h_req_dw_len            <= 11'd0;
+            c2h_req_data              <= {PCIE_DATA_WIDTH{1'b0}};
+            c2h_req_last              <= 1'b0;
+            completed_c2h_count       <= 32'd0;
+            c2h_bytes_transferred     <= 32'd0;
+            c2h_cur_addr              <= 64'd0;
+            c2h_rem_bytes             <= 16'd0;
+            c2h_word_idx              <= 16'd0;
+            c2h_burst_bytes           <= 16'd0;
+            c2h_payload_beats_to_load <= 6'd0;
         end else begin
             case (c2h_state)
                 C2H_IDLE: begin
@@ -204,34 +227,59 @@ module sg_dma_engine #(
                     if (c2h_desc_valid) begin
                         c2h_desc_ready <= 1'b1;
                         c2h_cur_addr   <= c2h_plane0_dst;
-                        c2h_rem_bytes  <= (c2h_line_width > 16'd0) ? c2h_line_width : 16'd4096;
+                        c2h_rem_bytes  <= (c2h_line_width > 16'd0) ?
+                                          c2h_line_width : 16'd4096;
                         c2h_word_idx   <= 16'd0;
-                        c2h_state      <= C2H_SEND_BEAT;
+                        c2h_state      <= C2H_ISSUE_MWR;
                     end
                 end
 
-                C2H_SEND_BEAT: begin
+                C2H_ISSUE_MWR: begin
                     c2h_desc_ready <= 1'b0;
                     if (c2h_rem_bytes > 16'd0) begin
-                        c2h_req_addr   <= c2h_cur_addr;
-                        c2h_req_dw_len <= 11'd4; // 4 DWs = 16 Bytes (1 128-bit beat)
-                        c2h_req_data   <= {p_dw3, p_dw2, p_dw1, p_dw0};
-                        c2h_req_last   <= (c2h_rem_bytes <= 16'd16);
-                        c2h_req_valid  <= 1'b1;
-                        c2h_state      <= C2H_WAIT_ACK;
+                        c2h_req_addr      <= c2h_cur_addr;
+                        c2h_req_dw_len    <= c2h_next_burst_dw;
+                        c2h_req_data      <= {
+                            c2h_pattern_dw(c2h_word_idx + 16'd3),
+                            c2h_pattern_dw(c2h_word_idx + 16'd2),
+                            c2h_pattern_dw(c2h_word_idx + 16'd1),
+                            c2h_pattern_dw(c2h_word_idx)
+                        };
+                        c2h_req_last      <=
+                            (c2h_rem_bytes <= c2h_next_burst_bytes);
+                        c2h_burst_bytes   <= c2h_next_burst_bytes;
+                        c2h_payload_beats_to_load <= c2h_next_payload_beats;
+                        c2h_req_valid     <= 1'b1;
+                        c2h_state         <= C2H_WAIT_ACK;
                     end else begin
                         c2h_state <= C2H_COMPLETE;
                     end
                 end
 
                 C2H_WAIT_ACK: begin
+                    if (c2h_req_data_ready) begin
+                        c2h_word_idx <= c2h_word_idx + (PCIE_DATA_WIDTH/32);
+                        c2h_payload_beats_to_load <=
+                            c2h_payload_beats_to_load - 1'b1;
+                        if (c2h_payload_beats_to_load > 1) begin
+                            c2h_req_data <= {
+                                c2h_pattern_dw(c2h_word_idx + 16'd7),
+                                c2h_pattern_dw(c2h_word_idx + 16'd6),
+                                c2h_pattern_dw(c2h_word_idx + 16'd5),
+                                c2h_pattern_dw(c2h_word_idx + 16'd4)
+                            };
+                        end
+                    end
                     if (c2h_req_ack) begin
                         c2h_req_valid         <= 1'b0;
-                        c2h_cur_addr          <= c2h_cur_addr + 64'd16;
-                        c2h_rem_bytes         <= c2h_rem_bytes - 16'd16;
-                        c2h_word_idx          <= c2h_word_idx + 16'd4;
-                        c2h_bytes_transferred <= c2h_bytes_transferred + 32'd16;
-                        c2h_state             <= C2H_SEND_BEAT;
+                        c2h_cur_addr          <= c2h_cur_addr + c2h_burst_bytes;
+                        c2h_rem_bytes         <= c2h_rem_bytes - c2h_burst_bytes;
+                        c2h_bytes_transferred <= c2h_bytes_transferred +
+                                                  c2h_burst_bytes;
+                        if (c2h_rem_bytes == c2h_burst_bytes)
+                            c2h_state <= C2H_COMPLETE;
+                        else
+                            c2h_state <= C2H_ISSUE_MWR;
                     end
                 end
 

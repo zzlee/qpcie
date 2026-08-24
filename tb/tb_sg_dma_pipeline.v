@@ -45,6 +45,7 @@ module tb_sg_dma_pipeline;
     // Emulated Host Memory Buffer for Full 4096-Byte Verification
     reg [31:0] host_mem [0:1023];
     integer burst_cnt;
+    integer payload_beat;
     integer dw_idx;
     integer err_cnt;
 
@@ -285,30 +286,43 @@ module tb_sg_dma_pipeline;
         m_axis_rx_tlast  <= 1'b0;
 
         // 7. Full 4096-Byte (1024-DWORD) C2H DMA Write Verification
-        $display("--- [Step 7: Verifying Full 4096-Byte (256 Bursts / 1024 DWs) C2H Transmission] ---");
+        $display("--- [Step 7: Verifying Full 4096-Byte (32 x 128-Byte MWr / 1024 DWs) C2H Transmission] ---");
 
-        for (burst_cnt = 0; burst_cnt < 256; burst_cnt = burst_cnt + 1) begin
-            // 1. Wait for Beat 0 (4-DW Header)
+        for (burst_cnt = 0; burst_cnt < 32; burst_cnt = burst_cnt + 1) begin
+            // Beat 0 is a 4-DW MWr header for a 32-DW/128-byte payload.
             @(posedge clk);
-            while (!(s_axis_tx_tvalid && s_axis_tx_tdata[30:29] == 2'b11)) @(posedge clk);
-            if (s_axis_tx_tlast != 1'b0) begin
-                $display("  ❌ [FAIL] Burst %0d Beat 0: tlast must be 0! Got: %b", burst_cnt, s_axis_tx_tlast);
+            while (!(s_axis_tx_tvalid && s_axis_tx_tdata[30:29] == 2'b11))
+                @(posedge clk);
+            if (s_axis_tx_tlast != 1'b0 || s_axis_tx_tdata[9:0] != 10'd32) begin
+                $display("  ❌ [FAIL] Burst %0d header malformed: last=%b len=%0d",
+                         burst_cnt, s_axis_tx_tlast, s_axis_tx_tdata[9:0]);
+                $finish;
+            end
+            if ({s_axis_tx_tdata[95:64], s_axis_tx_tdata[127:96]} !==
+                (64'h0000_0000_FFFF_C000 + burst_cnt * 128)) begin
+                $display("  ❌ [FAIL] Burst %0d address malformed", burst_cnt);
                 $finish;
             end
 
-            // 2. Wait for Beat 1 (128-bit Payload Data: 4 DWs)
-            @(posedge clk);
-            while (!s_axis_tx_tvalid) @(posedge clk);
-            if (s_axis_tx_tlast != 1'b1) begin
-                $display("  ❌ [FAIL] Burst %0d Beat 1: tlast must be 1! Got: %b", burst_cnt, s_axis_tx_tlast);
-                $finish;
+            // Eight 128-bit payload beats follow each header.
+            for (payload_beat = 0; payload_beat < 8;
+                 payload_beat = payload_beat + 1) begin
+                @(posedge clk);
+                while (!s_axis_tx_tvalid) @(posedge clk);
+                if (s_axis_tx_tlast != (payload_beat == 7)) begin
+                    $display("  ❌ [FAIL] Burst %0d payload beat %0d TLAST=%b",
+                             burst_cnt, payload_beat, s_axis_tx_tlast);
+                    $finish;
+                end
+                host_mem[(burst_cnt * 32) + (payload_beat * 4) + 0] =
+                    host_payload_dw(s_axis_tx_tdata[31:0]);
+                host_mem[(burst_cnt * 32) + (payload_beat * 4) + 1] =
+                    host_payload_dw(s_axis_tx_tdata[63:32]);
+                host_mem[(burst_cnt * 32) + (payload_beat * 4) + 2] =
+                    host_payload_dw(s_axis_tx_tdata[95:64]);
+                host_mem[(burst_cnt * 32) + (payload_beat * 4) + 3] =
+                    host_payload_dw(s_axis_tx_tdata[127:96]);
             end
-
-            // Record into Host Memory Model
-            host_mem[(burst_cnt * 4) + 0] = host_payload_dw(s_axis_tx_tdata[31:0]);
-            host_mem[(burst_cnt * 4) + 1] = host_payload_dw(s_axis_tx_tdata[63:32]);
-            host_mem[(burst_cnt * 4) + 2] = host_payload_dw(s_axis_tx_tdata[95:64]);
-            host_mem[(burst_cnt * 4) + 3] = host_payload_dw(s_axis_tx_tdata[127:96]);
         end
 
         // 8. Verify all 1024 DWs (4096 Bytes) Golden Pattern
