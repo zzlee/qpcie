@@ -98,6 +98,32 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
     pci_set_master(pdev);
 
+    /* The SG diagnostic and the capture engines emit 256-byte MWr payloads.
+     * A host that has not negotiated MaxPayloadSize >= 256 treats those TLPs
+     * as malformed (AER MalfTLP fatal), so fail cleanly here instead of
+     * poisoning the link during the self-test below. */
+    {
+        int mps = pcie_get_mps(pdev);
+
+        if (mps < 0) {
+            dev_err(&pdev->dev, "[ERROR] failed to read negotiated MPS: %d\n",
+                    mps);
+            ret = mps;
+            goto disable_pci;
+        }
+        if (mps < 256) {
+            dev_err(&pdev->dev,
+                    "[ERROR] negotiated MaxPayloadSize %d < 256; add "
+                    "pci=pcie_bus_perf to the kernel command line and reboot\n",
+                    mps);
+            ret = -EOPNOTSUPP;
+            goto disable_pci;
+        }
+        dev_info(&pdev->dev,
+                 "Negotiated MaxPayloadSize: %d bytes (256-byte MWr enabled)\n",
+                 mps);
+    }
+
     dev_info(&pdev->dev, "[PCI BAR0 Resource] Start=0x%llx, Len=0x%llx, Flags=0x%lx\n",
              (unsigned long long)pci_resource_start(pdev, 0),
              (unsigned long long)pci_resource_len(pdev, 0),
