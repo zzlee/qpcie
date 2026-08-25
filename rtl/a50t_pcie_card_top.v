@@ -413,63 +413,13 @@ module a50t_pcie_card_top #(
         8'hFF, tpg_axis_tdata[47:24],
         8'hFF, tpg_axis_tdata[23:0]
     };
-    wire [127:0] tpg_cdc_tdata;
-    wire         tpg_cdc_tvalid;
-    wire         tpg_cdc_tlast;
-    wire [0:0]   tpg_cdc_tuser;
 
-    xpm_fifo_axis #(
-        .CLOCKING_MODE("independent_clock"),
-        .FIFO_MEMORY_TYPE("block"),
-        .PACKET_FIFO("false"),
-        .FIFO_DEPTH(2048),
-        .TDATA_WIDTH(128),
-        .TID_WIDTH(1),
-        .TDEST_WIDTH(1),
-        .TUSER_WIDTH(1),
-        .CDC_SYNC_STAGES(2),
-        .RELATED_CLOCKS(0),
-        .USE_ADV_FEATURES("0000"),
-        .WR_DATA_COUNT_WIDTH(1),
-        .RD_DATA_COUNT_WIDTH(1)
-    ) u_tpg_axis_cdc (
-        .s_aresetn(video_pipeline_rst_n),
-        .s_aclk(video_clk_150),
-        .m_aclk(pcie_user_clk),
-        .s_axis_tvalid(tpg_axis_tvalid),
-        .s_axis_tready(tpg_axis_tready),
-        .s_axis_tdata(tpg_padded_tdata),
-        .s_axis_tstrb(16'hffff),
-        .s_axis_tkeep(16'hffff),
-        .s_axis_tlast(tpg_axis_tlast),
-        .s_axis_tid(1'b0),
-        .s_axis_tdest(1'b0),
-        .s_axis_tuser(tpg_axis_tuser),
-        .m_axis_tvalid(tpg_cdc_tvalid),
-        .m_axis_tready(s_video_tready[0]),
-        .m_axis_tdata(tpg_cdc_tdata),
-        .m_axis_tstrb(),
-        .m_axis_tkeep(),
-        .m_axis_tlast(tpg_cdc_tlast),
-        .m_axis_tid(),
-        .m_axis_tdest(),
-        .m_axis_tuser(tpg_cdc_tuser),
-        .prog_full_axis(),
-        .wr_data_count_axis(),
-        .almost_full_axis(),
-        .prog_empty_axis(),
-        .rd_data_count_axis(),
-        .almost_empty_axis(),
-        .injectsbiterr_axis(1'b0),
-        .injectdbiterr_axis(1'b0),
-        .sbiterr_axis(),
-        .dbiterr_axis()
-    );
-
-    assign s_video_tdata[127:0] = tpg_cdc_tdata;
-    assign s_video_tvalid[0]    = tpg_cdc_tvalid;
-    assign s_video_tlast[0]     = tpg_cdc_tlast;
-    assign s_video_tuser[0]     = tpg_cdc_tuser[0];
+    // The NV12 capture engine now lives in the 150 MHz video domain and
+    // consumes the TPG stream directly (same clock). Its C2H requests cross
+    // back to the PCIe domain through u_video_req_cdc inside the DMA top.
+    assign s_video_tvalid[0]    = 1'b0;
+    assign s_video_tlast[0]     = 1'b0;
+    assign s_video_tuser[0]     = 1'b0;
 
     assign s_video_tdata[511:128] = m_video_tdata[511:128];
     assign s_video_tvalid[3:1]    = m_video_tvalid[3:1];
@@ -782,6 +732,14 @@ module a50t_pcie_card_top #(
         .s_axis_video_tlast(s_video_tlast),
         .s_axis_video_tuser(s_video_tuser),
         .s_axis_video_tready(s_video_tready),
+
+        .video_clk(video_clk_150),
+        .video_rst_n(video_pipeline_rst_n),
+        .video_ch0_tdata(tpg_padded_tdata),
+        .video_ch0_tvalid(tpg_axis_tvalid),
+        .video_ch0_tlast(tpg_axis_tlast),
+        .video_ch0_tuser(tpg_axis_tuser),
+        .video_ch0_tready(tpg_axis_tready),
 
         .m_axis_video_tdata(m_video_tdata),
         .m_axis_video_tvalid(m_video_tvalid),

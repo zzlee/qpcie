@@ -108,8 +108,11 @@ generate_target all [get_ips axi_crossbar_0]
 # 7. Update Compile Order
 update_compile_order -fileset sources_1
 
-# 8. Run Synthesis and Implementation to Bitstream
-puts "Launching Synthesis and Implementation for qpcie top module..."
+# 7.1 Disable the IP cache: cached OOC products have been observed leaving
+# an IP's generation state as 'Reset', which breaks run-dependency tracking
+# and lets synth_1 consume *_stub.v files (silent IP black-boxing).
+config_ip_cache -disable_cache
+
 launch_runs impl_1 -to_step write_bitstream -jobs 8
 wait_on_run impl_1
 
@@ -120,6 +123,18 @@ if {[get_property PROGRESS [get_runs impl_1]] != "100%" ||
 }
 
 open_run impl_1
+
+# Black-box guard: PCIe transceivers, TPG DSPs and block RAMs must exist.
+# Their absence means an IP was silently stubbed during top-level synthesis.
+set gt_count   [llength [get_cells -quiet -hierarchical -filter {REF_NAME =~ "GTPE2_CHANNEL*"}]]
+set dsp_count  [llength [get_cells -quiet -hierarchical -filter {REF_NAME =~ "DSP48E1*"}]]
+set bram_count [llength [get_cells -quiet -hierarchical -filter {REF_NAME =~ "RAMB*"}]]
+puts " IP-content audit: GTPE2=$gt_count DSP48E1=$dsp_count RAMB=$bram_count"
+if {$gt_count < 4 || $dsp_count == 0 || $bram_count < 10} {
+    puts "ERROR: IP contents missing from netlist (stub/black-box synthesis)."
+    exit 1
+}
+
 set failing_path [get_timing_paths -quiet -slack_lesser_than 0 -max_paths 1]
 if {[llength $failing_path] != 0} {
     set worst_slack [get_property SLACK [lindex $failing_path 0]]

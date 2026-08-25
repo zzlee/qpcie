@@ -80,6 +80,16 @@ module custom_pcie_dma_top #(
     input  wire [NUM_VIDEO_CH-1:0]                          s_axis_video_tuser, // tuser[0] = SOF
     output wire [NUM_VIDEO_CH-1:0]                          s_axis_video_tready,
 
+    // 150 MHz NV12 capture domain (channel 0). The engine runs here and its
+    // C2H requests cross back through video_req_cdc.
+    input  wire                                             video_clk,
+    input  wire                                             video_rst_n,
+    input  wire [127:0]                                     video_ch0_tdata,
+    input  wire                                             video_ch0_tvalid,
+    input  wire                                             video_ch0_tlast,
+    input  wire                                             video_ch0_tuser,
+    output wire                                             video_ch0_tready,
+
     output wire [(NUM_VIDEO_CH*VIDEO_DATA_WIDTH)-1:0]       m_axis_video_tdata,
     output wire [NUM_VIDEO_CH-1:0]                          m_axis_video_tvalid,
     output wire [NUM_VIDEO_CH-1:0]                          m_axis_video_tlast,
@@ -609,46 +619,214 @@ module custom_pcie_dma_top #(
         .c2h_busy(sg_c2h_busy)
     );
 
-    // 8. Channel-0 YUV444 -> NV12M Capture Engine
+    // 8. Channel-0 YUV444 -> NV12M Capture Engine (150 MHz video domain)
     // Descriptor format 0 remains reserved for the SG diagnostic engine;
     // format 2 with two planes is accepted only by this video engine.
     localparam integer NUM_V_CH = NUM_VIDEO_CH;
     localparam integer NUM_A_CH = NUM_AUDIO_CH;
 
+    // ---- Signal declarations (before any use) ----------------------------
+    reg         hs_send_q;
+    reg [239:0] hs_bus_q;
+    wire        hs_src_rcv, hs_dest_req;
+    wire [239:0] hs_dest_bus;
+    reg          hs_dest_ack;
+    reg          eng_desc_valid;
+    reg [63:0]   eng_y_addr, eng_uv_addr, eng_ts;
+    reg [15:0]   eng_width, eng_height, eng_stride;
+    wire         nv12_desc_ready_v;
+
+    // Pacer enable crosses as a quasi-static level (BAR0 write, rare).
+    (* ASYNC_REG = "TRUE" *) reg [1:0] pacer_sync = 2'b01;
+
+    wire        eng_frame_done, eng_busy;
+    wire [31:0] eng_err_count;
+    wire [63:0] eng_frame_pts;
+    wire        eng_req_valid, eng_req_ready, eng_req_ack;
+    wire [63:0] eng_req_addr;
+    wire [PCIE_DATA_WIDTH-1:0] eng_req_data;
+
+    (* ASYNC_REG = "TRUE" *) reg [1:0] v_done_sync = 2'b00;
+    (* ASYNC_REG = "TRUE" *) reg [1:0] v_busy_sync = 2'b00;
+    reg v_done_prev = 1'b0;
+    wire v_done_pulse = v_done_sync[1] ^ v_done_prev;
+
+    wire        tel_dest_req;
+    wire [95:0] tel_dest_out;
+    wire        tel_dest_ack_unused;
+    reg [31:0] v_err_sync_q = 32'd0;
+    reg [63:0] v_pts_sync_q = 64'd0;
+
+    // ---- Descriptor crossing: 125 MHz fetch -> 150 MHz engine ------------
+    // Bus layout: {timestamp[63:0], stride[15:0], height[15:0], width[15:0],
+    //              uv_addr[63:0], y_addr[63:0]}
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            hs_send_q <= 1'b0;
+            hs_bus_q  <= 240'd0;
+        end else if (!hs_send_q && c2h_desc_valid && nv12_desc_select) begin
+            hs_bus_q  <= {global_timestamp, c2h_dst_stride,
+                          c2h_line_count, c2h_line_width,
+                          c2h_plane1_dst, c2h_plane0_dst};
+            hs_send_q <= 1'b1;
+        end else if (hs_send_q && hs_src_rcv) begin
+            hs_send_q <= 1'b0;
+        end
+    end
+
+    assign nv12_desc_ready = c2h_desc_valid && nv12_desc_select && !hs_send_q;
+
+    xpm_cdc_handshake #(
+        .WIDTH(240),
+        .DEST_EXT_HSK(0)
+    ) u_desc_cdc (
+        .src_clk    (clk),
+        .src_send   (hs_send_q),
+        .src_rcv    (hs_src_rcv),
+        .src_in     (hs_bus_q),
+        .dest_clk   (video_clk),
+        .dest_req   (hs_dest_req),
+        .dest_out   (hs_dest_bus),
+        .dest_ack   (hs_dest_ack)
+    );
+
+    always @(posedge video_clk or negedge video_rst_n) begin
+        if (!video_rst_n) begin
+            eng_desc_valid <= 1'b0;
+            hs_dest_ack    <= 1'b0;
+            eng_y_addr     <= 64'd0;
+            eng_uv_addr    <= 64'd0;
+            eng_width      <= 16'd0;
+            eng_height     <= 16'd0;
+            eng_stride     <= 16'd0;
+            eng_ts         <= 64'd0;
+        end else begin
+            if (hs_dest_req) begin
+                eng_y_addr     <= hs_dest_bus[63:0];
+                eng_uv_addr    <= hs_dest_bus[127:64];
+                eng_width      <= hs_dest_bus[143:128];
+                eng_height     <= hs_dest_bus[159:144];
+                eng_stride     <= hs_dest_bus[175:160];
+                eng_ts         <= hs_dest_bus[239:176];
+                eng_desc_valid <= 1'b1;
+            end
+            if (eng_desc_valid && nv12_desc_ready_v) begin
+                eng_desc_valid <= 1'b0;
+                hs_dest_ack    <= 1'b1;
+            end else begin
+                hs_dest_ack <= 1'b0;
+            end
+        end
+    end
+
+    always @(posedge video_clk) pacer_sync <= {pacer_sync[0], reg_pacer_ctrl[0]};
+
+    // Completion pulse + telemetry cross back to the PCIe domain.
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            v_done_sync <= 2'b00;
+            v_busy_sync <= 2'b00;
+            v_done_prev <= 1'b0;
+        end else begin
+            v_done_sync[0] <= eng_frame_done;
+            v_done_sync[1] <= v_done_sync[0];
+            v_busy_sync[0] <= eng_busy;
+            v_busy_sync[1] <= v_busy_sync[0];
+            v_done_prev    <= v_done_sync[1];
+        end
+    end
+
+    // Telemetry handshake: {protocol_error_count, frame_pts} per frame done.
+    xpm_cdc_handshake #(
+        .WIDTH(96),
+        .DEST_EXT_HSK(0)
+    ) u_tel_cdc (
+        .src_clk    (video_clk),
+        .src_send   (eng_frame_done),
+        .src_rcv    (),
+        .src_in     ({eng_err_count, eng_frame_pts}),
+        .dest_clk   (clk),
+        .dest_req   (tel_dest_req),
+        .dest_out   (tel_dest_out),
+        .dest_ack   (tel_dest_ack_unused)
+    );
+
+    assign tel_dest_ack_unused = tel_dest_req;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            v_err_sync_q <= 32'd0;
+            v_pts_sync_q <= 64'd0;
+        end else if (tel_dest_req) begin
+            v_err_sync_q <= tel_dest_out[95:64];
+            v_pts_sync_q <= tel_dest_out[63:0];
+        end
+    end
+
+    // Channel-0 status/telemetry now come from the synchronized copies.
+    assign v_done[0]     = v_done_pulse;
+    assign v_busy[0]     = v_busy_sync[1];
+    assign v_pts[0]      = v_pts_sync_q;
+    assign v_drop_cnt[0] = v_err_sync_q;
+    assign s_axis_video_tready[0] = 1'b0;
+
+    // ---- Request crossing: engine @150 MHz -> RQ arbiter @125 MHz --------
+    video_req_cdc #(
+        .REQ_DWORDS(64),
+        .FIFO_DEPTH(512)
+    ) u_video_req_cdc (
+        .wr_clk           (video_clk),
+        .wr_rst_n         (video_rst_n),
+        .s_req_valid      (eng_req_valid),
+        .s_req_addr       (eng_req_addr),
+        .s_req_data       (eng_req_data),
+        .s_req_data_ready (eng_req_ready),
+        .s_req_ack        (eng_req_ack),
+        .rd_clk           (clk),
+        .rd_rst_n         (rst_n),
+        .m_req_valid      (v_c2h_req_valid[0]),
+        .m_req_addr       (v_c2h_req_addr[63:0]),
+        .m_req_dw_len     (v_c2h_req_dw_len[10:0]),
+        .m_req_data       (v_c2h_req_data[PCIE_DATA_WIDTH-1:0]),
+        .m_req_data_ready (v_c2h_req_data_ready[0]),
+        .m_req_ack        (v_c2h_req_ack[0])
+    );
+
+    // ---- The capture engine itself ---------------------------------------
     nv12_capture_engine #(
         .MAX_WIDTH(3840),
         .PCIE_DATA_WIDTH(PCIE_DATA_WIDTH),
         .FIFO_DEPTH(128),
         .MWR_PAYLOAD_BYTES(256)
     ) u_nv12_capture_engine (
-        .clk(clk),
-        .rst_n(rst_n),
-        .desc_valid(c2h_desc_valid && nv12_desc_select),
-        .desc_ready(nv12_desc_ready),
-        .plane_y_addr(c2h_plane0_dst),
-        .plane_uv_addr(c2h_plane1_dst),
-        .frame_width(c2h_line_width),
-        .frame_height(c2h_line_count),
-        .frame_stride(c2h_dst_stride),
-        .pacer_enable(reg_pacer_ctrl[0]),
-        .frame_interval_clks(32'd2083333),
-        .global_timestamp(global_timestamp),
-        .s_axis_tdata(s_axis_video_tdata[127:0]),
-        .s_axis_tvalid(s_axis_video_tvalid[0]),
-        .s_axis_tlast(s_axis_video_tlast[0]),
-        .s_axis_tuser(s_axis_video_tuser[0]),
-        .s_axis_tready(s_axis_video_tready[0]),
-        .c2h_req_valid(v_c2h_req_valid[0]),
-        .c2h_req_addr(v_c2h_req_addr[63:0]),
-        .c2h_req_dw_len(v_c2h_req_dw_len[10:0]),
-        .c2h_req_data(v_c2h_req_data[PCIE_DATA_WIDTH-1:0]),
-        .c2h_req_last(v_c2h_req_last[0]),
-        .c2h_req_data_ready(v_c2h_req_data_ready[0]),
-        .c2h_req_ack(v_c2h_req_ack[0]),
-        .video_busy(v_busy[0]),
-        .video_frame_done(v_done[0]),
-        .frame_pts(v_pts[0]),
-        .protocol_error_count(v_drop_cnt[0])
+        .clk(video_clk),
+        .rst_n(video_rst_n),
+        .desc_valid(eng_desc_valid),
+        .desc_ready(nv12_desc_ready_v),
+        .plane_y_addr(eng_y_addr),
+        .plane_uv_addr(eng_uv_addr),
+        .frame_width(eng_width),
+        .frame_height(eng_height),
+        .frame_stride(eng_stride),
+        .pacer_enable(pacer_sync[1]),
+        .frame_interval_clks(32'd2500000),   // 60 FPS @ 150 MHz
+        .global_timestamp(eng_ts),
+        .s_axis_tdata(video_ch0_tdata),
+        .s_axis_tvalid(video_ch0_tvalid),
+        .s_axis_tlast(video_ch0_tlast),
+        .s_axis_tuser(video_ch0_tuser),
+        .s_axis_tready(video_ch0_tready),
+        .c2h_req_valid(eng_req_valid),
+        .c2h_req_addr(eng_req_addr),
+        .c2h_req_dw_len(),
+        .c2h_req_data(eng_req_data),
+        .c2h_req_last(),
+        .c2h_req_data_ready(eng_req_ready),
+        .c2h_req_ack(eng_req_ack),
+        .video_busy(eng_busy),
+        .video_frame_done(eng_frame_done),
+        .frame_pts(eng_frame_pts),
+        .protocol_error_count(eng_err_count)
     );
 
     assign m_axis_video_tdata[VIDEO_DATA_WIDTH-1:0] = {VIDEO_DATA_WIDTH{1'b0}};

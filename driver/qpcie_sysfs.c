@@ -93,34 +93,20 @@ static DEVICE_ATTR_RW(tpg_resolution);
 
 static ssize_t tpg_fps_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
-    struct pci_dev *pdev = to_pci_dev(dev);
-    struct qpcie_dev *qdev = pci_get_drvdata(pdev);
-    u32 clks = 2083333;
-
-    if (qdev && qdev->bar1_mmio) {
-        clks = ioread32(qdev->bar1_mmio + 0x0000 + 0x30);
-        if (clks == 0) clks = 2083333;
-    }
-
-    u32 fps = 125000000 / clks;
-    return sysfs_emit(buf, "%u fps (Interval Clks: %u)\n", fps, clks);
+    /* The NV12 engine pacer is fixed in RTL: 60 FPS @ 150 MHz video clock.
+     * Do NOT touch BAR1 + 0x30 here -- that offset is the v_tpg maskId
+     * register, not a frame-pacer, and writing it corrupts TPG output. */
+    return sysfs_emit(buf, "%u fps (Interval Clks: %u)\n", 60u, 2500000u);
 }
 
 static ssize_t tpg_fps_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
 {
-    struct pci_dev *pdev = to_pci_dev(dev);
-    struct qpcie_dev *qdev = pci_get_drvdata(pdev);
-    u32 target_fps = 60;
+    u32 target_fps = 0;
 
-    if (kstrtou32(buf, 0, &target_fps) || target_fps == 0) return -EINVAL;
-
-    u32 target_clks = 125000000 / target_fps;
-
-    if (qdev && qdev->bar1_mmio) {
-        iowrite32(target_clks, qdev->bar1_mmio + 0x0000 + 0x30);
-        dev_info(dev, "Updated Hardware Video Frame Pacer FPS to %u (Clks: %u)\n", target_fps, target_clks);
-    }
-
+    if (!kstrtou32(buf, 0, &target_fps) && target_fps != 60)
+        dev_info(dev,
+                 "TPG FPS is fixed at 60 by the NV12 engine pacer; %u ignored\n",
+                 target_fps);
     return count;
 }
 static DEVICE_ATTR_RW(tpg_fps);

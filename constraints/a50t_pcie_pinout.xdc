@@ -73,6 +73,15 @@ set_false_path -to [get_pins -quiet -hierarchical -filter \
 set_false_path -to [get_pins -quiet -hierarchical -regexp \
     {.*video_pipeline_reset_sync_reg\[0\]/D}]
 
+# The 150 MHz video domain and the PCIe user-clock domain exchange data
+# exclusively through proper CDC primitives (xpm_cdc_handshake,
+# xpm_fifo_async, video_req_cdc gray-pointer FIFO, ASYNC_REG 2FF stages).
+# Declare the two trees asynchronous so their crossings are not analyzed
+# as synchronous paths.
+set_clock_groups -name async_video_vs_pcie -asynchronous \
+    -group [get_clocks -include_generated_clocks clk150_mmcm] \
+    -group [get_clocks -include_generated_clocks userclk2]
+
 # ------------------------------------------------------------------------------
 # 6. Bitstream Configuration Properties
 # ------------------------------------------------------------------------------
