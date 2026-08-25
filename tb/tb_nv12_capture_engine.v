@@ -1,9 +1,9 @@
 `timescale 1ns / 1ps
 
 module tb_nv12_capture_engine;
-    localparam WIDTH = 128;
+    localparam WIDTH = 256;
     localparam HEIGHT = 4;
-    localparam STRIDE = 128;
+    localparam STRIDE = 256;
     localparam Y_BASE = 64'h0000_0000_0000_1000;
     localparam UV_BASE = 64'h0000_0000_0000_2000;
 
@@ -36,7 +36,8 @@ module tb_nv12_capture_engine;
 
     nv12_capture_engine #(
         .MAX_WIDTH(WIDTH),
-        .PCIE_DATA_WIDTH(128)
+        .PCIE_DATA_WIDTH(128),
+        .MWR_PAYLOAD_BYTES(256)
     ) dut (
         .clk(clk), .rst_n(rst_n),
         .desc_valid(desc_valid), .desc_ready(desc_ready),
@@ -99,15 +100,15 @@ module tb_nv12_capture_engine;
         end
     endtask
 
-    // Streaming 128-byte request sink with deterministic payload stalls.
+    // Streaming 256-byte request sink with deterministic payload stalls.
     always @(negedge clk) begin
         if (!rst_n) begin
             req_data_ready <= 1'b0;
             req_ack <= 1'b0;
             stall_count <= 0;
         end else if (req_valid) begin
-            req_ack <= (payload_beat == 8);
-            if (payload_beat < 8 && stall_count == 0) begin
+            req_ack <= (payload_beat == 16);
+            if (payload_beat < 16 && stall_count == 0) begin
                 req_data_ready <= 1'b1;
                 stall_count <= (req_count + payload_beat) % 3;
             end else begin
@@ -124,7 +125,7 @@ module tb_nv12_capture_engine;
 
     always @(posedge clk) begin
         if (rst_n && req_valid && req_data_ready) begin
-            if (req_len !== 11'd32 || !req_last || req_addr[6:0] != 0)
+            if (req_len !== 11'd64 || !req_last || req_addr[7:0] != 0)
                 $fatal(1, "Malformed MWr request addr=%h len=%0d last=%b",
                        req_addr, req_len, req_last);
             if (req_addr >= Y_BASE && req_addr < Y_BASE + WIDTH*HEIGHT) begin
@@ -141,7 +142,7 @@ module tb_nv12_capture_engine;
             payload_beat = payload_beat + 1;
         end
         if (rst_n && req_valid && req_ack) begin
-            if (payload_beat != 8)
+            if (payload_beat != 16)
                 $fatal(1, "MWr acknowledged after %0d payload beats", payload_beat);
             payload_beat = 0;
             req_count = req_count + 1;

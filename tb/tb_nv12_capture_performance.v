@@ -3,7 +3,11 @@
 module tb_nv12_capture_performance;
     localparam [15:0] WIDTH = 16'd1920;
     localparam [15:0] HEIGHT = 16'd1080;
-    localparam integer EXPECTED_REQS = (1920/128)*1080 + (1920/128)*(1080/2);
+    // Requests stream contiguously across scanlines (planes are
+    // DMA-contiguous with stride == width), so the count is exactly
+    // total-plane-bytes / payload-size.
+    localparam integer EXPECTED_REQS =
+        ((1920 * 1080) + (1920 * (1080 / 2))) / 256;
     localparam integer FRAME_BUDGET_CLKS = 2083333;
 
     reg clk = 0;
@@ -34,7 +38,8 @@ module tb_nv12_capture_performance;
     wire [15:0] rq_keep;
     integer frame_clks, request_count;
 
-    nv12_capture_engine #(.MAX_WIDTH(1920), .PCIE_DATA_WIDTH(128)) dut (
+    nv12_capture_engine #(.MAX_WIDTH(1920), .PCIE_DATA_WIDTH(128),
+                          .MWR_PAYLOAD_BYTES(256)) dut (
         .clk(clk), .rst_n(rst_n),
         .desc_valid(desc_valid), .desc_ready(desc_ready),
         .plane_y_addr(64'h1000_0000), .plane_uv_addr(64'h1020_0000),

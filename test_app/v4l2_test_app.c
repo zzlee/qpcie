@@ -28,7 +28,7 @@
 #define DEFAULT_BENCHMARK_FRAMES 600U
 #define BENCHMARK_WARMUP_FRAMES  8U
 #define NV12_PLANES              2U
-#define NV12_MWR_PAYLOAD_BYTES   128U
+#define NV12_MWR_PAYLOAD_BYTES   256U
 #define FOUR_K_WIDTH             3840U
 #define FOUR_K_HEIGHT            2160U
 #define FOUR_K_60_MIB_S          \
@@ -524,7 +524,7 @@ int main(int argc, char **argv)
         if (benchmark_mode) {
             double mwr_per_s = measured_frames *
                                (double)nv12_mwr_per_frame / elapsed_s;
-            printf(" 128-byte PCIe MWr rate: %.3f million requests/s\n"
+            printf(" 256-byte PCIe MWr rate: %.3f million requests/s\n"
                    " 4K60 payload requirement: %.2f MiB/s (%s)\n"
                    " Warm-up excluded: %u frames\n",
                    mwr_per_s / 1000000.0, FOUR_K_60_MIB_S,

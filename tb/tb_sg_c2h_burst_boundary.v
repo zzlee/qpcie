@@ -98,19 +98,15 @@ module tb_sg_c2h_burst_boundary;
         c2h_desc_valid <= 0;
 
         global_dw = 0;
-        for (burst = 0; burst < 3; burst = burst + 1) begin
+        for (burst = 0; burst < 2; burst = burst + 1) begin
             case (burst)
                 0: begin
                     expected_addr = 64'h0000_0001_0000_FFC0;
                     expected_len = 11'd16;
                 end
-                1: begin
-                    expected_addr = 64'h0000_0001_0001_0000;
-                    expected_len = 11'd32;
-                end
                 default: begin
-                    expected_addr = 64'h0000_0001_0001_0080;
-                    expected_len = 11'd16;
+                    expected_addr = 64'h0000_0001_0001_0000;
+                    expected_len = 11'd48;
                 end
             endcase
 
@@ -145,7 +141,7 @@ module tb_sg_c2h_burst_boundary;
             $fatal(1, "Byte/DWORD accounting mismatch bytes=%0d dw=%0d",
                    c2h_bytes_transferred, global_dw);
 
-        $display("SUCCESS: 128-byte C2H bursts split 64/128/64 at 4-KiB boundary under backpressure");
+        $display("SUCCESS: 256-byte C2H bursts split 64/192 at 4-KiB boundary under backpressure");
         $finish;
     end
 

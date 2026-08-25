@@ -12,7 +12,12 @@ Xilinx TPG YUV444, 4 pixels/clock @ 150 MHz
   -> asynchronous AXI-Stream CDC FIFO
   -> rounded 2x2 chroma downsample @ 125 MHz
   -> NV12M Y and UV planes
-  -> 128-byte PCIe C2H MWr DMA
+  -> 256-byte PCIe C2H MWr DMA
+```
+
+The 256-byte MWr payload requires the host to negotiate `MaxPayloadSize >= 256`.
+On Jetson, add `pci=pcie_bus_perf` to the kernel command line; the driver refuses
+to register V4L2 when the negotiated MPS is lower.
 ```
 
 Only `V4L2_MEMORY_MMAP` is enabled during bring-up. ALSA and additional video

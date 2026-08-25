@@ -3,8 +3,8 @@
 module tb_nv12_capture_4k_performance;
     localparam [15:0] WIDTH = 16'd3840;
     localparam [15:0] HEIGHT = 16'd2160;
-    localparam integer EXPECTED_REQS = (3840/128)*2160 +
-                                       (3840/128)*(2160/2);
+    localparam integer EXPECTED_REQS = (3840/256)*2160 +
+                                       (3840/256)*(2160/2);
     localparam integer FRAME_BUDGET_CLKS = 2083333;
 
     reg clk = 0;
@@ -39,7 +39,7 @@ module tb_nv12_capture_4k_performance;
 
     nv12_capture_engine #(
         .MAX_WIDTH(3840), .PCIE_DATA_WIDTH(128),
-        .FIFO_DEPTH(128), .MWR_PAYLOAD_BYTES(128)
+        .FIFO_DEPTH(128), .MWR_PAYLOAD_BYTES(256)
     ) dut (
         .clk(clk), .rst_n(rst_n),
         .desc_valid(desc_valid), .desc_ready(desc_ready),

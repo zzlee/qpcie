@@ -229,7 +229,8 @@ module nv12_capture_engine #(
                 odd_frame_end <= 0;
                 if (frame_width > MAX_WIDTH || frame_width[6:0] != 0 ||
                     frame_height[0] || frame_stride < frame_width ||
-                    MWR_PAYLOAD_BYTES != 128 || PCIE_DATA_WIDTH != 128)
+                    (MWR_PAYLOAD_BYTES != 128 && MWR_PAYLOAD_BYTES != 256) ||
+                    PCIE_DATA_WIDTH != 128)
                     protocol_error_count <= protocol_error_count + 1'b1;
             end else begin
                 odd_valid <= pixel_accept && line_idx[0];

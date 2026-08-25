@@ -165,13 +165,14 @@ module sg_dma_engine #(
     // =========================================================================
     // C2H (FPGA -> Host) DMA Execution State Machine
     // =========================================================================
-    // Diagnostic traffic uses 128-byte MWr payloads by default.  Bursts are
-    // shortened at the descriptor end and may never cross a 4-KiB boundary.
+    // Diagnostic traffic uses 256-byte MWr payloads by default, matching the
+    // video engine and a host MPS of at least 256 bytes. Bursts are shortened
+    // at the descriptor end and may never cross a 4-KiB boundary.
     localparam C2H_IDLE       = 2'd0;
     localparam C2H_ISSUE_MWR  = 2'd1;
     localparam C2H_WAIT_ACK   = 2'd2;
     localparam C2H_COMPLETE   = 2'd3;
-    localparam [15:0] C2H_MAX_BURST_BYTES = 16'd128;
+    localparam [15:0] C2H_MAX_BURST_BYTES = 16'd256;
 
     reg [1:0]  c2h_state;
     reg [63:0] c2h_cur_addr;

@@ -619,7 +619,7 @@ module custom_pcie_dma_top #(
         .MAX_WIDTH(3840),
         .PCIE_DATA_WIDTH(PCIE_DATA_WIDTH),
         .FIFO_DEPTH(128),
-        .MWR_PAYLOAD_BYTES(128)
+        .MWR_PAYLOAD_BYTES(256)
     ) u_nv12_capture_engine (
         .clk(clk),
         .rst_n(rst_n),

@@ -555,6 +555,25 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
 {
     int i, ret;
 
+    /* The capture engines emit 256-byte MWr payloads. A host that has not
+     * negotiated MPS >= 256 would silently drop those TLPs, so refuse to
+     * bring up video instead of risking silent data corruption. */
+    ret = pcie_get_mps(qdev->pdev);
+    if (ret < 0) {
+        dev_err(&qdev->pdev->dev,
+                "[V4L2] failed to read negotiated MPS: %d\n", ret);
+        return ret;
+    }
+    if (ret < 256) {
+        dev_err(&qdev->pdev->dev,
+                "[V4L2] negotiated MaxPayloadSize %d < 256; add pci=pcie_bus_perf "
+                "to the kernel command line and reload\n", ret);
+        return -EOPNOTSUPP;
+    }
+    dev_info(&qdev->pdev->dev,
+             "[V4L2] negotiated MaxPayloadSize %d bytes supports 256-byte MWr\n",
+             ret);
+
     dev_info(&qdev->pdev->dev, "[DEBUG STEP 2.1] Registering top-level v4l2_device...\n");
     snprintf(qdev->v4l2_dev.name, sizeof(qdev->v4l2_dev.name), "qpcie-v4l2");
     ret = v4l2_device_register(&qdev->pdev->dev, &qdev->v4l2_dev);
