@@ -23,7 +23,7 @@
 #define DEFAULT_DEVICE  "/dev/video0"
 #define DEFAULT_WIDTH   1920U
 #define DEFAULT_HEIGHT  1080U
-#define DEFAULT_BUFFERS 4U
+#define DEFAULT_BUFFERS 8U
 #define DEFAULT_FRAMES           120U
 #define DEFAULT_BENCHMARK_FRAMES 600U
 #define BENCHMARK_WARMUP_FRAMES  8U
@@ -98,10 +98,11 @@ static void usage(const char *program)
            "  -h, --height LINES     1080 or 2160 (default %u)\n"
            "  -o, --out FILE         save first frame as contiguous NV12\n"
            "  -b, --benchmark        disable the 60 FPS pacer and measure maximum DMA rate\n"
+           "      --buffers COUNT    VB2 buffers to queue (default %u)\n"
            "      --probe            control-plane probe only, no STREAMON\n"
            "      --help             show this help\n",
            program, DEFAULT_DEVICE, DEFAULT_FRAMES,
-           DEFAULT_WIDTH, DEFAULT_HEIGHT);
+           DEFAULT_WIDTH, DEFAULT_HEIGHT, DEFAULT_BUFFERS);
 }
 
 int main(int argc, char **argv)
@@ -124,6 +125,7 @@ int main(int argc, char **argv)
     struct mapped_buffer *buffers = NULL;
     FILE *output = NULL;
     unsigned int i, p, captured = 0, data_errors = 0;
+    unsigned int num_buffers = DEFAULT_BUFFERS;
     uint64_t first_y_hash = 0, first_uv_hash = 0;
     uint64_t y_frame_bytes, uv_frame_bytes, nv12_frame_bytes;
     uint64_t nv12_mwr_per_frame;
@@ -138,13 +140,14 @@ int main(int argc, char **argv)
         {"width", required_argument, NULL, 'w'},
         {"height", required_argument, NULL, 'h'},
         {"out", required_argument, NULL, 'o'},
+        {"buffers", required_argument, NULL, 'n'},
         {"benchmark", no_argument, NULL, 'b'},
         {"probe", no_argument, NULL, 'P'},
         {"help", no_argument, NULL, 'H'},
         {NULL, 0, NULL, 0}
     };
 
-    while ((opt = getopt_long(argc, argv, "d:f:p:r:w:h:o:b", options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "d:f:p:r:w:h:o:bn:", options, NULL)) != -1) {
         switch (opt) {
         case 'd': device = optarg; break;
         case 'f': frame_target = strtoul(optarg, NULL, 0); frames_set = 1; break;
@@ -153,6 +156,7 @@ int main(int argc, char **argv)
         case 'w': width = strtoul(optarg, NULL, 0); break;
         case 'h': height = strtoul(optarg, NULL, 0); break;
         case 'o': output_name = optarg; break;
+        case 'n': num_buffers = strtoul(optarg, NULL, 0); break;
         case 'b': benchmark_mode = 1; break;
         case 'P': probe_only = 1; break;
         case 'H': usage(argv[0]); return EXIT_SUCCESS;
@@ -177,6 +181,11 @@ int main(int argc, char **argv)
     uv_frame_bytes = y_frame_bytes / 2;
     nv12_frame_bytes = y_frame_bytes + uv_frame_bytes;
     nv12_mwr_per_frame = nv12_frame_bytes / NV12_MWR_PAYLOAD_BYTES;
+
+    if (num_buffers < 2 || num_buffers > 8) {
+        fprintf(stderr, "Buffer count must be between 2 and 8\n");
+        return EXIT_FAILURE;
+    }
 
     printf("=================================================================\n"
            " QPCIe YUV444 -> NV12M Capture Test%s\n"
@@ -334,7 +343,7 @@ int main(int argc, char **argv)
     }
 
     memset(&req, 0, sizeof(req));
-    req.count = DEFAULT_BUFFERS;
+    req.count = num_buffers;
     req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
     req.memory = V4L2_MEMORY_MMAP;
     if (xioctl(fd, VIDIOC_REQBUFS, &req) < 0 || req.count < 2) {
