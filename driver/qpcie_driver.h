@@ -147,6 +147,11 @@ struct qpcie_dev {
     int irq;
     bool v4l2_registered;
 
+    /* Saved MPS state when probe had to raise it for 256-byte MWr. */
+    bool mps_modified;
+    int ep_mps_saved;
+    int rp_mps_saved;
+
     /* Descriptor Ring Buffer Handles */
     struct qpcie_dma_desc_2d *h2c_ring_virt;
     dma_addr_t h2c_ring_dma;

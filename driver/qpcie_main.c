@@ -99,10 +99,11 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
     pci_set_master(pdev);
 
     /* The SG diagnostic and the capture engines emit 256-byte MWr payloads.
-     * A host that has not negotiated MaxPayloadSize >= 256 treats those TLPs
-     * as malformed (AER MalfTLP fatal), so fail cleanly here instead of
-     * poisoning the link during the self-test below. */
+     * Instead of a system-wide pci=pcie_bus_perf boot parameter, raise the
+     * negotiated MPS on this path only (upstream root port + this endpoint)
+     * and restore the original values on remove. */
     {
+        struct pci_dev *rp = pci_upstream_bridge(pdev);
         int mps = pcie_get_mps(pdev);
 
         if (mps < 0) {
@@ -111,17 +112,43 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
             ret = mps;
             goto disable_pci;
         }
-        if (mps < 256) {
-            dev_err(&pdev->dev,
-                    "[ERROR] negotiated MaxPayloadSize %d < 256; add "
-                    "pci=pcie_bus_perf to the kernel command line and reboot\n",
-                    mps);
-            ret = -EOPNOTSUPP;
-            goto disable_pci;
+        if (mps >= 256) {
+            dev_info(&pdev->dev,
+                     "Negotiated MaxPayloadSize: %d bytes (256-byte MWr enabled)\n",
+                     mps);
+        } else {
+            if (!rp) {
+                dev_err(&pdev->dev,
+                        "[ERROR] MPS %d < 256 and no upstream root port to raise\n",
+                        mps);
+                ret = -EOPNOTSUPP;
+                goto disable_pci;
+            }
+            qdev->rp_mps_saved = pcie_get_mps(rp);
+            qdev->ep_mps_saved = mps;
+
+            /* Receiver first, then generator: raising the root port's limit
+             * before the endpoint starts emitting larger TLPs keeps the
+             * transient state safe. */
+            ret = pcie_set_mps(rp, 256);
+            if (ret) {
+                dev_err(&pdev->dev,
+                        "[ERROR] cannot raise root port MPS to 256: %d\n", ret);
+                goto disable_pci;
+            }
+            ret = pcie_set_mps(pdev, 256);
+            if (ret) {
+                pcie_set_mps(rp, qdev->rp_mps_saved);
+                dev_err(&pdev->dev,
+                        "[ERROR] cannot raise endpoint MPS to 256: %d\n", ret);
+                goto disable_pci;
+            }
+            qdev->mps_modified = true;
+            dev_info(&pdev->dev,
+                     "Raised MPS for 256-byte MWr: endpoint %d -> 256, "
+                     "root port %d -> 256\n",
+                     qdev->ep_mps_saved, qdev->rp_mps_saved);
         }
-        dev_info(&pdev->dev,
-                 "Negotiated MaxPayloadSize: %d bytes (256-byte MWr enabled)\n",
-                 mps);
     }
 
     dev_info(&pdev->dev, "[PCI BAR0 Resource] Start=0x%llx, Len=0x%llx, Flags=0x%lx\n",
@@ -507,6 +534,16 @@ static void qpcie_remove(struct pci_dev *pdev)
                           qdev->h2c_ring_virt, qdev->h2c_ring_dma);
         qdev->h2c_ring_virt = NULL;
         qdev->c2h_ring_virt = NULL;
+    }
+
+    /* Restore the pre-probe MPS values (decrease downstream first). */
+    if (qdev->mps_modified) {
+        struct pci_dev *rp = pci_upstream_bridge(pdev);
+
+        pcie_set_mps(pdev, qdev->ep_mps_saved);
+        if (rp)
+            pcie_set_mps(rp, qdev->rp_mps_saved);
+        dev_info(&pdev->dev, "Restored original MPS settings\n");
     }
 
     pci_clear_master(pdev);
