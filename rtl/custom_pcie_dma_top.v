@@ -111,7 +111,6 @@ module custom_pcie_dma_top #(
     output wire                                             video_pipeline_reset,
     output wire                                             video_tpg_reset,
     output wire                                             video_engine_reset,
-    output wire                                             video_tpg_frame_gate,
 
     // Interrupt Pins
     output wire                                             usr_irq_req,
@@ -779,42 +778,6 @@ module custom_pcie_dma_top #(
 
     always @(posedge video_clk) pacer_sync <= {pacer_sync[0], reg_pacer_ctrl[0]};
 
-    // ------------------------------------------------------------------
-    // Hardware frame pacing: gate the TPG itself instead of stalling it
-    // mid-frame.  Freezing a free-running TPG with backpressure desyncs its
-    // pattern phase from the output timing (silent content shifts), and the
-    // post-completion hold skews the paced cadence at 4K.  Between frames
-    // the TPG is held in reset; releasing it always restarts a fresh,
-    // phase-aligned frame, so the delivered rate is exactly interval-based.
-    // The engine's own pacing is disabled (pacer_enable tied low below);
-    // this FSM is the single source of frame-rate control.
-    // ------------------------------------------------------------------
-    localparam [31:0] PACE_INTERVAL_CLKS = 32'd2500000;   // 60 FPS @ 150 MHz
-    reg        tpg_frame_gate_v = 1'b1;                  // 1: hold TPG in reset
-    reg [31:0] pace_timer_v     = 32'd0;
-
-    always @(posedge video_clk or negedge video_rst_n) begin
-        if (!video_rst_n) begin
-            tpg_frame_gate_v <= 1'b1;
-            pace_timer_v     <= 32'd0;
-        end else if (!pacer_sync[1]) begin
-            tpg_frame_gate_v <= 1'b0;                     // uncapped: run free
-            pace_timer_v     <= 32'd0;
-        end else if (tpg_frame_gate_v) begin
-            pace_timer_v <= pace_timer_v + 32'd1;
-            // Release once the interval has elapsed and the engine holds a
-            // descriptor and waits for SOF.  Without a queued descriptor the
-            // TPG stays in reset, which cannot corrupt anything.
-            if (pace_timer_v >= PACE_INTERVAL_CLKS && eng_busy)
-                tpg_frame_gate_v <= 1'b0;
-        end else if (eng_frame_done) begin
-            tpg_frame_gate_v <= 1'b1;                     // abort cleanly
-            pace_timer_v     <= 32'd0;
-        end
-    end
-
-    assign video_tpg_frame_gate = tpg_frame_gate_v;
-
     // Convert the one-video-clock completion pulse into a toggle before the
     // 150 -> 125 MHz crossing. A level synchronizer can miss this 6.67 ns
     // pulse entirely (and edge-detecting the level also fires on both edges).
@@ -912,7 +875,7 @@ module custom_pcie_dma_top #(
         .frame_width(eng_width),
         .frame_height(eng_height),
         .frame_stride(eng_stride),
-        .pacer_enable(1'b0),                 // pacing is done by the TPG gate above
+        .pacer_enable(pacer_sync[1]),
         .frame_interval_clks(32'd2500000),   // 60 FPS @ 150 MHz
         .global_timestamp(eng_ts),
         .s_axis_tdata(video_ch0_tdata),

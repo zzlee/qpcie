@@ -398,7 +398,6 @@ module tb_video_cdc_system;
 
         mmio_write_bar0(32'h08, 32'h00000000);           // ring base low
         mmio_write_bar0(32'h0C, 32'h00000000);           // ring base high
-        mmio_write_bar0(32'h74, 32'h00000000);           // pacer off (uncapped)
         mmio_write_bar0(32'h20, 32'h00000003);           // IRQ enable (both)
         mmio_write_bar0(32'h00, 32'h00000001);           // DMA run
         mmio_write_bar0(32'h10, (32'd1 << 16) | 32'd16); // tail=1,size=16
