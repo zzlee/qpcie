@@ -452,29 +452,43 @@ int main(int argc, char **argv)
         if (benchmark_mode && captured == BENCHMARK_WARMUP_FRAMES)
             benchmark_start_ms = last_frame_ms;
 
-        if (captured == 1) {
+        if (captured <= 3) {
             y_hash = fnv1a64(buffers[buf.index].plane[0].addr,
                              planes[0].bytesused);
             uv_hash = fnv1a64(buffers[buf.index].plane[1].addr,
-                              planes[1].bytesused);
-            first_y_hash = y_hash;
-            first_uv_hash = uv_hash;
-            byte_range(buffers[buf.index].plane[0].addr, planes[0].bytesused,
-                       &y_min, &y_max);
-            byte_range(buffers[buf.index].plane[1].addr, planes[1].bytesused,
-                       &uv_min, &uv_max);
-            printf("[FRAME 1] seq=%u Y-hash=%016" PRIx64 " UV-hash=%016" PRIx64
-                   " Y-range=%u..%u UV-range=%u..%u\n",
-                   buf.sequence, y_hash, uv_hash, y_min, y_max, uv_min, uv_max);
-            if (y_min == y_max || uv_min == uv_max) {
-                fprintf(stderr, "[FAIL] color-bars planes have no sample variation\n");
-                data_errors++;
+                             planes[1].bytesused);
+            if (captured == 1) {
+                first_y_hash = y_hash;
+                first_uv_hash = uv_hash;
+                byte_range(buffers[buf.index].plane[0].addr, planes[0].bytesused,
+                           &y_min, &y_max);
+                byte_range(buffers[buf.index].plane[1].addr, planes[1].bytesused,
+                           &uv_min, &uv_max);
+                printf("[FRAME 1] seq=%u Y-hash=%016" PRIx64 " UV-hash=%016" PRIx64
+                       " Y-range=%u..%u UV-range=%u..%u\n",
+                       buf.sequence, y_hash, uv_hash, y_min, y_max, uv_min, uv_max);
+                if (y_min == y_max || uv_min == uv_max) {
+                    fprintf(stderr, "[FAIL] color-bars planes have no sample variation\n");
+                    data_errors++;
+                }
+            } else {
+                printf("[FRAME %u] seq=%u Y-hash=%016" PRIx64 " UV-hash=%016" PRIx64
+                       "\n", captured, buf.sequence, y_hash, uv_hash);
             }
-            if (output) {
-                fwrite(buffers[buf.index].plane[0].addr, 1, planes[0].bytesused, output);
-                fwrite(buffers[buf.index].plane[1].addr, 1, planes[1].bytesused, output);
-                fflush(output);
-                printf("[PASS] Saved first contiguous NV12 frame to %s\n", output_name);
+            if (output && !benchmark_mode) {
+                char path[512];
+                FILE *frame_out;
+                snprintf(path, sizeof(path), "%s.frame%u", output_name, captured);
+                frame_out = fopen(path, "wb");
+                if (frame_out) {
+                    fwrite(buffers[buf.index].plane[0].addr, 1,
+                           planes[0].bytesused, frame_out);
+                    fwrite(buffers[buf.index].plane[1].addr, 1,
+                           planes[1].bytesused, frame_out);
+                    fclose(frame_out);
+                    printf("[PASS] Saved NV12 frame %u to %s\n",
+                           captured, path);
+                }
             }
         } else if (!benchmark_mode) {
             y_hash = fnv1a64(buffers[buf.index].plane[0].addr,
