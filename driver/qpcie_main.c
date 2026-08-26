@@ -491,8 +491,15 @@ free_diag_dma:
     qdev->v4l2_registered = true;
     dev_info(&pdev->dev,
              "Stage-2 V4L2 NV12M capture ready; ALSA is intentionally disabled\n");
+
+    ret = qpcie_sysfs_init(qdev);
+    if (ret)
+        goto v4l2_remove;
     return 0;
 
+v4l2_remove:
+    qpcie_v4l2_remove(qdev);
+    qdev->v4l2_registered = false;
 free_video_ring:
     dma_free_coherent(&pdev->dev,
                       sizeof(*qdev->h2c_ring_virt) * RING_BUFFER_SIZE,
@@ -519,6 +526,8 @@ static void qpcie_remove(struct pci_dev *pdev)
     struct qpcie_dev *qdev = pci_get_drvdata(pdev);
 
     dev_info(&pdev->dev, "Removing QPCIe Driver (Minimal Diagnostic Mode)...\n");
+
+    qpcie_sysfs_remove(qdev);
 
     iowrite32(0, qdev->bar0_mmio + REG_DMA_CTRL);
     ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
