@@ -109,6 +109,8 @@ module custom_pcie_dma_top #(
 
     // Video pipeline control exported to the board-level clock/CDC logic.
     output wire                                             video_pipeline_reset,
+    output wire                                             video_tpg_reset,
+    output wire                                             video_engine_reset,
 
     // Interrupt Pins
     output wire                                             usr_irq_req,
@@ -134,6 +136,58 @@ module custom_pcie_dma_top #(
     wire [31:0] reg_slice_height;
     wire [31:0] reg_video_ctrl;
     assign video_pipeline_reset = reg_video_ctrl[0];
+
+    // Fine-grained sub-domain reset requests (BAR0 0x84). The board top
+    // synchronizes these into the 150 MHz domain and gates only the targeted
+    // reset, so software can realign the TPG (or the NV12 engine) without
+    // tearing down the whole pipeline.
+    wire [31:0] reg_video_sub_reset;
+    wire [31:0] reg_sof_count;
+    assign video_tpg_reset    = reg_video_sub_reset[0];
+    assign video_engine_reset = reg_video_sub_reset[1];
+
+    // ------------------------------------------------------------------
+    // Free-running TPG start-of-frame counter (video domain, gray-coded).
+    // Software reads it twice over a known interval (BAR0 0x88) to measure
+    // the true TPG frame rate; the Gray code keeps asynchronous sampling
+    // coherent to within one count.
+    // ------------------------------------------------------------------
+    reg [31:0] sof_gray_v = 32'd0;
+    wire       sof_pulse  = video_ch0_tvalid && video_ch0_tuser;
+
+    function [31:0] gray_to_bin;
+        input [31:0] g;
+        integer i;
+        reg [31:0] b;
+        begin
+            b[31] = g[31];
+            for (i = 30; i >= 0; i = i - 1)
+                b[i] = b[i+1] ^ g[i];
+            gray_to_bin = b;
+        end
+    endfunction
+
+    wire [31:0] sof_bin_next   = gray_to_bin(sof_gray_v) + 32'd1;
+    wire [31:0] sof_gray_next  = (sof_bin_next >> 1) ^ sof_bin_next;
+
+    always @(posedge video_clk or negedge video_rst_n) begin
+        if (!video_rst_n)
+            sof_gray_v <= 32'd0;
+        else if (sof_pulse)
+            sof_gray_v <= sof_gray_next;
+    end
+
+    (* ASYNC_REG = "TRUE" *) reg [31:0] sof_gray_sync1 = 32'd0;
+    (* ASYNC_REG = "TRUE" *) reg [31:0] sof_gray_sync2 = 32'd0;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            sof_gray_sync1 <= 32'd0;
+            sof_gray_sync2 <= 32'd0;
+        end else begin
+            sof_gray_sync1 <= sof_gray_v;
+            sof_gray_sync2 <= sof_gray_sync1;
+        end
+    end
     wire [63:0] reg_h2c_ring_addr, reg_c2h_ring_addr;
     wire [15:0] reg_h2c_ring_size, reg_h2c_tail_ptr, reg_h2c_head_ptr;
     wire [15:0] reg_c2h_ring_size, reg_c2h_tail_ptr, reg_c2h_head_ptr;
@@ -445,7 +499,9 @@ module custom_pcie_dma_top #(
         .reg_latency_max_ns(reg_latency_max_ns),
         .reg_pacer_ctrl(reg_pacer_ctrl),
         .reg_slice_height(reg_slice_height),
-        .reg_video_ctrl(reg_video_ctrl)
+        .reg_video_ctrl(reg_video_ctrl),
+        .reg_video_sub_reset(reg_video_sub_reset),
+        .reg_sof_count(gray_to_bin(sof_gray_sync2))
     );
 
     // 3.1 Hardware AV Sync Global Precision Timestamp Generator (64-bit @ 125MHz, 8ns resolution)

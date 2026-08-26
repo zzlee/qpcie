@@ -49,7 +49,11 @@ module a50t_pcie_card_top #(
     (* ASYNC_REG = "TRUE" *) reg [1:0] video_reset_sync = 2'b00;
     wire video_rst_n = video_reset_sync[1];
     wire video_pipeline_reset;
+    wire video_tpg_reset;
+    wire video_engine_reset;
     (* ASYNC_REG = "TRUE" *) reg [1:0] video_pipeline_reset_sync = 2'b00;
+    (* ASYNC_REG = "TRUE" *) reg [1:0] video_tpg_reset_sync = 2'b00;
+    (* ASYNC_REG = "TRUE" *) reg [1:0] video_engine_reset_sync = 2'b00;
     wire video_pipeline_rst_n = video_rst_n && !video_pipeline_reset_sync[1];
 
     video_clock_gen u_video_clock_gen (
@@ -73,12 +77,26 @@ module a50t_pcie_card_top #(
         if (!video_reset_meta) begin
             video_reset_sync <= 2'b00;
             video_pipeline_reset_sync <= 2'b00;
+            video_tpg_reset_sync <= 2'b00;
+            video_engine_reset_sync <= 2'b00;
         end else begin
             video_reset_sync <= {video_reset_sync[0], 1'b1};
             video_pipeline_reset_sync <=
                 {video_pipeline_reset_sync[0], video_pipeline_reset};
+            video_tpg_reset_sync <=
+                {video_tpg_reset_sync[0], video_tpg_reset};
+            video_engine_reset_sync <=
+                {video_engine_reset_sync[0], video_engine_reset};
         end
     end
+
+    // Fine-grained sub-domain resets (BAR0 0x84). Each request gates only its
+    // own domain so software can realign the TPG or the NV12 engine without
+    // tearing down the whole pipeline.
+    wire video_tpg_rst_n =
+        video_pipeline_rst_n && !video_tpg_reset_sync[1];
+    wire video_engine_rst_n =
+        video_pipeline_rst_n && !video_engine_reset_sync[1];
 
     // =========================================================================
     // BAR1 AXI4-Lite Master Interconnect Wires
@@ -263,7 +281,7 @@ module a50t_pcie_card_top #(
 
     v_tpg_0 u_v_tpg (
         .ap_clk(video_clk_150),
-        .ap_rst_n(video_pipeline_rst_n),
+        .ap_rst_n(video_tpg_rst_n),
         .s_axi_CTRL_AWADDR(tpg_ip_axi_awaddr[7:0]),
         .s_axi_CTRL_AWVALID(tpg_ip_axi_awvalid),
         .s_axi_CTRL_AWREADY(tpg_ip_axi_awready),
@@ -734,7 +752,7 @@ module a50t_pcie_card_top #(
         .s_axis_video_tready(s_video_tready),
 
         .video_clk(video_clk_150),
-        .video_rst_n(video_pipeline_rst_n),
+        .video_rst_n(video_engine_rst_n),
         .video_ch0_tdata(tpg_padded_tdata),
         .video_ch0_tvalid(tpg_axis_tvalid),
         .video_ch0_tlast(tpg_axis_tlast),
@@ -758,6 +776,8 @@ module a50t_pcie_card_top #(
         .m_axis_audio_tready(m_audio_tready),
 
         .video_pipeline_reset(video_pipeline_reset),
+        .video_tpg_reset(video_tpg_reset),
+        .video_engine_reset(video_engine_reset),
         .usr_irq_req(usr_irq_req),
         .usr_irq_ack(usr_irq_ack)
     );

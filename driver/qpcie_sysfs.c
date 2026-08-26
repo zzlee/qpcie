@@ -95,8 +95,25 @@ static ssize_t tpg_fps_show(struct device *dev, struct device_attribute *attr, c
 {
     /* The NV12 engine pacer is fixed in RTL: 60 FPS @ 150 MHz video clock.
      * Do NOT touch BAR1 + 0x30 here -- that offset is the v_tpg maskId
-     * register, not a frame-pacer, and writing it corrupts TPG output. */
-    return sysfs_emit(buf, "%u fps (Interval Clks: %u)\n", 60u, 2500000u);
+     * register, not a frame-pacer, and writing it corrupts TPG output.
+     *
+     * Report the MEASURED TPG start-of-frame rate by sampling the hardware
+     * SOF counter (BAR0 0x88) over ~500 ms. While DMA is streaming, the
+     * engine consumes every SOF it can, so this approximates the TPG's
+     * free-running frame rate. */
+    struct pci_dev *pdev = to_pci_dev(dev);
+    struct qpcie_dev *qdev = pci_get_drvdata(pdev);
+    u32 c0, c1;
+
+    if (!qdev || !qdev->bar0_mmio)
+        return sysfs_emit(buf, "60 fps (nominal; device unavailable)\n");
+
+    c0 = ioread32(qdev->bar0_mmio + REG_TPG_SOF_COUNT);
+    msleep(500);
+    c1 = ioread32(qdev->bar0_mmio + REG_TPG_SOF_COUNT);
+
+    return sysfs_emit(buf, "%u fps measured over 500 ms (nominal 60)\n",
+                      (c1 - c0) * 2u);
 }
 
 static ssize_t tpg_fps_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)

@@ -445,6 +445,33 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
     iowrite32(0, qdev->bar0_mmio + REG_SLICE_HEIGHT);
     iowrite32(vch->pacer_enable ? 1 : 0,
               qdev->bar0_mmio + REG_PACER_CTRL);
+
+    /* Realign the TPG before the first capture: a clean TPG-only reset
+     * guarantees the pattern phase and its output timing start together,
+     * so frame 1 begins from a deterministic state. The reset clears the
+     * TPG control registers, so reprogram them afterwards; their readback
+     * doubles as verification that the TPG came back healthy. */
+    {
+        struct v4l2_ctrl *pattern_ctrl;
+        u32 pattern_id;
+
+        pattern_ctrl = v4l2_ctrl_find(&vch->ctrl_handler,
+                                      V4L2_CID_TEST_PATTERN);
+        pattern_id = qpcie_tpg_pattern_id(pattern_ctrl ? pattern_ctrl->val : 3);
+
+        iowrite32(1, qdev->bar0_mmio + REG_VIDEO_SUB_RESET);
+        ioread32(qdev->bar0_mmio + REG_VIDEO_SUB_RESET);
+        usleep_range(1000, 2000);
+        iowrite32(0, qdev->bar0_mmio + REG_VIDEO_SUB_RESET);
+        ioread32(qdev->bar0_mmio + REG_VIDEO_SUB_RESET);
+        usleep_range(1000, 2000);
+
+        if (qpcie_program_tpg(vch, pattern_id, false)) {
+            qpcie_return_all_buffers(vch, VB2_BUF_STATE_QUEUED);
+            return -EIO;
+        }
+    }
+
     pacer_ctrl = ioread32(qdev->bar0_mmio + REG_PACER_CTRL);
     if (!!(pacer_ctrl & BIT(0)) != vch->pacer_enable) {
         dev_err(&qdev->pdev->dev,
