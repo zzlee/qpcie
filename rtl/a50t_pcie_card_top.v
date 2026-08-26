@@ -51,9 +51,11 @@ module a50t_pcie_card_top #(
     wire video_pipeline_reset;
     wire video_tpg_reset;
     wire video_engine_reset;
+    wire video_tpg_frame_gate;
     (* ASYNC_REG = "TRUE" *) reg [1:0] video_pipeline_reset_sync = 2'b00;
     (* ASYNC_REG = "TRUE" *) reg [1:0] video_tpg_reset_sync = 2'b00;
     (* ASYNC_REG = "TRUE" *) reg [1:0] video_engine_reset_sync = 2'b00;
+    (* ASYNC_REG = "TRUE" *) reg [1:0] video_frame_gate_sync = 2'b00;
     wire video_pipeline_rst_n = video_rst_n && !video_pipeline_reset_sync[1];
 
     video_clock_gen u_video_clock_gen (
@@ -87,14 +89,17 @@ module a50t_pcie_card_top #(
                 {video_tpg_reset_sync[0], video_tpg_reset};
             video_engine_reset_sync <=
                 {video_engine_reset_sync[0], video_engine_reset};
+            video_frame_gate_sync <=
+                {video_frame_gate_sync[0], video_tpg_frame_gate};
         end
     end
 
-    // Fine-grained sub-domain resets (BAR0 0x84). Each request gates only its
-    // own domain so software can realign the TPG or the NV12 engine without
-    // tearing down the whole pipeline.
+    // Fine-grained sub-domain resets (BAR0 0x84) gate only their own domain.
+    // The hardware frame pacer additionally holds the TPG in reset between
+    // frames so every paced frame starts phase-aligned.
     wire video_tpg_rst_n =
-        video_pipeline_rst_n && !video_tpg_reset_sync[1];
+        video_pipeline_rst_n && !video_tpg_reset_sync[1] &&
+        !video_frame_gate_sync[1];
     wire video_engine_rst_n =
         video_pipeline_rst_n && !video_engine_reset_sync[1];
 
@@ -778,6 +783,7 @@ module a50t_pcie_card_top #(
         .video_pipeline_reset(video_pipeline_reset),
         .video_tpg_reset(video_tpg_reset),
         .video_engine_reset(video_engine_reset),
+        .video_tpg_frame_gate(video_tpg_frame_gate),
         .usr_irq_req(usr_irq_req),
         .usr_irq_ack(usr_irq_ack)
     );
