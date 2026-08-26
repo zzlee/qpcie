@@ -52,6 +52,8 @@ module axil_reg_space (
     output reg  [31:0]           reg_video_sub_reset,
 
     input  wire [31:0] reg_sof_count,
+    input  wire [31:0] reg_eol_count,
+    input  wire [31:0] reg_beat_count,
 
     input  wire [31:0] completed_h2c_count,
     input  wire [31:0] completed_c2h_count,
@@ -222,6 +224,8 @@ module axil_reg_space (
                     8'h80:                s_axil_rdata <= reg_video_ctrl;
                     8'h84:                s_axil_rdata <= reg_video_sub_reset;
                     8'h88:                s_axil_rdata <= reg_sof_count;
+                    8'h8C:                s_axil_rdata <= reg_eol_count;
+                    8'h90:                s_axil_rdata <= reg_beat_count;
 
                     default:              s_axil_rdata <= 32'hDEAD_BEEF;
                 endcase

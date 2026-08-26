@@ -128,6 +128,34 @@ static ssize_t tpg_fps_store(struct device *dev, struct device_attribute *attr, 
 }
 static DEVICE_ATTR_RW(tpg_fps);
 
+static ssize_t tpg_stream_stats_show(struct device *dev,
+                                     struct device_attribute *attr, char *buf)
+{
+    /* Sample the three free-running stream counters over ~500 ms and report
+     * per-second rates: SOF (frame starts), EOL (line ends), and valid
+     * beats. Comparing them reveals exactly how the TPG drives the stream
+     * (frames/s, lines/frame, beats/line). */
+    struct pci_dev *pdev = to_pci_dev(dev);
+    struct qpcie_dev *qdev = pci_get_drvdata(pdev);
+    u32 s0, s1, e0, e1, b0, b1;
+
+    if (!qdev || !qdev->bar0_mmio)
+        return sysfs_emit(buf, "device unavailable\n");
+
+    s0 = ioread32(qdev->bar0_mmio + REG_TPG_SOF_COUNT);
+    e0 = ioread32(qdev->bar0_mmio + REG_TPG_EOL_COUNT);
+    b0 = ioread32(qdev->bar0_mmio + REG_TPG_BEAT_COUNT);
+    msleep(500);
+    s1 = ioread32(qdev->bar0_mmio + REG_TPG_SOF_COUNT);
+    e1 = ioread32(qdev->bar0_mmio + REG_TPG_EOL_COUNT);
+    b1 = ioread32(qdev->bar0_mmio + REG_TPG_BEAT_COUNT);
+
+    return sysfs_emit(buf,
+                      "sof=%u/s eol=%u/s beats=%u/s\n",
+                      (s1 - s0) * 2u, (e1 - e0) * 2u, (b1 - b0) * 2u);
+}
+static DEVICE_ATTR_RO(tpg_stream_stats);
+
 /* ============================================================================
  * 3. Hardware AV Sync Timestamp Sysfs Attributes
  * ============================================================================ */
@@ -428,6 +456,7 @@ static struct attribute *qpcie_sysfs_attrs[] = {
     &dev_attr_tpg_pattern.attr,
     &dev_attr_tpg_resolution.attr,
     &dev_attr_tpg_fps.attr,
+    &dev_attr_tpg_stream_stats.attr,
     &dev_attr_pacer_enable.attr,
     &dev_attr_slice_height.attr,
     &dev_attr_timestamp.attr,

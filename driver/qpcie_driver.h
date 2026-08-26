@@ -69,6 +69,8 @@
 #define REG_PACER_CTRL       0x74    /* Video Pacer Bypass Control (0=Bypass, 1=Enable) */
 #define REG_VIDEO_SUB_RESET  0x84    /* Bit0: TPG-only reset, Bit1: NV12 engine reset */
 #define REG_TPG_SOF_COUNT    0x88    /* Free-running TPG start-of-frame counter (RO) */
+#define REG_TPG_EOL_COUNT    0x8C    /* Free-running line-end (TLAST) counter (RO) */
+#define REG_TPG_BEAT_COUNT   0x90    /* Free-running valid-beat counter (RO) */
 #define REG_SLICE_HEIGHT     0x78    /* Sub-Frame Slice Height in Lines (0=Full Frame IRQ, >0=Slice IRQ) */
 #define REG_VIDEO_ERRORS     0x7C    /* AXI-video framing/configuration error count */
 #define REG_VIDEO_CTRL       0x80    /* Bit 0: reset TPG and video CDC FIFO */
