@@ -275,13 +275,13 @@ module tb_video_cdc_system;
             m_axis_rx_tdata  <= {host_dw(32'h00000000), 32'h00000000,
                                  32'h04000000, 32'h4A000010};
             @(posedge clk); while (!m_axis_rx_tready) @(posedge clk);
-            // DW1..DW4: src_hi, dst_lo(Y), dst_hi, plane1_src_lo
-            m_axis_rx_tdata  <= {host_dw(32'h00000000), host_dw(Y_BASE[31:0]),
-                                 host_dw(32'h00000000), host_dw(32'h00000000)};
+            // DW1..DW4: plane0_dst = {DW3 hi=0, DW2 lo=Y_BASE}, DW1/DW4 = 0
+            m_axis_rx_tdata  <= {host_dw(32'h00000000), host_dw(32'h00000000),
+                                 host_dw(Y_BASE[31:0]), host_dw(32'h00000000)};
             @(posedge clk); while (!m_axis_rx_tready) @(posedge clk);
-            // DW5..DW8: plane1_dst = UV_BASE
-            m_axis_rx_tdata  <= {host_dw(32'h00000000), host_dw(UV_BASE[31:0]),
-                                 host_dw(32'h00000000), host_dw(32'h00000000)};
+            // DW5..DW8: plane1_dst = {DW7 hi=0, DW6 lo=UV_BASE}
+            m_axis_rx_tdata  <= {host_dw(32'h00000000), host_dw(32'h00000000),
+                                 host_dw(UV_BASE[31:0]), host_dw(32'h00000000)};
             @(posedge clk); while (!m_axis_rx_tready) @(posedge clk);
             // DW9..DW12 (DW12 = {line_count=4, line_width=128})
             m_axis_rx_tdata  <= {host_dw(32'h00040080), host_dw(32'h00000000),
@@ -409,11 +409,18 @@ module tb_video_cdc_system;
 
         send_nv12_descriptor();
 
-        #300;                       // allow descriptor CDC + engine accept
-        stream_frame();
-
-        for (i = 0; i < EXPECT_PKTS; i = i + 1)
-            capture_one_mwr();
+        // Packets hit the wire while later rows are still streaming, so the
+        // capturer must run concurrently with the video source.
+        fork
+            begin
+                #300;                   // allow descriptor CDC + engine accept
+                stream_frame();
+            end
+            begin
+                for (i = 0; i < EXPECT_PKTS; i = i + 1)
+                    capture_one_mwr();
+            end
+        join
         #500;
 
         if (pkt_cnt != EXPECT_PKTS)
@@ -453,7 +460,7 @@ module tb_video_cdc_system;
     // Debug heartbeat
     initial forever begin
         #250;
-        $display("[%0t] DBG vreq: st=%0d empty=%b done=%0d started=%0d mreqv=%b full=%b | eng_reqv=%b eng_ack=%b busy=%b descv=%b capen=%b row=%0d",
+        $display("[%0t] DBG vreq: st=%0d empty=%b done=%0d started=%0d mreqv=%b full=%b | eng_reqv=%b eng_ack=%b busy=%b descv=%b capen=%b row=%0d req_addr=%h y_plane=%h y_send=%h uv_send=%h",
                  $time,
                  u_dma_top.u_video_req_cdc.rd_state,
                  u_dma_top.u_video_req_cdc.fifo_empty,
@@ -466,6 +473,10 @@ module tb_video_cdc_system;
                  u_dma_top.eng_busy,
                  u_dma_top.eng_desc_valid,
                  u_dma_top.u_nv12_capture_engine.capture_enable,
-                 u_dma_top.u_nv12_capture_engine.line_idx);
+                 u_dma_top.u_nv12_capture_engine.line_idx,
+                 u_dma_top.eng_req_addr,
+                 u_dma_top.u_nv12_capture_engine.plane_y_addr,
+                 u_dma_top.u_nv12_capture_engine.y_send_addr,
+                 u_dma_top.u_nv12_capture_engine.uv_send_addr);
     end
 endmodule

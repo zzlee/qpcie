@@ -646,6 +646,7 @@ module custom_pcie_dma_top #(
     wire [63:0] eng_req_addr;
     wire [PCIE_DATA_WIDTH-1:0] eng_req_data;
 
+    reg v_done_toggle = 1'b0;
     (* ASYNC_REG = "TRUE" *) reg [1:0] v_done_sync = 2'b00;
     (* ASYNC_REG = "TRUE" *) reg [1:0] v_busy_sync = 2'b00;
     reg v_done_prev = 1'b0;
@@ -721,14 +722,24 @@ module custom_pcie_dma_top #(
 
     always @(posedge video_clk) pacer_sync <= {pacer_sync[0], reg_pacer_ctrl[0]};
 
-    // Completion pulse + telemetry cross back to the PCIe domain.
+    // Convert the one-video-clock completion pulse into a toggle before the
+    // 150 -> 125 MHz crossing. A level synchronizer can miss this 6.67 ns
+    // pulse entirely (and edge-detecting the level also fires on both edges).
+    always @(posedge video_clk or negedge video_rst_n) begin
+        if (!video_rst_n)
+            v_done_toggle <= 1'b0;
+        else if (eng_frame_done)
+            v_done_toggle <= ~v_done_toggle;
+    end
+
+    // Completion toggle + busy level cross back to the PCIe domain.
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             v_done_sync <= 2'b00;
             v_busy_sync <= 2'b00;
             v_done_prev <= 1'b0;
         end else begin
-            v_done_sync[0] <= eng_frame_done;
+            v_done_sync[0] <= v_done_toggle;
             v_done_sync[1] <= v_done_sync[0];
             v_busy_sync[0] <= eng_busy;
             v_busy_sync[1] <= v_busy_sync[0];

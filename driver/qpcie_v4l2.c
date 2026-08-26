@@ -430,6 +430,7 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
 {
     struct qpcie_v4l2_channel *vch = vb2_get_drv_priv(vq);
     struct qpcie_dev *qdev = vch->qdev;
+    u32 pacer_ctrl;
 
     if (count < 2) {
         qpcie_return_all_buffers(vch, VB2_BUF_STATE_QUEUED);
@@ -442,15 +443,24 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
     iowrite32(0, qdev->bar0_mmio + REG_SLICE_HEIGHT);
     iowrite32(vch->pacer_enable ? 1 : 0,
               qdev->bar0_mmio + REG_PACER_CTRL);
+    pacer_ctrl = ioread32(qdev->bar0_mmio + REG_PACER_CTRL);
+    if (!!(pacer_ctrl & BIT(0)) != vch->pacer_enable) {
+        dev_err(&qdev->pdev->dev,
+                "NV12M pacer readback mismatch: requested=%u readback=0x%08x\n",
+                vch->pacer_enable, pacer_ctrl);
+        qpcie_return_all_buffers(vch, VB2_BUF_STATE_QUEUED);
+        return -EIO;
+    }
     iowrite32(0x3, qdev->bar0_mmio + REG_IRQ_STATUS);
     dma_wmb();
     iowrite32(1, qdev->bar0_mmio + REG_DMA_CTRL);
     ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
     dev_info(&qdev->pdev->dev,
-             "NV12M STREAMON: %u buffers, ring tail=%u, mode=%ux%u %s\n",
+             "NV12M STREAMON: %u buffers, ring tail=%u, mode=%ux%u %s (pacer=0x%08x)\n",
              count, qdev->h2c_tail, vch->width, vch->height,
              vch->pacer_enable ? "60 FPS paced" :
-                                 "uncapped DMA benchmark");
+                                 "uncapped DMA benchmark",
+             pacer_ctrl);
     return 0;
 }
 

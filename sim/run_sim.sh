@@ -19,6 +19,9 @@ echo " Building & Simulating Custom PCIe AXI4-Stream DMA Project"
 echo "================================================================="
 
 mkdir -p work_sim
+RUN_DIR="$ROOT_DIR/work_sim/run-$$"
+SIM_WORK="$RUN_DIR/work"
+mkdir -p "$SIM_WORK"
 
 # XPM CDC library source (needed by custom_pcie_dma_top's descriptor and
 # telemetry handshakes in system-level testbenches).
@@ -42,11 +45,19 @@ TESTS=(
     "tb_nv12_capture_engine rtl/nv12_capture_engine.v tb/tb_nv12_capture_engine.v"
     "tb_nv12_capture_performance rtl/nv12_capture_engine.v rtl/rq_tx_encoder.v tb/tb_nv12_capture_performance.v"
     "tb_nv12_capture_4k_performance rtl/nv12_capture_engine.v rtl/rq_tx_encoder.v tb/tb_nv12_capture_4k_performance.v"
-    "tb_video_cdc_system rtl/video_req_cdc.v "$XPM_CDC_SV" "$XPM_FIFO_SV" "$XPM_MEMORY_SV" rtl/custom_pcie_dma_top.v tb/tb_video_cdc_system.v"
-    "tb_pcie_dma_system rtl/global_timer.v rtl/dma_telemetry.v rtl/video_stream_engine.v rtl/nv12_capture_engine.v rtl/audio_stream_engine.v rtl/axil_reg_space.v rtl/c2h_dma_engine.v rtl/h2c_dma_engine.v rtl/desc_fetch_engine.v rtl/cq_rx_decoder.v rtl/cc_tx_encoder.v rtl/rq_tx_encoder.v rtl/rc_rx_decoder.v rtl/pcie_tag_manager.v rtl/interrupt_ctrl.v rtl/sg_dma_engine.v rtl/video_req_cdc.v "$XPM_CDC_SV" "$XPM_FIFO_SV" "$XPM_MEMORY_SV" rtl/custom_pcie_dma_top.v tb/tb_pcie_dma_system.v"
+    "tb_video_cdc_system rtl/video_req_cdc.v rtl/custom_pcie_dma_top.v tb/tb_video_cdc_system.v"
+    "tb_pcie_dma_system rtl/global_timer.v rtl/dma_telemetry.v rtl/video_stream_engine.v rtl/nv12_capture_engine.v rtl/audio_stream_engine.v rtl/axil_reg_space.v rtl/c2h_dma_engine.v rtl/h2c_dma_engine.v rtl/desc_fetch_engine.v rtl/cq_rx_decoder.v rtl/cc_tx_encoder.v rtl/rq_tx_encoder.v rtl/rc_rx_decoder.v rtl/pcie_tag_manager.v rtl/interrupt_ctrl.v rtl/sg_dma_engine.v rtl/video_req_cdc.v rtl/custom_pcie_dma_top.v tb/tb_pcie_dma_system.v"
     "tb_pcie_7x_axi_bridge rtl/pcie_7x_axi_bridge.v rtl/cq_rx_decoder.v rtl/cc_tx_encoder.v rtl/rq_tx_encoder.v rtl/rc_rx_decoder.v rtl/axil_reg_space.v rtl/desc_fetch_engine.v tb/tb_pcie_7x_axi_bridge.v"
-    "tb_sg_dma_pipeline rtl/global_timer.v rtl/dma_telemetry.v rtl/video_stream_engine.v rtl/nv12_capture_engine.v rtl/audio_stream_engine.v rtl/axil_reg_space.v rtl/c2h_dma_engine.v rtl/h2c_dma_engine.v rtl/desc_fetch_engine.v rtl/cq_rx_decoder.v rtl/cc_tx_encoder.v rtl/rq_tx_encoder.v rtl/rc_rx_decoder.v rtl/pcie_tag_manager.v rtl/interrupt_ctrl.v rtl/sg_dma_engine.v rtl/video_req_cdc.v "$XPM_CDC_SV" "$XPM_FIFO_SV" "$XPM_MEMORY_SV" rtl/custom_pcie_dma_top.v rtl/pcie_7x_axi_bridge.v tb/tb_sg_dma_pipeline.v"
+    "tb_sg_dma_pipeline rtl/global_timer.v rtl/dma_telemetry.v rtl/video_stream_engine.v rtl/nv12_capture_engine.v rtl/audio_stream_engine.v rtl/axil_reg_space.v rtl/c2h_dma_engine.v rtl/h2c_dma_engine.v rtl/desc_fetch_engine.v rtl/cq_rx_decoder.v rtl/cc_tx_encoder.v rtl/rq_tx_encoder.v rtl/rc_rx_decoder.v rtl/pcie_tag_manager.v rtl/interrupt_ctrl.v rtl/sg_dma_engine.v rtl/video_req_cdc.v rtl/custom_pcie_dma_top.v rtl/pcie_7x_axi_bridge.v tb/tb_sg_dma_pipeline.v"
 )
+
+# Use a private simulator library for every invocation. Multiple sessions may
+# run regressions in the same checkout, and XSim otherwise blocks indefinitely
+# on the shared xsim.dir/work library. Precompile complete RTL/XPM contents so
+# system testbenches never depend on stale modules from an earlier run.
+timeout 600s xvlog --work work="$SIM_WORK" --sv \
+    rtl/*.v "$XPM_CDC_SV" "$XPM_FIFO_SV" "$XPM_MEMORY_SV" \
+    "$XILINX_VIVADO/data/verilog/src/glbl.v" > /dev/null 2>&1
 
 PASSED=0
 FAILED=0
@@ -57,10 +68,10 @@ for TEST in "${TESTS[@]}"; do
 
     echo -n "Running $TB_NAME ... "
     
-    SIM_LOG="work_sim/${TB_NAME}.log"
-    if timeout 120s xvlog --sv $FILES "$XILINX_VIVADO/data/verilog/src/glbl.v" > /dev/null 2>&1 && \
-       timeout 120s xelab $TB_NAME work.glbl -s sim_$TB_NAME > /dev/null 2>&1 && \
-       timeout 300s xsim sim_$TB_NAME -R > "$SIM_LOG" 2>&1 && \
+    SIM_LOG="$ROOT_DIR/work_sim/${TB_NAME}.log"
+    if timeout 600s xvlog --work work="$SIM_WORK" --sv $FILES > /dev/null 2>&1 && \
+       (cd "$RUN_DIR" && timeout 600s xelab -L work="$SIM_WORK" $TB_NAME work.glbl -s sim_$TB_NAME > /dev/null 2>&1) && \
+       (cd "$RUN_DIR" && timeout 300s xsim sim_$TB_NAME -R > "$SIM_LOG" 2>&1) && \
        grep -Eq "PASSED|SUCCESS|VERIFIED 100% PASS" "$SIM_LOG"; then
         echo "[PASS]"
         PASSED=$((PASSED + 1))
