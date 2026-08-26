@@ -1,4 +1,19 @@
-# HANDOFF: A50T 150MHz NV12 遷移後實機 timeout 除錯（未解）
+# HANDOFF: A50T 150MHz NV12 遷移後實機 timeout 除錯（已結案 ✅ 2026-08-26）
+
+> **結案摘要**：§5 的整合仿真成功重現並定位全部根因。實際上共有四個疊加缺陷：
+> ① `video_req_cdc` 把 `REQ_DWORDS` 同時當 DW 數與 128-bit 拍數；
+> ② writer ack 為 registered 导致 stale `s_req_valid` 被當新請求（位址滯後一包）；
+> ③ xpm FWFT `dout` 落後 pop 一拍，「邊彈邊讀」back-to-back 必錯位（改為整包
+> burst 讀入分散式緩衝後隨機存取）；④ TB 描述子把 Y/UV 基址放在 hi-DW 槽。
+> 實機層面另發現：completion pulse 以 level synchronizer 跨 150→125 會漏採、
+> `interrupt_ctrl` 在 MSI in-flight 時丟 completion（改 pending counter）、
+> driver `S_PARM` 隱式覆寫 pacer。修正於 commits `21d6b79`、`3d9c228`。
+>
+> **實機最終結果**：1080p60 uncapped 600/600、270.09 FPS、801.18 MiB/s；
+> 4K60 uncapped 600/600、67.53 FPS、801.30 MiB/s；back-to-back 完全再現、
+> data errors 0。4K60 餘裕從 0.22% → **12.6%**。詳細紀錄見
+> [wiki/A50T-NV12M-Implementation-and-Results.md §7.5](wiki/A50T-NV12M-Implementation-and-Results.md)。
+> 以下原文保留作除錯過程存檔。
 
 > 產生時間：2026-08-25　｜　撰寫者：ox-alpha session（交接給下一位 coding agent）
 > 溝通語言慣例：與使用者以**繁體中文**回報；程式碼/commit 訊息英文。

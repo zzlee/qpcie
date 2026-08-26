@@ -205,9 +205,38 @@ Data errors: 0
 
 目前等效餘裕只有約 `1.56 MiB/s`（`0.22%`），所以最新 4K mode 必須通過直接實機測試，不能只以 1080p 等效吞吐量宣稱完成。
 
+### 7.5 NV12 引擎遷入 150 MHz video domain checkpoint（最新，已實機通過）
+
+commit `ffff925` 把 `nv12_capture_engine` 從 125 MHz PCIe domain 搬進既有 150 MHz
+video domain（TPG 同域直連），C2H request 經 `rtl/video_req_cdc.v` 跨回 125 MHz。
+理論天花板從 60.28 FPS 提升至 72.3 FPS（4K）。
+
+遷移過程中發現並修正四個缺陷（commits `21d6b79`、`3d9c228`）：
+
+| # | 缺陷 | 修正 |
+|---|---|---|
+| 1 | `REQ_DWORDS=64` 同時被當成 DW 數與 128-bit 拍數；writer 等 64 拍但引擎只送 16 拍 | 以 `PAYLOAD_BEATS = REQ_DWORDS/4` 區分單位 |
+| 2 | writer ack 為 registered，回到 IDLE 時引擎的 `s_req_valid` 尚未降，同一請求被重複接受、位址滯後一包 | 新增 `WR_DRAIN`：等 `!s_req_valid` 才回 IDLE |
+| 3 | xpm_fifo_async FWFT 的 `dout` 落後 pop 一拍，「邊彈邊讀」在 back-to-back 必錯位 | 讀端改為整包 burst 讀入 16×128 分散式緩衝，隨機存取服務 requester（天然耐受 PCIe backpressure） |
+| 4 | `eng_frame_done`（6.67 ns pulse）以 level synchronizer 跨 150→125 會漏採且 edge-detect 雙觸發；`interrupt_ctrl` 在 MSI in-flight 時丟失新 completion | completion 改 source-toggle CDC；interrupt controller 改 pending counter 依序補發 |
+
+driver 另修正：STREAMON 讀回 `REG_PACER_CTRL` 驗證（不符即 `-EIO`）、移除
+`S_PARM` 對 pacer 的隱式覆寫（uncapped benchmark 不再被悄悄改回 60 FPS）。
+
+實機結果（bitstream SHA256 `8ada057d…`，Jetson Orin NX，Gen2 x4，MPS 256B）：
+
+```text
+1080p60 uncapped : 600/600 frames, 270.095 FPS, 801.18 MiB/s, errors 0
+                   （back-to-back 第二輪 270.086 FPS / 801.16 MiB/s 完全再現）
+4K60 uncapped    : 600/600 frames,  67.534 FPS, 801.30 MiB/s, errors 0
+```
+
+對 4K60 需求 711.91 MiB/s 的餘裕從 `0.22%` 提升為 **`12.6%`**。
+
 ## 8. 仿真與 timing 結果
 
-完整 regression：`18/18 PASS`。
+完整 regression：`19/19 PASS`（含 `tb_video_cdc_system` 整合 TB 與
+`tb_interrupt_ctrl` MSI in-flight 回歸測試）。
 
 關鍵性能仿真：
 
@@ -255,6 +284,9 @@ Firmware hash: 0x2450DCB7
 | `0aae5bf` | pipelined NV12 engine、Y/UV FIFOs、4K RTL support |
 | `0950aa6` | 150 MHz TPG domain、AXI-Lite CDC、AXIS async FIFO |
 | `2450dcb` | switch-safe 1080p60/4K60 V4L2 modes 與完整 app 驗證 |
+| `ffff925` | NV12 引擎遷入 150 MHz video domain、`video_req_cdc` |
+| `21d6b79` | CDC 拍數/重複接受/FWFT 潛後修正、completion toggle CDC、pacer readback |
+| `3d9c228` | interrupt pending counter（MSI in-flight 不丟 completion）、S_PARM 覆寫移除 |
 
 ## 10. 最新 checkpoint 驗證步驟
 
@@ -301,7 +333,8 @@ v4l2-ctl -d /dev/video0 --list-formats-ext
 
 ## 11. 目前限制與未完成項目
 
-1. 最新 `2450dcb7` bitstream 尚待使用者完成 mode-switch 與 4K60 實機驗證。
-2. 效能餘裕僅約 0.22%；若 4K 實機低於門檻，下一階段需把 NV12 frontend/PCIe-side processing 提升時脈或進一步降低 requester overhead。
-3. ALSA、channel 1–3、USERPTR、DMABUF import/export、slice DMA 與 GPU P2P 都不是目前已驗證交付範圍。
-4. 目前 capture bring-up 只保證 DMA-contiguous MMAP buffers。
+1. 150 MHz 引擎遷移 checkpoint 已實機通過（§7.5）：1080p uncapped 270 FPS /
+   801 MiB/s、4K60 uncapped 67.5 FPS / 801.30 MiB/s、back-to-back 再現、
+   data errors 0。
+2. ALSA、channel 1–3、USERPTR、DMABUF import/export、slice DMA 與 GPU P2P 都不是目前已驗證交付範圍。
+3. 目前 capture bring-up 只保證 DMA-contiguous MMAP buffers。
