@@ -80,6 +80,42 @@ module tb_interrupt_ctrl;
         end
 
         #30;
+        $display("[%0t] Test 2: Back-to-back C2H done while MSI in flight...", $time);
+        @(posedge clk);
+        c2h_done <= 1;
+        @(posedge clk);
+        c2h_done <= 1;      // second completion while first MSI still pending
+        @(posedge clk);
+        c2h_done <= 0;
+
+        wait(irq_req_valid);
+        if (irq_req_code !== 8'h02) begin
+            $display("FAIL: expected C2H code 0x02, got 0x%h", irq_req_code);
+            $finish;
+        end
+        // Hold usr_irq_ack low across the next completion event.
+        repeat (4) @(posedge clk);
+        @(posedge clk);
+        irq_req_ack <= 1;
+        @(posedge clk);
+        irq_req_ack <= 0;
+        // First MSI retired; the queued completion must raise a new MSI.
+        wait(irq_req_valid);
+        if (irq_req_code !== 8'h02) begin
+            $display("FAIL: queued completion lost (code=0x%h)", irq_req_code);
+            $finish;
+        end
+        @(posedge clk);
+        irq_req_ack <= 1;
+        @(posedge clk);
+        irq_req_ack <= 0;
+        repeat (6) @(posedge clk);
+        if (irq_req_valid !== 1'b0) begin
+            $display("FAIL: unexpected extra MSI request");
+            $finish;
+        end
+
+        #30;
         $display("[%0t] SUCCESS: interrupt_ctrl Test Completed!", $time);
         $finish;
     end

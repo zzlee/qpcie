@@ -227,10 +227,12 @@ static int qpcie_vidioc_s_parm(struct file *file, void *priv, struct v4l2_stream
         return -EINVAL;
 
     /* v_tpg offset 0x30 is maskId, not a frame-pacer register. Keep the
-     * bring-up mode fixed at 60 fps without corrupting TPG configuration. */
+     * bring-up mode fixed at 60 fps without corrupting TPG configuration.
+     * The frame interval is informational only: actual pacing follows the
+     * V4L2_CID_QPCIE_PACER_ENABLE control so userspace can disable it for
+     * uncapped benchmarks without S_PARM silently re-enabling it. */
     a->parm.capture.timeperframe.numerator = 1;
     a->parm.capture.timeperframe.denominator = 60;
-    vch->pacer_enable = true;
     dev_info(&vch->qdev->pdev->dev,
              "V4L2 channel %u configured for %ux%u@60 NV12M\n",
              vch->channel_id, vch->width, vch->height);

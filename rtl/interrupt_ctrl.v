@@ -34,6 +34,15 @@ module interrupt_ctrl (
 
     reg [1:0] state;
 
+    // Completion events are counted, not dropped: while an earlier MSI is
+    // still waiting for cfg_interrupt_rdy, further frame completions must
+    // survive so every buffer completion eventually raises one IRQ.
+    reg [7:0] h2c_pending;
+    reg [7:0] c2h_pending;
+    wire      h2c_send = (h2c_pending != 8'd0) && reg_irq_ctrl[0];
+    wire      c2h_send = (h2c_pending == 8'd0) &&
+                         (c2h_pending != 8'd0) && reg_irq_ctrl[1];
+
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state          <= IDLE;
@@ -41,6 +50,8 @@ module interrupt_ctrl (
             irq_req_valid  <= 1'b0;
             irq_req_code   <= 8'd0;
             usr_irq_req    <= 1'b0;
+            h2c_pending    <= 8'd0;
+            c2h_pending    <= 8'd0;
         end else begin
             // Single owner for sticky status; software clear is W1C and
             // same-cycle completion events take priority over a clear.
@@ -48,12 +59,23 @@ module interrupt_ctrl (
             if (h2c_done) reg_irq_status[0] <= 1'b1;
             if (c2h_done) reg_irq_status[1] <= 1'b1;
 
+            // Completion accounting (saturating at 255).
+            if (h2c_done && !h2c_send && (h2c_pending != 8'hFF))
+                h2c_pending <= h2c_pending + 8'd1;
+            else if (!h2c_done && h2c_send)
+                h2c_pending <= h2c_pending - 8'd1;
+
+            if (c2h_done && !c2h_send && (c2h_pending != 8'hFF))
+                c2h_pending <= c2h_pending + 8'd1;
+            else if (!c2h_done && c2h_send)
+                c2h_pending <= c2h_pending - 8'd1;
+
             case (state)
                 IDLE: begin
                     irq_req_valid <= 1'b0;
-                    if ((h2c_done && reg_irq_ctrl[0]) || (c2h_done && reg_irq_ctrl[1])) begin
+                    if (h2c_send || c2h_send) begin
                         irq_req_valid <= 1'b1;
-                        irq_req_code  <= (h2c_done) ? 8'h01 : 8'h02;
+                        irq_req_code  <= h2c_send ? 8'h01 : 8'h02;
                         usr_irq_req   <= 1'b1;
                         state         <= SEND_MSI;
                     end
