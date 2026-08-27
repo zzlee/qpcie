@@ -98,6 +98,14 @@
 #define REG_PERF_IDLE_CDC_EMPTY     0xD8 /* Idle cycles due to empty CDC FIFO */
 #define REG_PERF_IDLE_NO_REQ        0xDC /* Idle cycles with no DMA request */
 
+/* Scatter-Gather Page Table & Status Registers (BAR0 Offsets 0xE0..0xEC) */
+#define REG_SG_PT_CTRL              0xE0 /* Page Table Target Address [10:0] */
+#define REG_SG_PT_DATA_LO           0xE4 /* Physical Address [31:0] */
+#define REG_SG_PT_DATA_HI           0xE8 /* Physical Address [63:32] (Bit 31: 0=Y, 1=UV) */
+#define REG_SG_STATUS               0xEC /* Current Page Indexes [31:16]=UV, [15:0]=Y */
+
+#define DESC_CTRL_SG_MODE           0x10 /* Bit 4: Scatter-Gather Multi-Page Table Mode */
+
 /* 64-Byte 2D Multi-Planar Extended Descriptor Structure (Hardware Wire Format) */
 struct __packed qpcie_dma_desc_64b {
     u64 plane0_src_addr; /* Bytes 0..7   : DW0-DW1 (Src Buffer Phys Addr) */

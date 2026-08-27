@@ -460,7 +460,49 @@ static void qpcie_buf_queue(struct vb2_buffer *vb)
     desc->plane12_count   = vch->height / 2;
     desc->format          = 0x2; /* NV12M */
     desc->plane_count     = 2;
-    desc->control         = 0x0B; /* Valid | C2H | IRQ */
+
+    if (sgt0->nents > 1 || sgt1->nents > 1) {
+        struct scatterlist *sg;
+        unsigned int i, pt_idx;
+        dma_addr_t page_addr;
+        u32 len;
+
+        /* Program Y Plane Scatter-Gather Page Table into FPGA On-Chip BRAM */
+        iowrite32(0, qdev->bar0_mmio + REG_SG_PT_CTRL);
+        pt_idx = 0;
+        for_each_sg(sgt0->sgl, sg, sgt0->nents, i) {
+            page_addr = sg_dma_address(sg);
+            len = sg_dma_len(sg);
+            while (len >= 4096 && pt_idx < 2048) {
+                iowrite32((u32)page_addr, qdev->bar0_mmio + REG_SG_PT_DATA_LO);
+                /* Bit 31 = 0 (Y Plane) */
+                iowrite32((u32)(page_addr >> 32) & 0x7FFFFFFF, qdev->bar0_mmio + REG_SG_PT_DATA_HI);
+                page_addr += 4096;
+                len -= 4096;
+                pt_idx++;
+            }
+        }
+
+        /* Program UV Plane Scatter-Gather Page Table into FPGA On-Chip BRAM */
+        iowrite32(0, qdev->bar0_mmio + REG_SG_PT_CTRL);
+        pt_idx = 0;
+        for_each_sg(sgt1->sgl, sg, sgt1->nents, i) {
+            page_addr = sg_dma_address(sg);
+            len = sg_dma_len(sg);
+            while (len >= 4096 && pt_idx < 1024) {
+                iowrite32((u32)page_addr, qdev->bar0_mmio + REG_SG_PT_DATA_LO);
+                /* Bit 31 = 1 (UV Plane) */
+                iowrite32(((u32)(page_addr >> 32) & 0x7FFFFFFF) | 0x80000000, qdev->bar0_mmio + REG_SG_PT_DATA_HI);
+                page_addr += 4096;
+                len -= 4096;
+                pt_idx++;
+            }
+        }
+
+        desc->control = 0x0B | DESC_CTRL_SG_MODE; /* Valid | C2H | IRQ | SG_MODE */
+    } else {
+        desc->control = 0x0B; /* Valid | C2H | IRQ (Linear Mode) */
+    }
 
     /* Descriptor data must be globally visible before publishing the shared
      * hardware-ring tail doorbell. */

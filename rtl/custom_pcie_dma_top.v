@@ -499,6 +499,12 @@ module custom_pcie_dma_top #(
                                        (c2h_req_dw_len_mux == 11'd32) &&
                                        (c2h_req_addr_mux[11:7] == 5'b11111));
 
+    // Scatter-Gather Page Table Wires
+    wire        pt_y_wr_en, pt_uv_wr_en;
+    wire [10:0] pt_y_wr_addr, pt_uv_wr_addr;
+    wire [63:0] pt_y_wr_data, pt_uv_wr_data;
+    wire [10:0] cur_y_page_idx, cur_uv_page_idx;
+
     // 3. BAR0 AXI4-Lite Register Space
     axil_reg_space u_axil_reg_space (
         .clk(clk),
@@ -564,7 +570,15 @@ module custom_pcie_dma_top #(
         .reg_perf_split_4k_count(reg_perf_split_4k_count),
         .reg_perf_max_queue_depth(reg_perf_max_queue_depth),
         .reg_perf_idle_cdc_empty(reg_perf_idle_cdc_empty),
-        .reg_perf_idle_no_req(reg_perf_idle_no_req)
+        .reg_perf_idle_no_req(reg_perf_idle_no_req),
+        .pt_y_wr_en(pt_y_wr_en),
+        .pt_y_wr_addr(pt_y_wr_addr),
+        .pt_y_wr_data(pt_y_wr_data),
+        .pt_uv_wr_en(pt_uv_wr_en),
+        .pt_uv_wr_addr(pt_uv_wr_addr),
+        .pt_uv_wr_data(pt_uv_wr_data),
+        .cur_y_page_idx(cur_y_page_idx),
+        .cur_uv_page_idx(cur_uv_page_idx)
     );
 
     // 3.1 Hardware Performance Monitor Instance
@@ -777,11 +791,12 @@ module custom_pcie_dma_top #(
 
     // ---- Signal declarations (before any use) ----------------------------
     reg         hs_send_q;
-    reg [239:0] hs_bus_q;
+    reg [240:0] hs_bus_q;
     wire        hs_src_rcv, hs_dest_req;
-    wire [239:0] hs_dest_bus;
+    wire [240:0] hs_dest_bus;
     reg          hs_dest_ack;
     reg          eng_desc_valid;
+    reg          eng_desc_sg_mode;
     reg [63:0]   eng_y_addr, eng_uv_addr, eng_ts;
     reg [15:0]   eng_width, eng_height, eng_stride;
     wire         nv12_desc_ready_v;
@@ -809,14 +824,15 @@ module custom_pcie_dma_top #(
     reg [63:0] v_pts_sync_q = 64'd0;
 
     // ---- Descriptor crossing: 125 MHz fetch -> 150 MHz engine ------------
-    // Bus layout: {timestamp[63:0], stride[15:0], height[15:0], width[15:0],
+    // Bus layout: {desc_ctrl[4], timestamp[63:0], stride[15:0], height[15:0], width[15:0],
     //              uv_addr[63:0], y_addr[63:0]}
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             hs_send_q <= 1'b0;
-            hs_bus_q  <= 240'd0;
+            hs_bus_q  <= 241'd0;
         end else if (!hs_send_q && c2h_desc_valid && nv12_desc_select) begin
-            hs_bus_q  <= {global_timestamp, c2h_dst_stride,
+            hs_bus_q  <= {c2h_desc_ctrl[4],
+                          global_timestamp, c2h_dst_stride,
                           c2h_line_count, c2h_line_width,
                           c2h_plane1_dst, c2h_plane0_dst};
             hs_send_q <= 1'b1;
@@ -828,7 +844,7 @@ module custom_pcie_dma_top #(
     assign nv12_desc_ready = c2h_desc_valid && nv12_desc_select && !hs_send_q;
 
     xpm_cdc_handshake #(
-        .WIDTH(240),
+        .WIDTH(241),
         .DEST_EXT_HSK(1)
     ) u_desc_cdc (
         .src_clk    (clk),
@@ -848,28 +864,30 @@ module custom_pcie_dma_top #(
 
     always @(posedge video_clk or negedge video_rst_n) begin
         if (!video_rst_n) begin
-            dest_state     <= DEST_IDLE;
-            eng_desc_valid <= 1'b0;
-            hs_dest_ack    <= 1'b0;
-            eng_y_addr     <= 64'd0;
-            eng_uv_addr    <= 64'd0;
-            eng_width      <= 16'd0;
-            eng_height     <= 16'd0;
-            eng_stride     <= 16'd0;
-            eng_ts         <= 64'd0;
+            dest_state       <= DEST_IDLE;
+            eng_desc_valid   <= 1'b0;
+            eng_desc_sg_mode <= 1'b0;
+            hs_dest_ack      <= 1'b0;
+            eng_y_addr       <= 64'd0;
+            eng_uv_addr      <= 64'd0;
+            eng_width        <= 16'd0;
+            eng_height       <= 16'd0;
+            eng_stride       <= 16'd0;
+            eng_ts           <= 64'd0;
         end else begin
             case (dest_state)
                 DEST_IDLE: begin
                     hs_dest_ack <= 1'b0;
                     if (hs_dest_req) begin
-                        eng_y_addr     <= hs_dest_bus[63:0];
-                        eng_uv_addr    <= hs_dest_bus[127:64];
-                        eng_width      <= hs_dest_bus[143:128];
-                        eng_height     <= hs_dest_bus[159:144];
-                        eng_stride     <= hs_dest_bus[175:160];
-                        eng_ts         <= hs_dest_bus[239:176];
-                        eng_desc_valid <= 1'b1;
-                        dest_state     <= DEST_WAIT_ENG;
+                        eng_y_addr       <= hs_dest_bus[63:0];
+                        eng_uv_addr      <= hs_dest_bus[127:64];
+                        eng_width        <= hs_dest_bus[143:128];
+                        eng_height       <= hs_dest_bus[159:144];
+                        eng_stride       <= hs_dest_bus[175:160];
+                        eng_ts           <= hs_dest_bus[239:176];
+                        eng_desc_sg_mode <= hs_dest_bus[240];
+                        eng_desc_valid   <= 1'b1;
+                        dest_state       <= DEST_WAIT_ENG;
                     end
                 end
 
@@ -992,11 +1010,20 @@ module custom_pcie_dma_top #(
         .rst_n(video_rst_n),
         .desc_valid(eng_desc_valid),
         .desc_ready(nv12_desc_ready_v),
+        .desc_sg_mode(eng_desc_sg_mode),
         .plane_y_addr(eng_y_addr),
         .plane_uv_addr(eng_uv_addr),
         .frame_width(eng_width),
         .frame_height(eng_height),
         .frame_stride(eng_stride),
+        .pt_y_wr_en(pt_y_wr_en),
+        .pt_y_wr_addr(pt_y_wr_addr),
+        .pt_y_wr_data(pt_y_wr_data),
+        .pt_uv_wr_en(pt_uv_wr_en),
+        .pt_uv_wr_addr(pt_uv_wr_addr),
+        .pt_uv_wr_data(pt_uv_wr_data),
+        .cur_y_page_idx(cur_y_page_idx),
+        .cur_uv_page_idx(cur_uv_page_idx),
         .pacer_enable(1'b0),   /* Hardware pacer disabled; Linux driver pacer drives 60 FPS */
         .frame_interval_clks(32'd2500000),   // 60 FPS @ 150 MHz
         .global_timestamp(eng_ts),

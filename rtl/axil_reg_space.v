@@ -83,7 +83,17 @@ module axil_reg_space (
     input  wire [31:0] reg_perf_split_4k_count,
     input  wire [15:0] reg_perf_max_queue_depth,
     input  wire [31:0] reg_perf_idle_cdc_empty,
-    input  wire [31:0] reg_perf_idle_no_req
+    input  wire [31:0] reg_perf_idle_no_req,
+
+    // Scatter-Gather Page Table Programming Ports (BAR0 Offsets 0xE0..0xEC)
+    output reg         pt_y_wr_en,
+    output reg  [10:0] pt_y_wr_addr,
+    output reg  [63:0] pt_y_wr_data,
+    output reg         pt_uv_wr_en,
+    output reg  [10:0] pt_uv_wr_addr,
+    output reg  [63:0] pt_uv_wr_data,
+    input  wire [10:0] cur_y_page_idx,
+    input  wire [10:0] cur_uv_page_idx
 );
 
     // BAR0 Register Offset Definitions
@@ -149,6 +159,12 @@ module axil_reg_space (
             reg_video_sub_reset<= 32'd0; // Bit 0: TPG-only reset, Bit 1: NV12 engine reset
             reg_perf_enable    <= 1'b0;
             reg_perf_reset_w1c <= 1'b0;
+            pt_y_wr_en         <= 1'b0;
+            pt_y_wr_addr       <= 11'd0;
+            pt_y_wr_data       <= 64'd0;
+            pt_uv_wr_en        <= 1'b0;
+            pt_uv_wr_addr      <= 11'd0;
+            pt_uv_wr_data      <= 64'd0;
             reg_debug_last_wdata <= 32'd0;
             reg_debug_last_waddr <= 32'd0;
             s_axil_awready       <= 1'b0;
@@ -157,6 +173,8 @@ module axil_reg_space (
             s_axil_bresp      <= 2'b00; // OKAY
         end else begin
             reg_irq_status_w1c <= 32'd0;
+            pt_y_wr_en         <= 1'b0;
+            pt_uv_wr_en        <= 1'b0;
             if (s_axil_awvalid && s_axil_wvalid && !s_axil_bvalid) begin
                 s_axil_awready <= 1'b1;
                 s_axil_wready  <= 1'b1;
@@ -187,6 +205,25 @@ module axil_reg_space (
                     8'hA0: begin
                         reg_perf_enable    <= s_axil_wdata[0];
                         reg_perf_reset_w1c <= s_axil_wdata[1];
+                    end
+                    8'hE0: begin
+                        pt_y_wr_addr  <= s_axil_wdata[10:0];
+                        pt_uv_wr_addr <= s_axil_wdata[10:0];
+                    end
+                    8'hE4: begin
+                        pt_y_wr_data[31:0]  <= s_axil_wdata;
+                        pt_uv_wr_data[31:0] <= s_axil_wdata;
+                    end
+                    8'hE8: begin
+                        pt_y_wr_data[63:32]  <= s_axil_wdata;
+                        pt_uv_wr_data[63:32] <= s_axil_wdata;
+                        if (!s_axil_wdata[31]) begin // Bit 31: 0 = Y Plane, 1 = UV Plane
+                            pt_y_wr_en   <= 1'b1;
+                            pt_y_wr_addr <= pt_y_wr_addr + 1'b1;
+                        end else begin
+                            pt_uv_wr_en   <= 1'b1;
+                            pt_uv_wr_addr <= pt_uv_wr_addr + 1'b1;
+                        end
                     end
                     default: ; // Ignore writes to read-only registers
                 endcase
@@ -274,6 +311,12 @@ module axil_reg_space (
                     8'hD4:                s_axil_rdata <= {16'd0, reg_perf_max_queue_depth};
                     8'hD8:                s_axil_rdata <= reg_perf_idle_cdc_empty;
                     8'hDC:                s_axil_rdata <= reg_perf_idle_no_req;
+
+                    // Scatter-Gather Page Table & Status Registers (BAR0 0xE0..0xEC)
+                    8'hE0:                s_axil_rdata <= {21'd0, pt_y_wr_addr};
+                    8'hE4:                s_axil_rdata <= pt_y_wr_data[31:0];
+                    8'hE8:                s_axil_rdata <= pt_y_wr_data[63:32];
+                    8'hEC:                s_axil_rdata <= {5'd0, cur_uv_page_idx, 5'd0, cur_y_page_idx};
 
                     default:              s_axil_rdata <= 32'hDEAD_BEEF;
                 endcase

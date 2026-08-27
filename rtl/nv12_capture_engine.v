@@ -19,11 +19,22 @@ module nv12_capture_engine #(
 
     input  wire                         desc_valid,
     output reg                          desc_ready,
+    input  wire                         desc_sg_mode,
     input  wire [63:0]                  plane_y_addr,
     input  wire [63:0]                  plane_uv_addr,
     input  wire [15:0]                  frame_width,
     input  wire [15:0]                  frame_height,
     input  wire [15:0]                  frame_stride,
+
+    // Page Table write interface
+    input  wire                         pt_y_wr_en,
+    input  wire [10:0]                  pt_y_wr_addr,
+    input  wire [63:0]                  pt_y_wr_data,
+    input  wire                         pt_uv_wr_en,
+    input  wire [10:0]                  pt_uv_wr_addr,
+    input  wire [63:0]                  pt_uv_wr_data,
+    output wire [10:0]                  cur_y_page_idx,
+    output wire [10:0]                  cur_uv_page_idx,
 
     input  wire                         pacer_enable,
     input  wire [31:0]                  frame_interval_clks,
@@ -96,16 +107,69 @@ module nv12_capture_engine #(
     wire [15:0] y_rem_bytes  = width_q - y_send_offset;
     wire [15:0] uv_rem_bytes = width_q - uv_send_offset;
 
+    wire descriptor_accept = desc_valid && !video_busy;
+
+    wire [63:0] y_walker_addr;
+    wire [11:0] y_walker_page_offset;
+    wire        y_walker_boundary_next;
+
+    sg_page_walker #(
+        .MAX_PAGES(2048),
+        .PAGE_SIZE_BYTES(4096)
+    ) u_y_page_walker (
+        .clk(clk),
+        .rst_n(rst_n),
+        .start(descriptor_accept),
+        .sg_mode(desc_sg_mode),
+        .linear_base_addr(plane_y_addr),
+        .pt_wr_en(pt_y_wr_en),
+        .pt_wr_addr(pt_y_wr_addr),
+        .pt_wr_data(pt_y_wr_data),
+        .advance_burst(c2h_req_ack && c2h_req_valid && !request_is_uv),
+        .burst_bytes(active_req_bytes),
+        .current_addr(y_walker_addr),
+        .current_page_idx(cur_y_page_idx),
+        .current_page_offset(y_walker_page_offset),
+        .page_boundary_next(y_walker_boundary_next)
+    );
+
+    wire [63:0] uv_walker_addr;
+    wire [11:0] uv_walker_page_offset;
+    wire        uv_walker_boundary_next;
+
+    sg_page_walker #(
+        .MAX_PAGES(2048),
+        .PAGE_SIZE_BYTES(4096)
+    ) u_uv_page_walker (
+        .clk(clk),
+        .rst_n(rst_n),
+        .start(descriptor_accept),
+        .sg_mode(desc_sg_mode),
+        .linear_base_addr(plane_uv_addr),
+        .pt_wr_en(pt_uv_wr_en),
+        .pt_wr_addr(pt_uv_wr_addr),
+        .pt_wr_data(pt_uv_wr_data),
+        .advance_burst(c2h_req_ack && c2h_req_valid && request_is_uv),
+        .burst_bytes(active_req_bytes),
+        .current_addr(uv_walker_addr),
+        .current_page_idx(cur_uv_page_idx),
+        .current_page_offset(uv_walker_page_offset),
+        .page_boundary_next(uv_walker_boundary_next)
+    );
+
+    wire [63:0] cur_y_target_addr  = desc_sg_mode ? y_walker_addr  : y_send_addr;
+    wire [63:0] cur_uv_target_addr = desc_sg_mode ? uv_walker_addr : uv_send_addr;
+
     // A 256-byte request starting at offset 0xF80 (5'b11111) within any 4KB page
     // would cross the 4KB page boundary at 0x1000, causing fatal PCIe MalfTLP!
     // Clamp to 128 bytes whenever remaining page room is < 256 bytes.
-    wire y_is_256  = (y_rem_bytes >= 16'd256) && (y_send_addr[11:7] != 5'b11111);
+    wire y_is_256  = (y_rem_bytes >= 16'd256) && (cur_y_target_addr[11:7] != 5'b11111);
     wire [10:0] y_next_dw_len = y_is_256 ? 11'd64 : 11'd32;
     wire [4:0]  y_next_beats  = y_is_256 ? 5'd16  : 5'd8;
     wire [15:0] y_next_bytes  = y_is_256 ? 16'd256: 16'd128;
     wire y_ready_to_send = (y_fifo_count >= y_next_beats);
 
-    wire uv_is_256 = (uv_rem_bytes >= 16'd256) && (uv_send_addr[11:7] != 5'b11111);
+    wire uv_is_256 = (uv_rem_bytes >= 16'd256) && (cur_uv_target_addr[11:7] != 5'b11111);
     wire [10:0] uv_next_dw_len = uv_is_256 ? 11'd64 : 11'd32;
     wire [4:0]  uv_next_beats  = uv_is_256 ? 5'd16  : 5'd8;
     wire [15:0] uv_next_bytes  = uv_is_256 ? 16'd256: 16'd128;
@@ -152,7 +216,6 @@ module nv12_capture_engine #(
         end
     endfunction
 
-    wire descriptor_accept = desc_valid && !video_busy;
     wire fifo_space_available =
         (y_fifo_count <= FIFO_DEPTH-2) &&
         (uv_fifo_count <= FIFO_DEPTH-2);
@@ -349,7 +412,7 @@ module nv12_capture_engine #(
             if (!c2h_req_valid) begin
                 if (uv_ready_to_send && (prefer_uv || !y_ready_to_send)) begin
                     request_is_uv         <= 1'b1;
-                    c2h_req_addr          <= uv_send_addr;
+                    c2h_req_addr          <= cur_uv_target_addr;
                     c2h_req_dw_len        <= uv_next_dw_len;
                     c2h_req_data          <= uv_fifo[uv_rd_ptr];
                     c2h_req_last          <= 1'b1;
@@ -359,7 +422,7 @@ module nv12_capture_engine #(
                     prefer_uv             <= 1'b0;
                 end else if (y_ready_to_send) begin
                     request_is_uv         <= 1'b0;
-                    c2h_req_addr          <= y_send_addr;
+                    c2h_req_addr          <= cur_y_target_addr;
                     c2h_req_dw_len        <= y_next_dw_len;
                     c2h_req_data          <= y_fifo[y_rd_ptr];
                     c2h_req_last          <= 1'b1;

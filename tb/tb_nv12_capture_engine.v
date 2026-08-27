@@ -41,8 +41,12 @@ module tb_nv12_capture_engine;
     ) dut (
         .clk(clk), .rst_n(rst_n),
         .desc_valid(desc_valid), .desc_ready(desc_ready),
+        .desc_sg_mode(1'b0),
         .plane_y_addr(Y_BASE), .plane_uv_addr(UV_BASE),
         .frame_width(WIDTH), .frame_height(HEIGHT), .frame_stride(STRIDE),
+        .pt_y_wr_en(1'b0), .pt_y_wr_addr(11'd0), .pt_y_wr_data(64'd0),
+        .pt_uv_wr_en(1'b0), .pt_uv_wr_addr(11'd0), .pt_uv_wr_data(64'd0),
+        .cur_y_page_idx(), .cur_uv_page_idx(),
         .pacer_enable(1'b0), .frame_interval_clks(32'd0),
         .global_timestamp(64'h1122_3344_5566_7788),
         .s_axis_tdata(s_data), .s_axis_tvalid(s_valid),
