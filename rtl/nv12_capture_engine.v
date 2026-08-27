@@ -60,6 +60,7 @@ module nv12_capture_engine #(
     reg [15:0] width_q, height_q, stride_q;
     reg [15:0] line_idx, beat_col;
     reg [63:0] y_send_addr, uv_send_addr;
+    reg [63:0] y_line_start_addr, uv_line_start_addr;
     reg [15:0] y_send_offset, uv_send_offset;
     reg [15:0] y_send_line, uv_send_line;
     reg [127:0] y_pack, uv_pack;
@@ -317,6 +318,8 @@ module nv12_capture_engine #(
             active_req_bytes <= 0;
             y_send_addr <= 0;
             uv_send_addr <= 0;
+            y_line_start_addr <= 0;
+            uv_line_start_addr <= 0;
             y_send_offset <= 0;
             uv_send_offset <= 0;
             y_send_line <= 0;
@@ -333,6 +336,8 @@ module nv12_capture_engine #(
             active_req_bytes <= 0;
             y_send_addr <= plane_y_addr;
             uv_send_addr <= plane_uv_addr;
+            y_line_start_addr <= plane_y_addr;
+            uv_line_start_addr <= plane_uv_addr;
             y_send_offset <= 0;
             uv_send_offset <= 0;
             y_send_line <= 0;
@@ -376,18 +381,20 @@ module nv12_capture_engine #(
                 c2h_req_valid <= 0;
                 if (request_is_uv) begin
                     if (uv_send_offset + active_req_bytes >= width_q) begin
-                        uv_send_offset <= 16'd0;
-                        uv_send_line   <= uv_send_line + 1'b1;
-                        uv_send_addr   <= uv_send_addr - uv_send_offset + stride_q;
+                        uv_send_offset     <= 16'd0;
+                        uv_send_line       <= uv_send_line + 1'b1;
+                        uv_line_start_addr <= uv_line_start_addr + stride_q;
+                        uv_send_addr       <= uv_line_start_addr + stride_q;
                     end else begin
                         uv_send_offset <= uv_send_offset + active_req_bytes;
                         uv_send_addr   <= uv_send_addr + active_req_bytes;
                     end
                 end else begin
                     if (y_send_offset + active_req_bytes >= width_q) begin
-                        y_send_offset <= 16'd0;
-                        y_send_line   <= y_send_line + 1'b1;
-                        y_send_addr   <= y_send_addr - y_send_offset + stride_q;
+                        y_send_offset     <= 16'd0;
+                        y_send_line       <= y_send_line + 1'b1;
+                        y_line_start_addr <= y_line_start_addr + stride_q;
+                        y_send_addr       <= y_line_start_addr + stride_q;
                     end else begin
                         y_send_offset <= y_send_offset + active_req_bytes;
                         y_send_addr   <= y_send_addr + active_req_bytes;
