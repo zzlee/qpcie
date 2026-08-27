@@ -127,12 +127,11 @@ static int qpcie_program_tpg(struct qpcie_v4l2_channel *vch, u32 pattern_id,
     iowrite32(pattern_id, tpg + 0x20);
     iowrite32(1, tpg + 0x40);    /* XVIDC_CSF_YCRCB_444 */
 
-    /* Paced mode runs the TPG ONE-SHOT: AP_START without AUTO_RESTART
-     * produces exactly one frame and leaves the core idle, so a driver
-     * kthread can re-arm it at the target frame rate.  The TPG is then
-     * naturally idle between frames -- never frozen mid-stream, which is
-     * what desynced its pattern phase from the output timing. */
-    ctrl_val = vch->pacer_enable ? 0x01 : 0x81; /* AP_START [| AUTO_RESTART] */
+    /* Paced mode runs the TPG ONE-SHOT (0x01): AP_START without AUTO_RESTART
+     * produces exactly one frame. The Linux driver pacer kthread re-arms
+     * AP_START at high-precision 60.000 Hz.
+     * Uncapped benchmark mode runs AUTO_RESTART (0x81). */
+    ctrl_val = vch->pacer_enable ? 0x01 : 0x81;
     iowrite32(ctrl_val, tpg + 0x00);
     rb_ctrl = ioread32(tpg + 0x00);
     rb_width = ioread32(tpg + 0x18);
@@ -156,47 +155,42 @@ static int qpcie_program_tpg(struct qpcie_v4l2_channel *vch, u32 pattern_id,
 }
 
 /* ------------------------------------------------------------------
- * One-shot TPG pacing kthread: re-arms AP_START at the target frame
- * rate while paced V4L2 streaming is active.
+ * Linux Driver Pacer: Re-arms AP_START at high-precision 60.000 Hz
+ * using Real-Time FIFO scheduling and absolute high-resolution timers.
  * ------------------------------------------------------------------ */
 static int qpcie_tpg_pace_thread(void *data)
 {
     struct qpcie_dev *qdev = data;
     u64 period_ns;
-    u64 next_ns;
-
+    ktime_t next_ktime;
+    /* Elevate to real-time FIFO priority to prevent preemption under 4K load */
+    sched_set_fifo(current);
     set_freezable();
+
     period_ns = div_u64(NSEC_PER_SEC,
                         qdev->tpg_fps ? qdev->tpg_fps : 60);
-    next_ns = ktime_get_ns() + period_ns;
+    next_ktime = ktime_add_ns(ktime_get(), period_ns);
 
     while (!kthread_should_stop()) {
-        s64 delta;
-        ktime_t timeout;
         unsigned long flags;
 
         set_current_state(TASK_INTERRUPTIBLE);
-        delta = (s64)(next_ns - ktime_get_ns());
-        if (delta > 0) {
-            timeout = ns_to_ktime(delta);
-            schedule_hrtimeout(&timeout, HRTIMER_MODE_REL);
-        }
+        schedule_hrtimeout(&next_ktime, HRTIMER_MODE_ABS);
         __set_current_state(TASK_RUNNING);
 
         if (kthread_should_stop())
             break;
-
-        /* Fell behind (heavy load): resync to now instead of bursting. */
-        delta = (s64)(ktime_get_ns() - next_ns);
-        if (delta > (s64)period_ns)
-            next_ns = ktime_get_ns() + period_ns;
 
         if (READ_ONCE(qdev->tpg_pace_run) && qdev->bar1_mmio) {
             spin_lock_irqsave(&qdev->tpg_lock, flags);
             iowrite32(0x01, qdev->bar1_mmio + 0x0000 + 0x00); /* AP_START */
             spin_unlock_irqrestore(&qdev->tpg_lock, flags);
         }
-        next_ns += period_ns;
+
+        next_ktime = ktime_add_ns(next_ktime, period_ns);
+        /* If system fell behind by more than 1 period, advance to current time + 1 period */
+        if (ktime_after(ktime_get(), next_ktime))
+            next_ktime = ktime_add_ns(ktime_get(), period_ns);
     }
     return 0;
 }

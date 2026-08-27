@@ -17,6 +17,8 @@
 #include <linux/kthread.h>
 #include <linux/hrtimer.h>
 #include <linux/spinlock.h>
+#include <linux/sched.h>
+#include <uapi/linux/sched/types.h>
 
 #include <media/v4l2-device.h>
 #include <media/v4l2-ioctl.h>
