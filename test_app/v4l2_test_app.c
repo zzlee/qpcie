@@ -65,8 +65,15 @@ static double monotonic_ms(void)
 static uint64_t fnv1a64(const uint8_t *data, size_t length)
 {
     uint64_t hash = UINT64_C(1469598103934665603);
+    const uint64_t *p64 = (const uint64_t *)data;
+    size_t n64 = length / 8;
     size_t i;
-    for (i = 0; i < length; i++) {
+
+    for (i = 0; i < n64; i++) {
+        hash ^= p64[i];
+        hash *= UINT64_C(1099511628211);
+    }
+    for (i = n64 * 8; i < length; i++) {
         hash ^= data[i];
         hash *= UINT64_C(1099511628211);
     }

@@ -104,8 +104,7 @@ static int qpcie_program_tpg(struct qpcie_v4l2_channel *vch, u32 pattern_id,
 {
     struct qpcie_dev *qdev = vch->qdev;
     void __iomem *tpg;
-    u32 rb_width, rb_height, rb_pattern, rb_format, rb_ctrl;
-    u32 ctrl_val;
+    u32 rb_width, rb_height, rb_pattern, rb_format;
 
     if (!qdev || !qdev->bar0_mmio || !qdev->bar1_mmio)
         return -ENODEV;
@@ -126,28 +125,21 @@ static int qpcie_program_tpg(struct qpcie_v4l2_channel *vch, u32 pattern_id,
     iowrite32(vch->width, tpg + 0x18);
     iowrite32(pattern_id, tpg + 0x20);
     iowrite32(1, tpg + 0x40);    /* XVIDC_CSF_YCRCB_444 */
+    /* Hold TPG idle until STREAMON */
+    iowrite32(0x00, tpg + 0x00);
 
-    /* Paced mode runs the TPG ONE-SHOT (0x01): AP_START without AUTO_RESTART
-     * produces exactly one frame. The Linux driver pacer kthread re-arms
-     * AP_START at high-precision 60.000 Hz.
-     * Uncapped benchmark mode runs AUTO_RESTART (0x81). */
-    ctrl_val = vch->pacer_enable ? 0x01 : 0x81;
-    iowrite32(ctrl_val, tpg + 0x00);
-    rb_ctrl = ioread32(tpg + 0x00);
     rb_width = ioread32(tpg + 0x18);
     rb_height = ioread32(tpg + 0x10);
     rb_pattern = ioread32(tpg + 0x20);
     rb_format = ioread32(tpg + 0x40);
 
     dev_info(&qdev->pdev->dev,
-             "TPG%u readback: %ux%u YUV444 pattern=%u format=%u ctrl=0x%08X\n",
-             vch->channel_id, rb_width, rb_height, rb_pattern,
-             rb_format, rb_ctrl);
+             "TPG%u configured: %ux%u YUV444 pattern=%u format=%u\n",
+             vch->channel_id, rb_width, rb_height, rb_pattern, rb_format);
     if (rb_width != vch->width || rb_height != vch->height ||
-        rb_pattern != pattern_id || rb_format != 1 ||
-        !(rb_ctrl & BIT(0))) {
+        rb_pattern != pattern_id || rb_format != 1) {
         dev_err(&qdev->pdev->dev,
-                "TPG%u BAR1 control readback mismatch\n",
+                "TPG%u BAR1 configuration readback mismatch\n",
                 vch->channel_id);
         return -EIO;
     }
@@ -161,25 +153,15 @@ static int qpcie_program_tpg(struct qpcie_v4l2_channel *vch, u32 pattern_id,
 static int qpcie_tpg_pace_thread(void *data)
 {
     struct qpcie_dev *qdev = data;
-    u64 period_ns;
-    ktime_t next_ktime;
+    u64 period_ns = div_u64(NSEC_PER_SEC, qdev->tpg_fps ? qdev->tpg_fps : 60);
+    ktime_t next_ktime = ktime_get();
+
     /* Elevate to real-time FIFO priority to prevent preemption under 4K load */
     sched_set_fifo(current);
     set_freezable();
 
-    period_ns = div_u64(NSEC_PER_SEC,
-                        qdev->tpg_fps ? qdev->tpg_fps : 60);
-    next_ktime = ktime_add_ns(ktime_get(), period_ns);
-
     while (!kthread_should_stop()) {
         unsigned long flags;
-
-        set_current_state(TASK_INTERRUPTIBLE);
-        schedule_hrtimeout(&next_ktime, HRTIMER_MODE_ABS);
-        __set_current_state(TASK_RUNNING);
-
-        if (kthread_should_stop())
-            break;
 
         if (READ_ONCE(qdev->tpg_pace_run) && qdev->bar1_mmio) {
             spin_lock_irqsave(&qdev->tpg_lock, flags);
@@ -188,9 +170,16 @@ static int qpcie_tpg_pace_thread(void *data)
         }
 
         next_ktime = ktime_add_ns(next_ktime, period_ns);
-        /* If system fell behind by more than 1 period, advance to current time + 1 period */
+        set_current_state(TASK_INTERRUPTIBLE);
+        schedule_hrtimeout(&next_ktime, HRTIMER_MODE_ABS);
+        __set_current_state(TASK_RUNNING);
+
+        if (kthread_should_stop())
+            break;
+
+        /* If system fell behind by more than 1 period, advance to current time */
         if (ktime_after(ktime_get(), next_ktime))
-            next_ktime = ktime_add_ns(ktime_get(), period_ns);
+            next_ktime = ktime_get();
     }
     return 0;
 }
@@ -553,23 +542,25 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
         qpcie_return_all_buffers(vch, VB2_BUF_STATE_QUEUED);
         return -EIO;
     }
-    iowrite32(0x3, qdev->bar0_mmio + REG_IRQ_STATUS);
+    dma_wmb();
+    iowrite32(1, qdev->bar0_mmio + REG_DMA_CTRL);
+    ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
 
-    /* Paced mode: the TPG was armed for a single frame above; the kthread
-     * now takes over re-arming AP_START at the target frame rate. */
+    /* Start TPG AFTER DMA is enabled so frame 1 starts cleanly without FIFO backpressure */
     if (vch->pacer_enable) {
         ret = qpcie_tpg_pace_start(qdev);
         if (ret) {
             dev_err(&qdev->pdev->dev,
                     "Cannot start TPG pacing kthread: %d\n", ret);
+            iowrite32(0, qdev->bar0_mmio + REG_DMA_CTRL);
             qpcie_return_all_buffers(vch, VB2_BUF_STATE_QUEUED);
             return ret;
         }
+    } else {
+        void __iomem *tpg = qdev->bar1_mmio + (vch->channel_id * 0x100);
+        iowrite32(0x81, tpg + 0x00); /* Continuous AUTO_RESTART */
     }
 
-    dma_wmb();
-    iowrite32(1, qdev->bar0_mmio + REG_DMA_CTRL);
-    ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
     dev_info(&qdev->pdev->dev,
              "NV12M STREAMON: %u buffers, ring tail=%u, mode=%ux%u %s (pacer=0x%08x)\n",
              count, qdev->h2c_tail, vch->width, vch->height,
@@ -583,14 +574,13 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
 {
     struct qpcie_v4l2_channel *vch = vb2_get_drv_priv(vq);
     struct qpcie_dev *qdev = vch->qdev;
+    void __iomem *tpg = qdev->bar1_mmio + (vch->channel_id * 0x100);
     unsigned long timeout = jiffies + msecs_to_jiffies(500);
     bool drained = false;
 
-    /* Drain every descriptor already published to hardware. This avoids
-     * returning a vb2 plane while a posted PCIe MWr may still target it. */
-    /* Halt the pacing kthread before draining: the TPG finishes its
-     * current one-shot frame and then idles on its own. */
+    /* Halt pacing and stop TPG before draining DMA */
     qpcie_tpg_pace_stop(qdev);
+    iowrite32(0x00, tpg + 0x00);
     iowrite32(0, qdev->bar0_mmio + REG_PACER_CTRL);
     do {
         u32 status = ioread32(qdev->bar0_mmio + REG_DMA_STATUS);
