@@ -35,7 +35,7 @@ module video_req_cdc #(
     output reg          m_req_valid,
     output reg  [63:0]  m_req_addr,
     output reg  [10:0]  m_req_dw_len,
-    output reg  [127:0] m_req_data,
+    output wire [127:0] m_req_data,
     input  wire         m_req_data_ready,
     input  wire         m_req_ack,
     output wire         m_fifo_empty,
@@ -53,7 +53,7 @@ module video_req_cdc #(
     wire [127:0] fifo_dout;
     wire        fifo_wr_en;
     wire [127:0] fifo_din;
-    reg         fifo_rd_en;
+    wire        fifo_rd_en;
     wire        fifo_prog_full;
     wire [FIFO_COUNT_WIDTH-1:0] wr_data_count;
     wire [FIFO_COUNT_WIDTH-1:0] rd_data_count;
