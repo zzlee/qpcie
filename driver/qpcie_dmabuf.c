@@ -9,7 +9,7 @@
 #include <linux/pci.h>
 #include <linux/dma-buf.h>
 #include <media/videobuf2-v4l2.h>
-#include <media/videobuf2-dma-contig.h>
+#include <media/videobuf2-dma-sg.h>
 
 #include "qpcie_driver.h"
 

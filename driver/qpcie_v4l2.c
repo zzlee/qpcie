@@ -435,11 +435,17 @@ static void qpcie_buf_queue(struct vb2_buffer *vb)
     struct qpcie_v4l2_channel *vch = vb2_get_drv_priv(vb->vb2_queue);
     struct qpcie_dev *qdev = vch->qdev;
     struct qpcie_dma_desc_2d *desc;
+    struct sg_table *sgt0, *sgt1;
     dma_addr_t plane0_dma, plane1_dma;
     u32 tail;
 
-    plane0_dma = vb2_dma_contig_plane_dma_addr(vb, 0);
-    plane1_dma = vb2_dma_contig_plane_dma_addr(vb, 1);
+    sgt0 = vb2_dma_sg_plane_desc(vb, 0);
+    sgt1 = vb2_dma_sg_plane_desc(vb, 1);
+    if (WARN_ON(!sgt0 || !sgt1))
+        return;
+
+    plane0_dma = sg_dma_address(sgt0->sgl);
+    plane1_dma = sg_dma_address(sgt1->sgl);
     tail = qdev->h2c_tail;
     desc = &qdev->h2c_ring_virt[tail];
     memset(desc, 0, sizeof(*desc));
@@ -733,14 +739,14 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
             goto unreg_v4l2;
         }
 
-        /* Stage 2 starts with physically contiguous MMAP planes only. */
-        dev_info(&qdev->pdev->dev, "[DEBUG STEP 2.4] Channel %d: Initializing vb2_queue...\n", i);
+        /* Scatter-Gather DMA with MMAP, USERPTR, and DMABUF support */
+        dev_info(&qdev->pdev->dev, "[DEBUG STEP 2.4] Channel %d: Initializing vb2_queue with vb2_dma_sg...\n", i);
         vch->queue.type            = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
-        vch->queue.io_modes        = VB2_MMAP;
+        vch->queue.io_modes        = VB2_MMAP | VB2_USERPTR | VB2_DMABUF;
         vch->queue.drv_priv        = vch;
         vch->queue.buf_struct_size = sizeof(struct qpcie_v4l2_buffer);
         vch->queue.ops             = &qpcie_vb2_ops;
-        vch->queue.mem_ops         = &vb2_dma_contig_memops;
+        vch->queue.mem_ops         = &vb2_dma_sg_memops;
         vch->queue.timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
         vch->queue.lock            = &vch->lock;
         vch->queue.dev             = &qdev->pdev->dev;
