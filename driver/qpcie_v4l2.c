@@ -105,6 +105,7 @@ static int qpcie_program_tpg(struct qpcie_v4l2_channel *vch, u32 pattern_id,
     struct qpcie_dev *qdev = vch->qdev;
     void __iomem *tpg;
     u32 rb_width, rb_height, rb_pattern, rb_format, rb_ctrl;
+    u32 ctrl_val;
 
     if (!qdev || !qdev->bar0_mmio || !qdev->bar1_mmio)
         return -ENODEV;
@@ -125,7 +126,14 @@ static int qpcie_program_tpg(struct qpcie_v4l2_channel *vch, u32 pattern_id,
     iowrite32(vch->width, tpg + 0x18);
     iowrite32(pattern_id, tpg + 0x20);
     iowrite32(1, tpg + 0x40);    /* XVIDC_CSF_YCRCB_444 */
-    iowrite32(0x81, tpg + 0x00); /* AP_START | AUTO_RESTART */
+
+    /* Paced mode runs the TPG ONE-SHOT: AP_START without AUTO_RESTART
+     * produces exactly one frame and leaves the core idle, so a driver
+     * kthread can re-arm it at the target frame rate.  The TPG is then
+     * naturally idle between frames -- never frozen mid-stream, which is
+     * what desynced its pattern phase from the output timing. */
+    ctrl_val = vch->pacer_enable ? 0x01 : 0x81; /* AP_START [| AUTO_RESTART] */
+    iowrite32(ctrl_val, tpg + 0x00);
     rb_ctrl = ioread32(tpg + 0x00);
     rb_width = ioread32(tpg + 0x18);
     rb_height = ioread32(tpg + 0x10);
@@ -138,13 +146,83 @@ static int qpcie_program_tpg(struct qpcie_v4l2_channel *vch, u32 pattern_id,
              rb_format, rb_ctrl);
     if (rb_width != vch->width || rb_height != vch->height ||
         rb_pattern != pattern_id || rb_format != 1 ||
-        !(rb_ctrl & BIT(7))) {
+        !(rb_ctrl & BIT(0))) {
         dev_err(&qdev->pdev->dev,
                 "TPG%u BAR1 control readback mismatch\n",
                 vch->channel_id);
         return -EIO;
     }
     return 0;
+}
+
+/* ------------------------------------------------------------------
+ * One-shot TPG pacing kthread: re-arms AP_START at the target frame
+ * rate while paced V4L2 streaming is active.
+ * ------------------------------------------------------------------ */
+static int qpcie_tpg_pace_thread(void *data)
+{
+    struct qpcie_dev *qdev = data;
+    u64 period_ns;
+    u64 next_ns;
+
+    set_freezable();
+    period_ns = div_u64(NSEC_PER_SEC,
+                        qdev->tpg_fps ? qdev->tpg_fps : 60);
+    next_ns = ktime_get_ns() + period_ns;
+
+    while (!kthread_should_stop()) {
+        s64 delta;
+        ktime_t timeout;
+        unsigned long flags;
+
+        set_current_state(TASK_INTERRUPTIBLE);
+        delta = (s64)(next_ns - ktime_get_ns());
+        if (delta > 0) {
+            timeout = ns_to_ktime(delta);
+            schedule_hrtimeout(&timeout, HRTIMER_MODE_REL);
+        }
+        __set_current_state(TASK_RUNNING);
+
+        if (kthread_should_stop())
+            break;
+
+        /* Fell behind (heavy load): resync to now instead of bursting. */
+        delta = (s64)(ktime_get_ns() - next_ns);
+        if (delta > (s64)period_ns)
+            next_ns = ktime_get_ns() + period_ns;
+
+        if (READ_ONCE(qdev->tpg_pace_run) && qdev->bar1_mmio) {
+            spin_lock_irqsave(&qdev->tpg_lock, flags);
+            iowrite32(0x01, qdev->bar1_mmio + 0x0000 + 0x00); /* AP_START */
+            spin_unlock_irqrestore(&qdev->tpg_lock, flags);
+        }
+        next_ns += period_ns;
+    }
+    return 0;
+}
+
+static int qpcie_tpg_pace_start(struct qpcie_dev *qdev)
+{
+    qdev->tpg_pace_run = true;
+    qdev->tpg_pace_task = kthread_run(qpcie_tpg_pace_thread, qdev,
+                                      "qpcie-tpg-pace");
+    if (IS_ERR(qdev->tpg_pace_task)) {
+        int ret = PTR_ERR(qdev->tpg_pace_task);
+
+        qdev->tpg_pace_task = NULL;
+        qdev->tpg_pace_run = false;
+        return ret;
+    }
+    return 0;
+}
+
+static void qpcie_tpg_pace_stop(struct qpcie_dev *qdev)
+{
+    if (qdev->tpg_pace_task) {
+        qdev->tpg_pace_run = false;
+        kthread_stop(qdev->tpg_pace_task);
+        qdev->tpg_pace_task = NULL;
+    }
 }
 
 static int qpcie_vidioc_g_fmt_vid_cap_mplane(struct file *file, void *priv,
@@ -433,6 +511,7 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
     struct qpcie_v4l2_channel *vch = vb2_get_drv_priv(vq);
     struct qpcie_dev *qdev = vch->qdev;
     u32 pacer_ctrl;
+    int ret;
 
     if (count < 2) {
         qpcie_return_all_buffers(vch, VB2_BUF_STATE_QUEUED);
@@ -481,6 +560,19 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
         return -EIO;
     }
     iowrite32(0x3, qdev->bar0_mmio + REG_IRQ_STATUS);
+
+    /* Paced mode: the TPG was armed for a single frame above; the kthread
+     * now takes over re-arming AP_START at the target frame rate. */
+    if (vch->pacer_enable) {
+        ret = qpcie_tpg_pace_start(qdev);
+        if (ret) {
+            dev_err(&qdev->pdev->dev,
+                    "Cannot start TPG pacing kthread: %d\n", ret);
+            qpcie_return_all_buffers(vch, VB2_BUF_STATE_QUEUED);
+            return ret;
+        }
+    }
+
     dma_wmb();
     iowrite32(1, qdev->bar0_mmio + REG_DMA_CTRL);
     ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
@@ -502,6 +594,9 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
 
     /* Drain every descriptor already published to hardware. This avoids
      * returning a vb2 plane while a posted PCIe MWr may still target it. */
+    /* Halt the pacing kthread before draining: the TPG finishes its
+     * current one-shot frame and then idles on its own. */
+    qpcie_tpg_pace_stop(qdev);
     iowrite32(0, qdev->bar0_mmio + REG_PACER_CTRL);
     do {
         u32 status = ioread32(qdev->bar0_mmio + REG_DMA_STATUS);

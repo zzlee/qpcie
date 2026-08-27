@@ -897,7 +897,7 @@ module custom_pcie_dma_top #(
         .frame_width(eng_width),
         .frame_height(eng_height),
         .frame_stride(eng_stride),
-        .pacer_enable(pacer_sync[1]),
+        .pacer_enable(1'b0),   /* pacing is driven by the one-shot TPG kthread */
         .frame_interval_clks(32'd2500000),   // 60 FPS @ 150 MHz
         .global_timestamp(eng_ts),
         .s_axis_tdata(video_ch0_tdata),

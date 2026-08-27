@@ -47,6 +47,11 @@ static ssize_t tpg_pattern_store(struct device *dev, struct device_attribute *at
     if (kstrtou32(buf, 0, &pattern_id)) return -EINVAL;
 
     if (qdev && qdev->bar1_mmio) {
+        /* Paced streaming owns the TPG control register (one-shot
+         * AP_START re-arming); reject changes that would flip the core
+         * back to free-running AUTO_RESTART mid-stream. */
+        if (vb2_is_streaming(&qdev->v4l2_ch[0].queue))
+            return -EBUSY;
         /* Write Pattern ID to BAR1 Offset 0x0020 */
         iowrite32(pattern_id, qdev->bar1_mmio + 0x0000 + 0x20);
         /* Trigger AP_START & Auto-Restart on TPG Control Reg (0x0000) */
@@ -81,6 +86,8 @@ static ssize_t tpg_resolution_store(struct device *dev, struct device_attribute 
     if (sscanf(buf, "%ux%u", &cols, &rows) != 2) return -EINVAL;
 
     if (qdev && qdev->bar1_mmio) {
+        if (vb2_is_streaming(&qdev->v4l2_ch[0].queue))
+            return -EBUSY;
         iowrite32(rows, qdev->bar1_mmio + 0x0000 + 0x10);
         iowrite32(cols, qdev->bar1_mmio + 0x0000 + 0x18);
         iowrite32(0x81, qdev->bar1_mmio + 0x0000 + 0x00);

@@ -14,6 +14,9 @@
 #include <linux/interrupt.h>
 #include <linux/dma-mapping.h>
 #include <linux/scatterlist.h>
+#include <linux/kthread.h>
+#include <linux/hrtimer.h>
+#include <linux/spinlock.h>
 
 #include <media/v4l2-device.h>
 #include <media/v4l2-ioctl.h>
@@ -172,6 +175,14 @@ struct qpcie_dev {
 
     struct snd_card *card;
     struct snd_pcm *pcm;
+
+    /* One-shot TPG pacing (fixed frame-rate mode).  The kthread re-arms
+     * AP_START at the target rate while V4L2 streaming is active; the TPG
+     * idles between frames, so it is never frozen mid-frame. */
+    struct task_struct *tpg_pace_task;
+    bool tpg_pace_run;
+    u32 tpg_fps;
+    spinlock_t tpg_lock;
 };
 
 /* Submodule Function Declarations */

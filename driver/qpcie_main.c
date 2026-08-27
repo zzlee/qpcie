@@ -251,6 +251,8 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
         goto unmap_mmio;
     }
     qdev->irq = pci_irq_vector(pdev, 0);
+    spin_lock_init(&qdev->tpg_lock);
+    qdev->tpg_fps = 60;
     ret = request_irq(qdev->irq, qpcie_irq_handler, 0,
                       "qpcie-dma", qdev);
     if (ret) {
