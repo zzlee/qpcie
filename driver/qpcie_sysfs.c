@@ -458,6 +458,146 @@ static ssize_t slice_height_store(struct device *dev, struct device_attribute *a
 }
 static DEVICE_ATTR_RW(slice_height);
 
+/* ============================================================================
+ * 6. Hardware Performance Monitor (qpcie_perfmon) Sysfs Attributes
+ * ============================================================================ */
+
+static ssize_t perf_enable_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+    struct pci_dev *pdev = to_pci_dev(dev);
+    struct qpcie_dev *qdev = pci_get_drvdata(pdev);
+    u32 ctrl = 0;
+
+    if (qdev && qdev->bar0_mmio)
+        ctrl = ioread32(qdev->bar0_mmio + REG_PERF_CTRL);
+
+    return sysfs_emit(buf, "%u (%s)\n", ctrl & 1, (ctrl & 1) ? "Enabled" : "Disabled");
+}
+
+static ssize_t perf_enable_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+{
+    struct pci_dev *pdev = to_pci_dev(dev);
+    struct qpcie_dev *qdev = pci_get_drvdata(pdev);
+    u32 val = 0;
+
+    if (kstrtou32(buf, 0, &val)) return -EINVAL;
+
+    if (qdev && qdev->bar0_mmio) {
+        iowrite32(val ? 1 : 0, qdev->bar0_mmio + REG_PERF_CTRL);
+        dev_info(dev, "Performance Monitor %s\n", val ? "Enabled" : "Disabled");
+    }
+
+    return count;
+}
+static DEVICE_ATTR_RW(perf_enable);
+
+static ssize_t perf_reset_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+{
+    struct pci_dev *pdev = to_pci_dev(dev);
+    struct qpcie_dev *qdev = pci_get_drvdata(pdev);
+
+    if (qdev && qdev->bar0_mmio) {
+        /* Write bit 1 to pulse hardware reset */
+        iowrite32(0x02, qdev->bar0_mmio + REG_PERF_CTRL);
+        dev_info(dev, "Performance Monitor Counters Reset\n");
+    }
+
+    return count;
+}
+static DEVICE_ATTR_WO(perf_reset);
+
+static ssize_t perf_stats_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+    struct pci_dev *pdev = to_pci_dev(dev);
+    struct qpcie_dev *qdev = pci_get_drvdata(pdev);
+    u64 cycles = 0, bytes = 0;
+    u32 tlp_count = 0, tx_active = 0, tx_idle = 0;
+    u32 tready_stall = 0, inter_gap = 0;
+    u32 tlp_128b = 0, tlp_256b = 0, split_4k = 0;
+    u32 max_queue = 0, cdc_empty = 0, no_req = 0;
+    u64 duration_ms = 0, kib = 0;
+    u32 mib_s_int = 0, mib_s_frac = 0;
+    u32 active_pct_int = 0, active_pct_frac = 0;
+    u32 idle_pct_int = 0, idle_pct_frac = 0;
+    u32 stall_pct_int = 0, stall_pct_frac = 0;
+    u32 gap_pct_int = 0, gap_pct_frac = 0;
+    u32 cdc_pct_int = 0, cdc_pct_frac = 0;
+    u32 req_pct_int = 0, req_pct_frac = 0;
+
+    if (qdev && qdev->bar0_mmio) {
+        u32 c_l = ioread32(qdev->bar0_mmio + REG_PERF_CYCLES_L);
+        u32 c_h = ioread32(qdev->bar0_mmio + REG_PERF_CYCLES_H);
+        u32 b_l = ioread32(qdev->bar0_mmio + REG_PERF_PAYLOAD_BYTES_L);
+        u32 b_h = ioread32(qdev->bar0_mmio + REG_PERF_PAYLOAD_BYTES_H);
+
+        cycles = ((u64)c_h << 32) | c_l;
+        bytes = ((u64)b_h << 32) | b_l;
+        tlp_count = ioread32(qdev->bar0_mmio + REG_PERF_TLP_COUNT);
+        tx_active = ioread32(qdev->bar0_mmio + REG_PERF_TX_ACTIVE_CYCLES);
+        tx_idle = ioread32(qdev->bar0_mmio + REG_PERF_TX_IDLE_CYCLES);
+        tready_stall = ioread32(qdev->bar0_mmio + REG_PERF_TREADY_STALL_CYCLES);
+        inter_gap = ioread32(qdev->bar0_mmio + REG_PERF_INTER_TLP_GAP);
+        tlp_128b = ioread32(qdev->bar0_mmio + REG_PERF_TLP_128B_COUNT);
+        tlp_256b = ioread32(qdev->bar0_mmio + REG_PERF_TLP_256B_COUNT);
+        split_4k = ioread32(qdev->bar0_mmio + REG_PERF_SPLIT_4K_COUNT);
+        max_queue = ioread32(qdev->bar0_mmio + REG_PERF_MAX_QUEUE_DEPTH) & 0xFFFF;
+        cdc_empty = ioread32(qdev->bar0_mmio + REG_PERF_IDLE_CDC_EMPTY);
+        no_req = ioread32(qdev->bar0_mmio + REG_PERF_IDLE_NO_REQ);
+    }
+
+    if (cycles > 0) {
+        duration_ms = div64_u64(cycles, 125000);
+        kib = div64_u64(bytes, 1024);
+        if (duration_ms > 0) {
+            u64 rate_kib_s = div64_u64(kib * 1000, duration_ms);
+            mib_s_int = div64_u64(rate_kib_s, 1024);
+            mib_s_frac = div64_u64((rate_kib_s % 1024) * 100, 1024);
+        }
+        active_pct_int = div64_u64((u64)tx_active * 100, cycles);
+        active_pct_frac = div64_u64((u64)tx_active * 10000, cycles) % 100;
+        idle_pct_int = div64_u64((u64)tx_idle * 100, cycles);
+        idle_pct_frac = div64_u64((u64)tx_idle * 10000, cycles) % 100;
+        stall_pct_int = div64_u64((u64)tready_stall * 100, cycles);
+        stall_pct_frac = div64_u64((u64)tready_stall * 10000, cycles) % 100;
+        gap_pct_int = div64_u64((u64)inter_gap * 100, cycles);
+        gap_pct_frac = div64_u64((u64)inter_gap * 10000, cycles) % 100;
+    }
+
+    if (tx_idle > 0) {
+        cdc_pct_int = div64_u64((u64)cdc_empty * 100, tx_idle);
+        cdc_pct_frac = div64_u64((u64)cdc_empty * 10000, tx_idle) % 100;
+        req_pct_int = div64_u64((u64)no_req * 100, tx_idle);
+        req_pct_frac = div64_u64((u64)no_req * 10000, tx_idle) % 100;
+    }
+
+    return sysfs_emit(buf,
+        "================ QPCIe Hardware Performance Report ================\n"
+        "  Window Clocks       : %llu cycles (%llu.%03u s @ 125 MHz)\n"
+        "  Payload Transmitted : %llu bytes (%llu.%02u MiB)\n"
+        "  DMA Throughput      : %u.%02u MiB/s\n"
+        "  Total TLPs Sent     : %u (256B: %u, 128B: %u)\n"
+        "  4KB Boundary Splits : %u events\n"
+        "  Peak CDC Queue Depth: %u words\n"
+        "------------------- Bus Utilization Breakdown ---------------------\n"
+        "  TX Active (tvalid&tready) : %u cycles (%u.%02u%%)\n"
+        "  TX Idle   (!tx_tvalid)    : %u cycles (%u.%02u%%)\n"
+        "  PCIe Backpressure Stall   : %u cycles (%u.%02u%%)\n"
+        "  Inter-TLP Gap (Bubble)    : %u cycles (%u.%02u%%)\n"
+        "  Idle - Empty CDC FIFO     : %u cycles (%u.%02u%% of idle)\n"
+        "  Idle - No DMA Request     : %u cycles (%u.%02u%% of idle)\n"
+        "===================================================================\n",
+        cycles, duration_ms / 1000, (u32)(duration_ms % 1000),
+        bytes, kib / 1024, (u32)(((kib % 1024) * 100) / 1024),
+        mib_s_int, mib_s_frac, tlp_count, tlp_256b, tlp_128b, split_4k, max_queue,
+        tx_active, active_pct_int, active_pct_frac,
+        tx_idle, idle_pct_int, idle_pct_frac,
+        tready_stall, stall_pct_int, stall_pct_frac,
+        inter_gap, gap_pct_int, gap_pct_frac,
+        cdc_empty, cdc_pct_int, cdc_pct_frac,
+        no_req, req_pct_int, req_pct_frac);
+}
+static DEVICE_ATTR_RO(perf_stats);
+
 /* Sysfs Attribute Group Table */
 static struct attribute *qpcie_sysfs_attrs[] = {
     &dev_attr_tpg_pattern.attr,
@@ -466,6 +606,9 @@ static struct attribute *qpcie_sysfs_attrs[] = {
     &dev_attr_tpg_stream_stats.attr,
     &dev_attr_pacer_enable.attr,
     &dev_attr_slice_height.attr,
+    &dev_attr_perf_enable.attr,
+    &dev_attr_perf_reset.attr,
+    &dev_attr_perf_stats.attr,
     &dev_attr_timestamp.attr,
     &dev_attr_frame_drop_count.attr,
     &dev_attr_bandwidth.attr,

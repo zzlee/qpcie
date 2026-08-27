@@ -475,6 +475,30 @@ module custom_pcie_dma_top #(
     wire [31:0] reg_latency_max_ns;
     wire [31:0] reg_pacer_ctrl;
 
+    // Performance Monitor Signals (RTL Bandwidth & Bottleneck Attribution)
+    wire        perf_enable;
+    wire        perf_reset;
+    wire [63:0] reg_perf_cycles;
+    wire [31:0] reg_perf_tlp_count;
+    wire [63:0] reg_perf_payload_bytes;
+    wire [31:0] reg_perf_tx_active_cycles;
+    wire [31:0] reg_perf_tx_idle_cycles;
+    wire [31:0] reg_perf_tready_stall_cycles;
+    wire [31:0] reg_perf_inter_tlp_gap;
+    wire [31:0] reg_perf_tlp_128b_count;
+    wire [31:0] reg_perf_tlp_256b_count;
+    wire [31:0] reg_perf_split_4k_count;
+    wire [15:0] reg_perf_max_queue_depth;
+    wire [31:0] reg_perf_idle_cdc_empty;
+    wire [31:0] reg_perf_idle_no_req;
+
+    wire        video_cdc_fifo_empty;
+    wire [9:0]  video_cdc_fifo_count;
+    wire        perf_tlp_start = m_axis_rq_tvalid && m_axis_rq_tuser[0];
+    wire        perf_split_4k_event = (c2h_req_valid_mux && c2h_req_ack_mux &&
+                                       (c2h_req_dw_len_mux == 11'd32) &&
+                                       (c2h_req_addr_mux[11:7] == 5'b11111));
+
     // 3. BAR0 AXI4-Lite Register Space
     axil_reg_space u_axil_reg_space (
         .clk(clk),
@@ -523,10 +547,58 @@ module custom_pcie_dma_top #(
         .reg_video_sub_reset(reg_video_sub_reset),
         .reg_sof_count(gray_to_bin(sof_gray_sync2)),
         .reg_eol_count(gray_to_bin(eol_gray_sync2)),
-        .reg_beat_count(gray_to_bin(beat_gray_sync2))
+        .reg_beat_count(gray_to_bin(beat_gray_sync2)),
+
+        // Hardware Performance Monitor Ports
+        .perf_enable(perf_enable),
+        .perf_reset(perf_reset),
+        .reg_perf_cycles(reg_perf_cycles),
+        .reg_perf_tlp_count(reg_perf_tlp_count),
+        .reg_perf_payload_bytes(reg_perf_payload_bytes),
+        .reg_perf_tx_active_cycles(reg_perf_tx_active_cycles),
+        .reg_perf_tx_idle_cycles(reg_perf_tx_idle_cycles),
+        .reg_perf_tready_stall_cycles(reg_perf_tready_stall_cycles),
+        .reg_perf_inter_tlp_gap(reg_perf_inter_tlp_gap),
+        .reg_perf_tlp_128b_count(reg_perf_tlp_128b_count),
+        .reg_perf_tlp_256b_count(reg_perf_tlp_256b_count),
+        .reg_perf_split_4k_count(reg_perf_split_4k_count),
+        .reg_perf_max_queue_depth(reg_perf_max_queue_depth),
+        .reg_perf_idle_cdc_empty(reg_perf_idle_cdc_empty),
+        .reg_perf_idle_no_req(reg_perf_idle_no_req)
     );
 
-    // 3.1 Hardware AV Sync Global Precision Timestamp Generator (64-bit @ 125MHz, 8ns resolution)
+    // 3.1 Hardware Performance Monitor Instance
+    qpcie_perfmon u_qpcie_perfmon (
+        .clk(clk),
+        .rst_n(rst_n),
+        .perf_enable(perf_enable),
+        .perf_reset(perf_reset),
+        .tx_tvalid(m_axis_rq_tvalid),
+        .tx_tready(m_axis_rq_tready),
+        .tx_tlast(m_axis_rq_tlast),
+        .tx_dw_len(c2h_req_dw_len_mux),
+        .tlp_start(perf_tlp_start),
+        .req_valid(c2h_req_valid_mux),
+        .req_ack(c2h_req_ack_mux),
+        .fifo_empty(video_cdc_fifo_empty),
+        .fifo_count(video_cdc_fifo_count),
+        .split_4k_event(perf_split_4k_event),
+        .reg_perf_cycles(reg_perf_cycles),
+        .reg_perf_tlp_count(reg_perf_tlp_count),
+        .reg_perf_payload_bytes(reg_perf_payload_bytes),
+        .reg_perf_tx_active_cycles(reg_perf_tx_active_cycles),
+        .reg_perf_tx_idle_cycles(reg_perf_tx_idle_cycles),
+        .reg_perf_tready_stall_cycles(reg_perf_tready_stall_cycles),
+        .reg_perf_inter_tlp_gap(reg_perf_inter_tlp_gap),
+        .reg_perf_tlp_128b_count(reg_perf_tlp_128b_count),
+        .reg_perf_tlp_256b_count(reg_perf_tlp_256b_count),
+        .reg_perf_split_4k_count(reg_perf_split_4k_count),
+        .reg_perf_max_queue_depth(reg_perf_max_queue_depth),
+        .reg_perf_idle_cdc_empty(reg_perf_idle_cdc_empty),
+        .reg_perf_idle_no_req(reg_perf_idle_no_req)
+    );
+
+    // 3.2 Hardware AV Sync Global Precision Timestamp Generator (64-bit @ 125MHz, 8ns resolution)
     global_timer u_global_timer (
         .clk(clk),
         .rst_n(rst_n),
@@ -538,7 +610,7 @@ module custom_pcie_dma_top #(
         .timestamp_90khz(timestamp_90khz)
     );
 
-    // 3.2 Real-time Hardware Telemetry & Profiler (Throughput Bps & ACK Latency ns)
+    // 3.3 Real-time Hardware Telemetry & Profiler (Throughput Bps & ACK Latency ns)
     dma_telemetry u_dma_telemetry (
         .clk(clk),
         .rst_n(rst_n),
@@ -904,7 +976,9 @@ module custom_pcie_dma_top #(
         .m_req_dw_len     (v_c2h_req_dw_len[10:0]),
         .m_req_data       (v_c2h_req_data[PCIE_DATA_WIDTH-1:0]),
         .m_req_data_ready (v_c2h_req_data_ready[0]),
-        .m_req_ack        (v_c2h_req_ack[0])
+        .m_req_ack        (v_c2h_req_ack[0]),
+        .m_fifo_empty     (video_cdc_fifo_empty),
+        .m_fifo_count     (video_cdc_fifo_count)
     );
 
     // ---- The capture engine itself ---------------------------------------
@@ -923,7 +997,7 @@ module custom_pcie_dma_top #(
         .frame_width(eng_width),
         .frame_height(eng_height),
         .frame_stride(eng_stride),
-        .pacer_enable(1'b0),   /* pacing is driven by the one-shot TPG kthread */
+        .pacer_enable(1'b0),   /* Hardware pacer disabled; Linux driver pacer drives 60 FPS */
         .frame_interval_clks(32'd2500000),   // 60 FPS @ 150 MHz
         .global_timestamp(eng_ts),
         .s_axis_tdata(video_ch0_tdata),

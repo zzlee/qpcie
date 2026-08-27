@@ -80,6 +80,24 @@
 #define REG_VIDEO_ERRORS     0x7C    /* AXI-video framing/configuration error count */
 #define REG_VIDEO_CTRL       0x80    /* Bit 0: reset TPG and video CDC FIFO */
 
+/* Hardware Performance Monitor Registers (BAR0 Offsets 0xA0..0xDC) */
+#define REG_PERF_CTRL               0xA0 /* Bit 0: Enable, Bit 1: Reset (W1C) */
+#define REG_PERF_CYCLES_L           0xA4 /* Clocks while enabled [31:0] */
+#define REG_PERF_CYCLES_H           0xA8 /* Clocks while enabled [63:32] */
+#define REG_PERF_TLP_COUNT          0xAC /* Total TLPs transmitted */
+#define REG_PERF_PAYLOAD_BYTES_L    0xB0 /* Total payload bytes [31:0] */
+#define REG_PERF_PAYLOAD_BYTES_H    0xB4 /* Total payload bytes [63:32] */
+#define REG_PERF_TX_ACTIVE_CYCLES   0xB8 /* Cycles when tx_tvalid && tx_tready */
+#define REG_PERF_TX_IDLE_CYCLES     0xBC /* Cycles when !tx_tvalid */
+#define REG_PERF_TREADY_STALL_CYCLES 0xC0 /* Cycles when tx_tvalid && !tx_tready (PCIe backpressure) */
+#define REG_PERF_INTER_TLP_GAP      0xC4 /* Idle cycles between TLPs when FIFO is non-empty */
+#define REG_PERF_TLP_128B_COUNT     0xC8 /* Count of 128B TLPs */
+#define REG_PERF_TLP_256B_COUNT     0xCC /* Count of 256B TLPs */
+#define REG_PERF_SPLIT_4K_COUNT     0xD0 /* Count of 4KB boundary splits */
+#define REG_PERF_MAX_QUEUE_DEPTH    0xD4 /* Peak CDC FIFO depth */
+#define REG_PERF_IDLE_CDC_EMPTY     0xD8 /* Idle cycles due to empty CDC FIFO */
+#define REG_PERF_IDLE_NO_REQ        0xDC /* Idle cycles with no DMA request */
+
 /* 64-Byte 2D Multi-Planar Extended Descriptor Structure (Hardware Wire Format) */
 struct __packed qpcie_dma_desc_64b {
     u64 plane0_src_addr; /* Bytes 0..7   : DW0-DW1 (Src Buffer Phys Addr) */

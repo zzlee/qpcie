@@ -37,7 +37,9 @@ module video_req_cdc #(
     output reg  [10:0]  m_req_dw_len,
     output reg  [127:0] m_req_data,
     input  wire         m_req_data_ready,
-    input  wire         m_req_ack
+    input  wire         m_req_ack,
+    output wire         m_fifo_empty,
+    output wire [9:0]   m_fifo_count
 );
     localparam integer DATA_DWORDS        = 4;                       // 128-bit beat = 4 DWs
     localparam integer MAX_PAYLOAD_BEATS  = MAX_DWORDS / DATA_DWORDS; // 16 beats
@@ -54,6 +56,10 @@ module video_req_cdc #(
     reg         fifo_rd_en;
     wire        fifo_prog_full;
     wire [FIFO_COUNT_WIDTH-1:0] wr_data_count;
+    wire [FIFO_COUNT_WIDTH-1:0] rd_data_count;
+
+    assign m_fifo_empty = fifo_empty;
+    assign m_fifo_count = rd_data_count[9:0];
 
     xpm_fifo_async #(
         .FIFO_MEMORY_TYPE("block"),
@@ -85,7 +91,7 @@ module video_req_cdc #(
         .wr_data_count  (wr_data_count),
         .almost_full    (),
         .prog_empty     (),
-        .rd_data_count  (),
+        .rd_data_count  (rd_data_count),
         .almost_empty   ()
     );
 

@@ -66,7 +66,24 @@ module axil_reg_space (
     input  wire [63:0] reg_last_audio_pts,
     input  wire [31:0] reg_frame_drop_count,
     input  wire [31:0] reg_bandwidth_bps,
-    input  wire [31:0] reg_latency_max_ns
+    input  wire [31:0] reg_latency_max_ns,
+
+    // Hardware Performance Monitor Ports (BAR0 Offsets 0xA0..0xDC)
+    output wire        perf_enable,
+    output wire        perf_reset,
+    input  wire [63:0] reg_perf_cycles,
+    input  wire [31:0] reg_perf_tlp_count,
+    input  wire [63:0] reg_perf_payload_bytes,
+    input  wire [31:0] reg_perf_tx_active_cycles,
+    input  wire [31:0] reg_perf_tx_idle_cycles,
+    input  wire [31:0] reg_perf_tready_stall_cycles,
+    input  wire [31:0] reg_perf_inter_tlp_gap,
+    input  wire [31:0] reg_perf_tlp_128b_count,
+    input  wire [31:0] reg_perf_tlp_256b_count,
+    input  wire [31:0] reg_perf_split_4k_count,
+    input  wire [15:0] reg_perf_max_queue_depth,
+    input  wire [31:0] reg_perf_idle_cdc_empty,
+    input  wire [31:0] reg_perf_idle_no_req
 );
 
     // BAR0 Register Offset Definitions
@@ -101,6 +118,13 @@ module axil_reg_space (
     reg [31:0] reg_debug_last_wdata;
     reg [31:0] reg_debug_last_waddr;
 
+    // Performance Monitor Control Registers
+    reg reg_perf_enable;
+    reg reg_perf_reset_w1c;
+
+    assign perf_enable = reg_perf_enable;
+    assign perf_reset  = reg_perf_reset_w1c;
+
     // Version Constant Constants
     localparam [31:0] VERSION_ID_VAL      = 32'h0201_0001; // v2.1.0 (Variant 1)
     localparam [31:0] GIT_COMMIT_HASH_VAL = `GIT_COMMIT_HASH_DEF;
@@ -110,19 +134,21 @@ module axil_reg_space (
     // Write Logic
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            reg_dma_ctrl      <= 32'd0;
-            reg_h2c_ring_addr <= 64'd0;
-            reg_h2c_ring_size <= 16'd0;
-            reg_h2c_tail_ptr  <= 16'd0;
-            reg_c2h_ring_addr <= 64'd0;
-            reg_c2h_ring_size <= 16'd0;
-            reg_c2h_tail_ptr  <= 16'd0;
-            reg_irq_ctrl      <= 32'd0;
+            reg_dma_ctrl       <= 32'd0;
+            reg_h2c_ring_addr  <= 64'd0;
+            reg_h2c_ring_size  <= 16'd0;
+            reg_h2c_tail_ptr   <= 16'd0;
+            reg_c2h_ring_addr  <= 64'd0;
+            reg_c2h_ring_size  <= 16'd0;
+            reg_c2h_tail_ptr   <= 16'd0;
+            reg_irq_ctrl       <= 32'd0;
             reg_irq_status_w1c <= 32'd0;
-            reg_pacer_ctrl      <= 32'd1; // Default: 1 (Enabled - Internal Clock Pacer Mode)
-            reg_slice_height     <= 32'd0; // Default: 0 (Disabled - Full Frame IRQ)
-            reg_video_ctrl       <= 32'd0; // Bit 0: reset TPG and video CDC FIFO
-            reg_video_sub_reset  <= 32'd0; // Bit 0: TPG-only reset, Bit 1: NV12 engine reset
+            reg_pacer_ctrl     <= 32'd1; // Default: 1 (Enabled - Internal Clock Pacer Mode)
+            reg_slice_height   <= 32'd0; // Default: 0 (Disabled - Full Frame IRQ)
+            reg_video_ctrl     <= 32'd0; // Bit 0: reset TPG and video CDC FIFO
+            reg_video_sub_reset<= 32'd0; // Bit 0: TPG-only reset, Bit 1: NV12 engine reset
+            reg_perf_enable    <= 1'b0;
+            reg_perf_reset_w1c <= 1'b0;
             reg_debug_last_wdata <= 32'd0;
             reg_debug_last_waddr <= 32'd0;
             s_axil_awready       <= 1'b0;
@@ -158,6 +184,10 @@ module axil_reg_space (
                     8'h78:                reg_slice_height         <= s_axil_wdata; // BAR0 0x78: Sub-Frame Slice Height
                     8'h80:                reg_video_ctrl           <= s_axil_wdata; // BAR0 0x80: Video Pipeline Control
                     8'h84:                reg_video_sub_reset      <= s_axil_wdata; // BAR0 0x84: Sub-Domain Reset Control
+                    8'hA0: begin
+                        reg_perf_enable    <= s_axil_wdata[0];
+                        reg_perf_reset_w1c <= s_axil_wdata[1];
+                    end
                     default: ; // Ignore writes to read-only registers
                 endcase
                 reg_debug_last_wdata <= s_axil_wdata;
@@ -226,6 +256,24 @@ module axil_reg_space (
                     8'h88:                s_axil_rdata <= reg_sof_count;
                     8'h8C:                s_axil_rdata <= reg_eol_count;
                     8'h90:                s_axil_rdata <= reg_beat_count;
+
+                    // Hardware Performance Monitor Registers (BAR0 Offsets 0xA0..0xDC)
+                    8'hA0:                s_axil_rdata <= {30'd0, reg_perf_reset_w1c, reg_perf_enable};
+                    8'hA4:                s_axil_rdata <= reg_perf_cycles[31:0];
+                    8'hA8:                s_axil_rdata <= reg_perf_cycles[63:32];
+                    8'hAC:                s_axil_rdata <= reg_perf_tlp_count;
+                    8'hB0:                s_axil_rdata <= reg_perf_payload_bytes[31:0];
+                    8'hB4:                s_axil_rdata <= reg_perf_payload_bytes[63:32];
+                    8'hB8:                s_axil_rdata <= reg_perf_tx_active_cycles;
+                    8'hBC:                s_axil_rdata <= reg_perf_tx_idle_cycles;
+                    8'hC0:                s_axil_rdata <= reg_perf_tready_stall_cycles;
+                    8'hC4:                s_axil_rdata <= reg_perf_inter_tlp_gap;
+                    8'hC8:                s_axil_rdata <= reg_perf_tlp_128b_count;
+                    8'hCC:                s_axil_rdata <= reg_perf_tlp_256b_count;
+                    8'hD0:                s_axil_rdata <= reg_perf_split_4k_count;
+                    8'hD4:                s_axil_rdata <= {16'd0, reg_perf_max_queue_depth};
+                    8'hD8:                s_axil_rdata <= reg_perf_idle_cdc_empty;
+                    8'hDC:                s_axil_rdata <= reg_perf_idle_no_req;
 
                     default:              s_axil_rdata <= 32'hDEAD_BEEF;
                 endcase

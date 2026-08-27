@@ -80,6 +80,30 @@ static uint64_t fnv1a64(const uint8_t *data, size_t length)
     return hash;
 }
 
+static void dump_perfmon_sysfs(void)
+{
+    static const char *paths[] = {
+        "/sys/bus/pci/devices/0000:01:00.0/perf_stats",
+        "/sys/bus/pci/devices/0000:00:00.0/perf_stats",
+        "/sys/class/video4linux/video0/device/perf_stats"
+    };
+    char buf[2048];
+    size_t i;
+
+    for (i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+        FILE *f = fopen(paths[i], "r");
+        if (f) {
+            size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+            fclose(f);
+            if (n > 0) {
+                buf[n] = '\0';
+                printf("%s\n", buf);
+                return;
+            }
+        }
+    }
+}
+
 static void byte_range(const uint8_t *data, size_t length,
                        uint8_t *minimum, uint8_t *maximum)
 {
@@ -576,6 +600,7 @@ int main(int argc, char **argv)
         printf(" Data errors: %u\n"
                "=================================================================\n",
                data_errors);
+        dump_perfmon_sysfs();
 
         if (streamoff_ok && captured == frame_target && data_errors == 0 &&
             ((benchmark_mode && mib_s >= FOUR_K_60_MIB_S) ||
