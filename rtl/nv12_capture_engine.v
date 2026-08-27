@@ -89,7 +89,23 @@ module nv12_capture_engine #(
 
     reg request_is_uv;
     reg prefer_uv;
-    reg [$clog2(BURST_BEATS+1)-1:0] payload_beats_to_load;
+    reg [4:0] payload_beats_to_load;
+    reg [15:0] active_req_bytes;
+
+    wire [15:0] y_rem_bytes  = width_q - y_send_offset;
+    wire [15:0] uv_rem_bytes = width_q - uv_send_offset;
+
+    wire y_is_256  = (y_rem_bytes >= 16'd256);
+    wire [10:0] y_next_dw_len = y_is_256 ? 11'd64 : 11'd32;
+    wire [4:0]  y_next_beats  = y_is_256 ? 5'd16  : 5'd8;
+    wire [15:0] y_next_bytes  = y_is_256 ? 16'd256: 16'd128;
+    wire y_ready_to_send = (y_fifo_count >= y_next_beats);
+
+    wire uv_is_256 = (uv_rem_bytes >= 16'd256);
+    wire [10:0] uv_next_dw_len = uv_is_256 ? 11'd64 : 11'd32;
+    wire [4:0]  uv_next_beats  = uv_is_256 ? 5'd16  : 5'd8;
+    wire [15:0] uv_next_bytes  = uv_is_256 ? 16'd256: 16'd128;
+    wire uv_ready_to_send = (uv_fifo_count >= uv_next_beats);
 
     function [31:0] pack_y4;
         input [127:0] d;
@@ -298,6 +314,7 @@ module nv12_capture_engine #(
             request_is_uv <= 0;
             prefer_uv <= 0;
             payload_beats_to_load <= 0;
+            active_req_bytes <= 0;
             y_send_addr <= 0;
             uv_send_addr <= 0;
             y_send_offset <= 0;
@@ -307,12 +324,13 @@ module nv12_capture_engine #(
         end else if (descriptor_accept) begin
             c2h_req_valid <= 0;
             c2h_req_addr <= 0;
-            c2h_req_dw_len <= MWR_DWORDS;
+            c2h_req_dw_len <= 11'd64;
             c2h_req_data <= 0;
             c2h_req_last <= 1;
             request_is_uv <= 0;
             prefer_uv <= 0;
             payload_beats_to_load <= 0;
+            active_req_bytes <= 0;
             y_send_addr <= plane_y_addr;
             uv_send_addr <= plane_uv_addr;
             y_send_offset <= 0;
@@ -321,25 +339,26 @@ module nv12_capture_engine #(
             uv_send_line <= 0;
         end else begin
             if (!c2h_req_valid) begin
-                if ((uv_fifo_count >= BURST_BEATS) &&
-                    (prefer_uv || y_fifo_count < BURST_BEATS)) begin
-                    request_is_uv <= 1;
-                    c2h_req_addr <= uv_send_addr;
-                    c2h_req_dw_len <= MWR_DWORDS;
-                    c2h_req_data <= uv_fifo[uv_rd_ptr];
-                    c2h_req_last <= 1;
-                    payload_beats_to_load <= BURST_BEATS;
-                    c2h_req_valid <= 1;
-                    prefer_uv <= 0;
-                end else if (y_fifo_count >= BURST_BEATS) begin
-                    request_is_uv <= 0;
-                    c2h_req_addr <= y_send_addr;
-                    c2h_req_dw_len <= MWR_DWORDS;
-                    c2h_req_data <= y_fifo[y_rd_ptr];
-                    c2h_req_last <= 1;
-                    payload_beats_to_load <= BURST_BEATS;
-                    c2h_req_valid <= 1;
-                    prefer_uv <= 1;
+                if (uv_ready_to_send && (prefer_uv || !y_ready_to_send)) begin
+                    request_is_uv         <= 1'b1;
+                    c2h_req_addr          <= uv_send_addr;
+                    c2h_req_dw_len        <= uv_next_dw_len;
+                    c2h_req_data          <= uv_fifo[uv_rd_ptr];
+                    c2h_req_last          <= 1'b1;
+                    payload_beats_to_load <= uv_next_beats;
+                    active_req_bytes      <= uv_next_bytes;
+                    c2h_req_valid         <= 1'b1;
+                    prefer_uv             <= 1'b0;
+                end else if (y_ready_to_send) begin
+                    request_is_uv         <= 1'b0;
+                    c2h_req_addr          <= y_send_addr;
+                    c2h_req_dw_len        <= y_next_dw_len;
+                    c2h_req_data          <= y_fifo[y_rd_ptr];
+                    c2h_req_last          <= 1'b1;
+                    payload_beats_to_load <= y_next_beats;
+                    active_req_bytes      <= y_next_bytes;
+                    c2h_req_valid         <= 1'b1;
+                    prefer_uv             <= 1'b1;
                 end
             end
 
@@ -356,24 +375,22 @@ module nv12_capture_engine #(
             if (c2h_req_ack && c2h_req_valid) begin
                 c2h_req_valid <= 0;
                 if (request_is_uv) begin
-                    if (uv_send_offset + MWR_PAYLOAD_BYTES >= width_q) begin
-                        uv_send_offset <= 0;
-                        uv_send_line <= uv_send_line + 1'b1;
-                        uv_send_addr <= uv_send_addr + MWR_PAYLOAD_BYTES +
-                                        stride_q - width_q;
+                    if (uv_send_offset + active_req_bytes >= width_q) begin
+                        uv_send_offset <= 16'd0;
+                        uv_send_line   <= uv_send_line + 1'b1;
+                        uv_send_addr   <= uv_send_addr - uv_send_offset + stride_q;
                     end else begin
-                        uv_send_offset <= uv_send_offset + MWR_PAYLOAD_BYTES;
-                        uv_send_addr <= uv_send_addr + MWR_PAYLOAD_BYTES;
+                        uv_send_offset <= uv_send_offset + active_req_bytes;
+                        uv_send_addr   <= uv_send_addr + active_req_bytes;
                     end
                 end else begin
-                    if (y_send_offset + MWR_PAYLOAD_BYTES >= width_q) begin
-                        y_send_offset <= 0;
-                        y_send_line <= y_send_line + 1'b1;
-                        y_send_addr <= y_send_addr + MWR_PAYLOAD_BYTES +
-                                       stride_q - width_q;
+                    if (y_send_offset + active_req_bytes >= width_q) begin
+                        y_send_offset <= 16'd0;
+                        y_send_line   <= y_send_line + 1'b1;
+                        y_send_addr   <= y_send_addr - y_send_offset + stride_q;
                     end else begin
-                        y_send_offset <= y_send_offset + MWR_PAYLOAD_BYTES;
-                        y_send_addr <= y_send_addr + MWR_PAYLOAD_BYTES;
+                        y_send_offset <= y_send_offset + active_req_bytes;
+                        y_send_addr   <= y_send_addr + active_req_bytes;
                     end
                 end
             end

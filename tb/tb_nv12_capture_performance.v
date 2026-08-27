@@ -3,11 +3,12 @@
 module tb_nv12_capture_performance;
     localparam [15:0] WIDTH = 16'd1920;
     localparam [15:0] HEIGHT = 16'd1080;
-    // Requests stream contiguously across scanlines (planes are
-    // DMA-contiguous with stride == width), so the count is exactly
-    // total-plane-bytes / payload-size.
+    // Each 1920-byte scanline generates 7 x 256B requests + 1 x 128B tail request = 8 requests
+    // Y (1080 lines): 8640 requests
+    // UV (540 lines): 4320 requests
+    // Total = 12960 requests
     localparam integer EXPECTED_REQS =
-        ((1920 * 1080) + (1920 * (1080 / 2))) / 256;
+        (1080 * 8) + ((1080 / 2) * 8);
     localparam integer FRAME_BUDGET_CLKS = 2083333;
 
     reg clk = 0;

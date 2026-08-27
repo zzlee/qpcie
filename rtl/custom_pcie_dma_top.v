@@ -757,7 +757,7 @@ module custom_pcie_dma_top #(
 
     xpm_cdc_handshake #(
         .WIDTH(240),
-        .DEST_EXT_HSK(0)
+        .DEST_EXT_HSK(1)
     ) u_desc_cdc (
         .src_clk    (clk),
         .src_send   (hs_send_q),
@@ -769,8 +769,14 @@ module custom_pcie_dma_top #(
         .dest_ack   (hs_dest_ack)
     );
 
+    localparam DEST_IDLE         = 2'd0,
+               DEST_WAIT_ENG     = 2'd1,
+               DEST_WAIT_REQ_LOW = 2'd2;
+    reg [1:0]  dest_state;
+
     always @(posedge video_clk or negedge video_rst_n) begin
         if (!video_rst_n) begin
+            dest_state     <= DEST_IDLE;
             eng_desc_valid <= 1'b0;
             hs_dest_ack    <= 1'b0;
             eng_y_addr     <= 64'd0;
@@ -780,21 +786,38 @@ module custom_pcie_dma_top #(
             eng_stride     <= 16'd0;
             eng_ts         <= 64'd0;
         end else begin
-            if (hs_dest_req) begin
-                eng_y_addr     <= hs_dest_bus[63:0];
-                eng_uv_addr    <= hs_dest_bus[127:64];
-                eng_width      <= hs_dest_bus[143:128];
-                eng_height     <= hs_dest_bus[159:144];
-                eng_stride     <= hs_dest_bus[175:160];
-                eng_ts         <= hs_dest_bus[239:176];
-                eng_desc_valid <= 1'b1;
-            end
-            if (eng_desc_valid && nv12_desc_ready_v) begin
-                eng_desc_valid <= 1'b0;
-                hs_dest_ack    <= 1'b1;
-            end else begin
-                hs_dest_ack <= 1'b0;
-            end
+            case (dest_state)
+                DEST_IDLE: begin
+                    hs_dest_ack <= 1'b0;
+                    if (hs_dest_req) begin
+                        eng_y_addr     <= hs_dest_bus[63:0];
+                        eng_uv_addr    <= hs_dest_bus[127:64];
+                        eng_width      <= hs_dest_bus[143:128];
+                        eng_height     <= hs_dest_bus[159:144];
+                        eng_stride     <= hs_dest_bus[175:160];
+                        eng_ts         <= hs_dest_bus[239:176];
+                        eng_desc_valid <= 1'b1;
+                        dest_state     <= DEST_WAIT_ENG;
+                    end
+                end
+
+                DEST_WAIT_ENG: begin
+                    if (eng_desc_valid && nv12_desc_ready_v) begin
+                        eng_desc_valid <= 1'b0;
+                        hs_dest_ack    <= 1'b1;
+                        dest_state     <= DEST_WAIT_REQ_LOW;
+                    end
+                end
+
+                DEST_WAIT_REQ_LOW: begin
+                    if (!hs_dest_req) begin
+                        hs_dest_ack <= 1'b0;
+                        dest_state  <= DEST_IDLE;
+                    end
+                end
+
+                default: dest_state <= DEST_IDLE;
+            endcase
         end
     end
 
@@ -860,14 +883,17 @@ module custom_pcie_dma_top #(
     assign s_axis_video_tready[0] = 1'b0;
 
     // ---- Request crossing: engine @150 MHz -> RQ arbiter @125 MHz --------
+    wire [10:0] eng_req_dw_len;
+
     video_req_cdc #(
-        .REQ_DWORDS(64),
+        .MAX_DWORDS(64),
         .FIFO_DEPTH(512)
     ) u_video_req_cdc (
         .wr_clk           (video_clk),
         .wr_rst_n         (video_rst_n),
         .s_req_valid      (eng_req_valid),
         .s_req_addr       (eng_req_addr),
+        .s_req_dw_len     (eng_req_dw_len),
         .s_req_data       (eng_req_data),
         .s_req_data_ready (eng_req_ready),
         .s_req_ack        (eng_req_ack),
@@ -907,7 +933,7 @@ module custom_pcie_dma_top #(
         .s_axis_tready(video_ch0_tready),
         .c2h_req_valid(eng_req_valid),
         .c2h_req_addr(eng_req_addr),
-        .c2h_req_dw_len(),
+        .c2h_req_dw_len(eng_req_dw_len),
         .c2h_req_data(eng_req_data),
         .c2h_req_last(),
         .c2h_req_data_ready(eng_req_ready),

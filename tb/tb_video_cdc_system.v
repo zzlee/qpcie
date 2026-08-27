@@ -13,13 +13,16 @@
 `timescale 1ns / 1ps
 
 module tb_video_cdc_system;
-    localparam WIDTH   = 128;
+    localparam WIDTH   = 1920;
     localparam HEIGHT  = 4;
-    localparam STRIDE  = 128;
+    localparam STRIDE  = 1920;
     localparam [63:0] Y_BASE  = 64'h1000_0000;
     localparam [63:0] UV_BASE = 64'h1100_0000;
-    localparam integer PAYLOAD_BYTES = WIDTH*HEIGHT*3/2;      // 768
-    localparam integer EXPECT_PKTS   = PAYLOAD_BYTES / 256;   // 3
+    // Y: 4 lines * (7*256B + 1*128B) = 32 pkts (7680 bytes)
+    // UV: 2 lines * (7*256B + 1*128B) = 16 pkts (3840 bytes)
+    // Total = 48 pkts (11520 bytes)
+    localparam integer PAYLOAD_BYTES = WIDTH*HEIGHT*3/2;      // 11520
+    localparam integer EXPECT_PKTS   = (HEIGHT * 8) + (HEIGHT/2 * 8); // 48
 
     reg clk = 0;          // 125 MHz PCIe user clock
     reg video_clk = 0;    // 150 MHz video clock (independent phase)
@@ -283,14 +286,14 @@ module tb_video_cdc_system;
             m_axis_rx_tdata  <= {host_dw(32'h00000000), host_dw(32'h00000000),
                                  host_dw(UV_BASE[31:0]), host_dw(32'h00000000)};
             @(posedge clk); while (!m_axis_rx_tready) @(posedge clk);
-            // DW9..DW12 (DW12 = {line_count=4, line_width=128})
-            m_axis_rx_tdata  <= {host_dw(32'h00040080), host_dw(32'h00000000),
+            // DW9..DW12 (DW12 = {line_count=4, line_width=1920})
+            m_axis_rx_tdata  <= {host_dw(32'h00040780), host_dw(32'h00000000),
                                  host_dw(32'h00000000), host_dw(32'h00000000)};
             @(posedge clk); while (!m_axis_rx_tready) @(posedge clk);
-            // DW13=strides, DW14={cnt=2,w=128}, DW15={ctl=0B,pc=2,fmt=2}
+            // DW13=strides {uv=1920, y=1920}, DW14={cnt=2,w=1920}, DW15={ctl=0B,pc=2,fmt=2}
             m_axis_rx_tlast  <= 1'b1;
             m_axis_rx_tdata  <= {32'h00000000, host_dw(32'h00000B22),
-                                 host_dw(32'h00020080), host_dw(32'h00800080)};
+                                 host_dw(32'h00020780), host_dw(32'h07800780)};
             @(posedge clk); while (!m_axis_rx_tready) @(posedge clk);
             m_axis_rx_tvalid <= 1'b0; m_axis_rx_tlast <= 1'b0;
         end
@@ -320,29 +323,38 @@ module tb_video_cdc_system;
         end
     endtask
 
-    // Capture one fully-resident 64-DW MWr burst and route its payload.
+    // Capture one fully-resident MWr burst (64 DW / 256B or 32 DW / 128B) and route its payload.
     task capture_one_mwr;
-        integer i;
+        integer i, num_beats;
         reg [63:0] addr;
+        reg [9:0]  dw_len;
         reg [31:0] d0, d1, d2, d3;
         begin
             @(posedge clk);
             while (!(s_axis_tx_tvalid && s_axis_tx_tdata[30:29] == 2'b11))
                 @(posedge clk);
-            if (s_axis_tx_tdata[9:0] !== 10'd64 || s_axis_tx_tlast !== 1'b0)
+            dw_len = s_axis_tx_tdata[9:0];
+            if ((dw_len !== 10'd64 && dw_len !== 10'd32) || s_axis_tx_tlast !== 1'b0)
                 $fatal(1, "MWr header malformed len=%b(%0d) last=%b tdata=%h",
-                       s_axis_tx_tdata[9:0], s_axis_tx_tdata[9:0],
-                       s_axis_tx_tlast, s_axis_tx_tdata);
+                       dw_len, dw_len, s_axis_tx_tlast, s_axis_tx_tdata);
             addr = {s_axis_tx_tdata[95:64], s_axis_tx_tdata[127:96]};
-            pkt_cnt = pkt_cnt + 1;
-            $display("[%0t] CAPTURE pkt%0d addr=%h", $time, pkt_cnt, addr);
+            
+            // Critical 4 KiB boundary assertion: PCIe requests MUST NOT cross 4KB boundaries!
+            if ((addr[11:0] + dw_len * 4) > 4096)
+                $fatal(1, "CRITICAL ERROR: MWr crosses 4KB boundary! addr=%h len=%0d bytes",
+                       addr, dw_len * 4);
 
-            for (i = 0; i < 16; i = i + 1) begin   // 16 beats x 4 DW
+            num_beats = dw_len / 4;
+            pkt_cnt = pkt_cnt + 1;
+            $display("[%0t] CAPTURE pkt%0d addr=%h len=%0d DW (%0d bytes, %0d beats)",
+                     $time, pkt_cnt, addr, dw_len, dw_len*4, num_beats);
+
+            for (i = 0; i < num_beats; i = i + 1) begin
                 @(posedge clk);
                 while (!s_axis_tx_tvalid) @(posedge clk);
-                if (s_axis_tx_tlast !== (i == 15))
-                    $fatal(1, "packet %0d: TLAST wrong at beat %0d",
-                           pkt_cnt, i);
+                if (s_axis_tx_tlast !== (i == num_beats - 1))
+                    $fatal(1, "packet %0d: TLAST wrong at beat %0d of %0d",
+                           pkt_cnt, i, num_beats);
                 d0 = host_dw(s_axis_tx_tdata[31:0]);
                 d1 = host_dw(s_axis_tx_tdata[63:32]);
                 d2 = host_dw(s_axis_tx_tdata[95:64]);
@@ -447,7 +459,11 @@ module tb_video_cdc_system;
             end
 
         if (!usr_irq_seen) $fatal(1, "MSI completion never observed");
-        $display("SUCCESS: video CDC path verified (%0d packets, IRQ ok)",
+        #1000;
+        if (desc_accept_cnt !== 1)
+            $fatal(1, "Engine accepted descriptor %0d times (expected exactly 1)!", desc_accept_cnt);
+        $display("  [PASS] Single descriptor acceptance verified (desc_accept_cnt = 1)");
+        $display("SUCCESS: video CDC path verified (%0d packets, IRQ ok, Single Desc ok)",
                  pkt_cnt);
         $finish;
     end
