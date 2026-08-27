@@ -458,8 +458,6 @@ int main(int argc, char **argv)
             uv_hash = fnv1a64(buffers[buf.index].plane[1].addr,
                              planes[1].bytesused);
             if (captured == 1) {
-                first_y_hash = y_hash;
-                first_uv_hash = uv_hash;
                 byte_range(buffers[buf.index].plane[0].addr, planes[0].bytesused,
                            &y_min, &y_max);
                 byte_range(buffers[buf.index].plane[1].addr, planes[1].bytesused,
@@ -474,6 +472,13 @@ int main(int argc, char **argv)
             } else {
                 printf("[FRAME %u] seq=%u Y-hash=%016" PRIx64 " UV-hash=%016" PRIx64
                        "\n", captured, buf.sequence, y_hash, uv_hash);
+            }
+            /* Establish reference hash from frame 3: the TPG's first frame
+             * (and sometimes the second) can differ due to internal pattern-
+             * generator startup.  By frame 3 the pattern phase is stable. */
+            if (captured == 3) {
+                first_y_hash = y_hash;
+                first_uv_hash = uv_hash;
             }
             if (output && !benchmark_mode) {
                 char path[512];
