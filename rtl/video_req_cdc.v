@@ -170,23 +170,14 @@ module video_req_cdc #(
                         (wr_state == WR_DATA && s_req_valid && s_req_data_ready);
 
     // ---------------------------------------------------------------------
-    // Reader FSM: burst-read whole packet into rd_buf and stream to PCIe.
+    // Reader FSM: Cut-Through FWFT direct streaming to PCIe Requiter.
+    // Zero-bubble cut-through eliminates store-and-forward serialization.
     // ---------------------------------------------------------------------
-    localparam RD_HDR     = 3'd0,
-               RD_BURST   = 3'd1,
-               RD_SERVE   = 3'd2,
-               RD_ACKWAIT = 3'd3;
-    reg [2:0]  rd_state;
-
-    reg [10:0] rd_rem_send;      // payload beats still to be accepted
-    reg [4:0]  rd_payload_beats; // total payload beats for this packet
+    localparam RD_IDLE   = 1'b0,
+               RD_STREAM = 1'b1;
+    reg        rd_state;
     reg [15:0] rd_done_seen;     // completions observed in read domain
     reg [15:0] rd_started;       // packets started
-    reg [4:0]  rd_burst_cnt;     // burst-pop cycle counter
-    reg [4:0]  rd_serve_idx;     // next payload beat to present
-
-    (* ram_style = "distributed" *)
-    reg [127:0] rd_buf [0:MAX_PAYLOAD_BEATS-1];
 
     (* ASYNC_REG = "TRUE" *) reg [1:0] pkt_pushed_sync = 2'b00;
     always @(posedge rd_clk or negedge rd_rst_n) begin
@@ -197,78 +188,55 @@ module video_req_cdc #(
     end
     wire pkt_pushed_pulse = pkt_pushed_sync[0] ^ pkt_pushed_sync[1];
 
+    assign m_req_data = fifo_dout;
+
+    wire fifo_pop_hdr = (rd_state == RD_IDLE) && !fifo_empty && (rd_done_seen != rd_started);
+    wire fifo_pop_next_hdr = (rd_state == RD_STREAM) && m_req_ack && !fifo_empty &&
+                             (rd_done_seen != (rd_started + (pkt_pushed_pulse ? 1'b1 : 1'b0)));
+    wire fifo_pop_data = (rd_state == RD_STREAM) && m_req_data_ready && !m_req_ack;
+
+    assign fifo_rd_en = fifo_pop_hdr || fifo_pop_next_hdr || fifo_pop_data;
+
     always @(posedge rd_clk or negedge rd_rst_n) begin
         if (!rd_rst_n) begin
-            rd_state         <= RD_HDR;
-            rd_rem_send      <= 11'd0;
-            rd_payload_beats <= 5'd0;
-            rd_done_seen     <= 16'd0;
-            rd_started       <= 16'd0;
-            rd_burst_cnt     <= 5'd0;
-            rd_serve_idx     <= 5'd0;
-            fifo_rd_en       <= 1'b0;
-            m_req_valid      <= 1'b0;
-            m_req_addr       <= 64'd0;
-            m_req_dw_len     <= 11'd0;
-            m_req_data       <= 128'd0;
+            rd_state     <= RD_IDLE;
+            rd_done_seen <= 16'd0;
+            rd_started   <= 16'd0;
+            m_req_valid  <= 1'b0;
+            m_req_addr   <= 64'd0;
+            m_req_dw_len <= 11'd0;
         end else begin
             if (pkt_pushed_pulse)
                 rd_done_seen <= rd_done_seen + 1'b1;
 
             case (rd_state)
-                RD_HDR: begin
-                    m_req_valid <= 1'b0;
+                RD_IDLE: begin
                     if (!fifo_empty && (rd_done_seen != rd_started)) begin
-                        m_req_addr       <= fifo_dout[63:0];
-                        m_req_dw_len     <= (fifo_dout[74:64] != 0) ? fifo_dout[74:64] : 11'd64;
-                        rd_payload_beats <= (fifo_dout[74:64] != 0) ? fifo_dout[74:66] : 5'd16;
-                        rd_rem_send      <= (fifo_dout[74:64] != 0) ? fifo_dout[74:66] : 5'd16;
-                        fifo_rd_en       <= 1'b1; // Pop header word
-                        rd_started       <= rd_started + 1'b1;
-                        rd_burst_cnt     <= 5'd0;
-                        rd_state         <= RD_BURST;
+                        m_req_addr   <= fifo_dout[63:0];
+                        m_req_dw_len <= (fifo_dout[74:64] != 0) ? fifo_dout[74:64] : 11'd64;
+                        rd_started   <= rd_started + 1'b1;
+                        rd_state     <= RD_STREAM;
                     end else begin
-                        fifo_rd_en <= 1'b0;
+                        m_req_valid  <= 1'b0;
                     end
                 end
 
-                RD_BURST: begin
-                    if (rd_burst_cnt == 5'd0) begin
-                        fifo_rd_en   <= 1'b1; // hold through the burst
-                        rd_burst_cnt <= 5'd1; // dout settle cycle
-                    end else if (rd_burst_cnt <= rd_payload_beats) begin
-                        if (rd_burst_cnt == rd_payload_beats)
-                            fifo_rd_en <= 1'b0; // Last data beat pop just issued
-                        rd_buf[rd_burst_cnt - 5'd1] <= fifo_dout;
-                        rd_burst_cnt <= rd_burst_cnt + 5'd1;
-                    end else begin // Drain cycle
-                        rd_serve_idx <= 5'd1;
-                        m_req_data   <= rd_buf[0];
-                        m_req_valid  <= 1'b1;
-                        rd_state     <= RD_SERVE;
-                    end
-                end
-
-                RD_SERVE: begin
-                    if (m_req_valid && m_req_data_ready) begin
-                        rd_rem_send <= rd_rem_send - 1'b1;
-                        if (rd_rem_send == 11'd1) begin
-                            rd_state <= RD_ACKWAIT;
+                RD_STREAM: begin
+                    m_req_valid <= 1'b1;
+                    if (m_req_ack) begin
+                        if (!fifo_empty && (rd_done_seen != (rd_started + (pkt_pushed_pulse ? 1'b1 : 1'b0)))) begin
+                            m_req_addr   <= fifo_dout[63:0];
+                            m_req_dw_len <= (fifo_dout[74:64] != 0) ? fifo_dout[74:64] : 11'd64;
+                            rd_started   <= rd_started + 1'b1;
+                            rd_state     <= RD_STREAM;
                         end else begin
-                            m_req_data   <= rd_buf[rd_serve_idx[3:0]];
-                            rd_serve_idx <= rd_serve_idx + 5'd1;
+                            m_req_valid  <= 1'b0;
+                            rd_state     <= RD_IDLE;
                         end
                     end
                 end
 
-                RD_ACKWAIT: begin
-                    if (m_req_ack) begin
-                        m_req_valid <= 1'b0;
-                        rd_state    <= RD_HDR;
-                    end
-                end
-
-                default: rd_state <= RD_HDR;
+                default: rd_state <= RD_IDLE;
             endcase
         end
     end
