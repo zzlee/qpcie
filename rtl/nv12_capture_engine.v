@@ -96,13 +96,16 @@ module nv12_capture_engine #(
     wire [15:0] y_rem_bytes  = width_q - y_send_offset;
     wire [15:0] uv_rem_bytes = width_q - uv_send_offset;
 
-    wire y_is_256  = (y_rem_bytes >= 16'd256);
+    // A 256-byte request starting at offset 0xF80 (5'b11111) within any 4KB page
+    // would cross the 4KB page boundary at 0x1000, causing fatal PCIe MalfTLP!
+    // Clamp to 128 bytes whenever remaining page room is < 256 bytes.
+    wire y_is_256  = (y_rem_bytes >= 16'd256) && (y_send_addr[11:7] != 5'b11111);
     wire [10:0] y_next_dw_len = y_is_256 ? 11'd64 : 11'd32;
     wire [4:0]  y_next_beats  = y_is_256 ? 5'd16  : 5'd8;
     wire [15:0] y_next_bytes  = y_is_256 ? 16'd256: 16'd128;
     wire y_ready_to_send = (y_fifo_count >= y_next_beats);
 
-    wire uv_is_256 = (uv_rem_bytes >= 16'd256);
+    wire uv_is_256 = (uv_rem_bytes >= 16'd256) && (uv_send_addr[11:7] != 5'b11111);
     wire [10:0] uv_next_dw_len = uv_is_256 ? 11'd64 : 11'd32;
     wire [4:0]  uv_next_beats  = uv_is_256 ? 5'd16  : 5'd8;
     wire [15:0] uv_next_bytes  = uv_is_256 ? 16'd256: 16'd128;

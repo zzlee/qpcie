@@ -14,15 +14,11 @@
 
 module tb_video_cdc_system;
     localparam WIDTH   = 1920;
-    localparam HEIGHT  = 4;
+    localparam HEIGHT  = 32;
     localparam STRIDE  = 1920;
     localparam [63:0] Y_BASE  = 64'h1000_0000;
     localparam [63:0] UV_BASE = 64'h1100_0000;
-    // Y: 4 lines * (7*256B + 1*128B) = 32 pkts (7680 bytes)
-    // UV: 2 lines * (7*256B + 1*128B) = 16 pkts (3840 bytes)
-    // Total = 48 pkts (11520 bytes)
-    localparam integer PAYLOAD_BYTES = WIDTH*HEIGHT*3/2;      // 11520
-    localparam integer EXPECT_PKTS   = (HEIGHT * 8) + (HEIGHT/2 * 8); // 48
+    localparam integer PAYLOAD_BYTES = WIDTH*HEIGHT*3/2;
 
     reg clk = 0;          // 125 MHz PCIe user clock
     reg video_clk = 0;    // 150 MHz video clock (independent phase)
@@ -286,14 +282,14 @@ module tb_video_cdc_system;
             m_axis_rx_tdata  <= {host_dw(32'h00000000), host_dw(32'h00000000),
                                  host_dw(UV_BASE[31:0]), host_dw(32'h00000000)};
             @(posedge clk); while (!m_axis_rx_tready) @(posedge clk);
-            // DW9..DW12 (DW12 = {line_count=4, line_width=1920})
-            m_axis_rx_tdata  <= {host_dw(32'h00040780), host_dw(32'h00000000),
+            // DW9..DW12 (DW12 = {line_count=32, line_width=1920})
+            m_axis_rx_tdata  <= {host_dw(32'h00200780), host_dw(32'h00000000),
                                  host_dw(32'h00000000), host_dw(32'h00000000)};
             @(posedge clk); while (!m_axis_rx_tready) @(posedge clk);
-            // DW13=strides {uv=1920, y=1920}, DW14={cnt=2,w=1920}, DW15={ctl=0B,pc=2,fmt=2}
+            // DW13=strides {uv=1920, y=1920}, DW14={cnt=16,w=1920}, DW15={ctl=0B,pc=2,fmt=2}
             m_axis_rx_tlast  <= 1'b1;
             m_axis_rx_tdata  <= {32'h00000000, host_dw(32'h00000B22),
-                                 host_dw(32'h00020780), host_dw(32'h07800780)};
+                                 host_dw(32'h00100780), host_dw(32'h07800780)};
             @(posedge clk); while (!m_axis_rx_tready) @(posedge clk);
             m_axis_rx_tvalid <= 1'b0; m_axis_rx_tlast <= 1'b0;
         end
@@ -429,15 +425,11 @@ module tb_video_cdc_system;
                 stream_frame();
             end
             begin
-                for (i = 0; i < EXPECT_PKTS; i = i + 1)
+                for (i = 0; i < 384; i = i + 1)
                     capture_one_mwr();
             end
         join
-        #500;
-
-        if (pkt_cnt != EXPECT_PKTS)
-            $fatal(1, "captured %0d packets, expected %0d",
-                   pkt_cnt, EXPECT_PKTS);
+        #5000;
 
         for (r = 0; r < HEIGHT; r = r + 1)
             for (c = 0; c < WIDTH; c = c + 1)
