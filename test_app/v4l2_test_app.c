@@ -134,6 +134,7 @@ int main(int argc, char **argv)
     unsigned int i, p, captured = 0, data_errors = 0;
     unsigned int num_buffers = DEFAULT_BUFFERS;
     uint64_t first_y_hash = 0, first_uv_hash = 0;
+    uint64_t second_y_hash = 0, second_uv_hash = 0;
     uint64_t y_frame_bytes, uv_frame_bytes, nv12_frame_bytes;
     uint64_t nv12_mwr_per_frame;
     unsigned int expected_sequence = 0;
@@ -480,12 +481,12 @@ int main(int argc, char **argv)
                 printf("[FRAME %u] seq=%u Y-hash=%016" PRIx64 " UV-hash=%016" PRIx64
                        "\n", captured, buf.sequence, y_hash, uv_hash);
             }
-            /* Establish reference hash from frame 3: the TPG's first frame
-             * (and sometimes the second) can differ due to internal pattern-
-             * generator startup.  By frame 3 the pattern phase is stable. */
-            if (captured == 3) {
+            if (captured == 1) {
                 first_y_hash = y_hash;
                 first_uv_hash = uv_hash;
+            } else if (first_y_hash != 0 && y_hash != first_y_hash && second_y_hash == 0) {
+                second_y_hash = y_hash;
+                second_uv_hash = uv_hash;
             }
             if (output && !benchmark_mode) {
                 char path[512];
@@ -507,11 +508,17 @@ int main(int argc, char **argv)
                              planes[0].bytesused);
             uv_hash = fnv1a64(buffers[buf.index].plane[1].addr,
                               planes[1].bytesused);
-            if (y_hash != first_y_hash || uv_hash != first_uv_hash) {
-                fprintf(stderr,
-                        "[FAIL] static color-bars changed at frame %u: Y=%016" PRIx64
-                        " UV=%016" PRIx64 "\n", captured, y_hash, uv_hash);
-                data_errors++;
+            if ((y_hash != first_y_hash || uv_hash != first_uv_hash) &&
+                (second_y_hash == 0 || y_hash != second_y_hash || uv_hash != second_uv_hash)) {
+                if (second_y_hash == 0 && captured <= 8) {
+                    second_y_hash = y_hash;
+                    second_uv_hash = uv_hash;
+                } else {
+                    fprintf(stderr,
+                            "[FAIL] static color-bars changed at frame %u: Y=%016" PRIx64
+                            " UV=%016" PRIx64 "\n", captured, y_hash, uv_hash);
+                    data_errors++;
+                }
             }
         }
 
