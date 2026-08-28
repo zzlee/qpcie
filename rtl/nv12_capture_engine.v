@@ -115,7 +115,7 @@ module nv12_capture_engine #(
     wire [31:0] y_walker_bytes_left;
 
     sg_segment_walker #(
-        .FIFO_DEPTH(64)
+        .FIFO_DEPTH(16)
     ) u_y_segment_walker (
         .clk(clk),
         .rst_n(rst_n),
@@ -139,7 +139,7 @@ module nv12_capture_engine #(
     wire [31:0] uv_walker_bytes_left;
 
     sg_segment_walker #(
-        .FIFO_DEPTH(64)
+        .FIFO_DEPTH(16)
     ) u_uv_segment_walker (
         .clk(clk),
         .rst_n(rst_n),
