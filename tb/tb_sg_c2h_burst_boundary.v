@@ -47,6 +47,8 @@ module tb_sg_c2h_burst_boundary;
         .c2h_req_ack(c2h_req_ack),
         .h2c_cpl_valid(1'b0), .h2c_cpl_data(128'd0),
         .h2c_cpl_last(1'b0),
+        .m_axis_loopback_tdata(), .m_axis_loopback_tvalid(),
+        .m_axis_loopback_tlast(), .m_axis_loopback_tuser(),
         .completed_h2c_count(), .completed_c2h_count(completed_c2h_count),
         .h2c_bytes_transferred(),
         .c2h_bytes_transferred(c2h_bytes_transferred),

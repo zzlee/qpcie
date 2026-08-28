@@ -46,6 +46,12 @@ module sg_dma_engine #(
     input  wire [PCIE_DATA_WIDTH-1:0]    h2c_cpl_data,
     input  wire                          h2c_cpl_last,
 
+    // Loopback Stream Interface (For Multi-Channel Video Loopback)
+    output wire [PCIE_DATA_WIDTH-1:0]    m_axis_loopback_tdata,
+    output wire                          m_axis_loopback_tvalid,
+    output wire                          m_axis_loopback_tlast,
+    output wire                          m_axis_loopback_tuser,
+
     // Real-time DMA Status & Counters
     output reg  [31:0]                   completed_h2c_count,
     output reg  [31:0]                   completed_c2h_count,
@@ -54,6 +60,11 @@ module sg_dma_engine #(
     output wire                          h2c_busy,
     output wire                          c2h_busy
 );
+
+    assign m_axis_loopback_tdata  = h2c_cpl_data;
+    assign m_axis_loopback_tvalid = h2c_cpl_valid;
+    assign m_axis_loopback_tlast  = h2c_cpl_last && (h2c_rem_bytes == 0);
+    assign m_axis_loopback_tuser  = (h2c_burst_recv_dw == 0) && (h2c_rem_bytes == (h2c_line_width - (h2c_burst_dw << 2)));
 
     // =========================================================================
     // H2C (Host -> FPGA) DMA Execution State Machine

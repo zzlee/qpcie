@@ -288,10 +288,12 @@ module custom_pcie_dma_top #(
     // SG DMA Engine Wires
     wire        sg_h2c_desc_ready, sg_c2h_desc_ready;
     wire        nv12_desc_ready;
+    wire        nv12_ch1_desc_ready;
     wire        sg_c2h_desc_select = (c2h_format == 4'd0);
-    wire        nv12_desc_select = (c2h_format == 4'd2) &&
-                                     (c2h_plane_count == 4'd2);
+    wire        nv12_desc_select   = (c2h_format == 4'd2) && (c2h_plane_count == 4'd2) && (c2h_desc_ctrl[3:2] == 2'd0);
+    wire        nv12_ch1_desc_sel  = (c2h_format == 4'd2) && (c2h_plane_count == 4'd2) && (c2h_desc_ctrl[3:2] == 2'd1);
     assign c2h_desc_ready = nv12_desc_select ? nv12_desc_ready :
+                            nv12_ch1_desc_sel ? nv12_ch1_desc_ready :
                             sg_c2h_desc_select ? sg_c2h_desc_ready : 1'b0;
     wire        sg_h2c_req_valid, sg_h2c_req_ack;
     wire [63:0] sg_h2c_req_addr;
@@ -494,7 +496,7 @@ module custom_pcie_dma_top #(
 
     wire        video_cdc_fifo_empty;
     wire [9:0]  video_cdc_fifo_count;
-    wire        perf_tlp_start = m_axis_rq_tvalid && m_axis_rq_tuser[0];
+    wire        perf_tlp_start = m_axis_rq_tvalid && m_axis_rq_tready && m_axis_rq_tuser[0];
     wire        perf_split_4k_event = (c2h_req_valid_mux && c2h_req_ack_mux &&
                                        (c2h_req_dw_len_mux == 11'd32) &&
                                        (c2h_req_addr_mux[11:7] == 5'b11111));
@@ -831,6 +833,10 @@ module custom_pcie_dma_top #(
         .h2c_cpl_valid(h2c_fifo_wvalid),
         .h2c_cpl_data(h2c_fifo_wdata),
         .h2c_cpl_last(h2c_fifo_wlast),
+        .m_axis_loopback_tdata(lb_tdata),
+        .m_axis_loopback_tvalid(lb_tvalid),
+        .m_axis_loopback_tlast(lb_tlast),
+        .m_axis_loopback_tuser(lb_tuser),
         .completed_h2c_count(completed_h2c_count),
         .completed_c2h_count(completed_c2h_count),
         .h2c_bytes_transferred(sg_h2c_bytes),
@@ -1163,6 +1169,215 @@ module custom_pcie_dma_top #(
         .protocol_error_count(eng_err_count)
     );
 
+    // ---- Channel 1 Loopback Capture Engine (150 MHz domain) ---------------
+    wire [127:0] lb_tdata;
+    wire        lb_tvalid, lb_tlast, lb_tuser;
+    wire [129:0] ch1_fifo_dout;
+    wire        ch1_fifo_empty;
+    wire        ch1_tready;
+
+    xpm_fifo_async #(
+        .FIFO_MEMORY_TYPE("distributed"),
+        .FIFO_WRITE_DEPTH(64),
+        .WRITE_DATA_WIDTH(130),
+        .READ_DATA_WIDTH(130),
+        .READ_MODE("fwft"),
+        .FIFO_READ_LATENCY(0),
+        .USE_ADV_FEATURES("0000")
+    ) u_ch1_loopback_cdc (
+        .rst(!rst_n || !video_rst_n),
+        .wr_clk(clk),
+        .wr_en(lb_tvalid),
+        .din({lb_tuser, lb_tlast, lb_tdata}),
+        .full(),
+        .rd_clk(video_clk),
+        .rd_en(!ch1_fifo_empty && ch1_tready),
+        .dout(ch1_fifo_dout),
+        .empty(ch1_fifo_empty),
+        .sleep(1'b0),
+        .injectsbiterr(1'b0),
+        .injectdbiterr(1'b0),
+        .sbiterr(),
+        .dbiterr(),
+        .wr_rst_busy(),
+        .rd_rst_busy()
+    );
+
+    wire [127:0] ch1_tdata  = ch1_fifo_dout[127:0];
+    wire        ch1_tlast  = ch1_fifo_dout[128];
+    wire        ch1_tuser  = ch1_fifo_dout[129];
+    wire        ch1_tvalid = !ch1_fifo_empty;
+
+    // Channel 1 Descriptor Crossing
+    reg         hs1_send_q;
+    reg [240:0] hs1_bus_q;
+    wire        hs1_src_rcv, hs1_dest_req;
+    wire [240:0] hs1_dest_bus;
+    reg          hs1_dest_ack;
+    reg          eng1_desc_valid;
+    reg          eng1_desc_sg_mode;
+    reg [63:0]   eng1_y_addr, eng1_uv_addr, eng1_ts;
+    reg [15:0]   eng1_width, eng1_height, eng1_stride;
+    wire         nv12_ch1_desc_ready_v;
+    wire         nv12_ch1_desc_select = (c2h_format == 4'd2) && (c2h_plane_count == 4'd2) && (c2h_desc_ctrl[3:2] == 2'd1);
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            hs1_send_q <= 1'b0;
+            hs1_bus_q  <= 241'd0;
+        end else if (!hs1_send_q && c2h_desc_valid && nv12_ch1_desc_select) begin
+            hs1_bus_q  <= {(c2h_desc_ctrl[4] | c2h_desc_ctrl[5]),
+                           global_timestamp, c2h_dst_stride,
+                           c2h_line_count, c2h_line_width,
+                           c2h_plane1_dst, c2h_plane0_dst};
+            hs1_send_q <= 1'b1;
+        end else if (hs1_send_q && hs1_src_rcv) begin
+            hs1_send_q <= 1'b0;
+        end
+    end
+
+    wire nv12_ch1_desc_ready = c2h_desc_valid && nv12_ch1_desc_select && !hs1_send_q;
+
+    xpm_cdc_handshake #(
+        .WIDTH(241),
+        .DEST_EXT_HSK(1)
+    ) u_desc_cdc_ch1 (
+        .src_clk    (clk),
+        .src_send   (hs1_send_q),
+        .src_rcv    (hs1_src_rcv),
+        .src_in     (hs1_bus_q),
+        .dest_clk   (video_clk),
+        .dest_req   (hs1_dest_req),
+        .dest_out   (hs1_dest_bus),
+        .dest_ack   (hs1_dest_ack)
+    );
+
+    reg [1:0] dest1_state;
+    always @(posedge video_clk or negedge video_rst_n) begin
+        if (!video_rst_n) begin
+            dest1_state       <= DEST_IDLE;
+            eng1_desc_valid   <= 1'b0;
+            eng1_desc_sg_mode <= 1'b0;
+            hs1_dest_ack      <= 1'b0;
+            eng1_y_addr       <= 64'd0;
+            eng1_uv_addr      <= 64'd0;
+            eng1_width        <= 16'd0;
+            eng1_height       <= 16'd0;
+            eng1_stride       <= 16'd0;
+            eng1_ts           <= 64'd0;
+        end else begin
+            case (dest1_state)
+                DEST_IDLE: begin
+                    hs1_dest_ack <= 1'b0;
+                    if (hs1_dest_req) begin
+                        eng1_y_addr       <= hs1_dest_bus[63:0];
+                        eng1_uv_addr      <= hs1_dest_bus[127:64];
+                        eng1_width        <= hs1_dest_bus[143:128];
+                        eng1_height       <= hs1_dest_bus[159:144];
+                        eng1_stride       <= hs1_dest_bus[175:160];
+                        eng1_ts           <= hs1_dest_bus[239:176];
+                        eng1_desc_sg_mode <= hs1_dest_bus[240];
+                        eng1_desc_valid   <= 1'b1;
+                        dest1_state       <= DEST_WAIT_ENG;
+                    end
+                end
+
+                DEST_WAIT_ENG: begin
+                    if (eng1_desc_valid && nv12_ch1_desc_ready_v) begin
+                        eng1_desc_valid <= 1'b0;
+                        hs1_dest_ack    <= 1'b1;
+                        dest1_state     <= DEST_WAIT_REQ_LOW;
+                    end
+                end
+
+                DEST_WAIT_REQ_LOW: begin
+                    if (!hs1_dest_req) begin
+                        hs1_dest_ack <= 1'b0;
+                        dest1_state  <= DEST_IDLE;
+                    end
+                end
+
+                default: dest1_state <= DEST_IDLE;
+            endcase
+        end
+    end
+
+    wire        eng1_req_valid, eng1_req_ready, eng1_req_ack;
+    wire [63:0] eng1_req_addr;
+    wire [10:0] eng1_req_dw_len;
+    wire [PCIE_DATA_WIDTH-1:0] eng1_req_data;
+
+    nv12_capture_engine #(
+        .MAX_WIDTH(3840),
+        .PCIE_DATA_WIDTH(PCIE_DATA_WIDTH),
+        .FIFO_DEPTH(128),
+        .MWR_PAYLOAD_BYTES(256)
+    ) u_nv12_capture_engine_ch1 (
+        .clk(video_clk),
+        .rst_n(video_rst_n),
+        .desc_valid(eng1_desc_valid),
+        .desc_ready(nv12_ch1_desc_ready_v),
+        .desc_sg_mode(eng1_desc_sg_mode),
+        .plane_y_addr(eng1_y_addr),
+        .plane_uv_addr(eng1_uv_addr),
+        .frame_width(eng1_width),
+        .frame_height(eng1_height),
+        .frame_stride(eng1_stride),
+        .sgl_y_wr_en(!v_sgl_y_empty),
+        .sgl_y_wr_addr(v_sgl_y_dout[63:0]),
+        .sgl_y_wr_len(v_sgl_y_dout[95:64]),
+        .sgl_y_wr_flags(v_sgl_y_dout[127:96]),
+        .sgl_uv_wr_en(!v_sgl_uv_empty),
+        .sgl_uv_wr_addr(v_sgl_uv_dout[63:0]),
+        .sgl_uv_wr_len(v_sgl_uv_dout[95:64]),
+        .sgl_uv_wr_flags(v_sgl_uv_dout[127:96]),
+        .cur_y_sgl_count(),
+        .cur_uv_sgl_count(),
+        .pacer_enable(1'b0),
+        .frame_interval_clks(32'd2500000),
+        .global_timestamp(eng1_ts),
+        .s_axis_tdata(ch1_tdata),
+        .s_axis_tvalid(ch1_tvalid),
+        .s_axis_tlast(ch1_tlast),
+        .s_axis_tuser(ch1_tuser),
+        .s_axis_tready(ch1_tready),
+        .c2h_req_valid(eng1_req_valid),
+        .c2h_req_addr(eng1_req_addr),
+        .c2h_req_dw_len(eng1_req_dw_len),
+        .c2h_req_data(eng1_req_data),
+        .c2h_req_last(),
+        .c2h_req_data_ready(eng1_req_ready),
+        .c2h_req_ack(eng1_req_ack),
+        .video_busy(v_busy[1]),
+        .video_frame_done(v_done[1]),
+        .frame_pts(v_pts[1]),
+        .protocol_error_count(v_drop_cnt[1])
+    );
+
+    video_req_cdc #(
+        .MAX_DWORDS(64),
+        .FIFO_DEPTH(512)
+    ) u_video_req_cdc_ch1 (
+        .wr_clk           (video_clk),
+        .wr_rst_n         (video_rst_n),
+        .s_req_valid      (eng1_req_valid),
+        .s_req_addr       (eng1_req_addr),
+        .s_req_dw_len     (eng1_req_dw_len),
+        .s_req_data       (eng1_req_data),
+        .s_req_data_ready (eng1_req_ready),
+        .s_req_ack        (eng1_req_ack),
+        .rd_clk           (clk),
+        .rd_rst_n         (rst_n),
+        .m_req_valid      (v_c2h_req_valid[1]),
+        .m_req_addr       (v_c2h_req_addr[127:64]),
+        .m_req_dw_len     (v_c2h_req_dw_len[21:11]),
+        .m_req_data       (v_c2h_req_data[(1*PCIE_DATA_WIDTH) +: PCIE_DATA_WIDTH]),
+        .m_req_data_ready (v_c2h_req_data_ready[1]),
+        .m_req_ack        (v_c2h_req_ack[1]),
+        .m_fifo_empty     (),
+        .m_fifo_count     ()
+    );
+
     assign m_axis_video_tdata[VIDEO_DATA_WIDTH-1:0] = {VIDEO_DATA_WIDTH{1'b0}};
     assign m_axis_video_tvalid[0] = 1'b0;
     assign m_axis_video_tlast[0] = 1'b0;
@@ -1170,7 +1385,7 @@ module custom_pcie_dma_top #(
 
     genvar v_idx;
     generate
-        for (v_idx = 1; v_idx < NUM_V_CH; v_idx = v_idx + 1) begin : gen_unused_video_ch
+        for (v_idx = 2; v_idx < NUM_V_CH; v_idx = v_idx + 1) begin : gen_unused_video_ch
             assign s_axis_video_tready[v_idx] = 1'b0;
             assign m_axis_video_tdata[(v_idx*VIDEO_DATA_WIDTH) +: VIDEO_DATA_WIDTH] =
                    {VIDEO_DATA_WIDTH{1'b0}};

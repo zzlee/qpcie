@@ -181,6 +181,7 @@ struct qpcie_v4l2_channel {
     u32 current_slice_idx;
     u32 error_count_start;
     bool pacer_enable;
+    enum v4l2_buf_type buf_type;
 };
 
 struct qpcie_alsa_channel {

@@ -20,6 +20,8 @@ module tb_sg_dma_engine;
         .c2h_req_last(), .c2h_req_data_ready(1'b0), .c2h_req_ack(1'b0),
         .h2c_cpl_valid(h2c_cpl_valid), .h2c_cpl_data(128'd0),
         .h2c_cpl_last(h2c_cpl_last),
+        .m_axis_loopback_tdata(), .m_axis_loopback_tvalid(),
+        .m_axis_loopback_tlast(), .m_axis_loopback_tuser(),
         .completed_h2c_count(completed_h2c_count), .completed_c2h_count(),
         .h2c_bytes_transferred(h2c_bytes_transferred), .c2h_bytes_transferred(),
         .h2c_busy(), .c2h_busy());

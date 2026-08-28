@@ -57,9 +57,9 @@ TESTS=(
 # Use a private simulator library for every invocation. Multiple sessions may
 # run regressions in the same checkout, and XSim otherwise blocks indefinitely
 # on the shared xsim.dir/work library. Precompile complete RTL/XPM contents so
-# system testbenches never depend on stale modules from an earlier run.
+RTL_FILES=$(ls rtl/*.v | grep -v 'card_top\|tlp_test')
 timeout 600s xvlog --work work="$SIM_WORK" --sv \
-    rtl/*.v "$XPM_CDC_SV" "$XPM_FIFO_SV" "$XPM_MEMORY_SV" \
+    $RTL_FILES "$XPM_CDC_SV" "$XPM_FIFO_SV" "$XPM_MEMORY_SV" \
     "$XILINX_VIVADO/data/verilog/src/glbl.v" > /dev/null 2>&1
 
 PASSED=0

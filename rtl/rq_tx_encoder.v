@@ -92,6 +92,7 @@ module rq_tx_encoder #(
                         m_axis_rq_tdata[78:75] <= 4'b0010;
                         m_axis_rq_tdata[95:80] <= REQUESTER_ID;
                         m_axis_rq_tdata[127:120] <= irq_req_code;
+                        m_axis_rq_tuser <= 62'd1;
                         m_axis_rq_tkeep <= {{(KEEP_WIDTH-4){1'b0}}, 4'hF};
                         m_axis_rq_tlast <= 1'b1;
                         m_axis_rq_tvalid <= 1'b1;
@@ -102,6 +103,7 @@ module rq_tx_encoder #(
                         m_axis_rq_tdata[78:75] <= 4'b0000;
                         m_axis_rq_tdata[95:80] <= REQUESTER_ID;
                         m_axis_rq_tdata[103:96] <= desc_req_tag;
+                        m_axis_rq_tuser <= 62'd1;
                         m_axis_rq_tkeep <= {{(KEEP_WIDTH-4){1'b0}}, 4'hF};
                         m_axis_rq_tlast <= 1'b1;
                         m_axis_rq_tvalid <= 1'b1;
@@ -112,6 +114,7 @@ module rq_tx_encoder #(
                         m_axis_rq_tdata[78:75] <= 4'b0000;
                         m_axis_rq_tdata[95:80] <= REQUESTER_ID;
                         m_axis_rq_tdata[103:96] <= sg_req_tag;
+                        m_axis_rq_tuser <= 62'd1;
                         m_axis_rq_tkeep <= {{(KEEP_WIDTH-4){1'b0}}, 4'hF};
                         m_axis_rq_tlast <= 1'b1;
                         m_axis_rq_tvalid <= 1'b1;
@@ -122,6 +125,7 @@ module rq_tx_encoder #(
                         m_axis_rq_tdata[78:75] <= 4'b0000;
                         m_axis_rq_tdata[95:80] <= REQUESTER_ID;
                         m_axis_rq_tdata[103:96] <= h2c_req_tag;
+                        m_axis_rq_tuser <= 62'd1;
                         m_axis_rq_tkeep <= {{(KEEP_WIDTH-4){1'b0}}, 4'hF};
                         m_axis_rq_tlast <= 1'b1;
                         m_axis_rq_tvalid <= 1'b1;
@@ -133,6 +137,7 @@ module rq_tx_encoder #(
                         m_axis_rq_tdata[78:75] <= 4'b0001;
                         m_axis_rq_tdata[95:80] <= REQUESTER_ID;
                         m_axis_rq_tdata[103:96] <= 8'd0;
+                        m_axis_rq_tuser <= 62'd1;
                         m_axis_rq_tkeep <= {KEEP_WIDTH{1'b1}};
                         m_axis_rq_tlast <= 1'b0;
                         m_axis_rq_tvalid <= 1'b1;
