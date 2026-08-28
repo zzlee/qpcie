@@ -112,6 +112,8 @@
 #define DESC_CTRL_SG_MODE           0x10 /* Bit 4: Scatter-Gather Multi-Page Table Mode (MMIO BRAM) */
 #define DESC_CTRL_SG_MMIO_MODE      0x10 /* Bit 4: SG Mode with MMIO BRAM Page Table */
 #define DESC_CTRL_SG_FETCH_MODE     0x20 /* Bit 5: SG Mode with FPGA Host MRd Linked Page Table Fetch */
+#define DESC_CTRL_CHANNEL_SHIFT     6    /* Bits 7:6: video channel, independent of IRQ enable */
+#define DESC_CTRL_CHANNEL_MASK      GENMASK(7, 6)
 
 #define QPCIE_MAX_PAGE_SLOTS_Y      8    /* Up to 2040 SGL segments (Gigabytes) */
 #define QPCIE_MAX_PAGE_SLOTS_UV     4    /* Up to 1020 SGL segments (Gigabytes) */

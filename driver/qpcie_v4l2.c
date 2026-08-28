@@ -574,21 +574,23 @@ static void qpcie_buf_queue(struct vb2_buffer *vb)
         if (vch->buf_type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
             desc->plane0_src_addr = buf->y_slots_dma;
             desc->plane1_src_addr = buf->uv_slots_dma;
-            desc->control = 0x09 | (vch->channel_id << 2) | DESC_CTRL_SG_FETCH_MODE;
+            desc->control = 0x09 | (vch->channel_id << DESC_CTRL_CHANNEL_SHIFT) |
+                            DESC_CTRL_SG_FETCH_MODE;
         } else {
             desc->plane0_dst_addr = buf->y_slots_dma;
             desc->plane1_dst_addr = buf->uv_slots_dma;
-            desc->control = 0x0B | (vch->channel_id << 2) | DESC_CTRL_SG_FETCH_MODE;
+            desc->control = 0x0B | (vch->channel_id << DESC_CTRL_CHANNEL_SHIFT) |
+                            DESC_CTRL_SG_FETCH_MODE;
         }
     } else {
         if (vch->buf_type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
             desc->plane0_src_addr = plane0_dma;
             desc->plane1_src_addr = plane1_dma;
-            desc->control = 0x09 | (vch->channel_id << 2);
+            desc->control = 0x09 | (vch->channel_id << DESC_CTRL_CHANNEL_SHIFT);
         } else {
             desc->plane0_dst_addr = plane0_dma;
             desc->plane1_dst_addr = plane1_dma;
-            desc->control = 0x0B | (vch->channel_id << 2);
+            desc->control = 0x0B | (vch->channel_id << DESC_CTRL_CHANNEL_SHIFT);
         }
     }
 
