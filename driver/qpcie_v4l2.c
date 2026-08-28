@@ -653,12 +653,9 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
     iowrite32(vch->pacer_enable ? 1 : 0,
               qdev->bar0_mmio + REG_PACER_CTRL);
 
-    /* Realign the TPG before the first capture: a clean TPG-only reset
-     * guarantees the pattern phase and its output timing start together,
-     * so frame 1 begins from a deterministic state. The reset clears the
-     * TPG control registers, so reprogram them afterwards; their readback
-     * doubles as verification that the TPG came back healthy. */
-    {
+    /* Only Channel 0 uses the Video Test Pattern Generator (TPG0).
+     * Channels 1 and 2 are dedicated hardware loopback and user streaming. */
+    if (vch->channel_id == 0) {
         struct v4l2_ctrl *pattern_ctrl;
         u32 pattern_id;
 
@@ -692,22 +689,26 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
     ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
 
     /* Start TPG AFTER DMA is enabled so frame 1 starts cleanly without FIFO backpressure */
-    if (vch->pacer_enable) {
-        ret = qpcie_tpg_pace_start(qdev);
-        if (ret) {
-            dev_err(&qdev->pdev->dev,
-                    "Cannot start TPG pacing kthread: %d\n", ret);
-            iowrite32(0, qdev->bar0_mmio + REG_DMA_CTRL);
-            qpcie_return_all_buffers(vch, VB2_BUF_STATE_QUEUED);
-            return ret;
+    if (vch->channel_id == 0) {
+        if (vch->pacer_enable) {
+            ret = qpcie_tpg_pace_start(qdev);
+            if (ret) {
+                dev_err(&qdev->pdev->dev,
+                        "Cannot start TPG pacing kthread: %d\n", ret);
+                iowrite32(0, qdev->bar0_mmio + REG_DMA_CTRL);
+                qpcie_return_all_buffers(vch, VB2_BUF_STATE_QUEUED);
+                return ret;
+            }
+        } else {
+            void __iomem *tpg = qdev->bar1_mmio + 0x000;
+            iowrite32(0x81, tpg + 0x00); /* Continuous AUTO_RESTART */
         }
-    } else {
-        void __iomem *tpg = qdev->bar1_mmio + (vch->channel_id * 0x100);
-        iowrite32(0x81, tpg + 0x00); /* Continuous AUTO_RESTART */
     }
 
     dev_info(&qdev->pdev->dev,
-             "NV12M STREAMON: %u buffers, ring tail=%u, mode=%ux%u %s (pacer=0x%08x)\n",
+             "NV12M STREAMON (Ch%u %s): %u buffers, ring tail=%u, mode=%ux%u %s (pacer=0x%08x)\n",
+             vch->channel_id,
+             (vch->buf_type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) ? "Output" : "Capture",
              count, qdev->h2c_tail, vch->width, vch->height,
              vch->pacer_enable ? "60 FPS paced" :
                                  "uncapped DMA benchmark",
@@ -719,13 +720,15 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
 {
     struct qpcie_v4l2_channel *vch = vb2_get_drv_priv(vq);
     struct qpcie_dev *qdev = vch->qdev;
-    void __iomem *tpg = qdev->bar1_mmio + (vch->channel_id * 0x100);
     unsigned long timeout = jiffies + msecs_to_jiffies(500);
     bool drained = false;
 
-    /* Halt pacing and stop TPG before draining DMA */
-    qpcie_tpg_pace_stop(qdev);
-    iowrite32(0x00, tpg + 0x00);
+    if (vch->channel_id == 0) {
+        void __iomem *tpg = qdev->bar1_mmio + 0x000;
+        /* Halt pacing and stop TPG before draining DMA */
+        qpcie_tpg_pace_stop(qdev);
+        iowrite32(0x00, tpg + 0x00);
+    }
     iowrite32(0, qdev->bar0_mmio + REG_PACER_CTRL);
     do {
         u32 status = ioread32(qdev->bar0_mmio + REG_DMA_STATUS);
@@ -983,50 +986,71 @@ void qpcie_v4l2_remove(struct qpcie_dev *qdev)
 
 void qpcie_v4l2_irq_handler(struct qpcie_dev *qdev)
 {
+    u32 status = 0;
     int i;
     u32 slice_height = 0;
 
     if (qdev && qdev->bar0_mmio) {
+        status = ioread32(qdev->bar0_mmio + REG_IRQ_STATUS);
         slice_height = ioread32(qdev->bar0_mmio + REG_SLICE_HEIGHT);
     }
 
-    for (i = 0; i < 3; i++) {
-        struct qpcie_v4l2_channel *vch = &qdev->v4l2_ch[i];
+    /* Bit 0: H2C Output Complete (Node 1 Output /dev/video1) */
+    if (status & BIT(0)) {
+        struct qpcie_v4l2_channel *vch = &qdev->v4l2_ch[1];
         struct qpcie_v4l2_buffer *buf;
 
         spin_lock(&vch->slock);
         if (!list_empty(&vch->active_buffers)) {
             buf = list_first_entry(&vch->active_buffers, struct qpcie_v4l2_buffer, list);
+            list_del(&buf->list);
+            buf->vb.vb2_buf.timestamp = ktime_get_ns();
+            buf->vb.sequence = vch->sequence++;
+            vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
+        }
+        spin_unlock(&vch->slock);
+    }
 
-            if (slice_height > 0) {
-                /* Sub-Frame Low-Latency Slice DMA Mode */
-                u32 total_slices = (vch->height + slice_height - 1) / slice_height;
-                struct v4l2_event ev = {
-                    .type = V4L2_EVENT_FRAME_SYNC,
-                    .u.frame_sync.frame_sequence = vch->sequence,
-                };
+    /* Bit 1: C2H Video Capture Complete (Node 0 TPG or Node 2 Loopback In) */
+    if (status & BIT(1)) {
+        for (i = 0; i < 3; i++) {
+            struct qpcie_v4l2_channel *vch = &qdev->v4l2_ch[i];
+            struct qpcie_v4l2_buffer *buf;
 
-                vch->current_slice_idx++;
+            if (vch->buf_type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)
+                continue;
 
-                /* Fire Sub-Frame Slice Ready V4L2 Event to Userspace */
-                v4l2_event_queue(&vch->vdev, &ev);
+            spin_lock(&vch->slock);
+            if (!list_empty(&vch->active_buffers)) {
+                buf = list_first_entry(&vch->active_buffers, struct qpcie_v4l2_buffer, list);
 
-                /* Complete frame when all slices land in Host DDR/VRAM */
-                if (vch->current_slice_idx >= total_slices) {
-                    vch->current_slice_idx = 0;
+                if (slice_height > 0) {
+                    /* Sub-Frame Low-Latency Slice DMA Mode */
+                    u32 total_slices = (vch->height + slice_height - 1) / slice_height;
+                    struct v4l2_event ev = {
+                        .type = V4L2_EVENT_FRAME_SYNC,
+                        .u.frame_sync.frame_sequence = vch->sequence,
+                    };
+
+                    vch->current_slice_idx++;
+                    v4l2_event_queue(&vch->vdev, &ev);
+
+                    if (vch->current_slice_idx >= total_slices) {
+                        vch->current_slice_idx = 0;
+                        list_del(&buf->list);
+                        buf->vb.vb2_buf.timestamp = ktime_get_ns();
+                        buf->vb.sequence = vch->sequence++;
+                        vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
+                    }
+                } else {
+                    /* Standard Full-Frame IRQ Mode */
                     list_del(&buf->list);
                     buf->vb.vb2_buf.timestamp = ktime_get_ns();
                     buf->vb.sequence = vch->sequence++;
                     vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
                 }
-            } else {
-                /* Standard Full-Frame IRQ Mode */
-                list_del(&buf->list);
-                buf->vb.vb2_buf.timestamp = ktime_get_ns();
-                buf->vb.sequence = vch->sequence++;
-                vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
             }
+            spin_unlock(&vch->slock);
         }
-        spin_unlock(&vch->slock);
     }
 }

@@ -17,12 +17,20 @@ module sg_dma_engine #(
     input  wire                          h2c_desc_valid,
     input  wire [63:0]                   h2c_plane0_src,
     input  wire [15:0]                   h2c_line_width,
+    input  wire [15:0]                   h2c_line_count,
+    input  wire [15:0]                   h2c_plane12_width,
+    input  wire [15:0]                   h2c_plane12_count,
+    input  wire [3:0]                    h2c_plane_count,
     output reg                           h2c_desc_ready,
 
     // Interface from Descriptor Fetch Engine (C2H Descriptor Channel)
     input  wire                          c2h_desc_valid,
     input  wire [63:0]                   c2h_plane0_dst,
     input  wire [15:0]                   c2h_line_width,
+    input  wire [15:0]                   c2h_line_count,
+    input  wire [15:0]                   c2h_plane12_width,
+    input  wire [15:0]                   c2h_plane12_count,
+    input  wire [3:0]                    c2h_plane_count,
     output reg                           c2h_desc_ready,
 
     // Interface to RQ TX Encoder (H2C MRd Channel)
@@ -64,7 +72,7 @@ module sg_dma_engine #(
     assign m_axis_loopback_tdata  = h2c_cpl_data;
     assign m_axis_loopback_tvalid = h2c_cpl_valid;
     assign m_axis_loopback_tlast  = h2c_cpl_last && (h2c_rem_bytes == 0);
-    assign m_axis_loopback_tuser  = (h2c_burst_recv_dw == 0) && (h2c_rem_bytes == (h2c_line_width - (h2c_burst_dw << 2)));
+    assign m_axis_loopback_tuser  = (h2c_burst_recv_dw == 0) && (h2c_bytes_transferred == 0);
 
     // =========================================================================
     // H2C (Host -> FPGA) DMA Execution State Machine
@@ -76,13 +84,21 @@ module sg_dma_engine #(
 
     reg [1:0]  h2c_state;
     reg [63:0] h2c_cur_addr;
-    reg [15:0] h2c_rem_bytes;
+    reg [31:0] h2c_rem_bytes;
     reg [10:0] h2c_burst_dw;
     reg [10:0] h2c_burst_recv_dw;
     reg        h2c_cpl_in_packet;
     wire [10:0] h2c_cpl_step_dw = !h2c_cpl_in_packet ? 11'd1 :
         ((h2c_burst_dw - h2c_burst_recv_dw) < (PCIE_DATA_WIDTH/32)) ?
         (h2c_burst_dw - h2c_burst_recv_dw) : (PCIE_DATA_WIDTH/32);
+
+    wire [31:0] h2c_p0_bytes = (h2c_line_width > 0 ? h2c_line_width : 16'd4096) * (h2c_line_count > 0 ? h2c_line_count : 16'd1);
+    wire [31:0] h2c_p1_bytes = (h2c_plane12_width > 0 ? h2c_plane12_width : 16'd0) * (h2c_plane12_count > 0 ? h2c_plane12_count : 16'd0);
+    wire [31:0] h2c_desc_total_bytes = (h2c_plane_count >= 4'd2) ? (h2c_p0_bytes + h2c_p1_bytes) : h2c_p0_bytes;
+
+    wire [12:0] h2c_bytes_to_4k = 13'd4096 - {1'b0, h2c_cur_addr[11:0]};
+    wire [15:0] h2c_limit_bytes = (h2c_rem_bytes < 32'd256) ? h2c_rem_bytes[15:0] : 16'd256;
+    wire [15:0] h2c_burst_bytes = (h2c_limit_bytes < h2c_bytes_to_4k) ? h2c_limit_bytes : h2c_bytes_to_4k[11:0];
 
     assign h2c_busy = (h2c_state != H2C_IDLE);
 
@@ -97,7 +113,7 @@ module sg_dma_engine #(
             completed_h2c_count   <= 32'd0;
             h2c_bytes_transferred <= 32'd0;
             h2c_cur_addr          <= 64'd0;
-            h2c_rem_bytes         <= 16'd0;
+            h2c_rem_bytes         <= 32'd0;
             h2c_burst_dw          <= 11'd0;
             h2c_burst_recv_dw     <= 11'd0;
             h2c_cpl_in_packet     <= 1'b0;
@@ -107,46 +123,39 @@ module sg_dma_engine #(
                     h2c_desc_ready <= 1'b0;
                     h2c_req_valid  <= 1'b0;
                     if (h2c_desc_valid) begin
-                        h2c_desc_ready   <= 1'b1;
-                        h2c_cur_addr     <= h2c_plane0_src;
-                        h2c_rem_bytes    <= (h2c_line_width > 16'd0) ? h2c_line_width : 16'd4096;
+                        h2c_desc_ready    <= 1'b1;
+                        h2c_cur_addr      <= h2c_plane0_src;
+                        h2c_rem_bytes     <= h2c_desc_total_bytes;
                         h2c_burst_recv_dw <= 11'd0;
                         h2c_cpl_in_packet <= 1'b0;
-                        h2c_state        <= H2C_ISSUE_MRD;
+                        h2c_state         <= H2C_ISSUE_MRD;
                     end
                 end
 
                 H2C_ISSUE_MRD: begin
                     h2c_desc_ready <= 1'b0;
-                    if (h2c_rem_bytes > 16'd0) begin
-                        if (h2c_rem_bytes >= 16'd128) begin
-                            h2c_burst_dw   <= 11'd32;
-                            h2c_req_dw_len <= 11'd32;
-                        end else begin
-                            h2c_burst_dw   <= h2c_rem_bytes[12:2];
-                            h2c_req_dw_len <= h2c_rem_bytes[12:2];
-                        end
-                        h2c_req_addr  <= h2c_cur_addr;
-                        h2c_req_tag   <= 8'h02;
-                        h2c_req_valid <= 1'b1;
-                        h2c_state     <= H2C_WAIT_ACK;
+                    if (h2c_rem_bytes > 32'd0) begin
+                        h2c_burst_dw   <= h2c_burst_bytes[12:2];
+                        h2c_req_dw_len <= h2c_burst_bytes[12:2];
+                        h2c_req_addr   <= h2c_cur_addr;
+                        h2c_req_tag    <= 8'h02;
+                        h2c_req_valid  <= 1'b1;
+                        h2c_state      <= H2C_WAIT_ACK;
                     end else begin
                         completed_h2c_count <= completed_h2c_count + 1'b1;
-                        h2c_desc_ready <= 1'b1;
-                        h2c_state <= H2C_IDLE;
+                        h2c_desc_ready      <= 1'b1;
+                        h2c_state           <= H2C_IDLE;
                     end
                 end
 
                 H2C_WAIT_ACK: begin
                     if (h2c_req_ack) begin
-                        h2c_req_valid   <= 1'b0;
-                        h2c_cur_addr        <= h2c_cur_addr + (h2c_burst_dw << 2);
-                        h2c_rem_bytes       <= h2c_rem_bytes - (h2c_burst_dw << 2);
-                        h2c_burst_recv_dw   <= 11'd0;
-                        h2c_cpl_in_packet   <= 1'b0;
-                        // Serialize tag 1: issue the next MRd only after every
-                        // payload DWORD for this request has arrived.
-                        h2c_state           <= H2C_WAIT_CPLD;
+                        h2c_req_valid     <= 1'b0;
+                        h2c_cur_addr      <= h2c_cur_addr + (h2c_burst_dw << 2);
+                        h2c_rem_bytes     <= h2c_rem_bytes - (h2c_burst_dw << 2);
+                        h2c_burst_recv_dw <= 11'd0;
+                        h2c_cpl_in_packet <= 1'b0;
+                        h2c_state         <= H2C_WAIT_CPLD;
                     end
                 end
 
@@ -154,15 +163,15 @@ module sg_dma_engine #(
                     if (h2c_cpl_valid) begin
                         h2c_cpl_in_packet <= !h2c_cpl_last;
                         if ((h2c_burst_recv_dw + h2c_cpl_step_dw) >= h2c_burst_dw) begin
-                            h2c_burst_recv_dw <= 11'd0;
-                            h2c_cpl_in_packet <= 1'b0;
+                            h2c_burst_recv_dw     <= 11'd0;
+                            h2c_cpl_in_packet     <= 1'b0;
                             h2c_bytes_transferred <= h2c_bytes_transferred + (h2c_burst_dw << 2);
-                            if (h2c_rem_bytes == 16'd0) begin
+                            if (h2c_rem_bytes == 32'd0) begin
                                 completed_h2c_count <= completed_h2c_count + 1'b1;
-                                h2c_desc_ready <= 1'b1;
-                                h2c_state <= H2C_IDLE;
+                                h2c_desc_ready      <= 1'b1;
+                                h2c_state           <= H2C_IDLE;
                             end else begin
-                                h2c_state <= H2C_ISSUE_MRD;
+                                h2c_state           <= H2C_ISSUE_MRD;
                             end
                         end else begin
                             h2c_burst_recv_dw <= h2c_burst_recv_dw + h2c_cpl_step_dw;

@@ -18,9 +18,8 @@ static irqreturn_t qpcie_irq_handler(int irq, void *data)
     if (!(status & 0x3))
         return IRQ_NONE;
 
-    /* Video frame completion is IRQ status bit 0. ALSA remains disabled
-     * during the staged V4L2-only bring-up. */
-    if ((status & BIT(0)) && qdev->v4l2_registered)
+    /* Pass completion interrupts (bit 0: H2C, bit 1: C2H) to V4L2 handler */
+    if ((status & 0x3) && qdev->v4l2_registered)
         qpcie_v4l2_irq_handler(qdev);
 
     iowrite32(status & 0x3, qdev->bar0_mmio + REG_IRQ_STATUS);

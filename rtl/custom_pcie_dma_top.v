@@ -813,10 +813,18 @@ module custom_pcie_dma_top #(
         .h2c_desc_valid(h2c_desc_valid),
         .h2c_plane0_src(h2c_plane0_src),
         .h2c_line_width(h2c_line_width),
+        .h2c_line_count(h2c_line_count),
+        .h2c_plane12_width(h2c_plane12_width),
+        .h2c_plane12_count(h2c_plane12_count),
+        .h2c_plane_count(h2c_plane_count),
         .h2c_desc_ready(sg_h2c_desc_ready),
         .c2h_desc_valid(c2h_desc_valid && sg_c2h_desc_select),
         .c2h_plane0_dst(c2h_plane0_dst),
         .c2h_line_width(c2h_line_width),
+        .c2h_line_count(c2h_line_count),
+        .c2h_plane12_width(c2h_plane12_width),
+        .c2h_plane12_count(c2h_plane12_count),
+        .c2h_plane_count(c2h_plane_count),
         .c2h_desc_ready(sg_c2h_desc_ready),
         .h2c_req_valid(sg_h2c_req_valid),
         .h2c_req_addr(sg_h2c_req_addr),
@@ -1349,10 +1357,36 @@ module custom_pcie_dma_top #(
         .c2h_req_data_ready(eng1_req_ready),
         .c2h_req_ack(eng1_req_ack),
         .video_busy(v_busy[1]),
-        .video_frame_done(v_done[1]),
+        .video_frame_done(eng1_frame_done),
         .frame_pts(v_pts[1]),
         .protocol_error_count(v_drop_cnt[1])
     );
+
+    reg v_done1_toggle = 1'b0;
+    (* ASYNC_REG = "TRUE" *) reg [1:0] v_done1_sync = 2'b00;
+    reg v_done1_prev = 1'b0;
+    wire v_done1_pulse = v_done1_sync[1] ^ v_done1_prev;
+
+    always @(posedge video_clk or negedge video_rst_n) begin
+        if (!video_rst_n) begin
+            v_done1_toggle <= 1'b0;
+        end else if (eng1_frame_done) begin
+            v_done1_toggle <= ~v_done1_toggle;
+        end
+    end
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            v_done1_sync <= 2'b00;
+            v_done1_prev <= 1'b0;
+        end else begin
+            v_done1_sync[0] <= v_done1_toggle;
+            v_done1_sync[1] <= v_done1_sync[0];
+            v_done1_prev    <= v_done1_sync[1];
+        end
+    end
+
+    assign v_done[1] = v_done1_pulse;
 
     video_req_cdc #(
         .MAX_DWORDS(64),
@@ -1454,8 +1488,8 @@ module custom_pcie_dma_top #(
         .reg_irq_ctrl(reg_irq_ctrl),
         .reg_irq_status_w1c(reg_irq_status_w1c),
         .reg_irq_status(reg_irq_status),
-        .h2c_done(sg_h2c_done_irq | v_done[0]),
-        .c2h_done(sg_c2h_done_irq | a_done[0]),
+        .h2c_done(sg_h2c_done_irq),
+        .c2h_done(v_done[0] | v_done[1] | sg_c2h_done_irq | a_done[0]),
         .irq_req_valid(irq_req_valid),
         .irq_req_code(irq_req_code),
         .irq_req_ack(irq_req_ack),
