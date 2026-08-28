@@ -598,6 +598,39 @@ static ssize_t perf_stats_show(struct device *dev, struct device_attribute *attr
 }
 static DEVICE_ATTR_RO(perf_stats);
 
+static ssize_t sg_fetch_mode_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+    struct pci_dev *pdev = to_pci_dev(dev);
+    struct qpcie_dev *qdev = pci_get_drvdata(pdev);
+
+    return sysfs_emit(buf, "%d (%s)\n", qdev->sg_fetch_mode,
+                      (qdev->sg_fetch_mode == QPCIE_SG_MODE_HOST_FETCH) ?
+                      "Active Host MRd Fetch" : "MMIO BRAM Mode");
+}
+
+static ssize_t sg_fetch_mode_store(struct device *dev, struct device_attribute *attr,
+                                  const char *buf, size_t count)
+{
+    struct pci_dev *pdev = to_pci_dev(dev);
+    struct qpcie_dev *qdev = pci_get_drvdata(pdev);
+    int mode, ret;
+
+    ret = kstrtoint(buf, 10, &mode);
+    if (ret)
+        return ret;
+
+    if (mode != QPCIE_SG_MODE_MMIO && mode != QPCIE_SG_MODE_HOST_FETCH) {
+        dev_err(dev, "Invalid sg_fetch_mode %d (1: MMIO BRAM, 2: Host Active MRd Fetch)\n", mode);
+        return -EINVAL;
+    }
+
+    qdev->sg_fetch_mode = mode;
+    dev_info(dev, "SG Page Table Mode set to %d (%s)\n", mode,
+             (mode == QPCIE_SG_MODE_HOST_FETCH) ? "Active Host MRd Fetch" : "MMIO BRAM Mode");
+    return count;
+}
+static DEVICE_ATTR_RW(sg_fetch_mode);
+
 /* Sysfs Attribute Group Table */
 static struct attribute *qpcie_sysfs_attrs[] = {
     &dev_attr_tpg_pattern.attr,
@@ -609,6 +642,7 @@ static struct attribute *qpcie_sysfs_attrs[] = {
     &dev_attr_perf_enable.attr,
     &dev_attr_perf_reset.attr,
     &dev_attr_perf_stats.attr,
+    &dev_attr_sg_fetch_mode.attr,
     &dev_attr_timestamp.attr,
     &dev_attr_frame_drop_count.attr,
     &dev_attr_bandwidth.attr,

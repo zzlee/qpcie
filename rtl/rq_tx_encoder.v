@@ -1,6 +1,7 @@
 // ============================================================================
 // Module: rq_tx_encoder
 // Description: Arbitrates and packages requester MRd/MWr/Msg transactions.
+//              Priority: IRQ > Desc Fetch > SG Table Fetch > H2C Read > C2H Write.
 //              A C2H MWr uses one 4-DW header beat followed by an arbitrary
 //              number of streaming payload beats.  The source keeps the
 //              request metadata valid until c2h_req_ack and advances payload
@@ -22,6 +23,8 @@ module rq_tx_encoder #(
     input wire irq_req_valid, input wire [7:0] irq_req_code, output reg irq_req_ack,
     input wire desc_req_valid, input wire [63:0] desc_req_addr,
     input wire [10:0] desc_req_dw_len, input wire [7:0] desc_req_tag, output reg desc_req_ack,
+    input wire sg_req_valid, input wire [63:0] sg_req_addr,
+    input wire [10:0] sg_req_dw_len, input wire [7:0] sg_req_tag, output reg sg_req_ack,
     input wire h2c_req_valid, input wire [63:0] h2c_req_addr,
     input wire [10:0] h2c_req_dw_len, input wire [7:0] h2c_req_tag, output reg h2c_req_ack,
     input wire c2h_req_valid, input wire [63:0] c2h_req_addr,
@@ -31,7 +34,7 @@ module rq_tx_encoder #(
 );
     localparam IDLE = 3'd0, SEND_IRQ = 3'd1, SEND_DESC = 3'd2,
                SEND_H2C = 3'd3, SEND_MWR_HEADER = 3'd4,
-               SEND_MWR_DATA = 3'd5;
+               SEND_MWR_DATA = 3'd5, SEND_SG = 3'd6;
     localparam integer DATA_DWORDS = DATA_WIDTH / 32;
 
     reg [2:0] state;
@@ -41,10 +44,6 @@ module rq_tx_encoder #(
     wire [10:0] next_payload_dw =
         (c2h_dw_remaining > DATA_DWORDS) ? DATA_DWORDS : c2h_dw_remaining;
 
-    /* A ready pulse transfers one payload beat from the selected C2H source
-     * into the RQ output register.  The first payload is loaded while the
-     * accepted header vacates that register; subsequent payload beats use the
-     * same one-beat elastic pipeline without bubbles. */
     assign c2h_req_data_ready =
         (state == SEND_MWR_HEADER && m_axis_rq_tvalid && m_axis_rq_tready) ||
         (state == SEND_MWR_DATA && m_axis_rq_tvalid && m_axis_rq_tready &&
@@ -71,12 +70,14 @@ module rq_tx_encoder #(
             m_axis_rq_tkeep <= {KEEP_WIDTH{1'b1}};
             irq_req_ack <= 1'b0;
             desc_req_ack <= 1'b0;
+            sg_req_ack <= 1'b0;
             h2c_req_ack <= 1'b0;
             c2h_req_ack <= 1'b0;
             c2h_dw_remaining <= 11'd0;
         end else begin
             irq_req_ack <= 1'b0;
             desc_req_ack <= 1'b0;
+            sg_req_ack <= 1'b0;
             h2c_req_ack <= 1'b0;
             c2h_req_ack <= 1'b0;
 
@@ -105,6 +106,16 @@ module rq_tx_encoder #(
                         m_axis_rq_tlast <= 1'b1;
                         m_axis_rq_tvalid <= 1'b1;
                         state <= SEND_DESC;
+                    end else if (sg_req_valid && !sg_req_ack) begin
+                        m_axis_rq_tdata[63:0] <= sg_req_addr;
+                        m_axis_rq_tdata[74:64] <= sg_req_dw_len;
+                        m_axis_rq_tdata[78:75] <= 4'b0000;
+                        m_axis_rq_tdata[95:80] <= REQUESTER_ID;
+                        m_axis_rq_tdata[103:96] <= sg_req_tag;
+                        m_axis_rq_tkeep <= {{(KEEP_WIDTH-4){1'b0}}, 4'hF};
+                        m_axis_rq_tlast <= 1'b1;
+                        m_axis_rq_tvalid <= 1'b1;
+                        state <= SEND_SG;
                     end else if (h2c_req_valid && !h2c_req_ack) begin
                         m_axis_rq_tdata[63:0] <= h2c_req_addr;
                         m_axis_rq_tdata[74:64] <= h2c_req_dw_len;
@@ -134,6 +145,7 @@ module rq_tx_encoder #(
                     if (m_axis_rq_tvalid && m_axis_rq_tready) begin
                         irq_req_ack <= 1'b1;
                         m_axis_rq_tvalid <= 1'b0;
+                        m_axis_rq_tlast <= 1'b0;
                         state <= IDLE;
                     end
                 end
@@ -142,6 +154,16 @@ module rq_tx_encoder #(
                     if (m_axis_rq_tvalid && m_axis_rq_tready) begin
                         desc_req_ack <= 1'b1;
                         m_axis_rq_tvalid <= 1'b0;
+                        m_axis_rq_tlast <= 1'b0;
+                        state <= IDLE;
+                    end
+                end
+
+                SEND_SG: begin
+                    if (m_axis_rq_tvalid && m_axis_rq_tready) begin
+                        sg_req_ack <= 1'b1;
+                        m_axis_rq_tvalid <= 1'b0;
+                        m_axis_rq_tlast <= 1'b0;
                         state <= IDLE;
                     end
                 end
@@ -150,6 +172,7 @@ module rq_tx_encoder #(
                     if (m_axis_rq_tvalid && m_axis_rq_tready) begin
                         h2c_req_ack <= 1'b1;
                         m_axis_rq_tvalid <= 1'b0;
+                        m_axis_rq_tlast <= 1'b0;
                         state <= IDLE;
                     end
                 end
@@ -157,6 +180,7 @@ module rq_tx_encoder #(
                 SEND_MWR_HEADER: begin
                     if (m_axis_rq_tvalid && m_axis_rq_tready) begin
                         m_axis_rq_tdata <= c2h_req_data;
+                        m_axis_rq_tuser <= 62'd0;
                         m_axis_rq_tkeep <= payload_keep(first_payload_dw);
                         m_axis_rq_tlast <= (c2h_req_dw_len <= DATA_DWORDS);
                         m_axis_rq_tvalid <= 1'b1;
@@ -186,8 +210,6 @@ module rq_tx_encoder #(
         end
     end
 
-    /* c2h_req_last is retained in the interface for existing stream engines;
-     * PCIe packet termination is derived from c2h_req_dw_len. */
     wire unused_c2h_req_last = c2h_req_last;
 
 endmodule

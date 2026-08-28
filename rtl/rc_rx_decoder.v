@@ -1,8 +1,10 @@
 // ============================================================================
 // Module: rc_rx_decoder
 // Description: Decodes PCIe IP RC (Requester Completion) AXI4-Stream TLP packets.
-//              Extracts CplD data and routes to Descriptor Fetch Engine (supporting
-//              64-Byte Extended Descriptors across beats) or H2C FIFO based on Tag.
+//              Extracts CplD data and routes:
+//              - Tag 0: Descriptor Fetch Engine (64-Byte Extended Descriptors)
+//              - Tag 1: SG Host Linked Page Table Fetch Engine (256-Byte bursts)
+//              - Tag > 1: H2C DMA Data FIFO
 // Audit Compliance: Verified with UltraScale PCIe Specification pg213 Table 2-19:
 //                   - rc_tag is at bits [71:64]
 //                   - rc_dword_len is at bits [42:32]
@@ -31,7 +33,13 @@ module rc_rx_decoder #(
     output reg  [511:0]          desc_cpl_data, // 64-Byte (512-bit) Extended Descriptor Payload
     output reg                   desc_cpl_last,
 
-    // Interface to H2C DMA Data FIFO (Tag > 0)
+    // Interface to SG Host Fetch Engine (Tag 1 reserved for Scatter-Gather Page Table Fetch)
+    output reg                   sg_cpl_valid,
+    output reg  [DATA_WIDTH-1:0] sg_cpl_data,
+    output reg                   sg_cpl_last,
+    output reg  [7:0]            sg_cpl_tag,
+
+    // Interface to H2C DMA Data FIFO (Tag > 1)
     output reg                   h2c_fifo_wvalid,
     output reg  [DATA_WIDTH-1:0] h2c_fifo_wdata,
     output reg                   h2c_fifo_wlast,
@@ -44,6 +52,7 @@ module rc_rx_decoder #(
     localparam IDLE       = 2'b00;
     localparam ROUTE_DESC = 2'b01;
     localparam ROUTE_H2C  = 2'b10;
+    localparam ROUTE_SG   = 2'b11;
 
     reg [1:0] state;
     reg [2:0] desc_beat_cnt;
@@ -60,6 +69,10 @@ module rc_rx_decoder #(
             desc_cpl_valid   <= 1'b0;
             desc_cpl_data    <= 512'd0;
             desc_cpl_last    <= 1'b0;
+            sg_cpl_valid     <= 1'b0;
+            sg_cpl_data      <= {DATA_WIDTH{1'b0}};
+            sg_cpl_last      <= 1'b0;
+            sg_cpl_tag       <= 8'd0;
             h2c_fifo_wvalid  <= 1'b0;
             h2c_fifo_wdata   <= {DATA_WIDTH{1'b0}};
             h2c_fifo_wlast   <= 1'b0;
@@ -70,6 +83,7 @@ module rc_rx_decoder #(
             case (state)
                 IDLE: begin
                     desc_cpl_valid   <= 1'b0;
+                    sg_cpl_valid     <= 1'b0;
                     h2c_fifo_wvalid  <= 1'b0;
                     tag_free_req     <= 1'b0;
                     s_axis_rc_tready <= 1'b1;
@@ -87,7 +101,18 @@ module rc_rx_decoder #(
                                 desc_beat_cnt <= 3'd1;
                                 state         <= ROUTE_DESC;
                             end
-                        end else begin // H2C Data CplD (Tag > 0)
+                        end else if (rc_tag == 8'h01) begin // SG Host Fetch CplD (Tag 1)
+                            sg_cpl_valid <= 1'b1;
+                            sg_cpl_data  <= s_axis_rc_tdata;
+                            sg_cpl_last  <= s_axis_rc_tlast;
+                            sg_cpl_tag   <= 8'h01;
+                            tag_free_req <= s_axis_rc_tlast;
+                            tag_free_val <= 8'h01;
+
+                            if (!s_axis_rc_tlast) begin
+                                state <= ROUTE_SG;
+                            end
+                        end else begin // H2C Data CplD (Tag > 1)
                             h2c_fifo_wvalid <= 1'b1;
                             h2c_fifo_wdata  <= {96'd0, s_axis_rc_tdata[127:96]};
                             h2c_fifo_wlast  <= s_axis_rc_tlast;
@@ -117,6 +142,21 @@ module rc_rx_decoder #(
                             tag_free_req   <= 1'b1;
                             tag_free_val   <= 8'h00;
                             state          <= IDLE;
+                        end
+                    end
+                end
+
+                ROUTE_SG: begin
+                    if (s_axis_rc_tvalid && s_axis_rc_tready) begin
+                        sg_cpl_valid <= 1'b1;
+                        sg_cpl_data  <= s_axis_rc_tdata;
+                        sg_cpl_last  <= s_axis_rc_tlast;
+                        sg_cpl_tag   <= 8'h01;
+
+                        if (s_axis_rc_tlast) begin
+                            tag_free_req <= 1'b1;
+                            tag_free_val <= 8'h01;
+                            state        <= IDLE;
                         end
                     end
                 end

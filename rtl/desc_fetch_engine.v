@@ -131,7 +131,7 @@ module desc_fetch_engine (
                             h2c_plane12_count   <= desc_cpl_data[479:464];
                             h2c_format          <= desc_cpl_data[483:480];
                             h2c_plane_count     <= (desc_cpl_data[487:484] > 0) ? desc_cpl_data[487:484] : 4'd1;
-                            h2c_desc_ctrl       <= desc_cpl_data[495:480];
+                            h2c_desc_ctrl       <= desc_cpl_data[503:488];
                         end else begin // C2H DMA Descriptor
                             c2h_desc_valid      <= 1'b1;
                             c2h_plane0_src      <= desc_cpl_data[63:0];
@@ -148,7 +148,7 @@ module desc_fetch_engine (
                             c2h_plane12_count   <= desc_cpl_data[479:464];
                             c2h_format          <= desc_cpl_data[483:480];
                             c2h_plane_count     <= (desc_cpl_data[487:484] > 0) ? desc_cpl_data[487:484] : 4'd1;
-                            c2h_desc_ctrl       <= desc_cpl_data[495:480];
+                            c2h_desc_ctrl       <= desc_cpl_data[503:488];
                         end
                         state <= DISPATCH;
                     end

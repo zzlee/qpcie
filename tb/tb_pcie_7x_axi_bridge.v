@@ -212,6 +212,13 @@ module tb_pcie_7x_axi_bridge;
         .desc_cpl_valid(desc_cpl_valid),
         .desc_cpl_data(desc_cpl_data),
         .desc_cpl_last(desc_cpl_last),
+        .sg_cpl_valid(),
+        .sg_cpl_data(),
+        .sg_cpl_last(),
+        .sg_cpl_tag(),
+        .h2c_fifo_wvalid(),
+        .h2c_fifo_wdata(),
+        .h2c_fifo_wlast(),
         .tag_free_req(tag_free_req),
         .tag_free_val(tag_free_val)
     );

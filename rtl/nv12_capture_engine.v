@@ -26,15 +26,17 @@ module nv12_capture_engine #(
     input  wire [15:0]                  frame_height,
     input  wire [15:0]                  frame_stride,
 
-    // Page Table write interface
-    input  wire                         pt_y_wr_en,
-    input  wire [10:0]                  pt_y_wr_addr,
-    input  wire [63:0]                  pt_y_wr_data,
-    input  wire                         pt_uv_wr_en,
-    input  wire [10:0]                  pt_uv_wr_addr,
-    input  wire [63:0]                  pt_uv_wr_data,
-    output wire [10:0]                  cur_y_page_idx,
-    output wire [10:0]                  cur_uv_page_idx,
+    // SGL Segment Push Interface (from sg_host_fetch_engine)
+    input  wire                         sgl_y_wr_en,
+    input  wire [63:0]                  sgl_y_wr_addr,
+    input  wire [31:0]                  sgl_y_wr_len,
+    input  wire [31:0]                  sgl_y_wr_flags,
+    input  wire                         sgl_uv_wr_en,
+    input  wire [63:0]                  sgl_uv_wr_addr,
+    input  wire [31:0]                  sgl_uv_wr_len,
+    input  wire [31:0]                  sgl_uv_wr_flags,
+    output wire [5:0]                   cur_y_sgl_count,
+    output wire [5:0]                   cur_uv_sgl_count,
 
     input  wire                         pacer_enable,
     input  wire [31:0]                  frame_interval_clks,
@@ -110,51 +112,51 @@ module nv12_capture_engine #(
     wire descriptor_accept = desc_valid && !video_busy;
 
     wire [63:0] y_walker_addr;
-    wire [11:0] y_walker_page_offset;
-    wire        y_walker_boundary_next;
+    wire [31:0] y_walker_bytes_left;
 
-    sg_page_walker #(
-        .MAX_PAGES(2048),
-        .PAGE_SIZE_BYTES(4096)
-    ) u_y_page_walker (
+    sg_segment_walker #(
+        .FIFO_DEPTH(64)
+    ) u_y_segment_walker (
         .clk(clk),
         .rst_n(rst_n),
         .start(descriptor_accept),
         .sg_mode(desc_sg_mode),
         .linear_base_addr(plane_y_addr),
-        .pt_wr_en(pt_y_wr_en),
-        .pt_wr_addr(pt_y_wr_addr),
-        .pt_wr_data(pt_y_wr_data),
+        .sgl_wr_en(sgl_y_wr_en),
+        .sgl_wr_addr(sgl_y_wr_addr),
+        .sgl_wr_len(sgl_y_wr_len),
+        .sgl_wr_flags(sgl_y_wr_flags),
         .advance_burst(c2h_req_ack && c2h_req_valid && !request_is_uv),
         .burst_bytes(active_req_bytes),
         .current_addr(y_walker_addr),
-        .current_page_idx(cur_y_page_idx),
-        .current_page_offset(y_walker_page_offset),
-        .page_boundary_next(y_walker_boundary_next)
+        .seg_bytes_left(y_walker_bytes_left),
+        .fifo_count(cur_y_sgl_count),
+        .fifo_almost_full(),
+        .fifo_empty()
     );
 
     wire [63:0] uv_walker_addr;
-    wire [11:0] uv_walker_page_offset;
-    wire        uv_walker_boundary_next;
+    wire [31:0] uv_walker_bytes_left;
 
-    sg_page_walker #(
-        .MAX_PAGES(2048),
-        .PAGE_SIZE_BYTES(4096)
-    ) u_uv_page_walker (
+    sg_segment_walker #(
+        .FIFO_DEPTH(64)
+    ) u_uv_segment_walker (
         .clk(clk),
         .rst_n(rst_n),
         .start(descriptor_accept),
         .sg_mode(desc_sg_mode),
         .linear_base_addr(plane_uv_addr),
-        .pt_wr_en(pt_uv_wr_en),
-        .pt_wr_addr(pt_uv_wr_addr),
-        .pt_wr_data(pt_uv_wr_data),
+        .sgl_wr_en(sgl_uv_wr_en),
+        .sgl_wr_addr(sgl_uv_wr_addr),
+        .sgl_wr_len(sgl_uv_wr_len),
+        .sgl_wr_flags(sgl_uv_wr_flags),
         .advance_burst(c2h_req_ack && c2h_req_valid && request_is_uv),
         .burst_bytes(active_req_bytes),
         .current_addr(uv_walker_addr),
-        .current_page_idx(cur_uv_page_idx),
-        .current_page_offset(uv_walker_page_offset),
-        .page_boundary_next(uv_walker_boundary_next)
+        .seg_bytes_left(uv_walker_bytes_left),
+        .fifo_count(cur_uv_sgl_count),
+        .fifo_almost_full(),
+        .fifo_empty()
     );
 
     wire [63:0] cur_y_target_addr  = desc_sg_mode ? y_walker_addr  : y_send_addr;
@@ -162,14 +164,14 @@ module nv12_capture_engine #(
 
     // A 256-byte request starting at offset 0xF80 (5'b11111) within any 4KB page
     // would cross the 4KB page boundary at 0x1000, causing fatal PCIe MalfTLP!
-    // Clamp to 128 bytes whenever remaining page room is < 256 bytes.
-    wire y_is_256  = (y_rem_bytes >= 16'd256) && (cur_y_target_addr[11:7] != 5'b11111);
+    // Clamp to 128 bytes whenever remaining page room is < 256 bytes or segment remaining < 256 bytes.
+    wire y_is_256  = (y_rem_bytes >= 16'd256) && (cur_y_target_addr[11:7] != 5'b11111) && (!desc_sg_mode || (y_walker_bytes_left >= 256));
     wire [10:0] y_next_dw_len = y_is_256 ? 11'd64 : 11'd32;
     wire [4:0]  y_next_beats  = y_is_256 ? 5'd16  : 5'd8;
     wire [15:0] y_next_bytes  = y_is_256 ? 16'd256: 16'd128;
     wire y_ready_to_send = (y_fifo_count >= y_next_beats);
 
-    wire uv_is_256 = (uv_rem_bytes >= 16'd256) && (cur_uv_target_addr[11:7] != 5'b11111);
+    wire uv_is_256 = (uv_rem_bytes >= 16'd256) && (cur_uv_target_addr[11:7] != 5'b11111) && (!desc_sg_mode || (uv_walker_bytes_left >= 256));
     wire [10:0] uv_next_dw_len = uv_is_256 ? 11'd64 : 11'd32;
     wire [4:0]  uv_next_beats  = uv_is_256 ? 5'd16  : 5'd8;
     wire [15:0] uv_next_bytes  = uv_is_256 ? 16'd256: 16'd128;

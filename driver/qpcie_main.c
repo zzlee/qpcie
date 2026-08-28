@@ -64,6 +64,10 @@ static const struct pci_device_id qpcie_id_table[] = {
 };
 MODULE_DEVICE_TABLE(pci, qpcie_id_table);
 
+static int sg_fetch_mode = QPCIE_SG_MODE_HOST_FETCH;
+module_param(sg_fetch_mode, int, 0644);
+MODULE_PARM_DESC(sg_fetch_mode, "Scatter-Gather Page Table Fetch Mode (1: MMIO BRAM, 2: Active Host MRd Fetch)");
+
 static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
     struct qpcie_dev *qdev;
@@ -88,6 +92,7 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
     if (!qdev) return -ENOMEM;
 
     qdev->pdev = pdev;
+    qdev->sg_fetch_mode = sg_fetch_mode;
     pci_set_drvdata(pdev, qdev);
 
     ret = pci_enable_device(pdev);

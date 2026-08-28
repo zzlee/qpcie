@@ -61,6 +61,8 @@ module tb_sg_c2h_burst_boundary;
         .irq_req_valid(1'b0), .irq_req_code(8'd0), .irq_req_ack(),
         .desc_req_valid(1'b0), .desc_req_addr(64'd0),
         .desc_req_dw_len(11'd0), .desc_req_tag(8'd0), .desc_req_ack(),
+        .sg_req_valid(1'b0), .sg_req_addr(64'd0),
+        .sg_req_dw_len(11'd0), .sg_req_tag(8'd0), .sg_req_ack(),
         .h2c_req_valid(1'b0), .h2c_req_addr(64'd0),
         .h2c_req_dw_len(11'd0), .h2c_req_tag(8'd0), .h2c_req_ack(),
         .c2h_req_valid(c2h_req_valid), .c2h_req_addr(c2h_req_addr),

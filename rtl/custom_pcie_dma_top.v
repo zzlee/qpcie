@@ -650,6 +650,21 @@ module custom_pcie_dma_top #(
         .active_count()
     );
 
+    wire        sg_req_valid, sg_req_ack;
+    wire [63:0] sg_req_addr;
+    wire [10:0] sg_req_dw_len;
+    wire [7:0]  sg_req_tag;
+
+    wire        sg_cpl_valid, sg_cpl_last;
+    wire [PCIE_DATA_WIDTH-1:0] sg_cpl_data;
+    wire [7:0]  sg_cpl_tag;
+
+    wire        sgl_y_wr_en, sgl_uv_wr_en;
+    wire [63:0] sgl_y_wr_addr, sgl_uv_wr_addr;
+    wire [31:0] sgl_y_wr_len, sgl_uv_wr_len;
+    wire [31:0] sgl_y_wr_flags, sgl_uv_wr_flags;
+    wire        sg_fetch_busy, sg_fetch_done;
+
     // 5. RQ TX Encoder
     rq_tx_encoder #(
         .DATA_WIDTH(PCIE_DATA_WIDTH)
@@ -671,6 +686,11 @@ module custom_pcie_dma_top #(
         .desc_req_dw_len(desc_req_dw_len),
         .desc_req_tag(desc_req_tag),
         .desc_req_ack(desc_req_ack),
+        .sg_req_valid(sg_req_valid),
+        .sg_req_addr(sg_req_addr),
+        .sg_req_dw_len(sg_req_dw_len),
+        .sg_req_tag(sg_req_tag),
+        .sg_req_ack(sg_req_ack),
         .h2c_req_valid(sg_h2c_req_valid),
         .h2c_req_addr(sg_h2c_req_addr),
         .h2c_req_dw_len(sg_h2c_req_dw_len),
@@ -700,11 +720,47 @@ module custom_pcie_dma_top #(
         .desc_cpl_valid(desc_cpl_valid),
         .desc_cpl_data(desc_cpl_data),
         .desc_cpl_last(desc_cpl_last),
+        .sg_cpl_valid(sg_cpl_valid),
+        .sg_cpl_data(sg_cpl_data),
+        .sg_cpl_last(sg_cpl_last),
+        .sg_cpl_tag(sg_cpl_tag),
         .h2c_fifo_wvalid(h2c_fifo_wvalid),
         .h2c_fifo_wdata(h2c_fifo_wdata),
         .h2c_fifo_wlast(h2c_fifo_wlast),
         .tag_free_req(tag_free_req),
         .tag_free_val(tag_free_val)
+    );
+
+    // 6.1 SG Host Variable-Length SGL Fetch Engine
+    sg_host_fetch_engine #(
+        .DATA_WIDTH(PCIE_DATA_WIDTH)
+    ) u_sg_host_fetch_engine (
+        .clk(clk),
+        .rst_n(rst_n),
+        .fetch_start(c2h_desc_valid && (c2h_desc_ctrl[4] || c2h_desc_ctrl[5])),
+        .plane0_slot_addr(c2h_plane0_dst),
+        .plane1_slot_addr(c2h_plane1_dst),
+        .plane0_pages_req(16'd2025),
+        .plane1_pages_req(16'd1013),
+        .fetch_busy(sg_fetch_busy),
+        .fetch_done(sg_fetch_done),
+        .mrd_req_valid(sg_req_valid),
+        .mrd_req_addr(sg_req_addr),
+        .mrd_req_dw_len(sg_req_dw_len),
+        .mrd_req_tag(sg_req_tag),
+        .mrd_req_ack(sg_req_ack),
+        .cpld_valid(sg_cpl_valid),
+        .cpld_data(sg_cpl_data),
+        .cpld_last(sg_cpl_last),
+        .cpld_tag(sg_cpl_tag),
+        .sgl_y_wr_en(sgl_y_wr_en),
+        .sgl_y_wr_addr(sgl_y_wr_addr),
+        .sgl_y_wr_len(sgl_y_wr_len),
+        .sgl_y_wr_flags(sgl_y_wr_flags),
+        .sgl_uv_wr_en(sgl_uv_wr_en),
+        .sgl_uv_wr_addr(sgl_uv_wr_addr),
+        .sgl_uv_wr_len(sgl_uv_wr_len),
+        .sgl_uv_wr_flags(sgl_uv_wr_flags)
     );
 
     // 7. Descriptor Fetch Engine
@@ -824,14 +880,14 @@ module custom_pcie_dma_top #(
     reg [63:0] v_pts_sync_q = 64'd0;
 
     // ---- Descriptor crossing: 125 MHz fetch -> 150 MHz engine ------------
-    // Bus layout: {desc_ctrl[4], timestamp[63:0], stride[15:0], height[15:0], width[15:0],
+    // Bus layout: {desc_ctrl[4]|desc_ctrl[5], timestamp[63:0], stride[15:0], height[15:0], width[15:0],
     //              uv_addr[63:0], y_addr[63:0]}
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             hs_send_q <= 1'b0;
             hs_bus_q  <= 241'd0;
         end else if (!hs_send_q && c2h_desc_valid && nv12_desc_select) begin
-            hs_bus_q  <= {c2h_desc_ctrl[4],
+            hs_bus_q  <= {(c2h_desc_ctrl[4] | c2h_desc_ctrl[5]),
                           global_timestamp, c2h_dst_stride,
                           c2h_line_count, c2h_line_width,
                           c2h_plane1_dst, c2h_plane0_dst};
@@ -999,6 +1055,66 @@ module custom_pcie_dma_top #(
         .m_fifo_count     (video_cdc_fifo_count)
     );
 
+    // SGL Y CDC FIFO (125 MHz clk -> 150 MHz video_clk)
+    wire [127:0] v_sgl_y_dout;
+    wire        v_sgl_y_empty;
+    xpm_fifo_async #(
+        .FIFO_MEMORY_TYPE("distributed"),
+        .FIFO_WRITE_DEPTH(64),
+        .WRITE_DATA_WIDTH(128),
+        .READ_DATA_WIDTH(128),
+        .READ_MODE("fwft"),
+        .FIFO_READ_LATENCY(0),
+        .USE_ADV_FEATURES("0000")
+    ) u_sgl_y_cdc (
+        .rst(!rst_n || !video_rst_n),
+        .wr_clk(clk),
+        .wr_en(sgl_y_wr_en),
+        .din({sgl_y_wr_flags, sgl_y_wr_len, sgl_y_wr_addr}),
+        .full(),
+        .rd_clk(video_clk),
+        .rd_en(!v_sgl_y_empty),
+        .dout(v_sgl_y_dout),
+        .empty(v_sgl_y_empty),
+        .sleep(1'b0),
+        .injectsbiterr(1'b0),
+        .injectdbiterr(1'b0),
+        .sbiterr(),
+        .dbiterr(),
+        .wr_rst_busy(),
+        .rd_rst_busy()
+    );
+
+    // SGL UV CDC FIFO (125 MHz clk -> 150 MHz video_clk)
+    wire [127:0] v_sgl_uv_dout;
+    wire        v_sgl_uv_empty;
+    xpm_fifo_async #(
+        .FIFO_MEMORY_TYPE("distributed"),
+        .FIFO_WRITE_DEPTH(64),
+        .WRITE_DATA_WIDTH(128),
+        .READ_DATA_WIDTH(128),
+        .READ_MODE("fwft"),
+        .FIFO_READ_LATENCY(0),
+        .USE_ADV_FEATURES("0000")
+    ) u_sgl_uv_cdc (
+        .rst(!rst_n || !video_rst_n),
+        .wr_clk(clk),
+        .wr_en(sgl_uv_wr_en),
+        .din({sgl_uv_wr_flags, sgl_uv_wr_len, sgl_uv_wr_addr}),
+        .full(),
+        .rd_clk(video_clk),
+        .rd_en(!v_sgl_uv_empty),
+        .dout(v_sgl_uv_dout),
+        .empty(v_sgl_uv_empty),
+        .sleep(1'b0),
+        .injectsbiterr(1'b0),
+        .injectdbiterr(1'b0),
+        .sbiterr(),
+        .dbiterr(),
+        .wr_rst_busy(),
+        .rd_rst_busy()
+    );
+
     // ---- The capture engine itself ---------------------------------------
     nv12_capture_engine #(
         .MAX_WIDTH(3840),
@@ -1016,14 +1132,16 @@ module custom_pcie_dma_top #(
         .frame_width(eng_width),
         .frame_height(eng_height),
         .frame_stride(eng_stride),
-        .pt_y_wr_en(pt_y_wr_en),
-        .pt_y_wr_addr(pt_y_wr_addr),
-        .pt_y_wr_data(pt_y_wr_data),
-        .pt_uv_wr_en(pt_uv_wr_en),
-        .pt_uv_wr_addr(pt_uv_wr_addr),
-        .pt_uv_wr_data(pt_uv_wr_data),
-        .cur_y_page_idx(cur_y_page_idx),
-        .cur_uv_page_idx(cur_uv_page_idx),
+        .sgl_y_wr_en(!v_sgl_y_empty),
+        .sgl_y_wr_addr(v_sgl_y_dout[63:0]),
+        .sgl_y_wr_len(v_sgl_y_dout[95:64]),
+        .sgl_y_wr_flags(v_sgl_y_dout[127:96]),
+        .sgl_uv_wr_en(!v_sgl_uv_empty),
+        .sgl_uv_wr_addr(v_sgl_uv_dout[63:0]),
+        .sgl_uv_wr_len(v_sgl_uv_dout[95:64]),
+        .sgl_uv_wr_flags(v_sgl_uv_dout[127:96]),
+        .cur_y_sgl_count(),
+        .cur_uv_sgl_count(),
         .pacer_enable(1'b0),   /* Hardware pacer disabled; Linux driver pacer drives 60 FPS */
         .frame_interval_clks(32'd2500000),   // 60 FPS @ 150 MHz
         .global_timestamp(eng_ts),

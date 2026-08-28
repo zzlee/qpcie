@@ -104,7 +104,25 @@
 #define REG_SG_PT_DATA_HI           0xE8 /* Physical Address [63:32] (Bit 31: 0=Y, 1=UV) */
 #define REG_SG_STATUS               0xEC /* Current Page Indexes [31:16]=UV, [15:0]=Y */
 
-#define DESC_CTRL_SG_MODE           0x10 /* Bit 4: Scatter-Gather Multi-Page Table Mode */
+#define QPCIE_SG_MODE_MMIO          1    /* Mode 1: CPU writes REG_SG_PT_DATA_LO/HI into BRAM */
+#define QPCIE_SG_MODE_HOST_FETCH    2    /* Mode 2: FPGA Active PCIe MRd Linked Page Table Fetch */
+
+#define DESC_CTRL_SG_MODE           0x10 /* Bit 4: Scatter-Gather Multi-Page Table Mode (MMIO BRAM) */
+#define DESC_CTRL_SG_MMIO_MODE      0x10 /* Bit 4: SG Mode with MMIO BRAM Page Table */
+#define DESC_CTRL_SG_FETCH_MODE     0x20 /* Bit 5: SG Mode with FPGA Host MRd Linked Page Table Fetch */
+
+#define QPCIE_MAX_PAGE_SLOTS_Y      8    /* Up to 2040 SGL segments (Gigabytes) */
+#define QPCIE_MAX_PAGE_SLOTS_UV     4    /* Up to 1020 SGL segments (Gigabytes) */
+
+/* 128-Bit Variable-Length SGL Entry Structure (16 Bytes Wire Format) */
+struct __packed qpcie_sgl_entry {
+    u64 phys_addr;   /* Bytes 0..7   : DW0-DW1 (Physical base address) */
+    u32 len_bytes;   /* Bytes 8..11  : DW2     (Contiguous length in bytes) */
+    u32 flags;       /* Bytes 12..15 : DW3     (Bit 0: Chain Pointer, Bit 1: Last Segment) */
+};
+
+#define SGL_FLAG_CHAIN_PTR          BIT(0) /* Points to next 4KB SGL slot */
+#define SGL_FLAG_LAST_SEG           BIT(1) /* End of current planar payload */
 
 /* 64-Byte 2D Multi-Planar Extended Descriptor Structure (Hardware Wire Format) */
 struct __packed qpcie_dma_desc_64b {
@@ -139,6 +157,10 @@ struct qpcie_dev;
 struct qpcie_v4l2_buffer {
     struct vb2_v4l2_buffer vb;
     struct list_head list;
+    void *y_slots_virt;
+    dma_addr_t y_slots_dma;
+    void *uv_slots_virt;
+    dma_addr_t uv_slots_dma;
 };
 
 struct qpcie_v4l2_channel {
@@ -203,6 +225,9 @@ struct qpcie_dev {
 
     struct snd_card *card;
     struct snd_pcm *pcm;
+
+    /* Scatter-Gather Linked Page Table Fetch Mode */
+    int sg_fetch_mode; /* 1: MMIO BRAM, 2: Host Active MRd Fetch */
 
     /* One-shot TPG pacing (fixed frame-rate mode).  The kthread re-arms
      * AP_START at the target rate while V4L2 streaming is active; the TPG

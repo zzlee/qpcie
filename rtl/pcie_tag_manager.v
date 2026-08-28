@@ -38,7 +38,7 @@ module pcie_tag_manager #(
     always @(*) begin
         first_free_idx = {TAG_WIDTH{1'b0}};
         found_free     = 1'b0;
-        for (i = 1; i < MAX_TAGS; i = i + 1) begin // Tag 0 reserved for Descriptor Fetch
+        for (i = 2; i < MAX_TAGS; i = i + 1) begin // Tag 0=Desc Fetch, Tag 1=SG Fetch
             if (!tag_bitmap[i] && !found_free) begin
                 first_free_idx = i[TAG_WIDTH-1:0];
                 found_free     = 1'b1;

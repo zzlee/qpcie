@@ -428,6 +428,91 @@ static int qpcie_buf_prepare(struct vb2_buffer *vb)
     return 0;
 }
 
+static int qpcie_buf_init(struct vb2_buffer *vb)
+{
+    struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
+    struct qpcie_v4l2_buffer *buf = container_of(vbuf, struct qpcie_v4l2_buffer, vb);
+    struct qpcie_v4l2_channel *vch = vb2_get_drv_priv(vb->vb2_queue);
+    struct qpcie_dev *qdev = vch->qdev;
+
+    buf->y_slots_virt = dma_alloc_coherent(&qdev->pdev->dev,
+                                           QPCIE_MAX_PAGE_SLOTS_Y * 4096,
+                                           &buf->y_slots_dma, GFP_KERNEL);
+    if (!buf->y_slots_virt)
+        return -ENOMEM;
+
+    buf->uv_slots_virt = dma_alloc_coherent(&qdev->pdev->dev,
+                                            QPCIE_MAX_PAGE_SLOTS_UV * 4096,
+                                            &buf->uv_slots_dma, GFP_KERNEL);
+    if (!buf->uv_slots_virt) {
+        dma_free_coherent(&qdev->pdev->dev, QPCIE_MAX_PAGE_SLOTS_Y * 4096,
+                          buf->y_slots_virt, buf->y_slots_dma);
+        buf->y_slots_virt = NULL;
+        return -ENOMEM;
+    }
+    return 0;
+}
+
+static void qpcie_buf_cleanup(struct vb2_buffer *vb)
+{
+    struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
+    struct qpcie_v4l2_buffer *buf = container_of(vbuf, struct qpcie_v4l2_buffer, vb);
+    struct qpcie_v4l2_channel *vch = vb2_get_drv_priv(vb->vb2_queue);
+    struct qpcie_dev *qdev = vch->qdev;
+
+    if (buf->y_slots_virt) {
+        dma_free_coherent(&qdev->pdev->dev, QPCIE_MAX_PAGE_SLOTS_Y * 4096,
+                          buf->y_slots_virt, buf->y_slots_dma);
+        buf->y_slots_virt = NULL;
+    }
+    if (buf->uv_slots_virt) {
+        dma_free_coherent(&qdev->pdev->dev, QPCIE_MAX_PAGE_SLOTS_UV * 4096,
+                          buf->uv_slots_virt, buf->uv_slots_dma);
+        buf->uv_slots_virt = NULL;
+    }
+}
+
+static void qpcie_build_variable_sgl(struct scatterlist *sgl, unsigned int nents,
+                                     struct qpcie_sgl_entry *slots_virt, dma_addr_t slots_dma,
+                                     unsigned int max_slots)
+{
+    struct scatterlist *sg;
+    unsigned int i;
+    unsigned int cur_slot = 0;
+    unsigned int cur_entry = 0;
+    struct qpcie_sgl_entry *slot_ptr = slots_virt;
+
+    memset(slots_virt, 0, max_slots * 4096);
+
+    for_each_sg(sgl, sg, nents, i) {
+        dma_addr_t chunk_addr = sg_dma_address(sg);
+        u32 chunk_len = sg_dma_len(sg);
+
+        if (cur_slot >= max_slots)
+            break;
+
+        slot_ptr[cur_entry].phys_addr = (u64)chunk_addr;
+        slot_ptr[cur_entry].len_bytes = chunk_len;
+        slot_ptr[cur_entry].flags     = (i == nents - 1) ? SGL_FLAG_LAST_SEG : 0;
+        cur_entry++;
+
+        if (cur_entry == 255) {
+            /* Chained pointer at Entry 255 (offset 0xFF0) */
+            if (cur_slot + 1 < max_slots) {
+                slot_ptr[255].phys_addr = (u64)(slots_dma + (cur_slot + 1) * 4096);
+                slot_ptr[255].len_bytes = 0;
+                slot_ptr[255].flags     = SGL_FLAG_CHAIN_PTR;
+                cur_slot++;
+                slot_ptr = (struct qpcie_sgl_entry *)((u8 *)slots_virt + cur_slot * 4096);
+                cur_entry = 0;
+            } else {
+                slot_ptr[255].flags = 0;
+                break;
+            }
+        }
+    }
+}
+
 static void qpcie_buf_queue(struct vb2_buffer *vb)
 {
     struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
@@ -462,46 +547,19 @@ static void qpcie_buf_queue(struct vb2_buffer *vb)
     desc->plane_count     = 2;
 
     if (sgt0->nents > 1 || sgt1->nents > 1) {
-        struct scatterlist *sg;
-        unsigned int i, pt_idx;
-        dma_addr_t page_addr;
-        u32 len;
+        /* Variable-Length SGL Fetch Mode */
+        qpcie_build_variable_sgl(sgt0->sgl, sgt0->nents,
+                                 (struct qpcie_sgl_entry *)buf->y_slots_virt,
+                                 buf->y_slots_dma, QPCIE_MAX_PAGE_SLOTS_Y);
+        qpcie_build_variable_sgl(sgt1->sgl, sgt1->nents,
+                                 (struct qpcie_sgl_entry *)buf->uv_slots_virt,
+                                 buf->uv_slots_dma, QPCIE_MAX_PAGE_SLOTS_UV);
 
-        /* Program Y Plane Scatter-Gather Page Table into FPGA On-Chip BRAM */
-        iowrite32(0, qdev->bar0_mmio + REG_SG_PT_CTRL);
-        pt_idx = 0;
-        for_each_sg(sgt0->sgl, sg, sgt0->nents, i) {
-            page_addr = sg_dma_address(sg);
-            len = sg_dma_len(sg);
-            while (len >= 4096 && pt_idx < 2048) {
-                iowrite32((u32)page_addr, qdev->bar0_mmio + REG_SG_PT_DATA_LO);
-                /* Bit 31 = 0 (Y Plane) */
-                iowrite32((u32)(page_addr >> 32) & 0x7FFFFFFF, qdev->bar0_mmio + REG_SG_PT_DATA_HI);
-                page_addr += 4096;
-                len -= 4096;
-                pt_idx++;
-            }
-        }
-
-        /* Program UV Plane Scatter-Gather Page Table into FPGA On-Chip BRAM */
-        iowrite32(0, qdev->bar0_mmio + REG_SG_PT_CTRL);
-        pt_idx = 0;
-        for_each_sg(sgt1->sgl, sg, sgt1->nents, i) {
-            page_addr = sg_dma_address(sg);
-            len = sg_dma_len(sg);
-            while (len >= 4096 && pt_idx < 1024) {
-                iowrite32((u32)page_addr, qdev->bar0_mmio + REG_SG_PT_DATA_LO);
-                /* Bit 31 = 1 (UV Plane) */
-                iowrite32(((u32)(page_addr >> 32) & 0x7FFFFFFF) | 0x80000000, qdev->bar0_mmio + REG_SG_PT_DATA_HI);
-                page_addr += 4096;
-                len -= 4096;
-                pt_idx++;
-            }
-        }
-
-        desc->control = 0x0B | DESC_CTRL_SG_MODE; /* Valid | C2H | IRQ | SG_MODE */
+        desc->plane0_dst_addr = buf->y_slots_dma;
+        desc->plane1_dst_addr = buf->uv_slots_dma;
+        desc->control = 0x0B | DESC_CTRL_SG_FETCH_MODE; /* Valid | C2H | IRQ | SG_FETCH_MODE */
     } else {
-        desc->control = 0x0B; /* Valid | C2H | IRQ (Linear Mode) */
+        desc->control = 0x0B; /* Valid | C2H | IRQ (Linear Contiguous Mode) */
     }
 
     /* Descriptor data must be globally visible before publishing the shared
@@ -664,6 +722,8 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
 
 static const struct vb2_ops qpcie_vb2_ops = {
     .queue_setup    = qpcie_queue_setup,
+    .buf_init       = qpcie_buf_init,
+    .buf_cleanup    = qpcie_buf_cleanup,
     .buf_prepare    = qpcie_buf_prepare,
     .buf_queue      = qpcie_buf_queue,
     .start_streaming = qpcie_start_streaming,
