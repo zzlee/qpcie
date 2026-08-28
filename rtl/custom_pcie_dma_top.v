@@ -1125,7 +1125,7 @@ module custom_pcie_dma_top #(
     nv12_capture_engine #(
         .MAX_WIDTH(3840),
         .PCIE_DATA_WIDTH(PCIE_DATA_WIDTH),
-        .FIFO_DEPTH(128),
+        .FIFO_DEPTH(32),
         .MWR_PAYLOAD_BYTES(256)
     ) u_nv12_capture_engine (
         .clk(video_clk),
@@ -1310,7 +1310,7 @@ module custom_pcie_dma_top #(
     nv12_capture_engine #(
         .MAX_WIDTH(3840),
         .PCIE_DATA_WIDTH(PCIE_DATA_WIDTH),
-        .FIFO_DEPTH(128),
+        .FIFO_DEPTH(32),
         .MWR_PAYLOAD_BYTES(256)
     ) u_nv12_capture_engine_ch1 (
         .clk(video_clk),
