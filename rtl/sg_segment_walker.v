@@ -38,6 +38,7 @@ module sg_segment_walker #(
     // Translated Output Physical Address & Segment Status
     output reg  [63:0]                  current_addr,
     output reg  [31:0]                  seg_bytes_left,
+    output reg                          seg_valid,
     output wire [5:0]                   fifo_count,
     output wire                         fifo_almost_full,
     output wire                         fifo_empty
@@ -45,7 +46,7 @@ module sg_segment_walker #(
 
     localparam ADDR_W = $clog2(FIFO_DEPTH);
 
-    // 64-Entry SGL Segment FIFO (128 bits per entry: addr[63:0], len[31:0], flags[31:0])
+    // Distributed RAM SGL Segment FIFO
     (* ram_style = "distributed" *) reg [127:0] sgl_fifo [0:FIFO_DEPTH-1];
     reg [ADDR_W-1:0] wr_ptr;
     reg [ADDR_W-1:0] rd_ptr;
@@ -66,64 +67,83 @@ module sg_segment_walker #(
         end
     end
 
-    // FIFO Write Pointer Logic
+    // FIFO Pointers, Count, and Active Segment State Machine
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            wr_ptr <= {ADDR_W{1'b0}};
-        end else if (sgl_wr_en) begin
-            wr_ptr <= wr_ptr + 1'b1;
-        end
-    end
-
-    // FIFO Pop & Address Tracking Logic
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
+            wr_ptr         <= {ADDR_W{1'b0}};
             rd_ptr         <= {ADDR_W{1'b0}};
             count          <= {(ADDR_W+1){1'b0}};
             current_addr   <= 64'd0;
             seg_bytes_left <= 32'd0;
+            seg_valid      <= 1'b0;
+        end else if (start) begin
+            wr_ptr <= {ADDR_W{1'b0}};
+            rd_ptr <= {ADDR_W{1'b0}};
+            count  <= {(ADDR_W+1){1'b0}};
+            if (!sg_mode) begin
+                current_addr   <= linear_base_addr;
+                seg_bytes_left <= 32'hFFFFFFFF;
+                seg_valid      <= 1'b1;
+            end else begin
+                current_addr   <= 64'd0;
+                seg_bytes_left <= 32'd0;
+                seg_valid      <= 1'b0;
+            end
+        end else if (!sg_mode) begin
+            // Mode 0: Linear contiguous increment
+            if (advance_burst) begin
+                current_addr <= current_addr + burst_bytes;
+            end
         end else begin
-            // Count tracking
-            if (sgl_wr_en && (advance_burst && sg_mode && (seg_bytes_left <= burst_bytes) && (count > 1))) begin
-                count <= count; // Simultaneous push and pop
-            end else if (sgl_wr_en) begin
-                count <= count + 1'b1;
-            end else if (advance_burst && sg_mode && (seg_bytes_left <= burst_bytes) && (count > 0)) begin
-                count <= count - 1'b1;
+            // Mode 1: Variable Scatter-Gather Mode
+            if (sgl_wr_en) begin
+                wr_ptr <= wr_ptr + 1'b1;
             end
 
-            if (start) begin
-                if (!sg_mode) begin
-                    // Linear Mode
-                    current_addr   <= linear_base_addr;
-                    seg_bytes_left <= 32'hFFFFFFFF;
+            if (!seg_valid || seg_bytes_left == 0) begin
+                // Walker has no active segment loaded: Load head entry from FIFO or bypass
+                if (count > 0) begin
+                    current_addr   <= cur_entry_addr;
+                    seg_bytes_left <= cur_entry_len;
+                    rd_ptr         <= rd_ptr + 1'b1;
+                    count          <= sgl_wr_en ? count : (count - 1'b1);
+                    seg_valid      <= 1'b1;
+                end else if (sgl_wr_en) begin
+                    // Zero-cycle bypass directly into active segment register
+                    current_addr   <= sgl_wr_addr;
+                    seg_bytes_left <= sgl_wr_len;
+                    seg_valid      <= 1'b1;
                 end else begin
-                    // Variable SGL Mode: Load first segment
-                    if (count > 0 || sgl_wr_en) begin
-                        current_addr   <= (count > 0) ? cur_entry_addr : sgl_wr_addr;
-                        seg_bytes_left <= (count > 0) ? cur_entry_len  : sgl_wr_len;
-                        if (count > 0) begin
-                            rd_ptr <= rd_ptr + 1'b1;
-                            count  <= count - 1'b1;
-                        end
-                    end
+                    seg_valid <= 1'b0;
                 end
-            end else if (advance_burst) begin
-                if (!sg_mode) begin
-                    // Linear contiguous increment
-                    current_addr <= current_addr + burst_bytes;
-                end else begin
-                    // Variable SGL: Check if current segment completes
+            end else begin
+                // Walker has active segment loaded
+                if (advance_burst) begin
                     if (seg_bytes_left > burst_bytes) begin
                         // Stay within current segment
                         current_addr   <= current_addr + burst_bytes;
                         seg_bytes_left <= seg_bytes_left - burst_bytes;
+                        count          <= sgl_wr_en ? (count + 1'b1) : count;
                     end else begin
-                        // Advance to next segment in FIFO
-                        rd_ptr         <= rd_ptr + 1'b1;
-                        current_addr   <= cur_entry_addr;
-                        seg_bytes_left <= cur_entry_len;
+                        // Current segment finishes with this burst: Pop next segment
+                        if (count > 0) begin
+                            current_addr   <= cur_entry_addr;
+                            seg_bytes_left <= cur_entry_len;
+                            rd_ptr         <= rd_ptr + 1'b1;
+                            count          <= sgl_wr_en ? count : (count - 1'b1);
+                            seg_valid      <= 1'b1;
+                        end else if (sgl_wr_en) begin
+                            current_addr   <= sgl_wr_addr;
+                            seg_bytes_left <= sgl_wr_len;
+                            seg_valid      <= 1'b1;
+                        end else begin
+                            current_addr   <= 64'd0;
+                            seg_bytes_left <= 32'd0;
+                            seg_valid      <= 1'b0;
+                        end
                     end
+                end else begin
+                    count <= sgl_wr_en ? (count + 1'b1) : count;
                 end
             end
         end

@@ -112,6 +112,7 @@ module nv12_capture_engine #(
 
     wire [63:0] y_walker_addr;
     wire [31:0] y_walker_bytes_left;
+    wire        y_seg_valid;
 
     sg_segment_walker #(
         .FIFO_DEPTH(16)
@@ -129,6 +130,7 @@ module nv12_capture_engine #(
         .burst_bytes(active_req_bytes),
         .current_addr(y_walker_addr),
         .seg_bytes_left(y_walker_bytes_left),
+        .seg_valid(y_seg_valid),
         .fifo_count(cur_y_sgl_count),
         .fifo_almost_full(),
         .fifo_empty()
@@ -136,6 +138,7 @@ module nv12_capture_engine #(
 
     wire [63:0] uv_walker_addr;
     wire [31:0] uv_walker_bytes_left;
+    wire        uv_seg_valid;
 
     sg_segment_walker #(
         .FIFO_DEPTH(16)
@@ -153,6 +156,7 @@ module nv12_capture_engine #(
         .burst_bytes(active_req_bytes),
         .current_addr(uv_walker_addr),
         .seg_bytes_left(uv_walker_bytes_left),
+        .seg_valid(uv_seg_valid),
         .fifo_count(cur_uv_sgl_count),
         .fifo_almost_full(),
         .fifo_empty()
@@ -168,13 +172,13 @@ module nv12_capture_engine #(
     wire [10:0] y_next_dw_len = y_is_256 ? 11'd64 : 11'd32;
     wire [4:0]  y_next_beats  = y_is_256 ? 5'd16  : 5'd8;
     wire [15:0] y_next_bytes  = y_is_256 ? 16'd256: 16'd128;
-    wire y_ready_to_send = (y_fifo_count >= y_next_beats);
+    wire y_ready_to_send = (!desc_sg_mode || (y_seg_valid && y_walker_bytes_left > 0)) && (y_fifo_count >= y_next_beats);
 
     wire uv_is_256 = (uv_rem_bytes >= 16'd256) && (cur_uv_target_addr[11:7] != 5'b11111) && (!desc_sg_mode || (uv_walker_bytes_left >= 256));
     wire [10:0] uv_next_dw_len = uv_is_256 ? 11'd64 : 11'd32;
     wire [4:0]  uv_next_beats  = uv_is_256 ? 5'd16  : 5'd8;
     wire [15:0] uv_next_bytes  = uv_is_256 ? 16'd256: 16'd128;
-    wire uv_ready_to_send = (uv_fifo_count >= uv_next_beats);
+    wire uv_ready_to_send = (!desc_sg_mode || (uv_seg_valid && uv_walker_bytes_left > 0)) && (uv_fifo_count >= uv_next_beats);
 
     function [31:0] pack_y4;
         input [127:0] d;

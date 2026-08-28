@@ -820,7 +820,8 @@ module custom_pcie_dma_top #(
         .c2h_plane12_width(c2h_plane12_width), .c2h_plane12_count(c2h_plane12_count),
         .c2h_format(c2h_format), .c2h_plane_count(c2h_plane_count),
         .c2h_desc_ctrl(c2h_desc_ctrl),
-        .c2h_desc_ready(c2h_desc_ready)
+        .c2h_desc_ready(c2h_desc_ready),
+        .sg_fetch_busy(sg_fetch_busy)
     );
 
     // 7.1 Scatter-Gather (SG) DMA Engine (H2C MRd Stream Consumer & C2H MWr Pattern Generator)

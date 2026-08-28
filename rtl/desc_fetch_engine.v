@@ -53,14 +53,18 @@ module desc_fetch_engine (
     output reg  [15:0] c2h_plane12_width, c2h_plane12_count,
     output reg  [3:0]  c2h_format, c2h_plane_count,
     output reg  [15:0] c2h_desc_ctrl,
-    input  wire        c2h_desc_ready
+    input  wire        c2h_desc_ready,
+
+    // SG Fetch Engine Status (To synchronize multi-channel descriptor SGL prefetching)
+    input  wire        sg_fetch_busy
 );
 
-    localparam IDLE       = 3'b000;
-    localparam REQ_FETCH  = 3'b001;
-    localparam WAIT_CPLD  = 3'b010;
-    localparam DISPATCH   = 3'b011;
-    localparam INC_HEAD   = 3'b100;
+    localparam IDLE           = 3'b000;
+    localparam REQ_FETCH      = 3'b001;
+    localparam WAIT_CPLD      = 3'b010;
+    localparam DISPATCH       = 3'b011;
+    localparam WAIT_SGL_FETCH = 3'b100;
+    localparam INC_HEAD       = 3'b101;
 
     reg [2:0] state;
 
@@ -157,10 +161,22 @@ module desc_fetch_engine (
                 DISPATCH: begin
                     if (h2c_desc_valid && h2c_desc_ready) begin
                         h2c_desc_valid <= 1'b0;
-                        state          <= INC_HEAD;
+                        if (h2c_desc_ctrl[5] || h2c_desc_ctrl[4])
+                            state <= WAIT_SGL_FETCH;
+                        else
+                            state <= INC_HEAD;
                     end else if (c2h_desc_valid && c2h_desc_ready) begin
                         c2h_desc_valid <= 1'b0;
-                        state          <= INC_HEAD;
+                        if (c2h_desc_ctrl[5] || c2h_desc_ctrl[4])
+                            state <= WAIT_SGL_FETCH;
+                        else
+                            state <= INC_HEAD;
+                    end
+                end
+
+                WAIT_SGL_FETCH: begin
+                    if (!sg_fetch_busy) begin
+                        state <= INC_HEAD;
                     end
                 end
 

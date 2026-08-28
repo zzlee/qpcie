@@ -114,6 +114,7 @@ module sg_dma_engine #(
 
     wire [63:0] h2c_y_walker_addr;
     wire [31:0] h2c_y_walker_bytes_left;
+    wire        h2c_y_seg_valid;
     wire [5:0]  h2c_y_sgl_count;
 
     sg_segment_walker #(
@@ -132,6 +133,7 @@ module sg_dma_engine #(
         .burst_bytes({h2c_burst_dw, 2'b00}),
         .current_addr(h2c_y_walker_addr),
         .seg_bytes_left(h2c_y_walker_bytes_left),
+        .seg_valid(h2c_y_seg_valid),
         .fifo_count(h2c_y_sgl_count),
         .fifo_almost_full(),
         .fifo_empty()
@@ -139,6 +141,7 @@ module sg_dma_engine #(
 
     wire [63:0] h2c_uv_walker_addr;
     wire [31:0] h2c_uv_walker_bytes_left;
+    wire        h2c_uv_seg_valid;
     wire [5:0]  h2c_uv_sgl_count;
 
     sg_segment_walker #(
@@ -157,6 +160,7 @@ module sg_dma_engine #(
         .burst_bytes({h2c_burst_dw, 2'b00}),
         .current_addr(h2c_uv_walker_addr),
         .seg_bytes_left(h2c_uv_walker_bytes_left),
+        .seg_valid(h2c_uv_seg_valid),
         .fifo_count(h2c_uv_sgl_count),
         .fifo_almost_full(),
         .fifo_empty()
@@ -168,7 +172,7 @@ module sg_dma_engine #(
     wire [15:0] h2c_limit_bytes = (h2c_rem_bytes < 32'd256) ? h2c_rem_bytes[15:0] : 16'd256;
     wire [15:0] h2c_burst_bytes = (h2c_limit_bytes < h2c_avail_bytes[15:0]) ? h2c_limit_bytes : h2c_avail_bytes[15:0];
 
-    wire h2c_walker_ready = !h2c_sg_mode || (!h2c_is_uv ? (h2c_y_sgl_count > 0 || h2c_y_walker_bytes_left > 0) : (h2c_uv_sgl_count > 0 || h2c_uv_walker_bytes_left > 0));
+    wire h2c_walker_ready = !h2c_sg_mode || (!h2c_is_uv ? (h2c_y_seg_valid && h2c_y_walker_bytes_left > 0) : (h2c_uv_seg_valid && h2c_uv_walker_bytes_left > 0));
 
     assign h2c_busy = (h2c_state != H2C_IDLE);
 
