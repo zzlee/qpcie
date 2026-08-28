@@ -66,19 +66,25 @@ module sg_dma_engine #(
     input  wire [PCIE_DATA_WIDTH-1:0]    h2c_cpl_data,
     input  wire                          h2c_cpl_last,
 
+    // Flow Control Backpressure to SG Host Fetch Engine
+    output wire                          h2c_y_almost_full,
+    output wire                          h2c_uv_almost_full,
+
     // Loopback Stream Interface (For Multi-Channel Video Loopback)
     output wire [PCIE_DATA_WIDTH-1:0]    m_axis_loopback_tdata,
     output wire                          m_axis_loopback_tvalid,
     output wire                          m_axis_loopback_tlast,
     output wire                          m_axis_loopback_tuser,
+    input  wire                          m_axis_loopback_tready,
 
-    // Real-time DMA Status & Counters
+    // Status & Error Counters
+    output wire                          h2c_busy,
+    output wire                          c2h_busy,
     output reg  [31:0]                   completed_h2c_count,
     output reg  [31:0]                   completed_c2h_count,
     output reg  [31:0]                   h2c_bytes_transferred,
     output reg  [31:0]                   c2h_bytes_transferred,
-    output wire                          h2c_busy,
-    output wire                          c2h_busy
+    output reg  [31:0]                   dma_error_count
 );
 
     assign m_axis_loopback_tdata  = h2c_cpl_data;
@@ -115,10 +121,10 @@ module sg_dma_engine #(
     wire [63:0] h2c_y_walker_addr;
     wire [31:0] h2c_y_walker_bytes_left;
     wire        h2c_y_seg_valid;
-    wire [5:0]  h2c_y_sgl_count;
+    wire [6:0]  h2c_y_sgl_count;
 
     sg_segment_walker #(
-        .FIFO_DEPTH(16)
+        .FIFO_DEPTH(64)
     ) u_h2c_y_walker (
         .clk(clk),
         .rst_n(rst_n),
@@ -135,17 +141,17 @@ module sg_dma_engine #(
         .seg_bytes_left(h2c_y_walker_bytes_left),
         .seg_valid(h2c_y_seg_valid),
         .fifo_count(h2c_y_sgl_count),
-        .fifo_almost_full(),
+        .fifo_almost_full(h2c_y_almost_full),
         .fifo_empty()
     );
 
     wire [63:0] h2c_uv_walker_addr;
     wire [31:0] h2c_uv_walker_bytes_left;
     wire        h2c_uv_seg_valid;
-    wire [5:0]  h2c_uv_sgl_count;
+    wire [6:0]  h2c_uv_sgl_count;
 
     sg_segment_walker #(
-        .FIFO_DEPTH(16)
+        .FIFO_DEPTH(64)
     ) u_h2c_uv_walker (
         .clk(clk),
         .rst_n(rst_n),
@@ -162,7 +168,7 @@ module sg_dma_engine #(
         .seg_bytes_left(h2c_uv_walker_bytes_left),
         .seg_valid(h2c_uv_seg_valid),
         .fifo_count(h2c_uv_sgl_count),
-        .fifo_almost_full(),
+        .fifo_almost_full(h2c_uv_almost_full),
         .fifo_empty()
     );
 

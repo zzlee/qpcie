@@ -35,8 +35,10 @@ module nv12_capture_engine #(
     input  wire [63:0]                  sgl_uv_wr_addr,
     input  wire [31:0]                  sgl_uv_wr_len,
     input  wire [31:0]                  sgl_uv_wr_flags,
-    output wire [5:0]                   cur_y_sgl_count,
-    output wire [5:0]                   cur_uv_sgl_count,
+    output wire [6:0]                   cur_y_sgl_count,
+    output wire [6:0]                   cur_uv_sgl_count,
+    output wire                         sgl_y_pop_ready,
+    output wire                         sgl_uv_pop_ready,
 
     input  wire                         pacer_enable,
     input  wire [31:0]                  frame_interval_clks,
@@ -89,9 +91,8 @@ module nv12_capture_engine #(
     reg [127:0] odd_data;
     reg [15:0] odd_col;
     reg odd_frame_end;
+    reg [35:0] chroma_line [0:CHROMA_WORDS-1];
     reg [35:0] chroma_even_q;
-
-    (* ram_style = "block" *) reg [35:0] chroma_line [0:CHROMA_WORDS-1];
 
     // Two small asynchronous-read distributed FIFOs hold complete 16-byte
     // output beats.  A request starts only when all eight beats of a 128-byte
@@ -113,9 +114,12 @@ module nv12_capture_engine #(
     wire [63:0] y_walker_addr;
     wire [31:0] y_walker_bytes_left;
     wire        y_seg_valid;
+    wire        y_walker_almost_full;
+
+    assign sgl_y_pop_ready = !y_walker_almost_full;
 
     sg_segment_walker #(
-        .FIFO_DEPTH(16)
+        .FIFO_DEPTH(64)
     ) u_y_segment_walker (
         .clk(clk),
         .rst_n(rst_n),
@@ -132,16 +136,19 @@ module nv12_capture_engine #(
         .seg_bytes_left(y_walker_bytes_left),
         .seg_valid(y_seg_valid),
         .fifo_count(cur_y_sgl_count),
-        .fifo_almost_full(),
+        .fifo_almost_full(y_walker_almost_full),
         .fifo_empty()
     );
 
     wire [63:0] uv_walker_addr;
     wire [31:0] uv_walker_bytes_left;
     wire        uv_seg_valid;
+    wire        uv_walker_almost_full;
+
+    assign sgl_uv_pop_ready = !uv_walker_almost_full;
 
     sg_segment_walker #(
-        .FIFO_DEPTH(16)
+        .FIFO_DEPTH(64)
     ) u_uv_segment_walker (
         .clk(clk),
         .rst_n(rst_n),
@@ -158,7 +165,7 @@ module nv12_capture_engine #(
         .seg_bytes_left(uv_walker_bytes_left),
         .seg_valid(uv_seg_valid),
         .fifo_count(cur_uv_sgl_count),
-        .fifo_almost_full(),
+        .fifo_almost_full(uv_walker_almost_full),
         .fifo_empty()
     );
 

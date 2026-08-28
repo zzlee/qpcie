@@ -48,7 +48,11 @@ module sg_host_fetch_engine #(
     output reg         sgl_uv_wr_en,
     output reg  [63:0] sgl_uv_wr_addr,
     output reg  [31:0] sgl_uv_wr_len,
-    output reg  [31:0] sgl_uv_wr_flags
+    output reg  [31:0] sgl_uv_wr_flags,
+
+    // Flow Control Backpressure (Bit 4: H2C, Bit 0..3: C2H Channel 0..3)
+    input  wire [4:0]  channel_y_almost_full,
+    input  wire [4:0]  channel_uv_almost_full
 );
 
     localparam S_IDLE       = 3'd0;
@@ -63,6 +67,9 @@ module sg_host_fetch_engine #(
     reg [2:0]  curr_channel;
     reg        curr_plane; // 0 = Y Plane, 1 = UV Plane
     reg [63:0] curr_slot_base;
+
+    wire curr_target_almost_full = (curr_plane == 1'b0) ?
+        channel_y_almost_full[curr_channel] : channel_uv_almost_full[curr_channel];
     reg [11:0] curr_slot_offset; // 0 .. 4095
     reg [63:0] next_slot_ptr;
     reg        curr_plane_last_seen;
@@ -150,15 +157,19 @@ module sg_host_fetch_engine #(
                 end
 
                 S_REQ_BURST: begin
-                    mrd_req_valid  <= 1'b1;
-                    mrd_req_addr   <= curr_slot_base + curr_slot_offset;
-                    mrd_req_dw_len <= 11'd64; // 256 Bytes (16 entries)
-                    mrd_req_tag    <= 8'h01;
-                    buf_rd_idx     <= 5'd0;
+                    if (!curr_target_almost_full) begin
+                        mrd_req_valid  <= 1'b1;
+                        mrd_req_addr   <= curr_slot_base + curr_slot_offset;
+                        mrd_req_dw_len <= 11'd64; // 256 Bytes (16 entries)
+                        mrd_req_tag    <= 8'h01;
+                        buf_rd_idx     <= 5'd0;
 
-                    if (mrd_req_valid && mrd_req_ack) begin
+                        if (mrd_req_valid && mrd_req_ack) begin
+                            mrd_req_valid <= 1'b0;
+                            state         <= S_WAIT_CPLD;
+                        end
+                    end else begin
                         mrd_req_valid <= 1'b0;
-                        state         <= S_WAIT_CPLD;
                     end
                 end
 

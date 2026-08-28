@@ -15,7 +15,7 @@
 `timescale 1ns / 1ps
 
 module sg_segment_walker #(
-    parameter integer FIFO_DEPTH = 16
+    parameter integer FIFO_DEPTH = 64
 )(
     input  wire                         clk,
     input  wire                         rst_n,
@@ -39,7 +39,7 @@ module sg_segment_walker #(
     output reg  [63:0]                  current_addr,
     output reg  [31:0]                  seg_bytes_left,
     output reg                          seg_valid,
-    output wire [5:0]                   fifo_count,
+    output wire [6:0]                   fifo_count,
     output wire                         fifo_almost_full,
     output wire                         fifo_empty
 );
@@ -54,7 +54,7 @@ module sg_segment_walker #(
 
     assign fifo_count       = count;
     assign fifo_empty       = (count == 0);
-    assign fifo_almost_full = (count >= (FIFO_DEPTH - 4));
+    assign fifo_almost_full = (count >= (FIFO_DEPTH - 20));
 
     wire [127:0] cur_fifo_entry = sgl_fifo[rd_ptr];
     wire [63:0]  cur_entry_addr  = cur_fifo_entry[63:0];
