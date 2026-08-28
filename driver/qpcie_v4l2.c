@@ -469,6 +469,13 @@ static int qpcie_buf_init(struct vb2_buffer *vb)
         buf->y_slots_virt = NULL;
         return -ENOMEM;
     }
+    dev_info(&qdev->pdev->dev,
+             "SGL alloc ch%u %s: y=%pad/%uK uv=%pad/%uK\n",
+             vch->channel_id,
+             vch->buf_type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE ?
+             "H2C" : "C2H",
+             &buf->y_slots_dma, QPCIE_MAX_PAGE_SLOTS_Y * 4,
+             &buf->uv_slots_dma, QPCIE_MAX_PAGE_SLOTS_UV * 4);
     return 0;
 }
 
@@ -571,19 +578,6 @@ static void qpcie_buf_queue(struct vb2_buffer *vb)
                                  (struct qpcie_sgl_entry *)buf->uv_slots_virt,
                                  buf->uv_slots_dma, QPCIE_MAX_PAGE_SLOTS_UV);
 
-        dev_info_ratelimited(&qdev->pdev->dev,
-                             "SGL ch%u %s: y nents=%u slots=%pad first=%pad/%u, "
-                             "uv nents=%u slots=%pad first=%pad/%u\n",
-                             vch->channel_id,
-                             vch->buf_type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE ?
-                             "H2C" : "C2H",
-                             sgt0->nents, &buf->y_slots_dma,
-                             &((struct qpcie_sgl_entry *)buf->y_slots_virt)[0].phys_addr,
-                             ((struct qpcie_sgl_entry *)buf->y_slots_virt)[0].len_bytes,
-                             sgt1->nents, &buf->uv_slots_dma,
-                             &((struct qpcie_sgl_entry *)buf->uv_slots_virt)[0].phys_addr,
-                             ((struct qpcie_sgl_entry *)buf->uv_slots_virt)[0].len_bytes);
-
         if (vch->buf_type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
             desc->plane0_src_addr = buf->y_slots_dma;
             desc->plane1_src_addr = buf->uv_slots_dma;
@@ -606,6 +600,20 @@ static void qpcie_buf_queue(struct vb2_buffer *vb)
             desc->control = 0x0B | (vch->channel_id << DESC_CTRL_CHANNEL_SHIFT);
         }
     }
+
+    dev_info(&qdev->pdev->dev,
+             "DESC[%u] ch%u %s: mode=%s ctrl=0x%02x nents=%u/%u "
+             "p0=0x%016llx p1=0x%016llx slots=%pad/%pad\n",
+             tail, vch->channel_id,
+             vch->buf_type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE ?
+             "H2C" : "C2H",
+             desc->control & DESC_CTRL_SG_FETCH_MODE ? "SGL" : "linear",
+             desc->control, sgt0->nents, sgt1->nents,
+             vch->buf_type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE ?
+             desc->plane0_src_addr : desc->plane0_dst_addr,
+             vch->buf_type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE ?
+             desc->plane1_src_addr : desc->plane1_dst_addr,
+             &buf->y_slots_dma, &buf->uv_slots_dma);
 
     /* Descriptor data must be globally visible before publishing the shared
      * hardware-ring tail doorbell. */
