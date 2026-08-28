@@ -539,17 +539,9 @@ static void qpcie_buf_queue(struct vb2_buffer *vb)
     struct qpcie_v4l2_channel *vch = vb2_get_drv_priv(vb->vb2_queue);
     struct qpcie_dev *qdev = vch->qdev;
     struct qpcie_dma_desc_2d *desc;
-    struct sg_table *sgt0, *sgt1;
     dma_addr_t plane0_dma, plane1_dma;
     u32 tail;
 
-    sgt0 = vb2_dma_sg_plane_desc(vb, 0);
-    sgt1 = vb2_dma_sg_plane_desc(vb, 1);
-    if (WARN_ON(!sgt0 || !sgt1))
-        return;
-
-    plane0_dma = sg_dma_address(sgt0->sgl);
-    plane1_dma = sg_dma_address(sgt1->sgl);
     tail = qdev->h2c_tail;
     desc = &qdev->h2c_ring_virt[tail];
     memset(desc, 0, sizeof(*desc));
@@ -563,26 +555,16 @@ static void qpcie_buf_queue(struct vb2_buffer *vb)
     desc->format          = 0x2; /* NV12M */
     desc->plane_count     = 2;
 
-    if (vch->buf_type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
-        /* Video Output (Host -> H2C FPGA Loopback Stream) */
-        if (sgt0->nents > 1 || sgt1->nents > 1) {
-            qpcie_build_variable_sgl(sgt0->sgl, sgt0->nents,
-                                     (struct qpcie_sgl_entry *)buf->y_slots_virt,
-                                     buf->y_slots_dma, QPCIE_MAX_PAGE_SLOTS_Y);
-            qpcie_build_variable_sgl(sgt1->sgl, sgt1->nents,
-                                     (struct qpcie_sgl_entry *)buf->uv_slots_virt,
-                                     buf->uv_slots_dma, QPCIE_MAX_PAGE_SLOTS_UV);
+    if (vch->channel_id == 0) {
+        /* Channel 0: TPG0 Capture (Variable SGL Fetch Mode) */
+        struct sg_table *sgt0 = vb2_dma_sg_plane_desc(vb, 0);
+        struct sg_table *sgt1 = vb2_dma_sg_plane_desc(vb, 1);
+        if (WARN_ON(!sgt0 || !sgt1))
+            return;
 
-            desc->plane0_src_addr = buf->y_slots_dma;
-            desc->plane1_src_addr = buf->uv_slots_dma;
-            desc->control = 0x09 | (vch->channel_id << 2) | DESC_CTRL_SG_FETCH_MODE;
-        } else {
-            desc->plane0_src_addr = plane0_dma;
-            desc->plane1_src_addr = plane1_dma;
-            desc->control = 0x09 | (vch->channel_id << 2);
-        }
-    } else {
-        /* Video Capture (FPGA -> C2H Host Memory Stream) */
+        plane0_dma = sg_dma_address(sgt0->sgl);
+        plane1_dma = sg_dma_address(sgt1->sgl);
+
         if (sgt0->nents > 1 || sgt1->nents > 1) {
             qpcie_build_variable_sgl(sgt0->sgl, sgt0->nents,
                                      (struct qpcie_sgl_entry *)buf->y_slots_virt,
@@ -595,6 +577,24 @@ static void qpcie_buf_queue(struct vb2_buffer *vb)
             desc->plane1_dst_addr = buf->uv_slots_dma;
             desc->control = 0x0B | (vch->channel_id << 2) | DESC_CTRL_SG_FETCH_MODE;
         } else {
+            desc->plane0_dst_addr = plane0_dma;
+            desc->plane1_dst_addr = plane1_dma;
+            desc->control = 0x0B | (vch->channel_id << 2);
+        }
+    } else {
+        /* Channel 1: Full-Duplex Hardware Loopback (Contiguous DMA Mode) */
+        plane0_dma = vb2_dma_contig_plane_dma_addr(vb, 0);
+        plane1_dma = vb2_dma_contig_plane_dma_addr(vb, 1);
+        if (WARN_ON(!plane0_dma || !plane1_dma))
+            return;
+
+        if (vch->buf_type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
+            /* Output Stream (Host -> FPGA MRd) */
+            desc->plane0_src_addr = plane0_dma;
+            desc->plane1_src_addr = plane1_dma;
+            desc->control = 0x09 | (vch->channel_id << 2);
+        } else {
+            /* Capture Stream (FPGA -> Host MWr) */
             desc->plane0_dst_addr = plane0_dma;
             desc->plane1_dst_addr = plane1_dma;
             desc->control = 0x0B | (vch->channel_id << 2);
@@ -889,14 +889,15 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
             goto unreg_v4l2;
         }
 
-        /* Scatter-Gather DMA with MMAP, USERPTR, and DMABUF support */
-        dev_info(&qdev->pdev->dev, "[DEBUG STEP 2.4] Node %d: Initializing vb2_queue with vb2_dma_sg...\n", i);
+        /* Initialize vb2_queue: Node 0 uses vb2_dma_sg, Nodes 1 & 2 use vb2_dma_contig */
+        dev_info(&qdev->pdev->dev, "[DEBUG STEP 2.4] Node %d: Initializing vb2_queue with %s...\n",
+                 i, (i == 0) ? "vb2_dma_sg" : "vb2_dma_contig");
         vch->queue.type            = vch->buf_type;
         vch->queue.io_modes        = VB2_MMAP | VB2_USERPTR | VB2_DMABUF;
         vch->queue.drv_priv        = vch;
         vch->queue.buf_struct_size = sizeof(struct qpcie_v4l2_buffer);
         vch->queue.ops             = &qpcie_vb2_ops;
-        vch->queue.mem_ops         = &vb2_dma_sg_memops;
+        vch->queue.mem_ops         = (i == 0) ? &vb2_dma_sg_memops : &vb2_dma_contig_memops;
         vch->queue.timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
         vch->queue.lock            = &vch->lock;
         vch->queue.dev             = &qdev->pdev->dev;

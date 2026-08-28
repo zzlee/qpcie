@@ -25,6 +25,7 @@
 #include <media/v4l2-ctrls.h>
 #include <media/videobuf2-v4l2.h>
 #include <media/videobuf2-dma-sg.h>
+#include <media/videobuf2-dma-contig.h>
 
 #include <sound/core.h>
 #include <sound/control.h>
