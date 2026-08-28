@@ -105,9 +105,8 @@ module nv12_capture_engine #(
     reg prefer_uv;
     reg [4:0] payload_beats_to_load;
     reg [15:0] active_req_bytes;
-
-    wire [15:0] y_rem_bytes  = width_q - y_send_offset;
-    wire [15:0] uv_rem_bytes = width_q - uv_send_offset;
+    reg [15:0] y_rem_bytes;
+    reg [15:0] uv_rem_bytes;
 
     wire descriptor_accept = desc_valid && !video_busy;
 
@@ -390,6 +389,8 @@ module nv12_capture_engine #(
             uv_line_start_addr <= 0;
             y_send_offset <= 0;
             uv_send_offset <= 0;
+            y_rem_bytes <= 0;
+            uv_rem_bytes <= 0;
             y_send_line <= 0;
             uv_send_line <= 0;
         end else if (descriptor_accept) begin
@@ -408,6 +409,8 @@ module nv12_capture_engine #(
             uv_line_start_addr <= plane_uv_addr;
             y_send_offset <= 0;
             uv_send_offset <= 0;
+            y_rem_bytes <= frame_width;
+            uv_rem_bytes <= frame_width;
             y_send_line <= 0;
             uv_send_line <= 0;
         end else begin
@@ -450,21 +453,25 @@ module nv12_capture_engine #(
                 if (request_is_uv) begin
                     if (uv_send_offset + active_req_bytes >= width_q) begin
                         uv_send_offset     <= 16'd0;
+                        uv_rem_bytes       <= width_q;
                         uv_send_line       <= uv_send_line + 1'b1;
                         uv_line_start_addr <= uv_line_start_addr + stride_q;
                         uv_send_addr       <= uv_line_start_addr + stride_q;
                     end else begin
                         uv_send_offset <= uv_send_offset + active_req_bytes;
+                        uv_rem_bytes   <= width_q - (uv_send_offset + active_req_bytes);
                         uv_send_addr   <= uv_send_addr + active_req_bytes;
                     end
                 end else begin
                     if (y_send_offset + active_req_bytes >= width_q) begin
                         y_send_offset     <= 16'd0;
+                        y_rem_bytes       <= width_q;
                         y_send_line       <= y_send_line + 1'b1;
                         y_line_start_addr <= y_line_start_addr + stride_q;
                         y_send_addr       <= y_line_start_addr + stride_q;
                     end else begin
                         y_send_offset <= y_send_offset + active_req_bytes;
+                        y_rem_bytes   <= width_q - (y_send_offset + active_req_bytes);
                         y_send_addr   <= y_send_addr + active_req_bytes;
                     end
                 end

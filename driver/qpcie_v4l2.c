@@ -555,46 +555,37 @@ static void qpcie_buf_queue(struct vb2_buffer *vb)
     desc->format          = 0x2; /* NV12M */
     desc->plane_count     = 2;
 
-    if (vch->channel_id == 0) {
-        /* Channel 0: TPG0 Capture (Variable SGL Fetch Mode) */
-        struct sg_table *sgt0 = vb2_dma_sg_plane_desc(vb, 0);
-        struct sg_table *sgt1 = vb2_dma_sg_plane_desc(vb, 1);
-        if (WARN_ON(!sgt0 || !sgt1))
-            return;
+    struct sg_table *sgt0 = vb2_dma_sg_plane_desc(vb, 0);
+    struct sg_table *sgt1 = vb2_dma_sg_plane_desc(vb, 1);
+    if (WARN_ON(!sgt0 || !sgt1))
+        return;
 
-        plane0_dma = sg_dma_address(sgt0->sgl);
-        plane1_dma = sg_dma_address(sgt1->sgl);
+    plane0_dma = sg_dma_address(sgt0->sgl);
+    plane1_dma = sg_dma_address(sgt1->sgl);
 
-        if (sgt0->nents > 1 || sgt1->nents > 1) {
-            qpcie_build_variable_sgl(sgt0->sgl, sgt0->nents,
-                                     (struct qpcie_sgl_entry *)buf->y_slots_virt,
-                                     buf->y_slots_dma, QPCIE_MAX_PAGE_SLOTS_Y);
-            qpcie_build_variable_sgl(sgt1->sgl, sgt1->nents,
-                                     (struct qpcie_sgl_entry *)buf->uv_slots_virt,
-                                     buf->uv_slots_dma, QPCIE_MAX_PAGE_SLOTS_UV);
+    if (sgt0->nents > 1 || sgt1->nents > 1) {
+        qpcie_build_variable_sgl(sgt0->sgl, sgt0->nents,
+                                 (struct qpcie_sgl_entry *)buf->y_slots_virt,
+                                 buf->y_slots_dma, QPCIE_MAX_PAGE_SLOTS_Y);
+        qpcie_build_variable_sgl(sgt1->sgl, sgt1->nents,
+                                 (struct qpcie_sgl_entry *)buf->uv_slots_virt,
+                                 buf->uv_slots_dma, QPCIE_MAX_PAGE_SLOTS_UV);
 
+        if (vch->buf_type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
+            desc->plane0_src_addr = buf->y_slots_dma;
+            desc->plane1_src_addr = buf->uv_slots_dma;
+            desc->control = 0x09 | (vch->channel_id << 2) | DESC_CTRL_SG_FETCH_MODE;
+        } else {
             desc->plane0_dst_addr = buf->y_slots_dma;
             desc->plane1_dst_addr = buf->uv_slots_dma;
             desc->control = 0x0B | (vch->channel_id << 2) | DESC_CTRL_SG_FETCH_MODE;
-        } else {
-            desc->plane0_dst_addr = plane0_dma;
-            desc->plane1_dst_addr = plane1_dma;
-            desc->control = 0x0B | (vch->channel_id << 2);
         }
     } else {
-        /* Channel 1: Full-Duplex Hardware Loopback (Contiguous DMA Mode) */
-        plane0_dma = vb2_dma_contig_plane_dma_addr(vb, 0);
-        plane1_dma = vb2_dma_contig_plane_dma_addr(vb, 1);
-        if (WARN_ON(!plane0_dma || !plane1_dma))
-            return;
-
         if (vch->buf_type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
-            /* Output Stream (Host -> FPGA MRd) */
             desc->plane0_src_addr = plane0_dma;
             desc->plane1_src_addr = plane1_dma;
             desc->control = 0x09 | (vch->channel_id << 2);
         } else {
-            /* Capture Stream (FPGA -> Host MWr) */
             desc->plane0_dst_addr = plane0_dma;
             desc->plane1_dst_addr = plane1_dma;
             desc->control = 0x0B | (vch->channel_id << 2);
@@ -860,14 +851,34 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
 
         dev_info(&qdev->pdev->dev, "[DEBUG STEP 2.2] Initializing Video Node %d...\n", i);
         vch->qdev       = qdev;
-        vch->channel_id = (i == 0) ? 0 : 1;
         vch->width      = 1920;
         vch->height     = 1080;
         vch->stride     = 1920;
         vch->pixelformat= V4L2_PIX_FMT_NV12M;
         vch->pacer_enable = true;
-        vch->buf_type   = (i == 1) ? V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE :
-                                     V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+
+        if (i == 0) {
+            vch->channel_id = 0;
+            vch->buf_type   = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+        } else if (i == 1) {
+            vch->channel_id = 1;
+            vch->buf_type   = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+        } else if (i == 2) {
+            vch->channel_id = 1;
+            vch->buf_type   = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+        } else if (i == 3) {
+            vch->channel_id = 2;
+            vch->buf_type   = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+        } else if (i == 4) {
+            vch->channel_id = 2;
+            vch->buf_type   = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+        } else if (i == 5) {
+            vch->channel_id = 3;
+            vch->buf_type   = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+        } else {
+            vch->channel_id = 3;
+            vch->buf_type   = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+        }
 
         mutex_init(&vch->lock);
         spin_lock_init(&vch->slock);
@@ -889,15 +900,14 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
             goto unreg_v4l2;
         }
 
-        /* Initialize vb2_queue: Node 0 uses vb2_dma_sg, Nodes 1 & 2 use vb2_dma_contig */
-        dev_info(&qdev->pdev->dev, "[DEBUG STEP 2.4] Node %d: Initializing vb2_queue with %s...\n",
-                 i, (i == 0) ? "vb2_dma_sg" : "vb2_dma_contig");
+        /* Initialize vb2_queue: all nodes use vb2_dma_sg */
+        dev_info(&qdev->pdev->dev, "[DEBUG STEP 2.4] Node %d: Initializing vb2_queue with vb2_dma_sg...\n", i);
         vch->queue.type            = vch->buf_type;
         vch->queue.io_modes        = VB2_MMAP | VB2_USERPTR | VB2_DMABUF;
         vch->queue.drv_priv        = vch;
         vch->queue.buf_struct_size = sizeof(struct qpcie_v4l2_buffer);
         vch->queue.ops             = &qpcie_vb2_ops;
-        vch->queue.mem_ops         = (i == 0) ? &vb2_dma_sg_memops : &vb2_dma_contig_memops;
+        vch->queue.mem_ops         = &vb2_dma_sg_memops;
         vch->queue.timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
         vch->queue.lock            = &vch->lock;
         vch->queue.dev             = &qdev->pdev->dev;
@@ -921,8 +931,24 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
             snprintf(vdev->name, sizeof(vdev->name), "qpcie-loopback-out1");
             vdev->device_caps = V4L2_CAP_VIDEO_OUTPUT_MPLANE | V4L2_CAP_STREAMING;
             vdev->vfl_dir     = VFL_DIR_TX;
-        } else {
+        } else if (i == 2) {
             snprintf(vdev->name, sizeof(vdev->name), "qpcie-loopback-cap1");
+            vdev->device_caps = V4L2_CAP_VIDEO_CAPTURE_MPLANE | V4L2_CAP_STREAMING;
+            vdev->vfl_dir     = VFL_DIR_RX;
+        } else if (i == 3) {
+            snprintf(vdev->name, sizeof(vdev->name), "qpcie-loopback-out2");
+            vdev->device_caps = V4L2_CAP_VIDEO_OUTPUT_MPLANE | V4L2_CAP_STREAMING;
+            vdev->vfl_dir     = VFL_DIR_TX;
+        } else if (i == 4) {
+            snprintf(vdev->name, sizeof(vdev->name), "qpcie-loopback-cap2");
+            vdev->device_caps = V4L2_CAP_VIDEO_CAPTURE_MPLANE | V4L2_CAP_STREAMING;
+            vdev->vfl_dir     = VFL_DIR_RX;
+        } else if (i == 5) {
+            snprintf(vdev->name, sizeof(vdev->name), "qpcie-loopback-out3");
+            vdev->device_caps = V4L2_CAP_VIDEO_OUTPUT_MPLANE | V4L2_CAP_STREAMING;
+            vdev->vfl_dir     = VFL_DIR_TX;
+        } else {
+            snprintf(vdev->name, sizeof(vdev->name), "qpcie-loopback-cap3");
             vdev->device_caps = V4L2_CAP_VIDEO_CAPTURE_MPLANE | V4L2_CAP_STREAMING;
             vdev->vfl_dir     = VFL_DIR_RX;
         }
@@ -950,16 +976,16 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
 
         dev_info(&qdev->pdev->dev,
                  " -> Node %d registered as /dev/video%d (%s)\n",
-                 i, vdev->num, (i == 1) ? "Loopback Output" : "Capture");
+                 i, vdev->num, (vch->buf_type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) ? "Loopback Output" : "Capture");
     }
 
     qdev->v4l2_registered = true;
     dev_info(&qdev->pdev->dev,
-             "[V4L2] 3 nodes initialized: /dev/video0 (TPG0), /dev/video1 (Loopback Out), /dev/video2 (Loopback In)\n");
+             "[V4L2] 7 nodes initialized: /dev/video0 (TPG0), video1/2 (Ch1 LB), video3/4 (Ch2 LB), video5/6 (Ch3 LB)\n");
     return 0;
 
 unreg_v4l2:
-    for (i = 0; i < 3; i++) {
+    for (i = 0; i < NUM_VIDEO_NODES; i++) {
         struct qpcie_v4l2_channel *vch = &qdev->v4l2_ch[i];
         if (video_is_registered(&vch->vdev))
             video_unregister_device(&vch->vdev);
@@ -976,7 +1002,7 @@ void qpcie_v4l2_remove(struct qpcie_dev *qdev)
         return;
 
     qdev->v4l2_registered = false;
-    for (i = 0; i < 3; i++) {
+    for (i = 0; i < NUM_VIDEO_NODES; i++) {
         struct qpcie_v4l2_channel *vch = &qdev->v4l2_ch[i];
         if (video_is_registered(&vch->vdev))
             video_unregister_device(&vch->vdev);
@@ -996,25 +1022,30 @@ void qpcie_v4l2_irq_handler(struct qpcie_dev *qdev)
         slice_height = ioread32(qdev->bar0_mmio + REG_SLICE_HEIGHT);
     }
 
-    /* Bit 0: H2C Output Complete (Node 1 Output /dev/video1) */
+    /* Bit 0: H2C Output Complete (Video Output Nodes) */
     if (status & BIT(0)) {
-        struct qpcie_v4l2_channel *vch = &qdev->v4l2_ch[1];
-        struct qpcie_v4l2_buffer *buf;
+        for (i = 0; i < NUM_VIDEO_NODES; i++) {
+            struct qpcie_v4l2_channel *vch = &qdev->v4l2_ch[i];
+            struct qpcie_v4l2_buffer *buf;
 
-        spin_lock(&vch->slock);
-        if (!list_empty(&vch->active_buffers)) {
-            buf = list_first_entry(&vch->active_buffers, struct qpcie_v4l2_buffer, list);
-            list_del(&buf->list);
-            buf->vb.vb2_buf.timestamp = ktime_get_ns();
-            buf->vb.sequence = vch->sequence++;
-            vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
+            if (vch->buf_type != V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE)
+                continue;
+
+            spin_lock(&vch->slock);
+            if (!list_empty(&vch->active_buffers)) {
+                buf = list_first_entry(&vch->active_buffers, struct qpcie_v4l2_buffer, list);
+                list_del(&buf->list);
+                buf->vb.vb2_buf.timestamp = ktime_get_ns();
+                buf->vb.sequence = vch->sequence++;
+                vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
+            }
+            spin_unlock(&vch->slock);
         }
-        spin_unlock(&vch->slock);
     }
 
-    /* Bit 1: C2H Video Capture Complete (Node 0 TPG or Node 2 Loopback In) */
+    /* Bit 1: C2H Video Capture Complete (Video Capture Nodes) */
     if (status & BIT(1)) {
-        for (i = 0; i < 3; i++) {
+        for (i = 0; i < NUM_VIDEO_NODES; i++) {
             struct qpcie_v4l2_channel *vch = &qdev->v4l2_ch[i];
             struct qpcie_v4l2_buffer *buf;
 

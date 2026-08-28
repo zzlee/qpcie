@@ -16,12 +16,24 @@ module sg_dma_engine #(
     // Interface from Descriptor Fetch Engine (H2C Descriptor Channel)
     input  wire                          h2c_desc_valid,
     input  wire [63:0]                   h2c_plane0_src,
+    input  wire [63:0]                   h2c_plane1_src,
     input  wire [15:0]                   h2c_line_width,
     input  wire [15:0]                   h2c_line_count,
     input  wire [15:0]                   h2c_plane12_width,
     input  wire [15:0]                   h2c_plane12_count,
     input  wire [3:0]                    h2c_plane_count,
+    input  wire [15:0]                   h2c_desc_ctrl,
     output reg                           h2c_desc_ready,
+
+    // SGL Segment Push Ports for H2C (from sg_host_fetch_engine)
+    input  wire                          sgl_h2c_y_wr_en,
+    input  wire [63:0]                   sgl_h2c_y_wr_addr,
+    input  wire [31:0]                   sgl_h2c_y_wr_len,
+    input  wire [31:0]                   sgl_h2c_y_wr_flags,
+    input  wire                          sgl_h2c_uv_wr_en,
+    input  wire [63:0]                   sgl_h2c_uv_wr_addr,
+    input  wire [31:0]                   sgl_h2c_uv_wr_len,
+    input  wire [31:0]                   sgl_h2c_uv_wr_flags,
 
     // Interface from Descriptor Fetch Engine (C2H Descriptor Channel)
     input  wire                          c2h_desc_valid,
@@ -89,6 +101,8 @@ module sg_dma_engine #(
     reg [31:0] h2c_p0_bytes_q;
     reg [31:0] h2c_p1_bytes_q;
     reg [3:0]  h2c_plane_cnt_q;
+    reg [15:0] h2c_desc_ctrl_q;
+    reg        h2c_is_uv;
     reg [10:0] h2c_burst_dw;
     reg [10:0] h2c_burst_recv_dw;
     reg        h2c_cpl_in_packet;
@@ -96,9 +110,65 @@ module sg_dma_engine #(
         ((h2c_burst_dw - h2c_burst_recv_dw) < (PCIE_DATA_WIDTH/32)) ?
         (h2c_burst_dw - h2c_burst_recv_dw) : (PCIE_DATA_WIDTH/32);
 
-    wire [12:0] h2c_bytes_to_4k = 13'd4096 - {1'b0, h2c_cur_addr[11:0]};
+    wire h2c_sg_mode = h2c_desc_ctrl_q[5] || h2c_desc_ctrl_q[4];
+
+    wire [63:0] h2c_y_walker_addr;
+    wire [31:0] h2c_y_walker_bytes_left;
+    wire [5:0]  h2c_y_sgl_count;
+
+    sg_segment_walker #(
+        .FIFO_DEPTH(16)
+    ) u_h2c_y_walker (
+        .clk(clk),
+        .rst_n(rst_n),
+        .start(h2c_state == H2C_IDLE && h2c_desc_valid),
+        .sg_mode(h2c_desc_ctrl[5] || h2c_desc_ctrl[4]),
+        .linear_base_addr(h2c_plane0_src),
+        .sgl_wr_en(sgl_h2c_y_wr_en),
+        .sgl_wr_addr(sgl_h2c_y_wr_addr),
+        .sgl_wr_len(sgl_h2c_y_wr_len),
+        .sgl_wr_flags(sgl_h2c_y_wr_flags),
+        .advance_burst(h2c_req_valid && h2c_req_ack && !h2c_is_uv),
+        .burst_bytes({h2c_burst_dw, 2'b00}),
+        .current_addr(h2c_y_walker_addr),
+        .seg_bytes_left(h2c_y_walker_bytes_left),
+        .fifo_count(h2c_y_sgl_count),
+        .fifo_almost_full(),
+        .fifo_empty()
+    );
+
+    wire [63:0] h2c_uv_walker_addr;
+    wire [31:0] h2c_uv_walker_bytes_left;
+    wire [5:0]  h2c_uv_sgl_count;
+
+    sg_segment_walker #(
+        .FIFO_DEPTH(16)
+    ) u_h2c_uv_walker (
+        .clk(clk),
+        .rst_n(rst_n),
+        .start(h2c_state == H2C_IDLE && h2c_desc_valid),
+        .sg_mode(h2c_desc_ctrl[5] || h2c_desc_ctrl[4]),
+        .linear_base_addr(h2c_plane1_src),
+        .sgl_wr_en(sgl_h2c_uv_wr_en),
+        .sgl_wr_addr(sgl_h2c_uv_wr_addr),
+        .sgl_wr_len(sgl_h2c_uv_wr_len),
+        .sgl_wr_flags(sgl_h2c_uv_wr_flags),
+        .advance_burst(h2c_req_valid && h2c_req_ack && h2c_is_uv),
+        .burst_bytes({h2c_burst_dw, 2'b00}),
+        .current_addr(h2c_uv_walker_addr),
+        .seg_bytes_left(h2c_uv_walker_bytes_left),
+        .fifo_count(h2c_uv_sgl_count),
+        .fifo_almost_full(),
+        .fifo_empty()
+    );
+
+    wire [63:0] h2c_target_addr = (h2c_sg_mode) ? (!h2c_is_uv ? h2c_y_walker_addr : h2c_uv_walker_addr) : h2c_cur_addr;
+    wire [12:0] h2c_bytes_to_4k = 13'd4096 - {1'b0, h2c_target_addr[11:0]};
+    wire [31:0] h2c_avail_bytes = (h2c_sg_mode) ? (!h2c_is_uv ? h2c_y_walker_bytes_left : h2c_uv_walker_bytes_left) : {19'd0, h2c_bytes_to_4k};
     wire [15:0] h2c_limit_bytes = (h2c_rem_bytes < 32'd256) ? h2c_rem_bytes[15:0] : 16'd256;
-    wire [15:0] h2c_burst_bytes = (h2c_limit_bytes < h2c_bytes_to_4k) ? h2c_limit_bytes : h2c_bytes_to_4k[11:0];
+    wire [15:0] h2c_burst_bytes = (h2c_limit_bytes < h2c_avail_bytes[15:0]) ? h2c_limit_bytes : h2c_avail_bytes[15:0];
+
+    wire h2c_walker_ready = !h2c_sg_mode || (!h2c_is_uv ? (h2c_y_sgl_count > 0 || h2c_y_walker_bytes_left > 0) : (h2c_uv_sgl_count > 0 || h2c_uv_walker_bytes_left > 0));
 
     assign h2c_busy = (h2c_state != H2C_IDLE);
 
@@ -117,6 +187,8 @@ module sg_dma_engine #(
             h2c_p0_bytes_q        <= 32'd0;
             h2c_p1_bytes_q        <= 32'd0;
             h2c_plane_cnt_q       <= 4'd0;
+            h2c_desc_ctrl_q       <= 16'd0;
+            h2c_is_uv             <= 1'b0;
             h2c_burst_dw          <= 11'd0;
             h2c_burst_recv_dw     <= 11'd0;
             h2c_cpl_in_packet     <= 1'b0;
@@ -125,11 +197,13 @@ module sg_dma_engine #(
                 H2C_IDLE: begin
                     h2c_desc_ready <= 1'b0;
                     h2c_req_valid  <= 1'b0;
+                    h2c_is_uv      <= 1'b0;
                     if (h2c_desc_valid) begin
                         h2c_cur_addr      <= h2c_plane0_src;
                         h2c_p0_bytes_q    <= (h2c_line_width > 0 ? h2c_line_width : 16'd4096) * (h2c_line_count > 0 ? h2c_line_count : 16'd1);
                         h2c_p1_bytes_q    <= (h2c_plane12_width > 0 ? h2c_plane12_width : 16'd0) * (h2c_plane12_count > 0 ? h2c_plane12_count : 16'd0);
                         h2c_plane_cnt_q   <= h2c_plane_count;
+                        h2c_desc_ctrl_q   <= h2c_desc_ctrl;
                         h2c_burst_recv_dw <= 11'd0;
                         h2c_cpl_in_packet <= 1'b0;
                         h2c_state         <= H2C_PRECALC;
@@ -139,19 +213,20 @@ module sg_dma_engine #(
                 H2C_PRECALC: begin
                     h2c_desc_ready <= 1'b1;
                     h2c_rem_bytes  <= (h2c_plane_cnt_q >= 4'd2) ? (h2c_p0_bytes_q + h2c_p1_bytes_q) : h2c_p0_bytes_q;
+                    h2c_is_uv      <= (h2c_p0_bytes_q == 0) && (h2c_plane_cnt_q >= 4'd2);
                     h2c_state      <= H2C_ISSUE_MRD;
                 end
 
                 H2C_ISSUE_MRD: begin
                     h2c_desc_ready <= 1'b0;
-                    if (h2c_rem_bytes > 32'd0) begin
+                    if (h2c_rem_bytes > 32'd0 && h2c_walker_ready && h2c_burst_bytes > 0) begin
                         h2c_burst_dw   <= h2c_burst_bytes[12:2];
                         h2c_req_dw_len <= h2c_burst_bytes[12:2];
-                        h2c_req_addr   <= h2c_cur_addr;
+                        h2c_req_addr   <= h2c_target_addr;
                         h2c_req_tag    <= 8'h02;
                         h2c_req_valid  <= 1'b1;
                         h2c_state      <= H2C_WAIT_ACK;
-                    end else begin
+                    end else if (h2c_rem_bytes == 32'd0) begin
                         completed_h2c_count <= completed_h2c_count + 1'b1;
                         h2c_desc_ready      <= 1'b1;
                         h2c_state           <= H2C_IDLE;
@@ -163,6 +238,7 @@ module sg_dma_engine #(
                         h2c_req_valid     <= 1'b0;
                         h2c_cur_addr      <= h2c_cur_addr + (h2c_burst_dw << 2);
                         h2c_rem_bytes     <= h2c_rem_bytes - (h2c_burst_dw << 2);
+                        h2c_is_uv         <= ((h2c_rem_bytes - (h2c_burst_dw << 2)) <= h2c_p1_bytes_q) && (h2c_plane_cnt_q >= 4'd2);
                         h2c_burst_recv_dw <= 11'd0;
                         h2c_cpl_in_packet <= 1'b0;
                         h2c_state         <= H2C_WAIT_CPLD;

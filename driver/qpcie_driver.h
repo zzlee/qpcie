@@ -48,6 +48,7 @@
 #define QPCIE_VENDOR_ID   0x12AB /* Custom PCI Vendor ID */
 #define QPCIE_DEVICE_ID   0xE380 /* Custom PCIe DMA Device ID */
 
+#define NUM_VIDEO_NODES    7
 #define NUM_VIDEO_CHANNELS 4
 #define NUM_AUDIO_CHANNELS 4
 #define RING_BUFFER_SIZE   16
@@ -222,7 +223,7 @@ struct qpcie_dev {
 
     /* Subsystem Devices */
     struct v4l2_device v4l2_dev;
-    struct qpcie_v4l2_channel v4l2_ch[NUM_VIDEO_CHANNELS];
+    struct qpcie_v4l2_channel v4l2_ch[NUM_VIDEO_NODES];
     struct qpcie_alsa_channel alsa_ch[NUM_AUDIO_CHANNELS];
 
     struct snd_card *card;

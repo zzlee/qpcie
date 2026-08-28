@@ -15,8 +15,9 @@ module sg_host_fetch_engine #(
     input  wire        clk,
     input  wire        rst_n,
 
-    // Trigger from Descriptor Dispatch (C2H Video Channel)
+    // Trigger from Descriptor Dispatch (H2C or C2H Video Channel)
     input  wire        fetch_start,
+    input  wire [2:0]  fetch_channel, // 0..3 = C2H Ch0..Ch3, 4 = H2C
     input  wire [63:0] plane0_slot_addr,
     input  wire [63:0] plane1_slot_addr,
     input  wire [15:0] plane0_pages_req,
@@ -38,6 +39,7 @@ module sg_host_fetch_engine #(
     input  wire [7:0]  cpld_tag,
 
     // SGL Segment Push Ports (To sg_segment_walker)
+    output reg  [2:0]  sgl_channel,
     output reg         sgl_y_wr_en,
     output reg  [63:0] sgl_y_wr_addr,
     output reg  [31:0] sgl_y_wr_len,
@@ -58,6 +60,7 @@ module sg_host_fetch_engine #(
     localparam S_DONE       = 3'd6;
 
     reg [2:0]  state;
+    reg [2:0]  curr_channel;
     reg        curr_plane; // 0 = Y Plane, 1 = UV Plane
     reg [63:0] curr_slot_base;
     reg [11:0] curr_slot_offset; // 0 .. 4095
@@ -117,6 +120,8 @@ module sg_host_fetch_engine #(
             sgl_uv_wr_addr       <= 64'd0;
             sgl_uv_wr_len        <= 32'd0;
             sgl_uv_wr_flags      <= 32'd0;
+            curr_channel         <= 3'd0;
+            sgl_channel          <= 3'd0;
             curr_plane           <= 1'b0;
             curr_slot_base       <= 64'd0;
             curr_slot_offset     <= 12'd0;
@@ -135,6 +140,7 @@ module sg_host_fetch_engine #(
                     buf_rd_idx    <= 5'd0;
                     if (fetch_start) begin
                         fetch_busy           <= 1'b1;
+                        curr_channel         <= fetch_channel;
                         curr_plane           <= 1'b0; // Start with Y Plane
                         curr_slot_base       <= plane0_slot_addr;
                         curr_slot_offset     <= 12'd0;
@@ -163,6 +169,7 @@ module sg_host_fetch_engine #(
                 end
 
                 S_PUSH_SGL: begin
+                    sgl_channel <= curr_channel;
                     if (buf_rd_idx < 5'd16) begin
                         buf_rd_idx <= buf_rd_idx + 1'b1;
 
