@@ -82,7 +82,7 @@ module sg_dma_engine #(
             h2c_req_valid         <= 1'b0;
             h2c_req_addr          <= 64'd0;
             h2c_req_dw_len        <= 11'd0;
-            h2c_req_tag           <= 8'h01;
+            h2c_req_tag           <= 8'h02;
             completed_h2c_count   <= 32'd0;
             h2c_bytes_transferred <= 32'd0;
             h2c_cur_addr          <= 64'd0;
@@ -116,7 +116,7 @@ module sg_dma_engine #(
                             h2c_req_dw_len <= h2c_rem_bytes[12:2];
                         end
                         h2c_req_addr  <= h2c_cur_addr;
-                        h2c_req_tag   <= 8'h01;
+                        h2c_req_tag   <= 8'h02;
                         h2c_req_valid <= 1'b1;
                         h2c_state     <= H2C_WAIT_ACK;
                     end else begin

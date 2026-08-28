@@ -42,7 +42,7 @@ module tb_sg_dma_engine;
         @(posedge clk); h2c_desc_valid<=0;
         for (burst=0; burst<2; burst=burst+1) begin
             wait(h2c_req_valid);
-            if (h2c_req_dw_len !== 32 || h2c_req_tag !== 8'h01 ||
+            if (h2c_req_dw_len !== 32 || h2c_req_tag !== 8'h02 ||
                 h2c_req_addr !== (64'h1000 + burst*128)) begin
                 $display("FAIL: H2C request %0d malformed", burst); $finish;
             end
