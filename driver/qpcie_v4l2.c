@@ -23,11 +23,14 @@ static const struct v4l2_file_operations qpcie_v4l2_fops = {
 
 static int qpcie_vidioc_querycap(struct file *file, void *priv, struct v4l2_capability *cap)
 {
+    struct qpcie_v4l2_channel *vch = video_drvdata(file);
+
     strscpy(cap->driver, "qpcie-v4l2", sizeof(cap->driver));
-    strscpy(cap->card, "QPCIe NV12M Video Capture", sizeof(cap->card));
+    if (vch && vch->buf_type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE)
+        strscpy(cap->card, "QPCIe NV12M Video Output", sizeof(cap->card));
+    else
+        strscpy(cap->card, "QPCIe NV12M Video Capture", sizeof(cap->card));
     strscpy(cap->bus_info, "PCIe:custom-dma", sizeof(cap->bus_info));
-    cap->capabilities = V4L2_CAP_VIDEO_CAPTURE_MPLANE |
-                        V4L2_CAP_STREAMING | V4L2_CAP_DEVICE_CAPS;
     return 0;
 }
 
@@ -255,14 +258,16 @@ static int qpcie_vidioc_s_fmt_vid_cap_mplane(struct file *file, void *priv,
 
     pattern_ctrl = v4l2_ctrl_find(&vch->ctrl_handler,
                                   V4L2_CID_TEST_PATTERN);
-    pattern_id = qpcie_tpg_pattern_id(pattern_ctrl ? pattern_ctrl->val : 3);
-    ret = qpcie_program_tpg(vch, pattern_id, true);
-    if (ret) {
-        vch->width = old_width;
-        vch->height = old_height;
-        vch->stride = old_stride;
-        vch->pixelformat = old_pixelformat;
-        return ret;
+    if (pattern_ctrl) {
+        pattern_id = qpcie_tpg_pattern_id(pattern_ctrl->val);
+        ret = qpcie_program_tpg(vch, pattern_id, true);
+        if (ret) {
+            vch->width = old_width;
+            vch->height = old_height;
+            vch->stride = old_stride;
+            vch->pixelformat = old_pixelformat;
+            return ret;
+        }
     }
 
     qpcie_fill_pix_format(&f->fmt.pix_mp, mode);
@@ -271,12 +276,20 @@ static int qpcie_vidioc_s_fmt_vid_cap_mplane(struct file *file, void *priv,
 
 static int qpcie_vidioc_g_parm(struct file *file, void *priv, struct v4l2_streamparm *a)
 {
-    if (a->type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)
+    struct qpcie_v4l2_channel *vch = video_drvdata(file);
+
+    if (a->type != vch->buf_type)
         return -EINVAL;
 
-    a->parm.capture.capability = V4L2_CAP_TIMEPERFRAME;
-    a->parm.capture.timeperframe.numerator = 1;
-    a->parm.capture.timeperframe.denominator = 60;
+    if (a->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
+        a->parm.output.capability = V4L2_CAP_TIMEPERFRAME;
+        a->parm.output.timeperframe.numerator = 1;
+        a->parm.output.timeperframe.denominator = 60;
+    } else {
+        a->parm.capture.capability = V4L2_CAP_TIMEPERFRAME;
+        a->parm.capture.timeperframe.numerator = 1;
+        a->parm.capture.timeperframe.denominator = 60;
+    }
 
     return 0;
 }
@@ -284,19 +297,25 @@ static int qpcie_vidioc_g_parm(struct file *file, void *priv, struct v4l2_stream
 static int qpcie_vidioc_s_parm(struct file *file, void *priv, struct v4l2_streamparm *a)
 {
     struct qpcie_v4l2_channel *vch = video_drvdata(file);
-    if (a->type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)
+
+    if (a->type != vch->buf_type)
         return -EINVAL;
 
-    /* v_tpg offset 0x30 is maskId, not a frame-pacer register. Keep the
-     * bring-up mode fixed at 60 fps without corrupting TPG configuration.
-     * The frame interval is informational only: actual pacing follows the
-     * V4L2_CID_QPCIE_PACER_ENABLE control so userspace can disable it for
-     * uncapped benchmarks without S_PARM silently re-enabling it. */
-    a->parm.capture.timeperframe.numerator = 1;
-    a->parm.capture.timeperframe.denominator = 60;
+    if (a->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
+        a->parm.output.capability = V4L2_CAP_TIMEPERFRAME;
+        a->parm.output.timeperframe.numerator = 1;
+        a->parm.output.timeperframe.denominator = 60;
+    } else {
+        a->parm.capture.capability = V4L2_CAP_TIMEPERFRAME;
+        a->parm.capture.timeperframe.numerator = 1;
+        a->parm.capture.timeperframe.denominator = 60;
+    }
+
     dev_info(&vch->qdev->pdev->dev,
-             "V4L2 channel %u configured for %ux%u@60 NV12M\n",
-             vch->channel_id, vch->width, vch->height);
+             "V4L2 channel %u (%s) configured for %ux%u@60 NV12M\n",
+             vch->channel_id,
+             (vch->buf_type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) ? "Output" : "Capture",
+             vch->width, vch->height);
     return 0;
 }
 
