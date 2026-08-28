@@ -571,6 +571,19 @@ static void qpcie_buf_queue(struct vb2_buffer *vb)
                                  (struct qpcie_sgl_entry *)buf->uv_slots_virt,
                                  buf->uv_slots_dma, QPCIE_MAX_PAGE_SLOTS_UV);
 
+        dev_info_ratelimited(&qdev->pdev->dev,
+                             "SGL ch%u %s: y nents=%u slots=%pad first=%pad/%u, "
+                             "uv nents=%u slots=%pad first=%pad/%u\n",
+                             vch->channel_id,
+                             vch->buf_type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE ?
+                             "H2C" : "C2H",
+                             sgt0->nents, &buf->y_slots_dma,
+                             &((struct qpcie_sgl_entry *)buf->y_slots_virt)[0].phys_addr,
+                             ((struct qpcie_sgl_entry *)buf->y_slots_virt)[0].len_bytes,
+                             sgt1->nents, &buf->uv_slots_dma,
+                             &((struct qpcie_sgl_entry *)buf->uv_slots_virt)[0].phys_addr,
+                             ((struct qpcie_sgl_entry *)buf->uv_slots_virt)[0].len_bytes);
+
         if (vch->buf_type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
             desc->plane0_src_addr = buf->y_slots_dma;
             desc->plane1_src_addr = buf->uv_slots_dma;
