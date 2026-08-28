@@ -923,6 +923,9 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
         vch->queue.buf_struct_size = sizeof(struct qpcie_v4l2_buffer);
         vch->queue.ops             = &qpcie_vb2_ops;
         vch->queue.mem_ops         = &vb2_dma_sg_memops;
+        vch->queue.dma_dir         =
+            vch->buf_type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE ?
+            DMA_TO_DEVICE : DMA_FROM_DEVICE;
         vch->queue.timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
         vch->queue.lock            = &vch->lock;
         vch->queue.dev             = &qdev->pdev->dev;
