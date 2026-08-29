@@ -227,7 +227,7 @@ module tb_video_cdc_system;
             desc_mrd_cnt <= desc_mrd_cnt + 1;
         prev_tx_valid <= s_axis_tx_tvalid;
     end
-    always @(posedge clk)
+    always @(posedge video_clk)
         if (u_dma_top.nv12_desc_ready_v) begin
             desc_accept_cnt <= desc_accept_cnt + 1;
             $display("[%0t] PROBE engine accepted descriptor #%0d",
