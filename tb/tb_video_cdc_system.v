@@ -60,6 +60,7 @@ module tb_video_cdc_system;
     reg         usr_irq_seen = 0;
 
     integer pkt_cnt = 0;
+    integer mwr_done_cnt = 0;
 
     // Golden memories
     reg [7:0] y_mem  [0:(WIDTH*HEIGHT)-1];
@@ -204,6 +205,16 @@ module tb_video_cdc_system;
 
     always @(posedge clk) if (usr_irq_req) usr_irq_seen <= 1'b1;
 
+    // A frame IRQ must remain ordered behind every posted write in the frame.
+    always @(posedge clk) begin
+        if (s_axis_tx_tvalid && s_axis_tx_tready && s_axis_tx_tlast &&
+            u_bridge.tx_state == 2'b01)
+            mwr_done_cnt <= mwr_done_cnt + 1;
+        if (usr_irq_req && mwr_done_cnt != 384)
+            $fatal(1, "Video IRQ preceded final MWr: completed=%0d expected=384",
+                   mwr_done_cnt);
+    end
+
     // Integration probes
     integer desc_mrd_cnt = 0;
     integer desc_accept_cnt = 0;
@@ -327,7 +338,8 @@ module tb_video_cdc_system;
         reg [31:0] d0, d1, d2, d3;
         begin
             @(posedge clk);
-            while (!(s_axis_tx_tvalid && s_axis_tx_tdata[30:29] == 2'b11))
+            while (!(s_axis_tx_tvalid && s_axis_tx_tready &&
+                     s_axis_tx_tdata[30:29] == 2'b11))
                 @(posedge clk);
             dw_len = s_axis_tx_tdata[9:0];
             if ((dw_len !== 10'd64 && dw_len !== 10'd32) || s_axis_tx_tlast !== 1'b0)
@@ -347,7 +359,7 @@ module tb_video_cdc_system;
 
             for (i = 0; i < num_beats; i = i + 1) begin
                 @(posedge clk);
-                while (!s_axis_tx_tvalid) @(posedge clk);
+                while (!(s_axis_tx_tvalid && s_axis_tx_tready)) @(posedge clk);
                 if (s_axis_tx_tlast !== (i == num_beats - 1))
                     $fatal(1, "packet %0d: TLAST wrong at beat %0d of %0d",
                            pkt_cnt, i, num_beats);
@@ -428,6 +440,19 @@ module tb_video_cdc_system;
                 for (i = 0; i < 384; i = i + 1)
                     capture_one_mwr();
             end
+            begin
+                // Hold the final queued write behind PCIe backpressure. The
+                // old completion path raised IRQ while this stall was active.
+                @(posedge video_clk);
+                while (!u_dma_top.eng_frame_done) @(posedge video_clk);
+                @(negedge clk);
+                s_axis_tx_tready = 1'b0;
+                repeat (32) @(posedge clk);
+                if (usr_irq_req || usr_irq_seen)
+                    $fatal(1, "Video IRQ asserted while final MWr was stalled");
+                @(negedge clk);
+                s_axis_tx_tready = 1'b1;
+            end
         join
         #5000;
 
@@ -451,6 +476,8 @@ module tb_video_cdc_system;
             end
 
         if (!usr_irq_seen) $fatal(1, "MSI completion never observed");
+        if (mwr_done_cnt !== 384)
+            $fatal(1, "MWr completion count %0d (expected 384)", mwr_done_cnt);
         #1000;
         if (desc_accept_cnt !== 1)
             $fatal(1, "Engine accepted descriptor %0d times (expected exactly 1)!", desc_accept_cnt);

@@ -469,7 +469,7 @@ static int qpcie_buf_init(struct vb2_buffer *vb)
         buf->y_slots_virt = NULL;
         return -ENOMEM;
     }
-    dev_info(&qdev->pdev->dev,
+    dev_dbg(&qdev->pdev->dev,
              "SGL alloc ch%u %s: y=%pad/%uK uv=%pad/%uK\n",
              vch->channel_id,
              vch->buf_type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE ?

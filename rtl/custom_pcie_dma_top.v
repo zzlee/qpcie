@@ -927,11 +927,8 @@ module custom_pcie_dma_top #(
     wire [63:0] eng_req_addr;
     wire [PCIE_DATA_WIDTH-1:0] eng_req_data;
 
-    reg v_done_toggle = 1'b0;
-    (* ASYNC_REG = "TRUE" *) reg [1:0] v_done_sync = 2'b00;
     (* ASYNC_REG = "TRUE" *) reg [1:0] v_busy_sync = 2'b00;
-    reg v_done_prev = 1'b0;
-    wire v_done_pulse = v_done_sync[1] ^ v_done_prev;
+    wire pcie_frame_done;
 
     wire        tel_dest_req;
     wire [95:0] tel_dest_out;
@@ -1032,28 +1029,13 @@ module custom_pcie_dma_top #(
 
     always @(posedge video_clk) pacer_sync <= {pacer_sync[0], reg_pacer_ctrl[0]};
 
-    // Convert the one-video-clock completion pulse into a toggle before the
-    // 150 -> 125 MHz crossing. A level synchronizer can miss this 6.67 ns
-    // pulse entirely (and edge-detecting the level also fires on both edges).
-    always @(posedge video_clk or negedge video_rst_n) begin
-        if (!video_rst_n)
-            v_done_toggle <= 1'b0;
-        else if (eng_frame_done)
-            v_done_toggle <= ~v_done_toggle;
-    end
-
-    // Completion toggle + busy level cross back to the PCIe domain.
+    // Busy crosses back as a level; completion is ordered through the request FIFO.
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            v_done_sync <= 2'b00;
             v_busy_sync <= 2'b00;
-            v_done_prev <= 1'b0;
         end else begin
-            v_done_sync[0] <= v_done_toggle;
-            v_done_sync[1] <= v_done_sync[0];
             v_busy_sync[0] <= eng_busy;
             v_busy_sync[1] <= v_busy_sync[0];
-            v_done_prev    <= v_done_sync[1];
         end
     end
 
@@ -1085,8 +1067,8 @@ module custom_pcie_dma_top #(
     end
 
     // Channel-0 status/telemetry now come from the synchronized copies.
-    assign v_done[0]     = v_done_pulse;
-    assign v_busy[0]     = v_busy_sync[1];
+    assign v_done[0]     = pcie_frame_done;
+    assign v_busy[0]     = v_busy_sync[1] || !video_cdc_fifo_empty || v_c2h_req_valid[0];
     assign v_pts[0]      = v_pts_sync_q;
     assign v_drop_cnt[0] = v_err_sync_q;
     assign s_axis_video_tready[0] = 1'b0;
@@ -1106,6 +1088,7 @@ module custom_pcie_dma_top #(
         .s_req_data       (eng_req_data),
         .s_req_data_ready (eng_req_ready),
         .s_req_ack        (eng_req_ack),
+        .s_frame_done     (eng_frame_done),
         .rd_clk           (clk),
         .rd_rst_n         (rst_n),
         .m_req_valid      (v_c2h_req_valid[0]),
@@ -1114,6 +1097,7 @@ module custom_pcie_dma_top #(
         .m_req_data       (v_c2h_req_data[PCIE_DATA_WIDTH-1:0]),
         .m_req_data_ready (v_c2h_req_data_ready[0]),
         .m_req_ack        (v_c2h_req_ack[0]),
+        .m_frame_done     (pcie_frame_done),
         .m_fifo_empty     (video_cdc_fifo_empty),
         .m_fifo_count     (video_cdc_fifo_count)
     );
@@ -1280,11 +1264,9 @@ module custom_pcie_dma_top #(
         .sgl_uv_wr_en(!ch1_sgl_uv_empty && ch1_sgl_uv_pop_ready), .sgl_uv_wr_addr(ch1_sgl_uv_dout[63:0]), .sgl_uv_wr_len(ch1_sgl_uv_dout[95:64]), .sgl_uv_wr_flags(ch1_sgl_uv_dout[127:96]),
         .cur_y_sgl_count(), .cur_uv_sgl_count(), .sgl_y_pop_ready(ch1_sgl_y_pop_ready), .sgl_uv_pop_ready(ch1_sgl_uv_pop_ready), .pacer_enable(1'b0), .frame_interval_clks(32'd2500000), .global_timestamp(eng1_ts), .s_axis_tdata(ch1_tdata), .s_axis_tvalid(ch1_tvalid), .s_axis_tlast(ch1_tlast), .s_axis_tuser(ch1_tuser), .s_axis_tready(ch1_tready),
         .c2h_req_valid(eng1_req_valid), .c2h_req_addr(eng1_req_addr), .c2h_req_dw_len(eng1_req_dw_len), .c2h_req_data(eng1_req_data), .c2h_req_last(), .c2h_req_data_ready(eng1_req_ready), .c2h_req_ack(eng1_req_ack), .video_busy(v_busy[1]), .video_frame_done(eng1_frame_done), .frame_pts(v_pts[1]), .protocol_error_count(v_drop_cnt[1]));
-    reg v_done1_toggle = 1'b0; (* ASYNC_REG = "TRUE" *) reg [1:0] v_done1_sync = 2'b00; reg v_done1_prev = 1'b0;
-    always @(posedge video_clk or negedge video_rst_n) begin if (!video_rst_n) v_done1_toggle <= 1'b0; else if (eng1_frame_done) v_done1_toggle <= ~v_done1_toggle; end
-    always @(posedge clk or negedge rst_n) begin if (!rst_n) begin v_done1_sync <= 2'b00; v_done1_prev <= 1'b0; end else begin v_done1_sync[0] <= v_done1_toggle; v_done1_sync[1] <= v_done1_sync[0]; v_done1_prev <= v_done1_sync[1]; end end
-    assign v_done[1] = v_done1_sync[1] ^ v_done1_prev;
-    video_req_cdc #(.MAX_DWORDS(64), .FIFO_DEPTH(512)) u_video_req_cdc_ch1 (.wr_clk(video_clk), .wr_rst_n(video_rst_n), .s_req_valid(eng1_req_valid), .s_req_addr(eng1_req_addr), .s_req_dw_len(eng1_req_dw_len), .s_req_data(eng1_req_data), .s_req_data_ready(eng1_req_ready), .s_req_ack(eng1_req_ack), .rd_clk(clk), .rd_rst_n(rst_n), .m_req_valid(v_c2h_req_valid[1]), .m_req_addr(v_c2h_req_addr[127:64]), .m_req_dw_len(v_c2h_req_dw_len[21:11]), .m_req_data(v_c2h_req_data[(1*PCIE_DATA_WIDTH) +: PCIE_DATA_WIDTH]), .m_req_data_ready(v_c2h_req_data_ready[1]), .m_req_ack(v_c2h_req_ack[1]), .m_fifo_empty(), .m_fifo_count());
+    wire pcie_frame_done_ch1;
+    assign v_done[1] = pcie_frame_done_ch1;
+    video_req_cdc #(.MAX_DWORDS(64), .FIFO_DEPTH(512)) u_video_req_cdc_ch1 (.wr_clk(video_clk), .wr_rst_n(video_rst_n), .s_req_valid(eng1_req_valid), .s_req_addr(eng1_req_addr), .s_req_dw_len(eng1_req_dw_len), .s_req_data(eng1_req_data), .s_req_data_ready(eng1_req_ready), .s_req_ack(eng1_req_ack), .s_frame_done(eng1_frame_done), .rd_clk(clk), .rd_rst_n(rst_n), .m_req_valid(v_c2h_req_valid[1]), .m_req_addr(v_c2h_req_addr[127:64]), .m_req_dw_len(v_c2h_req_dw_len[21:11]), .m_req_data(v_c2h_req_data[(1*PCIE_DATA_WIDTH) +: PCIE_DATA_WIDTH]), .m_req_data_ready(v_c2h_req_data_ready[1]), .m_req_ack(v_c2h_req_ack[1]), .m_frame_done(pcie_frame_done_ch1), .m_fifo_empty(), .m_fifo_count());
 
     // ---------------------- CHANNEL 2 ----------------------------------------
     wire [127:0] ch2_sgl_y_dout, ch2_sgl_uv_dout;
@@ -1327,11 +1309,9 @@ module custom_pcie_dma_top #(
         .sgl_uv_wr_en(!ch2_sgl_uv_empty && ch2_sgl_uv_pop_ready), .sgl_uv_wr_addr(ch2_sgl_uv_dout[63:0]), .sgl_uv_wr_len(ch2_sgl_uv_dout[95:64]), .sgl_uv_wr_flags(ch2_sgl_uv_dout[127:96]),
         .cur_y_sgl_count(), .cur_uv_sgl_count(), .sgl_y_pop_ready(ch2_sgl_y_pop_ready), .sgl_uv_pop_ready(ch2_sgl_uv_pop_ready), .pacer_enable(1'b0), .frame_interval_clks(32'd2500000), .global_timestamp(eng2_ts), .s_axis_tdata(ch2_tdata), .s_axis_tvalid(ch2_tvalid), .s_axis_tlast(ch2_tlast), .s_axis_tuser(ch2_tuser), .s_axis_tready(ch2_tready),
         .c2h_req_valid(eng2_req_valid), .c2h_req_addr(eng2_req_addr), .c2h_req_dw_len(eng2_req_dw_len), .c2h_req_data(eng2_req_data), .c2h_req_last(), .c2h_req_data_ready(eng2_req_ready), .c2h_req_ack(eng2_req_ack), .video_busy(v_busy[2]), .video_frame_done(eng2_frame_done), .frame_pts(v_pts[2]), .protocol_error_count(v_drop_cnt[2]));
-    reg v_done2_toggle = 1'b0; (* ASYNC_REG = "TRUE" *) reg [1:0] v_done2_sync = 2'b00; reg v_done2_prev = 1'b0;
-    always @(posedge video_clk or negedge video_rst_n) begin if (!video_rst_n) v_done2_toggle <= 1'b0; else if (eng2_frame_done) v_done2_toggle <= ~v_done2_toggle; end
-    always @(posedge clk or negedge rst_n) begin if (!rst_n) begin v_done2_sync <= 2'b00; v_done2_prev <= 1'b0; end else begin v_done2_sync[0] <= v_done2_toggle; v_done2_sync[1] <= v_done2_sync[0]; v_done2_prev <= v_done2_sync[1]; end end
-    assign v_done[2] = v_done2_sync[1] ^ v_done2_prev;
-    video_req_cdc #(.MAX_DWORDS(64), .FIFO_DEPTH(512)) u_video_req_cdc_ch2 (.wr_clk(video_clk), .wr_rst_n(video_rst_n), .s_req_valid(eng2_req_valid), .s_req_addr(eng2_req_addr), .s_req_dw_len(eng2_req_dw_len), .s_req_data(eng2_req_data), .s_req_data_ready(eng2_req_ready), .s_req_ack(eng2_req_ack), .rd_clk(clk), .rd_rst_n(rst_n), .m_req_valid(v_c2h_req_valid[2]), .m_req_addr(v_c2h_req_addr[191:128]), .m_req_dw_len(v_c2h_req_dw_len[32:22]), .m_req_data(v_c2h_req_data[(2*PCIE_DATA_WIDTH) +: PCIE_DATA_WIDTH]), .m_req_data_ready(v_c2h_req_data_ready[2]), .m_req_ack(v_c2h_req_ack[2]), .m_fifo_empty(), .m_fifo_count());
+    wire pcie_frame_done_ch2;
+    assign v_done[2] = pcie_frame_done_ch2;
+    video_req_cdc #(.MAX_DWORDS(64), .FIFO_DEPTH(512)) u_video_req_cdc_ch2 (.wr_clk(video_clk), .wr_rst_n(video_rst_n), .s_req_valid(eng2_req_valid), .s_req_addr(eng2_req_addr), .s_req_dw_len(eng2_req_dw_len), .s_req_data(eng2_req_data), .s_req_data_ready(eng2_req_ready), .s_req_ack(eng2_req_ack), .s_frame_done(eng2_frame_done), .rd_clk(clk), .rd_rst_n(rst_n), .m_req_valid(v_c2h_req_valid[2]), .m_req_addr(v_c2h_req_addr[191:128]), .m_req_dw_len(v_c2h_req_dw_len[32:22]), .m_req_data(v_c2h_req_data[(2*PCIE_DATA_WIDTH) +: PCIE_DATA_WIDTH]), .m_req_data_ready(v_c2h_req_data_ready[2]), .m_req_ack(v_c2h_req_ack[2]), .m_frame_done(pcie_frame_done_ch2), .m_fifo_empty(), .m_fifo_count());
 
     // ---------------------- CHANNEL 3 ----------------------------------------
     wire [127:0] ch3_sgl_y_dout, ch3_sgl_uv_dout;
@@ -1374,11 +1354,9 @@ module custom_pcie_dma_top #(
         .sgl_uv_wr_en(!ch3_sgl_uv_empty && ch3_sgl_uv_pop_ready), .sgl_uv_wr_addr(ch3_sgl_uv_dout[63:0]), .sgl_uv_wr_len(ch3_sgl_uv_dout[95:64]), .sgl_uv_wr_flags(ch3_sgl_uv_dout[127:96]),
         .cur_y_sgl_count(), .cur_uv_sgl_count(), .sgl_y_pop_ready(ch3_sgl_y_pop_ready), .sgl_uv_pop_ready(ch3_sgl_uv_pop_ready), .pacer_enable(1'b0), .frame_interval_clks(32'd2500000), .global_timestamp(eng3_ts), .s_axis_tdata(ch3_tdata), .s_axis_tvalid(ch3_tvalid), .s_axis_tlast(ch3_tlast), .s_axis_tuser(ch3_tuser), .s_axis_tready(ch3_tready),
         .c2h_req_valid(eng3_req_valid), .c2h_req_addr(eng3_req_addr), .c2h_req_dw_len(eng3_req_dw_len), .c2h_req_data(eng3_req_data), .c2h_req_last(), .c2h_req_data_ready(eng3_req_ready), .c2h_req_ack(eng3_req_ack), .video_busy(v_busy[3]), .video_frame_done(eng3_frame_done), .frame_pts(v_pts[3]), .protocol_error_count(v_drop_cnt[3]));
-    reg v_done3_toggle = 1'b0; (* ASYNC_REG = "TRUE" *) reg [1:0] v_done3_sync = 2'b00; reg v_done3_prev = 1'b0;
-    always @(posedge video_clk or negedge video_rst_n) begin if (!video_rst_n) v_done3_toggle <= 1'b0; else if (eng3_frame_done) v_done3_toggle <= ~v_done3_toggle; end
-    always @(posedge clk or negedge rst_n) begin if (!rst_n) begin v_done3_sync <= 2'b00; v_done3_prev <= 1'b0; end else begin v_done3_sync[0] <= v_done3_toggle; v_done3_sync[1] <= v_done3_sync[0]; v_done3_prev <= v_done3_sync[1]; end end
-    assign v_done[3] = v_done3_sync[1] ^ v_done3_prev;
-    video_req_cdc #(.MAX_DWORDS(64), .FIFO_DEPTH(512)) u_video_req_cdc_ch3 (.wr_clk(video_clk), .wr_rst_n(video_rst_n), .s_req_valid(eng3_req_valid), .s_req_addr(eng3_req_addr), .s_req_dw_len(eng3_req_dw_len), .s_req_data(eng3_req_data), .s_req_data_ready(eng3_req_ready), .s_req_ack(eng3_req_ack), .rd_clk(clk), .rd_rst_n(rst_n), .m_req_valid(v_c2h_req_valid[3]), .m_req_addr(v_c2h_req_addr[255:192]), .m_req_dw_len(v_c2h_req_dw_len[43:33]), .m_req_data(v_c2h_req_data[(3*PCIE_DATA_WIDTH) +: PCIE_DATA_WIDTH]), .m_req_data_ready(v_c2h_req_data_ready[3]), .m_req_ack(v_c2h_req_ack[3]), .m_fifo_empty(), .m_fifo_count());
+    wire pcie_frame_done_ch3;
+    assign v_done[3] = pcie_frame_done_ch3;
+    video_req_cdc #(.MAX_DWORDS(64), .FIFO_DEPTH(512)) u_video_req_cdc_ch3 (.wr_clk(video_clk), .wr_rst_n(video_rst_n), .s_req_valid(eng3_req_valid), .s_req_addr(eng3_req_addr), .s_req_dw_len(eng3_req_dw_len), .s_req_data(eng3_req_data), .s_req_data_ready(eng3_req_ready), .s_req_ack(eng3_req_ack), .s_frame_done(eng3_frame_done), .rd_clk(clk), .rd_rst_n(rst_n), .m_req_valid(v_c2h_req_valid[3]), .m_req_addr(v_c2h_req_addr[255:192]), .m_req_dw_len(v_c2h_req_dw_len[43:33]), .m_req_data(v_c2h_req_data[(3*PCIE_DATA_WIDTH) +: PCIE_DATA_WIDTH]), .m_req_data_ready(v_c2h_req_data_ready[3]), .m_req_ack(v_c2h_req_ack[3]), .m_frame_done(pcie_frame_done_ch3), .m_fifo_empty(), .m_fifo_count());
 
     assign m_axis_video_tdata[VIDEO_DATA_WIDTH-1:0] = {VIDEO_DATA_WIDTH{1'b0}};
     assign m_axis_video_tvalid[0] = 1'b0;
