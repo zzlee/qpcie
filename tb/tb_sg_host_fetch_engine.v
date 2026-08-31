@@ -15,6 +15,7 @@ module tb_sg_host_fetch_engine;
     reg         rst_n;
 
     reg         fetch_start;
+    reg  [2:0]  fetch_channel;
     reg  [63:0] plane0_slot_addr;
     reg  [63:0] plane1_slot_addr;
     reg  [15:0] plane0_pages_req;
@@ -42,6 +43,9 @@ module tb_sg_host_fetch_engine;
     wire [63:0] sgl_uv_wr_addr;
     wire [31:0] sgl_uv_wr_len;
     wire [31:0] sgl_uv_wr_flags;
+    wire [2:0]  sgl_channel;
+    reg  [4:0]  channel_y_almost_full;
+    reg  [4:0]  channel_uv_almost_full;
 
     // Captured SGL entries in Testbench
     reg [63:0] captured_addr  [0:511];
@@ -65,6 +69,7 @@ module tb_sg_host_fetch_engine;
         .clk(clk),
         .rst_n(rst_n),
         .fetch_start(fetch_start),
+        .fetch_channel(fetch_channel),
         .plane0_slot_addr(plane0_slot_addr),
         .plane1_slot_addr(plane1_slot_addr),
         .plane0_pages_req(plane0_pages_req),
@@ -80,6 +85,7 @@ module tb_sg_host_fetch_engine;
         .cpld_data(cpld_data),
         .cpld_last(cpld_last),
         .cpld_tag(cpld_tag),
+        .sgl_channel(sgl_channel),
         .sgl_y_wr_en(sgl_y_wr_en),
         .sgl_y_wr_addr(sgl_y_wr_addr),
         .sgl_y_wr_len(sgl_y_wr_len),
@@ -87,7 +93,9 @@ module tb_sg_host_fetch_engine;
         .sgl_uv_wr_en(sgl_uv_wr_en),
         .sgl_uv_wr_addr(sgl_uv_wr_addr),
         .sgl_uv_wr_len(sgl_uv_wr_len),
-        .sgl_uv_wr_flags(sgl_uv_wr_flags)
+        .sgl_uv_wr_flags(sgl_uv_wr_flags),
+        .channel_y_almost_full(channel_y_almost_full),
+        .channel_uv_almost_full(channel_uv_almost_full)
     );
 
     always #(CLK_PERIOD/2) clk = ~clk;
@@ -122,7 +130,7 @@ module tb_sg_host_fetch_engine;
         end
     end
 
-    // Responder Task: Emits 256B CplD (16 x 128-bit entries)
+    // Responder Task: Emits one 64B CplD (4 x 128-bit entries)
     task respond_burst_cpld;
         input [63:0] burst_addr;
         integer beat, idx_base;
@@ -147,7 +155,7 @@ module tb_sg_host_fetch_engine;
 
             cpld_data  <= {hold_dw, 32'h00000000, 32'h04080100, 32'h4A000040};
 
-            for (beat = 1; beat <= 16; beat = beat + 1) begin
+            for (beat = 1; beat <= 4; beat = beat + 1) begin
                 @(posedge clk);
                 if (burst_addr[31:12] == 20'h00000) begin
                     e_addr  = host_slot0_addr[idx_base + beat - 1];
@@ -159,7 +167,7 @@ module tb_sg_host_fetch_engine;
                     e_flags = host_slot1_flags[idx_base + beat - 1];
                 end
 
-                if (beat < 16) begin
+                if (beat < 4) begin
                     if (burst_addr[31:12] == 20'h00000)
                         hold_dw = host_slot0_addr[idx_base + beat][31:0];
                     else
@@ -168,7 +176,7 @@ module tb_sg_host_fetch_engine;
                     hold_dw = 32'h00000000;
                 end
 
-                cpld_last <= (beat == 16);
+                cpld_last <= (beat == 4);
                 cpld_data <= {hold_dw, e_flags, e_len, e_addr[63:32]};
             end
 
@@ -185,6 +193,8 @@ module tb_sg_host_fetch_engine;
         forever begin
             @(posedge clk);
             if (mrd_req_valid) begin
+                if (mrd_req_dw_len !== 11'd16)
+                    $fatal(1, "FAIL: SG fetch MRd length is %0d DW, expected 16", mrd_req_dw_len);
                 mrd_req_ack <= 1'b1;
                 @(posedge clk);
                 mrd_req_ack <= 1'b0;
@@ -199,6 +209,7 @@ module tb_sg_host_fetch_engine;
         clk = 0;
         rst_n = 0;
         fetch_start = 0;
+        fetch_channel = 3'd0;
         plane0_slot_addr = 64'h0000000200000000;
         plane1_slot_addr = 64'd0;
         plane0_pages_req = 16'd300;
@@ -208,6 +219,8 @@ module tb_sg_host_fetch_engine;
         cpld_last = 0;
         cpld_tag = 0;
         captured_cnt = 0;
+        channel_y_almost_full = 5'd0;
+        channel_uv_almost_full = 5'd0;
 
         #40;
         rst_n = 1;
@@ -218,17 +231,25 @@ module tb_sg_host_fetch_engine;
         $display("=========================================================");
 
         $display("[TEST 1] Triggering Variable SGL Fetch across chained slots...");
+        channel_y_almost_full[0] <= 1'b1;
         @(posedge clk);
         fetch_start <= 1'b1;
         @(posedge clk);
         fetch_start <= 1'b0;
 
+        repeat (8) begin
+            @(posedge clk);
+            if (mrd_req_valid)
+                $fatal(1, "FAIL: MRd issued while channel-0 SGL FIFO is prog_full");
+        end
+        channel_y_almost_full[0] <= 1'b0;
+
         // Wait until fetch_done
         while (!fetch_done) @(posedge clk);
 
         $display("[TEST 2] Verifying SGL Segments (captured %0d entries)...", captured_cnt);
-        if (captured_cnt < 300) begin
-            $fatal(1, "FAIL: Expected at least 300 entries, got %0d", captured_cnt);
+        if (captured_cnt != 300) begin
+            $fatal(1, "FAIL: Expected exactly 300 entries, got %0d", captured_cnt);
         end
 
         // Verify entries from Slot 0

@@ -113,6 +113,9 @@ module sg_segment_walker #(
                     current_addr   <= sgl_wr_addr;
                     seg_bytes_left <= sgl_wr_len;
                     seg_valid      <= 1'b1;
+                    // The synchronous RAM write still consumed wr_ptr. Skip
+                    // that duplicate entry so the next pop sees segment 1.
+                    rd_ptr         <= rd_ptr + 1'b1;
                 end else begin
                     seg_valid <= 1'b0;
                 end
@@ -136,6 +139,7 @@ module sg_segment_walker #(
                             current_addr   <= sgl_wr_addr;
                             seg_bytes_left <= sgl_wr_len;
                             seg_valid      <= 1'b1;
+                            rd_ptr         <= rd_ptr + 1'b1;
                         end else begin
                             current_addr   <= 64'd0;
                             seg_bytes_left <= 32'd0;

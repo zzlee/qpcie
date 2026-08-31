@@ -87,11 +87,6 @@ module sg_dma_engine #(
     output reg  [31:0]                   dma_error_count
 );
 
-    assign m_axis_loopback_tdata  = h2c_cpl_data;
-    assign m_axis_loopback_tvalid = h2c_cpl_valid;
-    assign m_axis_loopback_tlast  = h2c_cpl_last && (h2c_rem_bytes == 0);
-    assign m_axis_loopback_tuser  = (h2c_burst_recv_dw == 0) && (h2c_bytes_transferred == 0);
-
     // =========================================================================
     // H2C (Host -> FPGA) DMA Execution State Machine
     // =========================================================================
@@ -112,6 +107,12 @@ module sg_dma_engine #(
     reg [10:0] h2c_burst_dw;
     reg [10:0] h2c_burst_recv_dw;
     reg        h2c_cpl_in_packet;
+
+    assign m_axis_loopback_tdata  = h2c_cpl_data;
+    assign m_axis_loopback_tvalid = h2c_cpl_valid;
+    assign m_axis_loopback_tlast  = h2c_cpl_last && (h2c_rem_bytes == 0);
+    assign m_axis_loopback_tuser  = (h2c_burst_recv_dw == 0) && (h2c_bytes_transferred == 0);
+
     wire [10:0] h2c_cpl_step_dw = !h2c_cpl_in_packet ? 11'd1 :
         ((h2c_burst_dw - h2c_burst_recv_dw) < (PCIE_DATA_WIDTH/32)) ?
         (h2c_burst_dw - h2c_burst_recv_dw) : (PCIE_DATA_WIDTH/32);

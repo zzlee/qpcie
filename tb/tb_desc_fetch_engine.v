@@ -47,6 +47,7 @@ module tb_desc_fetch_engine;
     wire [3:0]  c2h_format, c2h_plane_count;
     wire [15:0] c2h_desc_ctrl;
     reg         c2h_desc_ready;
+    reg         sg_fetch_busy;
 
     // Instantiate uut
     desc_fetch_engine uut (
@@ -84,7 +85,8 @@ module tb_desc_fetch_engine;
         .c2h_plane12_width(c2h_plane12_width), .c2h_plane12_count(c2h_plane12_count),
         .c2h_format(c2h_format), .c2h_plane_count(c2h_plane_count),
         .c2h_desc_ctrl(c2h_desc_ctrl),
-        .c2h_desc_ready(c2h_desc_ready)
+        .c2h_desc_ready(c2h_desc_ready),
+        .sg_fetch_busy(sg_fetch_busy)
     );
 
     always #5 clk = ~clk;
@@ -102,6 +104,7 @@ module tb_desc_fetch_engine;
         desc_cpl_last = 0;
         h2c_desc_ready = 0;
         c2h_desc_ready = 0;
+        sg_fetch_busy = 0;
 
         #20;
         rst_n = 1;
@@ -154,7 +157,75 @@ module tb_desc_fetch_engine;
 
         #30;
         $display("[%0t] Head Pointer updated to: %d", $time, head_ptr);
-        $display("[%0t] SUCCESS: desc_fetch_engine 64-Byte Extended Test Completed!", $time);
+        if (head_ptr !== 16'd1)
+            $fatal(1, "FAIL: First descriptor did not advance head to 1");
+
+        $display("[%0t] Test 2: Queue two C2H SG descriptors...", $time);
+        tail_ptr <= 16'd3;
+
+        wait(desc_req_valid);
+        if (desc_req_addr !== ring_base_addr + 64)
+            $fatal(1, "FAIL: SG descriptor 1 address mismatch: %h", desc_req_addr);
+        @(posedge clk);
+        desc_req_ack <= 1;
+        @(posedge clk);
+        desc_req_ack <= 0;
+
+        @(posedge clk);
+        desc_cpl_data <= 512'd0;
+        desc_cpl_data[127:64]  <= 64'h0000_0002_0000_0000;
+        desc_cpl_data[255:192] <= 64'h0000_0002_0000_1000;
+        desc_cpl_data[399:384] <= 16'd1920;
+        desc_cpl_data[415:400] <= 16'd1080;
+        desc_cpl_data[447:432] <= 16'd1920;
+        desc_cpl_data[483:480] <= 4'd2;
+        desc_cpl_data[487:484] <= 4'd2;
+        desc_cpl_data[503:488] <= 16'h002B;
+        desc_cpl_valid <= 1;
+        desc_cpl_last  <= 1;
+        @(posedge clk);
+        desc_cpl_valid <= 0;
+
+        wait(c2h_desc_valid);
+        sg_fetch_busy <= 1;
+        c2h_desc_ready <= 1;
+        @(posedge clk);
+        c2h_desc_ready <= 0;
+        repeat (5) @(posedge clk);
+        if (head_ptr !== 16'd1)
+            $fatal(1, "FAIL: Head advanced while descriptor 1 SGL fetch was busy");
+        sg_fetch_busy <= 0;
+        wait(head_ptr == 16'd2);
+
+        wait(desc_req_valid);
+        if (desc_req_addr !== ring_base_addr + 128)
+            $fatal(1, "FAIL: SG descriptor 2 address mismatch: %h", desc_req_addr);
+        @(posedge clk);
+        desc_req_ack <= 1;
+        @(posedge clk);
+        desc_req_ack <= 0;
+
+        @(posedge clk);
+        desc_cpl_data[127:64]  <= 64'h0000_0003_0000_0000;
+        desc_cpl_data[255:192] <= 64'h0000_0003_0000_1000;
+        desc_cpl_valid <= 1;
+        @(posedge clk);
+        desc_cpl_valid <= 0;
+
+        wait(c2h_desc_valid);
+        if (c2h_plane0_dst !== 64'h0000_0003_0000_0000)
+            $fatal(1, "FAIL: SG descriptor 2 payload mismatch: %h", c2h_plane0_dst);
+        sg_fetch_busy <= 1;
+        c2h_desc_ready <= 1;
+        @(posedge clk);
+        c2h_desc_ready <= 0;
+        repeat (5) @(posedge clk);
+        if (head_ptr !== 16'd2)
+            $fatal(1, "FAIL: Head advanced while descriptor 2 SGL fetch was busy");
+        sg_fetch_busy <= 0;
+        wait(head_ptr == 16'd3);
+
+        $display("[%0t] SUCCESS: Two queued C2H SG descriptors completed in order!", $time);
         $finish;
     end
 

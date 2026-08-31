@@ -3,7 +3,7 @@
 // Description: Autonomous PCIe MRd Host Variable-Length SGL Fetch Engine.
 //              Fetches 128-bit SGL segment descriptors ({phys_addr[63:0],
 //              seg_len_bytes[31:0], flags[31:0]}) from Host Coherent Memory
-//              via PCIe MRd 256-byte bursts, pushes segment descriptors into
+//              via aligned PCIe MRd 64-byte bursts, pushes segment descriptors into
 //              on-chip Segment Walker FIFOs, and follows Chained Slot Pointers.
 // ============================================================================
 
@@ -28,7 +28,7 @@ module sg_host_fetch_engine #(
     // PCIe MRd Requester Interface (To RQ TX Encoder)
     output reg         mrd_req_valid,
     output reg  [63:0] mrd_req_addr,
-    output reg  [10:0] mrd_req_dw_len, // 64 DWs = 256 Bytes
+    output reg  [10:0] mrd_req_dw_len, // 16 DWs = 64 Bytes
     output reg  [7:0]  mrd_req_tag,    // Tag 8'h01 reserved for SG Fetch
     input  wire        mrd_req_ack,
 
@@ -74,7 +74,8 @@ module sg_host_fetch_engine #(
     reg [63:0] next_slot_ptr;
     reg        curr_plane_last_seen;
 
-    // 16-Entry Burst Buffer for 128-bit SGL descriptors
+    // A 64-byte read contains four 128-bit SGL descriptors. Keeping requests
+    // within one 64-byte RCB avoids split completions with repeated headers.
     reg [63:0] buf_addr  [0:15];
     reg [31:0] buf_len   [0:15];
     reg [31:0] buf_flags [0:15];
@@ -117,7 +118,7 @@ module sg_host_fetch_engine #(
             fetch_done           <= 1'b0;
             mrd_req_valid        <= 1'b0;
             mrd_req_addr         <= 64'd0;
-            mrd_req_dw_len       <= 11'd64; // 256 Bytes (64 DWs)
+            mrd_req_dw_len       <= 11'd16; // 64 Bytes (16 DWs)
             mrd_req_tag          <= 8'h01;
             sgl_y_wr_en          <= 1'b0;
             sgl_y_wr_addr        <= 64'd0;
@@ -160,7 +161,7 @@ module sg_host_fetch_engine #(
                     if (!curr_target_almost_full) begin
                         mrd_req_valid  <= 1'b1;
                         mrd_req_addr   <= curr_slot_base + curr_slot_offset;
-                        mrd_req_dw_len <= 11'd64; // 256 Bytes (16 entries)
+                        mrd_req_dw_len <= 11'd16; // 64 Bytes (4 entries)
                         mrd_req_tag    <= 8'h01;
                         buf_rd_idx     <= 5'd0;
 
@@ -181,29 +182,31 @@ module sg_host_fetch_engine #(
 
                 S_PUSH_SGL: begin
                     sgl_channel <= curr_channel;
-                    if (buf_rd_idx < 5'd16) begin
+                    if (buf_rd_idx < 5'd4) begin
                         buf_rd_idx <= buf_rd_idx + 1'b1;
 
-                        // Check if entry has chain pointer flag (Bit 0)
-                        if (buf_flags[buf_rd_idx[3:0]][0]) begin
-                            next_slot_ptr <= buf_addr[buf_rd_idx[3:0]];
-                        end else if (buf_len[buf_rd_idx[3:0]] > 0) begin
-                            // Valid segment descriptor: push to Segment Walker FIFO
-                            if (curr_plane == 1'b0) begin
-                                sgl_y_wr_en    <= 1'b1;
-                                sgl_y_wr_addr  <= buf_addr[buf_rd_idx[3:0]];
-                                sgl_y_wr_len   <= buf_len[buf_rd_idx[3:0]];
-                                sgl_y_wr_flags <= buf_flags[buf_rd_idx[3:0]];
-                            end else begin
-                                sgl_uv_wr_en    <= 1'b1;
-                                sgl_uv_wr_addr  <= buf_addr[buf_rd_idx[3:0]];
-                                sgl_uv_wr_len   <= buf_len[buf_rd_idx[3:0]];
-                                sgl_uv_wr_flags <= buf_flags[buf_rd_idx[3:0]];
-                            end
+                        if (!curr_plane_last_seen) begin
+                            // Check if entry has chain pointer flag (Bit 0)
+                            if (buf_flags[buf_rd_idx[3:0]][0]) begin
+                                next_slot_ptr <= buf_addr[buf_rd_idx[3:0]];
+                            end else if (buf_len[buf_rd_idx[3:0]] > 0) begin
+                                // Valid segment descriptor: push to Segment Walker FIFO
+                                if (curr_plane == 1'b0) begin
+                                    sgl_y_wr_en    <= 1'b1;
+                                    sgl_y_wr_addr  <= buf_addr[buf_rd_idx[3:0]];
+                                    sgl_y_wr_len   <= buf_len[buf_rd_idx[3:0]];
+                                    sgl_y_wr_flags <= buf_flags[buf_rd_idx[3:0]];
+                                end else begin
+                                    sgl_uv_wr_en    <= 1'b1;
+                                    sgl_uv_wr_addr  <= buf_addr[buf_rd_idx[3:0]];
+                                    sgl_uv_wr_len   <= buf_len[buf_rd_idx[3:0]];
+                                    sgl_uv_wr_flags <= buf_flags[buf_rd_idx[3:0]];
+                                end
 
-                            // Check if last segment in plane (Bit 1)
-                            if (buf_flags[buf_rd_idx[3:0]][1]) begin
-                                curr_plane_last_seen <= 1'b1;
+                                // Check if last segment in plane (Bit 1)
+                                if (buf_flags[buf_rd_idx[3:0]][1]) begin
+                                    curr_plane_last_seen <= 1'b1;
+                                end
                             end
                         end
                     end else begin
@@ -219,7 +222,7 @@ module sg_host_fetch_engine #(
                         end else begin
                             state <= S_DONE;
                         end
-                    end else if (curr_slot_offset >= 12'hF00) begin
+                    end else if (curr_slot_offset >= 12'hFC0) begin
                         // End of 4KB slot reached, follow chained link pointer!
                         if (next_slot_ptr != 64'd0) begin
                             curr_slot_base   <= next_slot_ptr;
@@ -233,8 +236,8 @@ module sg_host_fetch_engine #(
                             end
                         end
                     end else begin
-                        // Advance to next 256B burst within current 4KB slot
-                        curr_slot_offset <= curr_slot_offset + 12'd256;
+                        // Advance to next 64B burst within current 4KB slot
+                        curr_slot_offset <= curr_slot_offset + 12'd64;
                         state            <= S_REQ_BURST;
                     end
                 end

@@ -416,7 +416,9 @@ int main(int argc, char **argv)
             goto out;
         }
     }
-    printf("[PASS] Allocated and queued %u contiguous NV12M MMAP buffers\n", req.count);
+    printf("[PASS] Allocated and queued %u NV12M MMAP buffers; "
+           "check driver DESC logs for per-buffer linear/SGL mappings\n",
+           req.count);
 
     if (output_name) {
         output = fopen(output_name, "wb");

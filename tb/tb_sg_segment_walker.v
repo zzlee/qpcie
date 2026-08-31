@@ -28,7 +28,8 @@ module tb_sg_segment_walker;
 
     wire [63:0] current_addr;
     wire [31:0] seg_bytes_left;
-    wire [5:0]  fifo_count;
+    wire [6:0]  fifo_count;
+    wire        seg_valid;
     wire        fifo_almost_full;
     wire        fifo_empty;
 
@@ -48,6 +49,7 @@ module tb_sg_segment_walker;
         .burst_bytes(burst_bytes),
         .current_addr(current_addr),
         .seg_bytes_left(seg_bytes_left),
+        .seg_valid(seg_valid),
         .fifo_count(fifo_count),
         .fifo_almost_full(fifo_almost_full),
         .fifo_empty(fifo_empty)
@@ -101,12 +103,18 @@ module tb_sg_segment_walker;
         $display("  [PASS] Linear Mode OK.");
 
         // Test 2: Variable-Length SGL Mode
-        // Preload 3 segments:
+        // Start the frame before the fetcher begins pushing its segments.
         // Seg 0: Addr 0x30000000, Len 512 bytes (2 x 256B bursts)
         // Seg 1: Addr 0x40000000, Len 1024 bytes (4 x 256B bursts)
         // Seg 2: Addr 0x50000000, Len 4096 bytes
         $display("[TEST 2] Variable-Length SGL Mode Verification...");
         @(posedge clk);
+        sg_mode <= 1'b1;
+        start   <= 1'b1;
+        @(posedge clk);
+        start <= 1'b0;
+        @(posedge clk);
+
         sgl_wr_en    <= 1'b1;
         sgl_wr_addr  <= 64'h0000000030000000;
         sgl_wr_len   <= 32'd512;
@@ -120,13 +128,6 @@ module tb_sg_segment_walker;
         sgl_wr_flags <= 32'h00000002; // LAST_SEG
         @(posedge clk);
         sgl_wr_en <= 1'b0;
-        @(posedge clk);
-
-        // Start frame in SGL mode
-        sg_mode <= 1'b1;
-        start   <= 1'b1;
-        @(posedge clk);
-        start <= 1'b0;
         @(posedge clk);
 
         if (current_addr !== 64'h0000000030000000 || seg_bytes_left !== 32'd512)
