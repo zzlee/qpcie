@@ -173,6 +173,7 @@ module axil_reg_space (
             s_axil_bresp      <= 2'b00; // OKAY
         end else begin
             reg_irq_status_w1c <= 32'd0;
+            reg_perf_reset_w1c <= 1'b0;
             pt_y_wr_en         <= 1'b0;
             pt_uv_wr_en        <= 1'b0;
             if (s_axil_awvalid && s_axil_wvalid && !s_axil_bvalid) begin

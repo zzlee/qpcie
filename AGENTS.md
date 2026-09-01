@@ -20,8 +20,7 @@ To compile native RTL sources (`a50t_pcie_card_top.v`, `pcie_7x_axi_bridge.v`, `
 
 ```bash
 cd /home/zzlee/qpcie
-rm -rf build/qpcie_a50t_proj
-/opt/Xilinx/Vivado/2023.2/bin/vivado -mode batch -source scripts/build_a50t.tcl
+./scripts/build_a50t.sh
 ```
 - Output Bitstream: `./build/qpcie_a50t_proj/qpcie_a50t_card.runs/impl_1/a50t_pcie_card_top.bit`
 

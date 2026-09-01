@@ -92,9 +92,11 @@ module sg_dma_engine #(
     // =========================================================================
     localparam H2C_IDLE       = 3'd0;
     localparam H2C_PRECALC    = 3'd1;
-    localparam H2C_ISSUE_MRD  = 3'd2;
-    localparam H2C_WAIT_ACK   = 3'd3;
-    localparam H2C_WAIT_CPLD  = 3'd4;
+    localparam H2C_LOAD_LIMIT = 3'd2;
+    localparam H2C_CALC_BURST = 3'd3;
+    localparam H2C_ISSUE_MRD  = 3'd4;
+    localparam H2C_WAIT_ACK   = 3'd5;
+    localparam H2C_WAIT_CPLD  = 3'd6;
 
     reg [2:0]  h2c_state;
     reg [63:0] h2c_cur_addr;
@@ -105,6 +107,9 @@ module sg_dma_engine #(
     reg [15:0] h2c_desc_ctrl_q;
     reg        h2c_is_uv;
     reg [10:0] h2c_burst_dw;
+    reg [63:0] h2c_calc_addr;
+    reg [15:0] h2c_calc_limit;
+    reg [15:0] h2c_calc_avail;
     reg [10:0] h2c_burst_recv_dw;
     reg        h2c_cpl_in_packet;
 
@@ -177,7 +182,8 @@ module sg_dma_engine #(
     wire [12:0] h2c_bytes_to_4k = 13'd4096 - {1'b0, h2c_target_addr[11:0]};
     wire [31:0] h2c_avail_bytes = (h2c_sg_mode) ? (!h2c_is_uv ? h2c_y_walker_bytes_left : h2c_uv_walker_bytes_left) : {19'd0, h2c_bytes_to_4k};
     wire [15:0] h2c_limit_bytes = (h2c_rem_bytes < 32'd256) ? h2c_rem_bytes[15:0] : 16'd256;
-    wire [15:0] h2c_burst_bytes = (h2c_limit_bytes < h2c_avail_bytes[15:0]) ? h2c_limit_bytes : h2c_avail_bytes[15:0];
+    wire [15:0] h2c_calc_burst_bytes =
+        (h2c_calc_limit < h2c_calc_avail) ? h2c_calc_limit : h2c_calc_avail;
 
     wire h2c_walker_ready = !h2c_sg_mode || (!h2c_is_uv ? (h2c_y_seg_valid && h2c_y_walker_bytes_left > 0) : (h2c_uv_seg_valid && h2c_uv_walker_bytes_left > 0));
 
@@ -201,6 +207,9 @@ module sg_dma_engine #(
             h2c_desc_ctrl_q       <= 16'd0;
             h2c_is_uv             <= 1'b0;
             h2c_burst_dw          <= 11'd0;
+            h2c_calc_addr         <= 64'd0;
+            h2c_calc_limit        <= 16'd0;
+            h2c_calc_avail        <= 16'd0;
             h2c_burst_recv_dw     <= 11'd0;
             h2c_cpl_in_packet     <= 1'b0;
         end else begin
@@ -225,23 +234,34 @@ module sg_dma_engine #(
                     h2c_desc_ready <= 1'b1;
                     h2c_rem_bytes  <= (h2c_plane_cnt_q >= 4'd2) ? (h2c_p0_bytes_q + h2c_p1_bytes_q) : h2c_p0_bytes_q;
                     h2c_is_uv      <= (h2c_p0_bytes_q == 0) && (h2c_plane_cnt_q >= 4'd2);
-                    h2c_state      <= H2C_ISSUE_MRD;
+                    h2c_state      <= H2C_LOAD_LIMIT;
                 end
 
-                H2C_ISSUE_MRD: begin
+                H2C_LOAD_LIMIT: begin
                     h2c_desc_ready <= 1'b0;
-                    if (h2c_rem_bytes > 32'd0 && h2c_walker_ready && h2c_burst_bytes > 0) begin
-                        h2c_burst_dw   <= h2c_burst_bytes[12:2];
-                        h2c_req_dw_len <= h2c_burst_bytes[12:2];
-                        h2c_req_addr   <= h2c_target_addr;
-                        h2c_req_tag    <= 8'h02;
-                        h2c_req_valid  <= 1'b1;
-                        h2c_state      <= H2C_WAIT_ACK;
+                    if (h2c_rem_bytes > 32'd0 && h2c_walker_ready) begin
+                        h2c_calc_addr  <= h2c_target_addr;
+                        h2c_calc_limit <= h2c_limit_bytes;
+                        h2c_calc_avail <= h2c_avail_bytes[15:0];
+                        h2c_state      <= H2C_CALC_BURST;
                     end else if (h2c_rem_bytes == 32'd0) begin
                         completed_h2c_count <= completed_h2c_count + 1'b1;
                         h2c_desc_ready      <= 1'b1;
                         h2c_state           <= H2C_IDLE;
                     end
+                end
+
+                H2C_CALC_BURST: begin
+                    h2c_burst_dw <= h2c_calc_burst_bytes[12:2];
+                    h2c_req_addr <= h2c_calc_addr;
+                    h2c_state    <= H2C_ISSUE_MRD;
+                end
+
+                H2C_ISSUE_MRD: begin
+                    h2c_req_dw_len <= h2c_burst_dw;
+                    h2c_req_tag    <= 8'h02;
+                    h2c_req_valid  <= 1'b1;
+                    h2c_state      <= H2C_WAIT_ACK;
                 end
 
                 H2C_WAIT_ACK: begin
@@ -268,7 +288,7 @@ module sg_dma_engine #(
                                 h2c_desc_ready      <= 1'b1;
                                 h2c_state           <= H2C_IDLE;
                             end else begin
-                                h2c_state           <= H2C_ISSUE_MRD;
+                                h2c_state           <= H2C_LOAD_LIMIT;
                             end
                         end else begin
                             h2c_burst_recv_dw <= h2c_burst_recv_dw + h2c_cpl_step_dw;

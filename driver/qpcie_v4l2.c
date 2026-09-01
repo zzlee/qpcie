@@ -663,6 +663,8 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
     vch->sequence = 0;
     vch->current_slice_idx = 0;
     vch->error_count_start = ioread32(qdev->bar0_mmio + REG_VIDEO_ERRORS);
+    iowrite32(0, qdev->bar0_mmio + REG_VIDEO_CTRL);
+    ioread32(qdev->bar0_mmio + REG_VIDEO_CTRL);
     iowrite32(0, qdev->bar0_mmio + REG_SLICE_HEIGHT);
     iowrite32(vch->pacer_enable ? 1 : 0,
               qdev->bar0_mmio + REG_PACER_CTRL);
@@ -699,6 +701,9 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
         return -EIO;
     }
     dma_wmb();
+    /* Reset for one PCIe clock, then count the complete streaming window. */
+    iowrite32(0x03, qdev->bar0_mmio + REG_PERF_CTRL);
+    ioread32(qdev->bar0_mmio + REG_PERF_CTRL);
     iowrite32(1, qdev->bar0_mmio + REG_DMA_CTRL);
     ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
 
@@ -736,6 +741,7 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
     struct qpcie_dev *qdev = vch->qdev;
     unsigned long timeout = jiffies + msecs_to_jiffies(500);
     bool drained = false;
+    u32 head;
 
     if (vch->channel_id == 0) {
         void __iomem *tpg = qdev->bar1_mmio + 0x000;
@@ -744,23 +750,51 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
         iowrite32(0x00, tpg + 0x00);
     }
     iowrite32(0, qdev->bar0_mmio + REG_PACER_CTRL);
+    /* Stop fetching descriptors. Queued descriptors are cancelled below;
+     * only already-buffered PCIe writes must drain before mappings return. */
+    iowrite32(0, qdev->bar0_mmio + REG_DMA_CTRL);
+    ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
     do {
         u32 status = ioread32(qdev->bar0_mmio + REG_DMA_STATUS);
-        u32 ptr = ioread32(qdev->bar0_mmio + 0x40);
 
-        if (!(status & BIT(0)) && ((ptr & 0xffff) == (ptr >> 16))) {
+        if (status & DMA_STATUS_VIDEO_TX_IDLE) {
             drained = true;
             break;
         }
         usleep_range(1000, 2000);
     } while (time_before(jiffies, timeout));
 
-    iowrite32(0, qdev->bar0_mmio + REG_DMA_CTRL);
-    ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
+    /* Freeze the video engine and its CDC FIFO before cancelling descriptors.
+     * STREAMON releases this reset after new mappings have been queued. */
+    iowrite32(1, qdev->bar0_mmio + REG_VIDEO_CTRL);
+    ioread32(qdev->bar0_mmio + REG_VIDEO_CTRL);
+    usleep_range(1000, 2000);
+    timeout = jiffies + msecs_to_jiffies(500);
+    do {
+        u32 status = ioread32(qdev->bar0_mmio + REG_DMA_STATUS);
+
+        if ((status & (DMA_STATUS_VIDEO_TX_IDLE |
+                       DMA_STATUS_DESC_IDLE)) ==
+            (DMA_STATUS_VIDEO_TX_IDLE | DMA_STATUS_DESC_IDLE))
+            break;
+        usleep_range(1000, 2000);
+    } while (time_before(jiffies, timeout));
+
+    /* Cancel descriptors that were queued for frames the stopped TPG will
+     * never produce. Rebase both producer pointers to the hardware consumer. */
+    head = ioread32(qdev->bar0_mmio + 0x40) & 0xffff;
+    qdev->h2c_tail = head;
+    qdev->c2h_tail = head;
+    iowrite32((head << 16) | RING_BUFFER_SIZE,
+              qdev->bar0_mmio + REG_H2C_RING_CFG);
+    ioread32(qdev->bar0_mmio + REG_H2C_RING_CFG);
+
+    /* Freeze counters after all channel-0 writes have retired. */
+    iowrite32(0, qdev->bar0_mmio + REG_PERF_CTRL);
+    ioread32(qdev->bar0_mmio + REG_PERF_CTRL);
     synchronize_irq(qdev->irq);
     {
         u32 errors = ioread32(qdev->bar0_mmio + REG_VIDEO_ERRORS);
-        u32 ptr = ioread32(qdev->bar0_mmio + 0x40);
 
         if (!drained)
             dev_err(&qdev->pdev->dev,
@@ -771,7 +805,7 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
                     vch->error_count_start, errors);
         dev_info(&qdev->pdev->dev,
                  "NV12M STREAMOFF: drained=%u head=%u tail=%u video_errors=%u\n",
-                 drained, ptr & 0xffff, ptr >> 16, errors);
+                 drained, head, head, errors);
     }
     qpcie_return_all_buffers(vch, VB2_BUF_STATE_ERROR);
 }

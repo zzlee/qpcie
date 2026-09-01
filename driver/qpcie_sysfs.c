@@ -498,7 +498,10 @@ static ssize_t perf_reset_store(struct device *dev, struct device_attribute *att
 
     if (qdev && qdev->bar0_mmio) {
         /* Write bit 1 to pulse hardware reset */
-        iowrite32(0x02, qdev->bar0_mmio + REG_PERF_CTRL);
+        u32 ctrl = ioread32(qdev->bar0_mmio + REG_PERF_CTRL);
+
+        iowrite32((ctrl & 1) | 0x02,
+                  qdev->bar0_mmio + REG_PERF_CTRL);
         dev_info(dev, "Performance Monitor Counters Reset\n");
     }
 

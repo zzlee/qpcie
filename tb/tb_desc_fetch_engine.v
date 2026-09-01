@@ -15,6 +15,7 @@ module tb_desc_fetch_engine;
     reg [15:0] ring_size;
     reg [15:0] tail_ptr;
     wire [15:0] head_ptr;
+    wire idle;
 
     wire        desc_req_valid;
     wire [63:0] desc_req_addr;
@@ -58,6 +59,7 @@ module tb_desc_fetch_engine;
         .ring_size(ring_size),
         .tail_ptr(tail_ptr),
         .head_ptr(head_ptr),
+        .idle(idle),
         .desc_req_valid(desc_req_valid),
         .desc_req_addr(desc_req_addr),
         .desc_req_dw_len(desc_req_dw_len),

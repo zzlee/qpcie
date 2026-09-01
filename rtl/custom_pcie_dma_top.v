@@ -174,23 +174,35 @@ module custom_pcie_dma_top #(
     reg [31:0] sof_gray_v  = 32'd0;
     reg [31:0] eol_gray_v  = 32'd0;
     reg [31:0] beat_gray_v = 32'd0;
+    reg [31:0] sof_bin_v   = 32'd0;
+    reg [31:0] eol_bin_v   = 32'd0;
+    reg [31:0] beat_bin_v  = 32'd0;
 
-    wire [31:0] sof_bin_next  = gray_to_bin(sof_gray_v) + 32'd1;
-    wire [31:0] eol_bin_next  = gray_to_bin(eol_gray_v) + 32'd1;
-    wire [31:0] beat_bin_next = gray_to_bin(beat_gray_v) + 32'd1;
+    wire [31:0] sof_bin_next  = sof_bin_v + 32'd1;
+    wire [31:0] eol_bin_next  = eol_bin_v + 32'd1;
+    wire [31:0] beat_bin_next = beat_bin_v + 32'd1;
 
     always @(posedge video_clk or negedge video_rst_n) begin
         if (!video_rst_n) begin
             sof_gray_v  <= 32'd0;
             eol_gray_v  <= 32'd0;
             beat_gray_v <= 32'd0;
+            sof_bin_v   <= 32'd0;
+            eol_bin_v   <= 32'd0;
+            beat_bin_v  <= 32'd0;
         end else begin
-            if (sof_pulse)
+            if (sof_pulse) begin
+                sof_bin_v   <= sof_bin_next;
                 sof_gray_v  <= (sof_bin_next >> 1) ^ sof_bin_next;
-            if (eol_pulse)
+            end
+            if (eol_pulse) begin
+                eol_bin_v   <= eol_bin_next;
                 eol_gray_v  <= (eol_bin_next >> 1) ^ eol_bin_next;
-            if (video_ch0_tvalid)
+            end
+            if (video_ch0_tvalid) begin
+                beat_bin_v  <= beat_bin_next;
                 beat_gray_v <= (beat_bin_next >> 1) ^ beat_bin_next;
+            end
         end
     end
 
@@ -231,6 +243,7 @@ module custom_pcie_dma_top #(
     wire        tag_free_req;
 
     wire        desc_req_valid, desc_req_ack;
+    wire        desc_fetch_idle;
     wire [63:0] desc_req_addr;
     wire [10:0] desc_req_dw_len;
     wire [7:0]  desc_req_tag;
@@ -277,6 +290,8 @@ module custom_pcie_dma_top #(
     wire [NUM_VIDEO_CH-1:0]                    v_c2h_req_last;
     wire [NUM_VIDEO_CH-1:0]                    v_c2h_req_data_ready;
     wire [NUM_VIDEO_CH-1:0]                    v_busy, v_done;
+    wire        video_cdc_fifo_empty;
+    wire [9:0]  video_cdc_fifo_count;
 
     wire [NUM_AUDIO_CH-1:0]                    a_c2h_req_valid;
     wire [(NUM_AUDIO_CH*64)-1:0]               a_c2h_req_addr;
@@ -383,7 +398,11 @@ module custom_pcie_dma_top #(
         end
     endgenerate
 
-    assign reg_dma_status = {16'd0, sg_c2h_busy, sg_h2c_busy, 6'd0, a_done[0], v_done[0], a_busy[0], v_busy[0]};
+    wire video_tx_idle = video_cdc_fifo_empty && !v_c2h_req_valid[0] &&
+                         (c2h_owner != 8'd2);
+    assign reg_dma_status = {20'd0, sg_c2h_busy, sg_h2c_busy,
+                             desc_fetch_idle, video_tx_idle, 4'd0,
+                             a_done[0], v_done[0], a_busy[0], v_busy[0]};
 
     // 1. CQ RX Decoder
     cq_rx_decoder #(
@@ -496,8 +515,6 @@ module custom_pcie_dma_top #(
     wire [31:0] reg_perf_idle_cdc_empty;
     wire [31:0] reg_perf_idle_no_req;
 
-    wire        video_cdc_fifo_empty;
-    wire [9:0]  video_cdc_fifo_count;
     wire        perf_tlp_start = m_axis_rq_tvalid && m_axis_rq_tready && m_axis_rq_tuser[0];
     wire        perf_split_4k_event = (c2h_req_valid_mux && c2h_req_ack_mux &&
                                        (c2h_req_dw_len_mux == 11'd32) &&
@@ -806,6 +823,7 @@ module custom_pcie_dma_top #(
         .ring_size(reg_h2c_ring_size),
         .tail_ptr(reg_h2c_tail_ptr),
         .head_ptr(reg_h2c_head_ptr),
+        .idle(desc_fetch_idle),
         .desc_req_valid(desc_req_valid),
         .desc_req_addr(desc_req_addr),
         .desc_req_dw_len(desc_req_dw_len),
@@ -941,6 +959,9 @@ module custom_pcie_dma_top #(
     //              uv_addr[63:0], y_addr[63:0]}
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
+            hs_send_q <= 1'b0;
+            hs_bus_q  <= 241'd0;
+        end else if (reg_video_ctrl[0]) begin
             hs_send_q <= 1'b0;
             hs_bus_q  <= 241'd0;
         end else if (!hs_send_q && c2h_desc_valid && nv12_desc_select) begin

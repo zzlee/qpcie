@@ -18,6 +18,7 @@ module desc_fetch_engine (
     input  wire [15:0] ring_size,
     input  wire [15:0] tail_ptr,
     output reg  [15:0] head_ptr,
+    output wire        idle,
 
     // Interface to RQ TX Encoder (MRd Request)
     output reg         desc_req_valid,
@@ -67,6 +68,7 @@ module desc_fetch_engine (
     localparam INC_HEAD       = 3'b101;
 
     reg [2:0] state;
+    assign idle = (state == IDLE);
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin

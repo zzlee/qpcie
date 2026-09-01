@@ -419,6 +419,7 @@ module tb_video_cdc_system;
         mmio_write_bar0(32'h08, 32'h00000000);           // ring base low
         mmio_write_bar0(32'h0C, 32'h00000000);           // ring base high
         mmio_write_bar0(32'h20, 32'h00000003);           // IRQ enable (both)
+        mmio_write_bar0(32'hA0, 32'h00000003);           // perf reset + enable
         mmio_write_bar0(32'h00, 32'h00000001);           // DMA run
         mmio_write_bar0(32'h10, (32'd1 << 16) | 32'd16); // tail=1,size=16
 
@@ -478,6 +479,24 @@ module tb_video_cdc_system;
         if (!usr_irq_seen) $fatal(1, "MSI completion never observed");
         if (mwr_done_cnt !== 384)
             $fatal(1, "MWr completion count %0d (expected 384)", mwr_done_cnt);
+        if (u_dma_top.reg_perf_cycles == 0 ||
+            u_dma_top.reg_perf_payload_bytes != PAYLOAD_BYTES)
+            $fatal(1, "Perf monitor invalid: cycles=%0d payload=%0d expected=%0d",
+                   u_dma_top.reg_perf_cycles,
+                   u_dma_top.reg_perf_payload_bytes, PAYLOAD_BYTES);
+
+        // Exercise the driver's STREAMOFF ordering through the MMIO path.
+        mmio_write_bar0(32'h00, 32'h00000000); // stop descriptor fetch
+        mmio_write_bar0(32'h80, 32'h00000001); // reset video pipeline
+        if (!u_dma_top.reg_dma_status[8] || !u_dma_top.reg_dma_status[9])
+            $fatal(1, "Quiesce status invalid: DMA_STATUS=%h",
+                   u_dma_top.reg_dma_status);
+        mmio_write_bar0(32'hA0, 32'h00000000); // freeze perf counters
+        expv = u_dma_top.reg_perf_cycles;
+        repeat (10) @(posedge clk);
+        if (u_dma_top.reg_perf_cycles !== expv)
+            $fatal(1, "Perf cycles changed after freeze: %0d -> %0d",
+                   expv, u_dma_top.reg_perf_cycles);
         #1000;
         if (desc_accept_cnt !== 1)
             $fatal(1, "Engine accepted descriptor %0d times (expected exactly 1)!", desc_accept_cnt);

@@ -100,6 +100,9 @@
 #define REG_PERF_IDLE_CDC_EMPTY     0xD8 /* Idle cycles due to empty CDC FIFO */
 #define REG_PERF_IDLE_NO_REQ        0xDC /* Idle cycles with no DMA request */
 
+#define DMA_STATUS_VIDEO_TX_IDLE    BIT(8) /* Channel-0 CDC and requester drained */
+#define DMA_STATUS_DESC_IDLE        BIT(9) /* Descriptor fetch FSM quiescent */
+
 /* Scatter-Gather Page Table & Status Registers (BAR0 Offsets 0xE0..0xEC) */
 #define REG_SG_PT_CTRL              0xE0 /* Page Table Target Address [10:0] */
 #define REG_SG_PT_DATA_LO           0xE4 /* Physical Address [31:0] */
