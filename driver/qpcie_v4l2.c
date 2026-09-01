@@ -719,7 +719,7 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
     /* Reset for one PCIe clock, then count the complete streaming window. */
     iowrite32(0x03, qdev->bar0_mmio + REG_PERF_CTRL);
     ioread32(qdev->bar0_mmio + REG_PERF_CTRL);
-    iowrite32(1, qdev->bar0_mmio + REG_DMA_CTRL);
+    iowrite32(DMA_CTRL_RUN, qdev->bar0_mmio + REG_DMA_CTRL);
     ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
 
     /* Start TPG AFTER DMA is enabled so frame 1 starts cleanly without FIFO backpressure */
@@ -794,6 +794,8 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
             break;
         usleep_range(1000, 2000);
     } while (time_before(jiffies, timeout));
+
+    qpcie_dma_soft_reset(qdev);
 
     /* Cancel descriptors that were queued for frames the stopped TPG will
      * never produce. Rebase both producer pointers to the hardware consumer. */

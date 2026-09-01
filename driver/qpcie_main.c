@@ -10,6 +10,16 @@
 
 #define SG_PAGES 4
 
+void qpcie_dma_soft_reset(struct qpcie_dev *qdev)
+{
+    iowrite32(DMA_CTRL_RESET, qdev->bar0_mmio + REG_DMA_CTRL);
+    ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
+    usleep_range(1000, 2000);
+    iowrite32(0, qdev->bar0_mmio + REG_DMA_CTRL);
+    ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
+    usleep_range(1000, 2000);
+}
+
 static irqreturn_t qpcie_irq_handler(int irq, void *data)
 {
     struct qpcie_dev *qdev = data;
@@ -186,6 +196,14 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
     } else {
         dev_info(&pdev->dev, "[MMIO] BAR1 Mapped Virt Addr: %p\n", qdev->bar1_mmio);
     }
+
+    /* Recover even when a warm host reboot leaves the FPGA DMA FSMs intact. */
+    iowrite32(1, qdev->bar0_mmio + REG_VIDEO_CTRL);
+    ioread32(qdev->bar0_mmio + REG_VIDEO_CTRL);
+    qpcie_dma_soft_reset(qdev);
+    iowrite32(0, qdev->bar0_mmio + REG_VIDEO_CTRL);
+    ioread32(qdev->bar0_mmio + REG_VIDEO_CTRL);
+    usleep_range(1000, 2000);
 
     /* ------------------------------------------------------------------------
      * 1. BAR0 Read Tests (Firmware Version, Git Hash, Build Timestamp)
@@ -432,11 +450,17 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
         }
 
 stop_diag_dma:
-        iowrite32(0x00000000, qdev->bar0_mmio + REG_DMA_CTRL);
+        iowrite32(0, qdev->bar0_mmio + REG_DMA_CTRL);
         ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
         if (ret)
             pci_clear_master(pdev);
         msleep(20);
+        iowrite32(1, qdev->bar0_mmio + REG_VIDEO_CTRL);
+        ioread32(qdev->bar0_mmio + REG_VIDEO_CTRL);
+        qpcie_dma_soft_reset(qdev);
+        iowrite32(0, qdev->bar0_mmio + REG_VIDEO_CTRL);
+        ioread32(qdev->bar0_mmio + REG_VIDEO_CTRL);
+        usleep_range(1000, 2000);
 free_diag_dma:
         dma_free_coherent(&pdev->dev, 64 * 16, desc_ring, desc_ring_dma);
         for (p = 0; p < SG_PAGES; p++) {

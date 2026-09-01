@@ -428,6 +428,24 @@ module tb_video_cdc_system;
                  s_axis_tx_tdata[28:24] == 5'b00000)) @(posedge clk);
         $display("  [PASS] descriptor MRd issued");
 
+        // A missing descriptor CplD must be recoverable without resetting the
+        // BAR control plane or relying on host PERST.
+        mmio_write_bar0(32'h00, 32'h00000002); // DMA soft reset
+        repeat (8) @(posedge clk);
+        if (!u_dma_top.desc_fetch_idle || u_dma_top.reg_h2c_head_ptr != 0 ||
+            u_dma_top.desc_req_valid || u_dma_top.reg_h2c_tail_ptr != 1 ||
+            u_dma_top.reg_h2c_ring_size != 16)
+            $fatal(1, "DMA soft reset failed: idle=%b head=%0d req=%b tail=%0d size=%0d",
+                   u_dma_top.desc_fetch_idle, u_dma_top.reg_h2c_head_ptr,
+                   u_dma_top.desc_req_valid, u_dma_top.reg_h2c_tail_ptr,
+                   u_dma_top.reg_h2c_ring_size);
+        mmio_write_bar0(32'h00, 32'h00000000); // release reset
+        mmio_write_bar0(32'h00, 32'h00000001); // restart DMA
+        @(posedge clk);
+        while (!(s_axis_tx_tvalid && s_axis_tx_tdata[30:29] == 2'b01 &&
+                 s_axis_tx_tdata[28:24] == 5'b00000)) @(posedge clk);
+        $display("  [PASS] descriptor fetch recovered after DMA soft reset");
+
         send_nv12_descriptor();
 
         // Packets hit the wire while later rows are still streaming, so the

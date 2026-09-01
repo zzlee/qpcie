@@ -66,7 +66,7 @@ static int qpcie_alsa_trigger(struct snd_pcm_substream *substream, int cmd)
 
     switch (cmd) {
     case SNDRV_PCM_TRIGGER_START:
-        iowrite32(0x02, qdev->bar0_mmio + REG_DMA_CTRL); /* Start Audio DMA */
+        iowrite32(DMA_CTRL_AUDIO_RUN, qdev->bar0_mmio + REG_DMA_CTRL);
         break;
     case SNDRV_PCM_TRIGGER_STOP:
         iowrite32(0x00, qdev->bar0_mmio + REG_DMA_CTRL); /* Stop DMA */

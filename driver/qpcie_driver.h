@@ -59,6 +59,9 @@
 /* BAR0 DMA Register Offsets */
 #define REG_DMA_CTRL         0x00
 #define REG_DMA_STATUS       0x04
+#define DMA_CTRL_RUN         BIT(0)
+#define DMA_CTRL_RESET       BIT(1)
+#define DMA_CTRL_AUDIO_RUN   BIT(2)
 #define REG_H2C_RING_ADDR_L  0x08
 #define REG_H2C_RING_ADDR_H  0x0C
 #define REG_H2C_RING_CFG     0x10
@@ -251,6 +254,7 @@ struct qpcie_dev {
 int qpcie_v4l2_init(struct qpcie_dev *qdev);
 void qpcie_v4l2_remove(struct qpcie_dev *qdev);
 void qpcie_v4l2_irq_handler(struct qpcie_dev *qdev);
+void qpcie_dma_soft_reset(struct qpcie_dev *qdev);
 
 int qpcie_alsa_init(struct qpcie_dev *qdev);
 void qpcie_alsa_remove(struct qpcie_dev *qdev);
