@@ -115,14 +115,63 @@ module sg_dma_engine #(
     reg [10:0] h2c_burst_recv_dw;
     reg        h2c_cpl_in_packet;
 
-    assign m_axis_loopback_tdata  = h2c_cpl_data;
-    assign m_axis_loopback_tvalid = h2c_cpl_valid;
-    assign m_axis_loopback_tlast  = h2c_cpl_last && (h2c_rem_bytes == 0);
-    assign m_axis_loopback_tuser  = (h2c_burst_recv_dw == 0) && (h2c_bytes_transferred == 0);
+    reg [223:0] h2c_pack_data;
+    reg [2:0]   h2c_pack_dw_count;
+    reg [31:0]  h2c_output_bytes;
+    reg [PCIE_DATA_WIDTH-1:0] loopback_tdata_q;
+    reg loopback_tvalid_q, loopback_tlast_q, loopback_tuser_q;
+
+    assign m_axis_loopback_tdata  = loopback_tdata_q;
+    assign m_axis_loopback_tvalid = loopback_tvalid_q;
+    assign m_axis_loopback_tlast  = loopback_tlast_q;
+    assign m_axis_loopback_tuser  = loopback_tuser_q;
 
     wire [10:0] h2c_cpl_step_dw = !h2c_cpl_in_packet ? 11'd1 :
         ((h2c_burst_dw - h2c_burst_recv_dw) < (PCIE_DATA_WIDTH/32)) ?
         (h2c_burst_dw - h2c_burst_recv_dw) : (PCIE_DATA_WIDTH/32);
+    wire [3:0] h2c_pack_total_dw = h2c_pack_dw_count + h2c_cpl_step_dw[2:0];
+    wire [255:0] h2c_pack_combined =
+        {32'd0, h2c_pack_data} |
+        ({128'd0, h2c_cpl_data} << (h2c_pack_dw_count * 32));
+
+    // Strip the three-DW CplD header gap from the first RC beat and repack the
+    // payload into contiguous 128-bit beats for the raw video loopback path.
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            h2c_pack_data <= 0;
+            h2c_pack_dw_count <= 0;
+            h2c_output_bytes <= 0;
+            loopback_tdata_q <= 0;
+            loopback_tvalid_q <= 0;
+            loopback_tlast_q <= 0;
+            loopback_tuser_q <= 0;
+        end else begin
+            loopback_tvalid_q <= 0;
+            loopback_tlast_q <= 0;
+            loopback_tuser_q <= 0;
+
+            if (h2c_state == H2C_IDLE && h2c_desc_valid) begin
+                h2c_pack_data <= 0;
+                h2c_pack_dw_count <= 0;
+                h2c_output_bytes <= 0;
+            end else if (h2c_cpl_valid) begin
+                if (h2c_pack_total_dw >= 4) begin
+                    loopback_tdata_q <= h2c_pack_combined[127:0];
+                    loopback_tvalid_q <= 1;
+                    loopback_tlast_q <= h2c_cpl_last &&
+                                        (h2c_rem_bytes == 0) &&
+                                        (h2c_pack_total_dw == 4);
+                    loopback_tuser_q <= (h2c_output_bytes == 0);
+                    h2c_output_bytes <= h2c_output_bytes + 16;
+                    h2c_pack_data <= h2c_pack_combined[255:128];
+                    h2c_pack_dw_count <= h2c_pack_total_dw - 4;
+                end else begin
+                    h2c_pack_data <= h2c_pack_combined[223:0];
+                    h2c_pack_dw_count <= h2c_pack_total_dw[2:0];
+                end
+            end
+        end
+    end
 
     wire h2c_sg_mode = h2c_desc_ctrl_q[5] || h2c_desc_ctrl_q[4];
 

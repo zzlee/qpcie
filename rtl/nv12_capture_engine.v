@@ -12,7 +12,8 @@ module nv12_capture_engine #(
     parameter integer MAX_WIDTH = 3840,
     parameter integer PCIE_DATA_WIDTH = 128,
     parameter integer FIFO_DEPTH = 128,
-    parameter integer MWR_PAYLOAD_BYTES = 128
+    parameter integer MWR_PAYLOAD_BYTES = 128,
+    parameter integer RAW_INPUT = 0
 )(
     input  wire                         clk,
     input  wire                         rst_n,
@@ -91,6 +92,9 @@ module nv12_capture_engine #(
     reg [127:0] odd_data;
     reg [15:0] odd_col;
     reg odd_frame_end;
+    reg [31:0] raw_byte_count;
+    reg [31:0] raw_y_bytes;
+    reg [31:0] raw_total_bytes;
     reg [35:0] chroma_line [0:CHROMA_WORDS-1];
     reg [35:0] chroma_even_q;
 
@@ -235,10 +239,15 @@ module nv12_capture_engine #(
 
     wire input_transfer = s_axis_tvalid && s_axis_tready;
     wire pixel_accept = input_transfer && (sof_seen || s_axis_tuser);
-    wire y_fifo_push = pixel_accept && (beat_col[1:0] == 2'b11);
-    wire [127:0] y_fifo_push_data = {pack_y4(s_axis_tdata), y_pack[95:0]};
-    wire uv_fifo_push = odd_valid && (odd_col[1:0] == 2'b11);
-    wire [127:0] uv_fifo_push_data =
+    wire raw_y_push = input_transfer && (raw_byte_count < raw_y_bytes);
+    wire raw_uv_push = input_transfer && (raw_byte_count >= raw_y_bytes);
+    wire y_fifo_push = RAW_INPUT ? raw_y_push :
+        (pixel_accept && (beat_col[1:0] == 2'b11));
+    wire [127:0] y_fifo_push_data = RAW_INPUT ? s_axis_tdata :
+        {pack_y4(s_axis_tdata), y_pack[95:0]};
+    wire uv_fifo_push = RAW_INPUT ? raw_uv_push :
+        (odd_valid && (odd_col[1:0] == 2'b11));
+    wire [127:0] uv_fifo_push_data = RAW_INPUT ? s_axis_tdata :
         {pack_nv12_uv4(odd_data, chroma_even_q), uv_pack[95:0]};
 
     wire y_fifo_pop = c2h_req_data_ready && c2h_req_valid && !request_is_uv;
@@ -247,7 +256,7 @@ module nv12_capture_engine #(
     // Simple-dual-port chroma line RAM.  beat_col is sampled before its input
     // transfer update, aligning chroma_even_q with odd_data one clock later.
     always @(posedge clk) begin
-        if (pixel_accept && !line_idx[0])
+        if (!RAW_INPUT && pixel_accept && !line_idx[0])
             chroma_line[beat_col[CHROMA_ADDR_WIDTH-1:0]] <=
                 horizontal_chroma_sums(s_axis_tdata);
         chroma_even_q <= chroma_line[beat_col[CHROMA_ADDR_WIDTH-1:0]];
@@ -306,6 +315,9 @@ module nv12_capture_engine #(
             odd_data <= 0;
             odd_col <= 0;
             odd_frame_end <= 0;
+            raw_byte_count <= 0;
+            raw_y_bytes <= 0;
+            raw_total_bytes <= 0;
             frame_pts <= 0;
             protocol_error_count <= 0;
         end else begin
@@ -322,11 +334,26 @@ module nv12_capture_engine #(
                 frontend_done <= 0;
                 odd_valid <= 0;
                 odd_frame_end <= 0;
+                raw_byte_count <= 0;
+                raw_y_bytes <= {16'd0, frame_width} * frame_height;
+                raw_total_bytes <= ({16'd0, frame_width} * frame_height) +
+                                   ({16'd0, frame_width} * (frame_height >> 1));
                 if (frame_width > MAX_WIDTH || frame_width[6:0] != 0 ||
                     frame_height[0] || frame_stride < frame_width ||
                     (MWR_PAYLOAD_BYTES != 128 && MWR_PAYLOAD_BYTES != 256) ||
                     PCIE_DATA_WIDTH != 128)
                     protocol_error_count <= protocol_error_count + 1'b1;
+            end else if (RAW_INPUT) begin
+                if (input_transfer) begin
+                    if (raw_byte_count == 0)
+                        frame_pts <= global_timestamp;
+                    raw_byte_count <= raw_byte_count + 32'd16;
+                    if (s_axis_tlast ||
+                        raw_byte_count + 32'd16 >= raw_total_bytes) begin
+                        frontend_done <= 1;
+                        capture_enable <= 0;
+                    end
+                end
             end else begin
                 odd_valid <= pixel_accept && line_idx[0];
                 if (pixel_accept && line_idx[0]) begin
