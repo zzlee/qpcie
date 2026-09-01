@@ -103,6 +103,7 @@ module sg_dma_engine #(
     reg [31:0] h2c_rem_bytes;
     reg [31:0] h2c_p0_bytes_q;
     reg [31:0] h2c_p1_bytes_q;
+    reg [63:0] h2c_p1_addr_q;
     reg [3:0]  h2c_plane_cnt_q;
     reg [15:0] h2c_desc_ctrl_q;
     reg        h2c_is_uv;
@@ -187,7 +188,10 @@ module sg_dma_engine #(
                                             h2c_sg_bytes_left < {19'd0, h2c_bytes_to_4k}) ?
                                            h2c_sg_bytes_left :
                                            {19'd0, h2c_bytes_to_4k};
-    wire [15:0] h2c_limit_bytes = (h2c_rem_bytes < 32'd256) ? h2c_rem_bytes[15:0] : 16'd256;
+    wire [31:0] h2c_plane_rem_bytes = (!h2c_is_uv && h2c_plane_cnt_q >= 4'd2) ?
+        (h2c_rem_bytes - h2c_p1_bytes_q) : h2c_rem_bytes;
+    wire [15:0] h2c_limit_bytes = (h2c_plane_rem_bytes < 32'd256) ?
+        h2c_plane_rem_bytes[15:0] : 16'd256;
     wire [15:0] h2c_calc_burst_bytes =
         (h2c_calc_limit < h2c_calc_avail) ? h2c_calc_limit : h2c_calc_avail;
 
@@ -209,6 +213,7 @@ module sg_dma_engine #(
             h2c_rem_bytes         <= 32'd0;
             h2c_p0_bytes_q        <= 32'd0;
             h2c_p1_bytes_q        <= 32'd0;
+            h2c_p1_addr_q         <= 64'd0;
             h2c_plane_cnt_q       <= 4'd0;
             h2c_desc_ctrl_q       <= 16'd0;
             h2c_is_uv             <= 1'b0;
@@ -228,6 +233,7 @@ module sg_dma_engine #(
                         h2c_cur_addr      <= h2c_plane0_src;
                         h2c_p0_bytes_q    <= (h2c_line_width > 0 ? h2c_line_width : 16'd4096) * (h2c_line_count > 0 ? h2c_line_count : 16'd1);
                         h2c_p1_bytes_q    <= (h2c_plane12_width > 0 ? h2c_plane12_width : 16'd0) * (h2c_plane12_count > 0 ? h2c_plane12_count : 16'd0);
+                        h2c_p1_addr_q     <= h2c_plane1_src;
                         h2c_plane_cnt_q   <= h2c_plane_count;
                         h2c_desc_ctrl_q   <= h2c_desc_ctrl;
                         h2c_burst_recv_dw <= 11'd0;
@@ -273,7 +279,12 @@ module sg_dma_engine #(
                 H2C_WAIT_ACK: begin
                     if (h2c_req_ack) begin
                         h2c_req_valid     <= 1'b0;
-                        h2c_cur_addr      <= h2c_cur_addr + (h2c_burst_dw << 2);
+                        if (!h2c_sg_mode && !h2c_is_uv &&
+                            h2c_plane_cnt_q >= 4'd2 &&
+                            (h2c_rem_bytes - (h2c_burst_dw << 2)) <= h2c_p1_bytes_q)
+                            h2c_cur_addr <= h2c_p1_addr_q;
+                        else
+                            h2c_cur_addr <= h2c_cur_addr + (h2c_burst_dw << 2);
                         h2c_rem_bytes     <= h2c_rem_bytes - (h2c_burst_dw << 2);
                         h2c_is_uv         <= ((h2c_rem_bytes - (h2c_burst_dw << 2)) <= h2c_p1_bytes_q) && (h2c_plane_cnt_q >= 4'd2);
                         h2c_burst_recv_dw <= 11'd0;

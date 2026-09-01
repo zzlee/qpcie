@@ -3,7 +3,10 @@ module tb_sg_dma_engine;
     reg clk=0, rst_n=0;
     reg h2c_desc_valid=0, h2c_req_ack=0, h2c_cpl_valid=0, h2c_cpl_last=0;
     reg [63:0] h2c_plane0_src=64'h1000;
+    reg [63:0] h2c_plane1_src=64'd0;
     reg [15:0] h2c_line_width=16'd256, h2c_line_count=16'd1;
+    reg [15:0] h2c_plane12_width=16'd0, h2c_plane12_count=16'd0;
+    reg [3:0] h2c_plane_count=4'd1;
     reg [15:0] h2c_desc_ctrl=16'd0;
     reg sgl_h2c_y_wr_en=0;
     reg [63:0] sgl_h2c_y_wr_addr=0;
@@ -17,9 +20,9 @@ module tb_sg_dma_engine;
     sg_dma_engine #(.PCIE_DATA_WIDTH(128)) dut (
         .clk(clk), .rst_n(rst_n),
         .h2c_desc_valid(h2c_desc_valid), .h2c_plane0_src(h2c_plane0_src),
-        .h2c_plane1_src(64'd0), .h2c_line_width(h2c_line_width),
-        .h2c_line_count(h2c_line_count), .h2c_plane12_width(16'd0),
-        .h2c_plane12_count(16'd0), .h2c_plane_count(4'd1),
+        .h2c_plane1_src(h2c_plane1_src), .h2c_line_width(h2c_line_width),
+        .h2c_line_count(h2c_line_count), .h2c_plane12_width(h2c_plane12_width),
+        .h2c_plane12_count(h2c_plane12_count), .h2c_plane_count(h2c_plane_count),
         .h2c_desc_ctrl(h2c_desc_ctrl), .h2c_desc_ready(h2c_desc_ready),
         .sgl_h2c_y_wr_en(sgl_h2c_y_wr_en),
         .sgl_h2c_y_wr_addr(sgl_h2c_y_wr_addr),
@@ -135,6 +138,10 @@ module tb_sg_dma_engine;
             h2c_cpl_valid = 0;
             h2c_cpl_last = 0;
             sgl_h2c_y_wr_en = 0;
+            h2c_plane1_src = 0;
+            h2c_plane12_width = 0;
+            h2c_plane12_count = 0;
+            h2c_plane_count = 1;
             repeat (3) @(posedge clk);
             rst_n = 1;
             repeat (2) @(posedge clk);
@@ -168,7 +175,22 @@ module tb_sg_dma_engine;
         service_request(64'h00000000_20001100, 11'd60);
         wait(completed_h2c_count == 1);
 
-        $display("SUCCESS: H2C SG burst limits and completion accounting passed");
+        reset_dut();
+        $display("[TEST 4] Linear NV12 switches to the independent UV plane base");
+        h2c_plane1_src = 64'h00000000_40000000;
+        h2c_plane12_width = 16'd128;
+        h2c_plane12_count = 16'd1;
+        h2c_plane_count = 4'd2;
+        start_h2c(64'h00000000_30000000, 16'd256, 16'd0);
+        service_request(64'h00000000_30000000, 11'd64);
+        service_request(64'h00000000_40000000, 11'd32);
+        wait(completed_h2c_count == 1);
+        if (h2c_bytes_transferred !== 384) begin
+            $display("FAIL: two-plane H2C byte count %0d", h2c_bytes_transferred);
+            $finish;
+        end
+
+        $display("SUCCESS: H2C plane switching, SG limits, and completion accounting passed");
         $finish;
     end
 endmodule
