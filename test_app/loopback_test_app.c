@@ -13,7 +13,6 @@
 #include <inttypes.h>
 #include <linux/videodev2.h>
 #include <math.h>
-#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -32,6 +31,8 @@
 #define DEFAULT_BUFFERS   8U
 #define DEFAULT_FRAMES    600U
 #define NV12_PLANES       2U
+#define DEQUEUE_TIMEOUT_US 5000000.0
+#define MAX_INITIAL_PAIRS 7U
 
 struct plane_map {
     void *addr;
@@ -61,7 +62,6 @@ struct loopback_ctx {
     struct v4l2_buf_entry *out_bufs;
     struct v4l2_buf_entry *cap_bufs;
 
-    volatile int stop;
     unsigned int tx_frames;
     unsigned int rx_frames;
     unsigned int data_errors;
@@ -71,8 +71,6 @@ struct loopback_ctx {
     double sum_rtt_us;
     unsigned int rtt_count;
 
-    pthread_t tx_thread;
-    pthread_mutex_t lock;
 };
 
 static int xioctl(int fd, unsigned long request, void *arg)
@@ -89,6 +87,25 @@ static double monotonic_us(void)
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return ts.tv_sec * 1000000.0 + ts.tv_nsec / 1000.0;
+}
+
+static int dequeue_buffer(int fd, struct v4l2_buffer *buf, const char *label)
+{
+    double deadline_us = monotonic_us() + DEQUEUE_TIMEOUT_US;
+
+    for (;;) {
+        if (xioctl(fd, VIDIOC_DQBUF, buf) == 0)
+            return 0;
+        if (errno != EAGAIN) {
+            perror(label);
+            return -1;
+        }
+        if (monotonic_us() >= deadline_us) {
+            fprintf(stderr, "[FAIL] %s timed out after 5 seconds\n", label);
+            return -1;
+        }
+        usleep(100);
+    }
 }
 
 static uint64_t fnv1a64(const uint8_t *data, size_t length)
@@ -181,58 +198,6 @@ static int verify_frame_pattern(const uint8_t *y_plane, const uint8_t *uv_plane,
     }
 
     return errors;
-}
-
-static void *tx_worker(void *arg)
-{
-    struct loopback_ctx *ctx = (struct loopback_ctx *)arg;
-    struct v4l2_buffer buf;
-    struct v4l2_plane planes[NV12_PLANES];
-    double interval_us = 1000000.0 / ctx->target_fps;
-    double next_send_us = monotonic_us();
-
-    while (!ctx->stop && ctx->tx_frames < ctx->frame_target) {
-        if (!ctx->benchmark_mode) {
-            double now = monotonic_us();
-            if (now < next_send_us)
-                usleep((useconds_t)(next_send_us - now));
-            next_send_us += interval_us;
-        }
-
-        memset(&buf, 0, sizeof(buf));
-        memset(planes, 0, sizeof(planes));
-        buf.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
-        buf.memory = V4L2_MEMORY_MMAP;
-        buf.length = NV12_PLANES;
-        buf.m.planes = planes;
-
-        if (xioctl(ctx->out_fd, VIDIOC_DQBUF, &buf) < 0) {
-            if (errno == EAGAIN) {
-                usleep(100);
-                continue;
-            }
-            perror("VIDIOC_DQBUF (TX)");
-            break;
-        }
-
-        double send_us = monotonic_us();
-        fill_frame_pattern(ctx->out_bufs[buf.index].plane[0].addr,
-                           ctx->out_bufs[buf.index].plane[1].addr,
-                           ctx->y_size, ctx->uv_size,
-                           ctx->tx_frames, send_us);
-
-        planes[0].bytesused = ctx->y_size;
-        planes[1].bytesused = ctx->uv_size;
-
-        if (xioctl(ctx->out_fd, VIDIOC_QBUF, &buf) < 0) {
-            perror("VIDIOC_QBUF (TX)");
-            break;
-        }
-
-        ctx->tx_frames++;
-    }
-
-    return NULL;
 }
 
 static int init_v4l2_node(int fd, enum v4l2_buf_type type, unsigned int width,
@@ -340,6 +305,7 @@ int main(int argc, char **argv)
     struct loopback_ctx ctx;
     int opt;
     unsigned int i;
+    unsigned int initial_pairs;
     double start_time_us, end_time_us, total_sec;
     double tx_throughput_mibs, rx_throughput_mibs, total_throughput_mibs;
 
@@ -355,7 +321,6 @@ int main(int argc, char **argv)
     ctx.min_rtt_us = 1e9;
     ctx.max_rtt_us = 0.0;
     ctx.sum_rtt_us = 0.0;
-    pthread_mutex_init(&ctx.lock, NULL);
 
     static const struct option options[] = {
         {"out-dev", required_argument, NULL, 'o'},
@@ -425,52 +390,57 @@ int main(int argc, char **argv)
     }
 
     ctx.total_frame_bytes = ctx.y_size + ctx.uv_size;
+    initial_pairs = ctx.num_buffers;
+    if (initial_pairs > ctx.frame_target)
+        initial_pairs = ctx.frame_target;
+    if (initial_pairs > MAX_INITIAL_PAIRS)
+        initial_pairs = MAX_INITIAL_PAIRS;
+    if (initial_pairs < 2) {
+        fprintf(stderr, "[FAIL] At least two frames and buffers are required\n");
+        return EXIT_FAILURE;
+    }
 
-    /* Pre-fill and queue all Output buffers */
-    for (i = 0; i < ctx.num_buffers; i++) {
-        struct v4l2_plane planes[NV12_PLANES];
-        struct v4l2_buffer buf;
+    /* The hardware consumes one shared descriptor ring. Queue each capture
+     * target before its matching output so the loopback sink is armed before
+     * H2C data can reach the small clock-crossing FIFO. */
+    for (i = 0; i < initial_pairs; i++) {
+        struct v4l2_plane cap_planes[NV12_PLANES];
+        struct v4l2_plane out_planes[NV12_PLANES];
+        struct v4l2_buffer cap_buf;
+        struct v4l2_buffer out_buf;
         double now_us = monotonic_us();
+
+        memset(&cap_buf, 0, sizeof(cap_buf));
+        memset(cap_planes, 0, sizeof(cap_planes));
+        cap_buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+        cap_buf.memory = V4L2_MEMORY_MMAP;
+        cap_buf.index = i;
+        cap_buf.length = NV12_PLANES;
+        cap_buf.m.planes = cap_planes;
+        if (xioctl(ctx.cap_fd, VIDIOC_QBUF, &cap_buf) < 0) {
+            perror("Initial Capture VIDIOC_QBUF");
+            return EXIT_FAILURE;
+        }
 
         fill_frame_pattern(ctx.out_bufs[i].plane[0].addr,
                            ctx.out_bufs[i].plane[1].addr,
                            ctx.y_size, ctx.uv_size,
                            i, now_us);
 
-        memset(&buf, 0, sizeof(buf));
-        memset(planes, 0, sizeof(planes));
-        buf.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
-        buf.memory = V4L2_MEMORY_MMAP;
-        buf.index = i;
-        buf.length = NV12_PLANES;
-        buf.m.planes = planes;
-        planes[0].bytesused = ctx.y_size;
-        planes[1].bytesused = ctx.uv_size;
-
-        if (xioctl(ctx.out_fd, VIDIOC_QBUF, &buf) < 0) {
+        memset(&out_buf, 0, sizeof(out_buf));
+        memset(out_planes, 0, sizeof(out_planes));
+        out_buf.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+        out_buf.memory = V4L2_MEMORY_MMAP;
+        out_buf.index = i;
+        out_buf.length = NV12_PLANES;
+        out_buf.m.planes = out_planes;
+        out_planes[0].bytesused = ctx.y_size;
+        out_planes[1].bytesused = ctx.uv_size;
+        if (xioctl(ctx.out_fd, VIDIOC_QBUF, &out_buf) < 0) {
             perror("Initial Output VIDIOC_QBUF");
             return EXIT_FAILURE;
         }
         ctx.tx_frames++;
-    }
-
-    /* Queue all Capture buffers */
-    for (i = 0; i < ctx.num_buffers; i++) {
-        struct v4l2_plane planes[NV12_PLANES];
-        struct v4l2_buffer buf;
-
-        memset(&buf, 0, sizeof(buf));
-        memset(planes, 0, sizeof(planes));
-        buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
-        buf.memory = V4L2_MEMORY_MMAP;
-        buf.index = i;
-        buf.length = NV12_PLANES;
-        buf.m.planes = planes;
-
-        if (xioctl(ctx.cap_fd, VIDIOC_QBUF, &buf) < 0) {
-            perror("Initial Capture VIDIOC_QBUF");
-            return EXIT_FAILURE;
-        }
     }
 
     /* STREAMON on both nodes */
@@ -485,16 +455,16 @@ int main(int argc, char **argv)
         perror("Capture VIDIOC_STREAMON");
         return EXIT_FAILURE;
     }
+    printf("[PASS] STREAMON on both nodes; waiting for frame completion...\n");
 
     start_time_us = monotonic_us();
-
-    /* Launch TX Worker thread */
-    pthread_create(&ctx.tx_thread, NULL, tx_worker, &ctx);
 
     /* Main RX Loop */
     while (ctx.rx_frames < ctx.frame_target) {
         struct v4l2_plane planes[NV12_PLANES];
+        struct v4l2_plane out_planes[NV12_PLANES];
         struct v4l2_buffer buf;
+        struct v4l2_buffer out_buf;
         double recv_us, send_us, rtt_us;
         int err;
 
@@ -505,14 +475,8 @@ int main(int argc, char **argv)
         buf.length = NV12_PLANES;
         buf.m.planes = planes;
 
-        if (xioctl(ctx.cap_fd, VIDIOC_DQBUF, &buf) < 0) {
-            if (errno == EAGAIN) {
-                usleep(100);
-                continue;
-            }
-            perror("Capture VIDIOC_DQBUF");
+        if (dequeue_buffer(ctx.cap_fd, &buf, "Capture VIDIOC_DQBUF") < 0)
             break;
-        }
 
         recv_us = monotonic_us();
         err = verify_frame_pattern(ctx.cap_bufs[buf.index].plane[0].addr,
@@ -542,17 +506,36 @@ int main(int argc, char **argv)
 
         ctx.rx_frames++;
 
-        if (ctx.rx_frames < ctx.frame_target) {
+        memset(&out_buf, 0, sizeof(out_buf));
+        memset(out_planes, 0, sizeof(out_planes));
+        out_buf.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+        out_buf.memory = V4L2_MEMORY_MMAP;
+        out_buf.length = NV12_PLANES;
+        out_buf.m.planes = out_planes;
+        if (dequeue_buffer(ctx.out_fd, &out_buf, "Output VIDIOC_DQBUF") < 0)
+            break;
+
+        if (ctx.tx_frames < ctx.frame_target) {
             if (xioctl(ctx.cap_fd, VIDIOC_QBUF, &buf) < 0) {
                 perror("Capture VIDIOC_QBUF requeue");
                 break;
             }
+            send_us = monotonic_us();
+            fill_frame_pattern(ctx.out_bufs[out_buf.index].plane[0].addr,
+                               ctx.out_bufs[out_buf.index].plane[1].addr,
+                               ctx.y_size, ctx.uv_size,
+                               ctx.tx_frames, send_us);
+            out_planes[0].bytesused = ctx.y_size;
+            out_planes[1].bytesused = ctx.uv_size;
+            if (xioctl(ctx.out_fd, VIDIOC_QBUF, &out_buf) < 0) {
+                perror("Output VIDIOC_QBUF requeue");
+                break;
+            }
+            ctx.tx_frames++;
         }
     }
 
     end_time_us = monotonic_us();
-    ctx.stop = 1;
-    pthread_join(ctx.tx_thread, NULL);
 
     xioctl(ctx.out_fd, VIDIOC_STREAMOFF, &out_type);
     xioctl(ctx.cap_fd, VIDIOC_STREAMOFF, &cap_type);
