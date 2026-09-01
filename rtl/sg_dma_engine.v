@@ -107,6 +107,7 @@ module sg_dma_engine #(
     reg [15:0] h2c_desc_ctrl_q;
     reg        h2c_is_uv;
     reg [10:0] h2c_burst_dw;
+    wire [15:0] h2c_burst_bytes = {3'd0, h2c_burst_dw, 2'b00};
     reg [63:0] h2c_calc_addr;
     reg [15:0] h2c_calc_limit;
     reg [15:0] h2c_calc_avail;
@@ -142,7 +143,7 @@ module sg_dma_engine #(
         .sgl_wr_len(sgl_h2c_y_wr_len),
         .sgl_wr_flags(sgl_h2c_y_wr_flags),
         .advance_burst(h2c_req_valid && h2c_req_ack && !h2c_is_uv),
-        .burst_bytes({h2c_burst_dw, 2'b00}),
+        .burst_bytes(h2c_burst_bytes),
         .current_addr(h2c_y_walker_addr),
         .seg_bytes_left(h2c_y_walker_bytes_left),
         .seg_valid(h2c_y_seg_valid),
@@ -169,7 +170,7 @@ module sg_dma_engine #(
         .sgl_wr_len(sgl_h2c_uv_wr_len),
         .sgl_wr_flags(sgl_h2c_uv_wr_flags),
         .advance_burst(h2c_req_valid && h2c_req_ack && h2c_is_uv),
-        .burst_bytes({h2c_burst_dw, 2'b00}),
+        .burst_bytes(h2c_burst_bytes),
         .current_addr(h2c_uv_walker_addr),
         .seg_bytes_left(h2c_uv_walker_bytes_left),
         .seg_valid(h2c_uv_seg_valid),
@@ -180,7 +181,12 @@ module sg_dma_engine #(
 
     wire [63:0] h2c_target_addr = (h2c_sg_mode) ? (!h2c_is_uv ? h2c_y_walker_addr : h2c_uv_walker_addr) : h2c_cur_addr;
     wire [12:0] h2c_bytes_to_4k = 13'd4096 - {1'b0, h2c_target_addr[11:0]};
-    wire [31:0] h2c_avail_bytes = (h2c_sg_mode) ? (!h2c_is_uv ? h2c_y_walker_bytes_left : h2c_uv_walker_bytes_left) : {19'd0, h2c_bytes_to_4k};
+    wire [31:0] h2c_sg_bytes_left = !h2c_is_uv ?
+        h2c_y_walker_bytes_left : h2c_uv_walker_bytes_left;
+    wire [31:0] h2c_avail_bytes = (h2c_sg_mode &&
+                                            h2c_sg_bytes_left < {19'd0, h2c_bytes_to_4k}) ?
+                                           h2c_sg_bytes_left :
+                                           {19'd0, h2c_bytes_to_4k};
     wire [15:0] h2c_limit_bytes = (h2c_rem_bytes < 32'd256) ? h2c_rem_bytes[15:0] : 16'd256;
     wire [15:0] h2c_calc_burst_bytes =
         (h2c_calc_limit < h2c_calc_avail) ? h2c_calc_limit : h2c_calc_avail;
