@@ -168,6 +168,7 @@ struct qpcie_v4l2_buffer {
     dma_addr_t y_slots_dma;
     void *uv_slots_virt;
     dma_addr_t uv_slots_dma;
+    bool sgl_logged;
 };
 
 struct qpcie_v4l2_channel {

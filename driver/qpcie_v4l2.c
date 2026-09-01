@@ -454,6 +454,8 @@ static int qpcie_buf_init(struct vb2_buffer *vb)
     struct qpcie_v4l2_channel *vch = vb2_get_drv_priv(vb->vb2_queue);
     struct qpcie_dev *qdev = vch->qdev;
 
+    buf->sgl_logged = false;
+
     buf->y_slots_virt = dma_alloc_coherent(&qdev->pdev->dev,
                                            QPCIE_MAX_PAGE_SLOTS_Y * 4096,
                                            &buf->y_slots_dma, GFP_KERNEL);
@@ -577,6 +579,33 @@ static void qpcie_buf_queue(struct vb2_buffer *vb)
         qpcie_build_variable_sgl(sgt1->sgl, sgt1->nents,
                                  (struct qpcie_sgl_entry *)buf->uv_slots_virt,
                                  buf->uv_slots_dma, QPCIE_MAX_PAGE_SLOTS_UV);
+
+        if (!buf->sgl_logged) {
+            struct qpcie_sgl_entry *y_entries = buf->y_slots_virt;
+            struct qpcie_sgl_entry *uv_entries = buf->uv_slots_virt;
+            unsigned int y_log_nents = min_t(unsigned int, sgt0->nents, 8);
+            unsigned int uv_log_nents = min_t(unsigned int, sgt1->nents, 8);
+            unsigned int i;
+
+            dev_info(&qdev->pdev->dev,
+                     "SGL ch%u %s buf%u: Y slot=%pad nents=%u/%u, UV slot=%pad nents=%u/%u\n",
+                     vch->channel_id,
+                     vch->buf_type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE ?
+                     "H2C" : "C2H", vb->index,
+                     &buf->y_slots_dma, sgt0->nents, sgt0->orig_nents,
+                     &buf->uv_slots_dma, sgt1->nents, sgt1->orig_nents);
+            for (i = 0; i < y_log_nents; i++)
+                dev_info(&qdev->pdev->dev,
+                         "  Y[%u] addr=0x%016llx len=%u flags=0x%x\n",
+                         i, y_entries[i].phys_addr,
+                         y_entries[i].len_bytes, y_entries[i].flags);
+            for (i = 0; i < uv_log_nents; i++)
+                dev_info(&qdev->pdev->dev,
+                         " UV[%u] addr=0x%016llx len=%u flags=0x%x\n",
+                         i, uv_entries[i].phys_addr,
+                         uv_entries[i].len_bytes, uv_entries[i].flags);
+            buf->sgl_logged = true;
+        }
 
         if (vch->buf_type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
             desc->plane0_src_addr = buf->y_slots_dma;

@@ -503,8 +503,50 @@ module tb_video_cdc_system;
         if (desc_accept_cnt !== 1)
             $fatal(1, "Engine accepted descriptor %0d times (expected exactly 1)!", desc_accept_cnt);
         $display("  [PASS] Single descriptor acceptance verified (desc_accept_cnt = 1)");
+
+        // Channel 1 must not accept descriptor N+1 or drain its SGL entries
+        // while descriptor N still owns the capture engine walkers.
+        force u_dma_top.c2h_desc_valid = 1'b1;
+        force u_dma_top.c2h_format = 4'd2;
+        force u_dma_top.c2h_plane_count = 4'd2;
+        force u_dma_top.c2h_desc_ctrl = 16'h006B;
+        force u_dma_top.hs1_send_q = 1'b0;
+        force u_dma_top.v1_busy_sync = 2'b11;
+        #1;
+        if (u_dma_top.nv12_ch1_desc_ready)
+            $fatal(1, "Channel 1 accepted a second descriptor while busy");
+        force u_dma_top.v1_busy_sync = 2'b00;
+        #1;
+        if (!u_dma_top.nv12_ch1_desc_ready)
+            $fatal(1, "Channel 1 did not accept a descriptor after becoming idle");
+
+        force u_dma_top.ch1_sgl_y_empty = 1'b0;
+        force u_dma_top.ch1_sgl_uv_empty = 1'b0;
+        force u_dma_top.ch1_sgl_y_pop_ready = 1'b1;
+        force u_dma_top.ch1_sgl_uv_pop_ready = 1'b1;
+        force u_dma_top.v_busy[1] = 1'b0;
+        #1;
+        if (u_dma_top.ch1_sgl_y_rd_en || u_dma_top.ch1_sgl_uv_rd_en)
+            $fatal(1, "Channel 1 drained SGL entries without an active owner");
+        force u_dma_top.v_busy[1] = 1'b1;
+        #1;
+        if (!u_dma_top.ch1_sgl_y_rd_en || !u_dma_top.ch1_sgl_uv_rd_en)
+            $fatal(1, "Channel 1 did not drain SGL entries for its active owner");
+
+        release u_dma_top.c2h_desc_valid;
+        release u_dma_top.c2h_format;
+        release u_dma_top.c2h_plane_count;
+        release u_dma_top.c2h_desc_ctrl;
+        release u_dma_top.hs1_send_q;
+        release u_dma_top.v1_busy_sync;
+        release u_dma_top.ch1_sgl_y_empty;
+        release u_dma_top.ch1_sgl_uv_empty;
+        release u_dma_top.ch1_sgl_y_pop_ready;
+        release u_dma_top.ch1_sgl_uv_pop_ready;
+        release u_dma_top.v_busy[1];
+        $display("  [PASS] Channel-1 descriptor and SGL ownership serialized");
         $display("SUCCESS: video CDC path verified (%0d packets, IRQ ok, Single Desc ok)",
-                 pkt_cnt);
+                  pkt_cnt);
         $finish;
     end
 
