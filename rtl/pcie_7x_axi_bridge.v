@@ -109,10 +109,13 @@ module pcie_7x_axi_bridge #(
 
     // 7-Series RX Header Decode. An upper-QWORD SOF is completed with
     // the following lower QWORD before the common decoder consumes it.
-    localparam RX_IDLE = 2'd0, RX_MWR4_BEAT1 = 2'd1,
-               RX_PASS_RC = 2'd2, RX_ALIGN_UPPER = 2'd3;
-    reg [1:0] rx_state;
+    localparam RX_IDLE = 3'd0, RX_MWR4_BEAT1 = 3'd1,
+               RX_PASS_RC = 3'd2, RX_ALIGN_UPPER = 3'd3,
+               RX_SHIFT_RC = 3'd4, RX_FLUSH_RC = 3'd5;
+    reg [2:0] rx_state;
     reg [63:0] reg_upper_header;
+    reg [63:0] rc_carry_data;
+    reg [7:0]  rc_carry_keep;
     wire [127:0] rx_data = (rx_state == RX_ALIGN_UPPER) ?
                             {m_axis_rx_tdata[63:0], reg_upper_header} :
                             m_axis_rx_tdata;
@@ -146,6 +149,14 @@ module pcie_7x_axi_bridge #(
     endfunction
     wire [127:0] rx_packet_data = payload_bswap128(
         m_axis_rx_tdata & keep_to_mask(rx_packet_keep));
+    wire [15:0] rc_shift_keep = {rx_packet_keep[7:0], rc_carry_keep};
+    wire [127:0] rc_shift_data = payload_bswap128(
+        {m_axis_rx_tdata[63:0], rc_carry_data} & keep_to_mask(rc_shift_keep));
+    wire [15:0] rc_flush_keep = {8'd0, rc_carry_keep};
+    wire [127:0] rc_flush_data = payload_bswap128(
+        {64'd0, rc_carry_data} & keep_to_mask(rc_flush_keep));
+    wire rx_eof_lower = rx_eof && (rx_eof_info[3:0] <= 4'd7);
+    wire rx_eof_upper = rx_eof && (rx_eof_info[3:0] >= 4'd11);
 
     wire [15:0] rx_req_id    = rx_data[63:48];
     wire [7:0]  rx_tag       = rx_data[47:40];
@@ -235,10 +246,11 @@ module pcie_7x_axi_bridge #(
                         end
                     end else if (rx_is_cpl) begin
                         m_axis_rc_tvalid = 1'b1;
-                        m_axis_rc_tlast  = rx_eof;
+                        m_axis_rc_tlast  = (rx_state == RX_ALIGN_UPPER) ?
+                                           rx_eof_lower : rx_eof;
                         m_axis_rc_tkeep  = (rx_state == RX_ALIGN_UPPER && rx_eof_info[4] &&
-                                             rx_eof_info[3:0] == 4'd3) ? 16'h0FFF :
-                                            (rx_state == RX_ALIGN_UPPER ? 16'hFFFF : rx_packet_keep);
+                                              rx_eof_info[3:0] == 4'd3) ? 16'h0FFF :
+                                             (rx_state == RX_ALIGN_UPPER ? 16'hFFFF : rx_packet_keep);
                         m_axis_rc_tdata  = {
                             payload_bswap32(rx_data[127:96]), // [127:96]: Little-endian payload DW0
                             8'd0,                     // [95:88]: Reserved
@@ -284,6 +296,21 @@ module pcie_7x_axi_bridge #(
                 m_axis_rc_tdata  = rx_packet_data;
                 m_axis_rx_tready = m_axis_rc_tready;
             end
+
+            RX_SHIFT_RC: begin
+                m_axis_rc_tvalid = m_axis_rx_tvalid;
+                m_axis_rc_tlast  = rx_eof_lower;
+                m_axis_rc_tkeep  = rc_shift_keep;
+                m_axis_rc_tdata  = rc_shift_data;
+                m_axis_rx_tready = m_axis_rc_tready;
+            end
+
+            RX_FLUSH_RC: begin
+                m_axis_rc_tvalid = 1'b1;
+                m_axis_rc_tlast  = 1'b1;
+                m_axis_rc_tkeep  = rc_flush_keep;
+                m_axis_rc_tdata  = rc_flush_data;
+            end
         endcase
     end
 
@@ -291,6 +318,8 @@ module pcie_7x_axi_bridge #(
         if (!rst_n) begin
             rx_state        <= RX_IDLE;
             reg_upper_header <= 64'd0;
+            rc_carry_data   <= 64'd0;
+            rc_carry_keep   <= 8'd0;
             reg_mwr4_addr   <= 64'd0;
             reg_mwr4_length <= 10'd0;
             reg_mwr4_req_id <= 16'd0;
@@ -326,7 +355,13 @@ module pcie_7x_axi_bridge #(
                             reg_mwr4_bar_id <= rx_bar_id;
                             rx_state <= RX_MWR4_BEAT1;
                         end else if (rx_is_cpl && !rx_eof) begin
-                            rx_state <= RX_PASS_RC;
+                            rc_carry_data <= m_axis_rx_tdata[127:64];
+                            rc_carry_keep <= 8'hFF;
+                            rx_state <= RX_SHIFT_RC;
+                        end else if (rx_is_cpl && rx_eof_upper) begin
+                            rc_carry_data <= m_axis_rx_tdata[127:64];
+                            rc_carry_keep <= rx_packet_keep[15:8];
+                            rx_state <= RX_FLUSH_RC;
                         end else if (rx_sof_upper) begin
                             // The aligned packet ended in the lower QWORD and
                             // another packet begins in this beat's upper QWORD.
@@ -357,6 +392,34 @@ module pcie_7x_axi_bridge #(
                         end else begin
                             rx_state <= RX_IDLE;
                         end
+                    end
+                end
+
+
+                RX_SHIFT_RC: begin
+                    if (m_axis_rx_tvalid && m_axis_rc_tready) begin
+                        if (!rx_eof) begin
+                            rc_carry_data <= m_axis_rx_tdata[127:64];
+                            rc_carry_keep <= 8'hFF;
+                        end else if (rx_eof_upper) begin
+                            rc_carry_data <= m_axis_rx_tdata[127:64];
+                            rc_carry_keep <= rx_packet_keep[15:8];
+                            rx_state <= RX_FLUSH_RC;
+                        end else if (rx_sof_upper) begin
+                            rc_carry_keep <= 8'd0;
+                            reg_upper_header <= m_axis_rx_tdata[127:64];
+                            rx_state <= RX_ALIGN_UPPER;
+                        end else begin
+                            rc_carry_keep <= 8'd0;
+                            rx_state <= RX_IDLE;
+                        end
+                    end
+                end
+
+                RX_FLUSH_RC: begin
+                    if (m_axis_rc_tready) begin
+                        rc_carry_keep <= 8'd0;
+                        rx_state <= RX_IDLE;
                     end
                 end
             endcase

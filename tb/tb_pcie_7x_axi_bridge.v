@@ -228,6 +228,19 @@ module tb_pcie_7x_axi_bridge;
 
     reg [31:0] captured_tx_cpld;
     reg [511:0] captured_desc;
+    reg [127:0] captured_rc_data [0:7];
+    reg [15:0] captured_rc_keep [0:7];
+    reg captured_rc_last [0:7];
+    integer captured_rc_count;
+
+    always @(posedge clk) begin
+        if (rc_tvalid && rc_tready) begin
+            captured_rc_data[captured_rc_count] <= rc_tdata;
+            captured_rc_keep[captured_rc_count] <= rc_tkeep;
+            captured_rc_last[captured_rc_count] <= rc_tlast;
+            captured_rc_count <= captured_rc_count + 1;
+        end
+    end
 
     function [31:0] host_payload_dw;
         input [31:0] value;
@@ -250,6 +263,7 @@ module tb_pcie_7x_axi_bridge;
         m_axis_rx_tvalid = 1'b0;
         m_axis_rx_tuser  = 22'd0;
         s_axis_tx_tready = 1'b1;
+        captured_rc_count = 0;
 
         #20;
         rst_n = 1;
@@ -376,6 +390,59 @@ module tb_pcie_7x_axi_bridge;
             $finish;
         end
         $display("  ✅ [PASS] Packed EOF/SOF preserved the following MRd");
+        #40;
+
+        // A multi-beat CplD starting in the upper QWORD requires carrying the
+        // unused upper half of every physical beat into the next RC beat.
+        $display("\n--- [Test 2d: Upper-QWORD multi-beat CplD alignment] ---");
+        @(posedge clk);
+        m_axis_rx_tvalid <= 1'b1;
+        m_axis_rx_tkeep <= 16'hFFFF;
+        m_axis_rx_tuser <= 22'd0;
+        m_axis_rx_tuser[14:10] <= 5'b11000;
+        m_axis_rx_tdata <= {32'h00000018, 32'h4A000006, 64'd0};
+        @(posedge clk);
+        while (!m_axis_rx_tready) @(posedge clk);
+
+        m_axis_rx_tuser <= 22'd0;
+        m_axis_rx_tdata <= {host_payload_dw(32'h11223342),
+                            host_payload_dw(32'h11223341),
+                            host_payload_dw(32'h11223340), 32'h04005A00};
+        @(posedge clk);
+        while (!m_axis_rx_tready) @(posedge clk);
+
+        m_axis_rx_tuser <= 22'd0;
+        m_axis_rx_tuser[21:17] <= 5'b11011;
+        m_axis_rx_tdata <= {32'd0, host_payload_dw(32'h11223345),
+                            host_payload_dw(32'h11223344),
+                            host_payload_dw(32'h11223343)};
+        @(posedge clk);
+        while (!m_axis_rx_tready) @(posedge clk);
+        m_axis_rx_tvalid <= 1'b0;
+        m_axis_rx_tuser <= 22'd0;
+
+        wait(captured_rc_count == 3);
+        if (captured_rc_data[0][127:96] !== 32'h11223340 ||
+            captured_rc_data[0][71:64] !== 8'h5A ||
+            captured_rc_data[0][42:32] !== 11'd6 ||
+            captured_rc_keep[0] !== 16'hFFFF || captured_rc_last[0]) begin
+            $display("  ❌ [FAIL] Upper-QWORD CplD first RC beat malformed");
+            $finish;
+        end
+        if (captured_rc_data[1] !== {32'h11223344, 32'h11223343,
+                                     32'h11223342, 32'h11223341} ||
+            captured_rc_keep[1] !== 16'hFFFF || captured_rc_last[1]) begin
+            $display("  ❌ [FAIL] Upper-QWORD CplD carried RC beat malformed: %h",
+                     captured_rc_data[1]);
+            $finish;
+        end
+        if (captured_rc_data[2] !== {96'd0, 32'h11223345} ||
+            captured_rc_keep[2] !== 16'h000F || !captured_rc_last[2]) begin
+            $display("  ❌ [FAIL] Upper-QWORD CplD flush RC beat malformed: data=%h keep=%h last=%b",
+                     captured_rc_data[2], captured_rc_keep[2], captured_rc_last[2]);
+            $finish;
+        end
+        $display("  ✅ [PASS] Upper-QWORD CplD payload carry preserved all DWORDs");
         #40;
 
         // ---------------------------------------------------------------------
