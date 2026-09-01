@@ -75,6 +75,8 @@ module video_req_cdc #(
         .READ_MODE("fwft"),
         .FIFO_READ_LATENCY(0),
         .PROG_FULL_THRESH(FIFO_DEPTH - 32),
+        .RD_DATA_COUNT_WIDTH(FIFO_COUNT_WIDTH),
+        .WR_DATA_COUNT_WIDTH(FIFO_COUNT_WIDTH),
         .USE_ADV_FEATURES("1F1F")
     ) u_fifo (
         .rst            (!cdc_rst_n),

@@ -601,20 +601,6 @@ static void qpcie_buf_queue(struct vb2_buffer *vb)
         }
     }
 
-    dev_info(&qdev->pdev->dev,
-             "DESC[%u] ch%u %s: mode=%s ctrl=0x%02x nents=%u/%u "
-             "p0=0x%016llx p1=0x%016llx slots=%pad/%pad\n",
-             tail, vch->channel_id,
-             vch->buf_type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE ?
-             "H2C" : "C2H",
-             desc->control & DESC_CTRL_SG_FETCH_MODE ? "SGL" : "linear",
-             desc->control, sgt0->nents, sgt1->nents,
-             vch->buf_type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE ?
-             desc->plane0_src_addr : desc->plane0_dst_addr,
-             vch->buf_type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE ?
-             desc->plane1_src_addr : desc->plane1_dst_addr,
-             &buf->y_slots_dma, &buf->uv_slots_dma);
-
     /* Descriptor data must be globally visible before publishing the shared
      * hardware-ring tail doorbell. */
     dma_wmb();

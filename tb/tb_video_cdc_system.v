@@ -484,6 +484,8 @@ module tb_video_cdc_system;
             $fatal(1, "Perf monitor invalid: cycles=%0d payload=%0d expected=%0d",
                    u_dma_top.reg_perf_cycles,
                    u_dma_top.reg_perf_payload_bytes, PAYLOAD_BYTES);
+        if (u_dma_top.reg_perf_max_queue_depth == 0)
+            $fatal(1, "CDC peak-depth monitor never observed queued data");
 
         // Exercise the driver's STREAMOFF ordering through the MMIO path.
         mmio_write_bar0(32'h00, 32'h00000000); // stop descriptor fetch
