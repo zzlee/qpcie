@@ -183,6 +183,7 @@ struct qpcie_v4l2_channel {
     struct v4l2_ctrl_handler ctrl_handler;
     struct mutex lock;
     spinlock_t slock;
+    struct list_head pending_buffers;
     struct list_head active_buffers;
     u32 sequence;
     u32 width;
@@ -229,6 +230,7 @@ struct qpcie_dev {
     struct qpcie_dma_desc_2d *c2h_ring_virt;
     dma_addr_t c2h_ring_dma;
     u32 c2h_tail;
+    spinlock_t ring_lock;
 
     /* Subsystem Devices */
     struct v4l2_device v4l2_dev;

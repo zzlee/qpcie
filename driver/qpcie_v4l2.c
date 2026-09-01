@@ -541,11 +541,10 @@ static void qpcie_build_variable_sgl(struct scatterlist *sgl, unsigned int nents
     }
 }
 
-static void qpcie_buf_queue(struct vb2_buffer *vb)
+static void qpcie_publish_buffer(struct qpcie_v4l2_channel *vch,
+                                 struct qpcie_v4l2_buffer *buf)
 {
-    struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
-    struct qpcie_v4l2_buffer *buf = container_of(vbuf, struct qpcie_v4l2_buffer, vb);
-    struct qpcie_v4l2_channel *vch = vb2_get_drv_priv(vb->vb2_queue);
+    struct vb2_buffer *vb = &buf->vb.vb2_buf;
     struct qpcie_dev *qdev = vch->qdev;
     struct qpcie_dma_desc_2d *desc;
     dma_addr_t plane0_dma, plane1_dma;
@@ -630,6 +629,12 @@ static void qpcie_buf_queue(struct vb2_buffer *vb)
         }
     }
 
+    /* The completion IRQ can arrive immediately after the doorbell, so make
+     * the matching VB2 buffer visible before publishing the descriptor. */
+    spin_lock(&vch->slock);
+    list_add_tail(&buf->list, &vch->active_buffers);
+    spin_unlock(&vch->slock);
+
     /* Descriptor data must be globally visible before publishing the shared
      * hardware-ring tail doorbell. */
     dma_wmb();
@@ -639,14 +644,67 @@ static void qpcie_buf_queue(struct vb2_buffer *vb)
               qdev->bar0_mmio + REG_H2C_RING_CFG);
     ioread32(qdev->bar0_mmio + REG_H2C_RING_CFG);
 
-    spin_lock_irq(&vch->slock);
-    list_add_tail(&buf->list, &vch->active_buffers);
-    spin_unlock_irq(&vch->slock);
+}
+
+static void qpcie_buf_queue(struct vb2_buffer *vb)
+{
+    struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
+    struct qpcie_v4l2_buffer *buf =
+        container_of(vbuf, struct qpcie_v4l2_buffer, vb);
+    struct qpcie_v4l2_channel *vch = vb2_get_drv_priv(vb->vb2_queue);
+    struct qpcie_dev *qdev = vch->qdev;
+    struct qpcie_v4l2_channel *out_vch, *cap_vch;
+    struct qpcie_v4l2_buffer *out_buf, *cap_buf;
+    unsigned long flags;
+
+    if (vch->channel_id == 0) {
+        spin_lock_irqsave(&qdev->ring_lock, flags);
+        qpcie_publish_buffer(vch, buf);
+        spin_unlock_irqrestore(&qdev->ring_lock, flags);
+        return;
+    }
+
+    out_vch = &qdev->v4l2_ch[(vch->channel_id * 2) - 1];
+    cap_vch = &qdev->v4l2_ch[vch->channel_id * 2];
+
+    spin_lock_irqsave(&qdev->ring_lock, flags);
+    list_add_tail(&buf->list, &vch->pending_buffers);
+    while (!list_empty(&out_vch->pending_buffers) &&
+           !list_empty(&cap_vch->pending_buffers)) {
+        out_buf = list_first_entry(&out_vch->pending_buffers,
+                                   struct qpcie_v4l2_buffer, list);
+        cap_buf = list_first_entry(&cap_vch->pending_buffers,
+                                   struct qpcie_v4l2_buffer, list);
+        list_del(&out_buf->list);
+        list_del(&cap_buf->list);
+
+        qpcie_publish_buffer(cap_vch, cap_buf);
+        qpcie_publish_buffer(out_vch, out_buf);
+    }
+    spin_unlock_irqrestore(&qdev->ring_lock, flags);
 }
 
 static void qpcie_return_all_buffers(struct qpcie_v4l2_channel *vch,
-                                      enum vb2_buffer_state state)
+                                       enum vb2_buffer_state state)
 {
+    struct qpcie_dev *qdev = vch->qdev;
+
+    for (;;) {
+        struct qpcie_v4l2_buffer *buf;
+        unsigned long flags;
+
+        spin_lock_irqsave(&qdev->ring_lock, flags);
+        if (list_empty(&vch->pending_buffers)) {
+            spin_unlock_irqrestore(&qdev->ring_lock, flags);
+            break;
+        }
+        buf = list_first_entry(&vch->pending_buffers,
+                               struct qpcie_v4l2_buffer, list);
+        list_del(&buf->list);
+        spin_unlock_irqrestore(&qdev->ring_lock, flags);
+        vb2_buffer_done(&buf->vb.vb2_buf, state);
+    }
+
     for (;;) {
         struct qpcie_v4l2_buffer *buf;
 
@@ -908,6 +966,7 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
              ret);
 
     dev_info(&qdev->pdev->dev, "[DEBUG STEP 2.1] Registering top-level v4l2_device...\n");
+    spin_lock_init(&qdev->ring_lock);
     snprintf(qdev->v4l2_dev.name, sizeof(qdev->v4l2_dev.name), "qpcie-v4l2");
     ret = v4l2_device_register(&qdev->pdev->dev, &qdev->v4l2_dev);
     if (ret) {
@@ -956,6 +1015,7 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
 
         mutex_init(&vch->lock);
         spin_lock_init(&vch->slock);
+        INIT_LIST_HEAD(&vch->pending_buffers);
         INIT_LIST_HEAD(&vch->active_buffers);
 
         /* Initialize V4L2 Control Handler */
