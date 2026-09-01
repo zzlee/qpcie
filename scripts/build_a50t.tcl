@@ -108,6 +108,10 @@ generate_target all [get_ips axi_crossbar_0]
 # 7. Update Compile Order
 update_compile_order -fileset sources_1
 
+# Use post-route physical optimization to close routing-dominated paths in the
+# dense PCIe and video clock regions without weakening timing constraints.
+set_property strategy Performance_ExplorePostRoutePhysOpt [get_runs impl_1]
+
 # 7.1 Disable the IP cache: cached OOC products have been observed leaving
 # an IP's generation state as 'Reset', which breaks run-dependency tracking
 # and lets synth_1 consume *_stub.v files (silent IP black-boxing).
