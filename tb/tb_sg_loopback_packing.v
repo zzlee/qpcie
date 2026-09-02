@@ -6,18 +6,19 @@ module tb_sg_loopback_packing;
     always #4 clk = ~clk;
 
     reg desc_valid, req_ack, cpl_valid, cpl_last;
+    reg [2:0] cpl_dw_count;
     reg [127:0] cpl_data;
     wire desc_ready, req_valid;
     wire [10:0] req_len;
     wire [127:0] loop_data;
     wire loop_valid, loop_last, loop_user;
     wire [31:0] completed_count;
-    integer beat, lane, output_dw, output_beats;
+    integer packet, beat, lane, output_dw, output_beats;
 
     sg_dma_engine #(.PCIE_DATA_WIDTH(128)) dut (
         .clk(clk), .rst_n(rst_n),
         .h2c_desc_valid(desc_valid), .h2c_plane0_src(64'h1000),
-        .h2c_plane1_src(64'd0), .h2c_line_width(16'd256),
+        .h2c_plane1_src(64'd0), .h2c_line_width(16'd512),
         .h2c_line_count(16'd1), .h2c_plane12_width(16'd0),
         .h2c_plane12_count(16'd0), .h2c_plane_count(4'd1),
         .h2c_desc_ctrl(16'd0), .h2c_desc_ready(desc_ready),
@@ -35,7 +36,7 @@ module tb_sg_loopback_packing;
         .c2h_req_data(), .c2h_req_last(),
         .c2h_req_data_ready(1'b0), .c2h_req_ack(1'b0),
         .h2c_cpl_valid(cpl_valid), .h2c_cpl_data(cpl_data),
-        .h2c_cpl_last(cpl_last),
+        .h2c_cpl_last(cpl_last), .h2c_cpl_dw_count(cpl_dw_count),
         .h2c_y_almost_full(), .h2c_uv_almost_full(),
         .m_axis_loopback_tdata(loop_data),
         .m_axis_loopback_tvalid(loop_valid),
@@ -57,7 +58,7 @@ module tb_sg_loopback_packing;
             end
             if (loop_user !== (output_beats == 0))
                 $fatal(1, "SOF mismatch on output beat %0d", output_beats);
-            if (loop_last !== (output_beats == 15))
+            if (loop_last !== (output_beats == 31))
                 $fatal(1, "TLAST mismatch on output beat %0d", output_beats);
             output_beats = output_beats + 1;
         end
@@ -68,6 +69,7 @@ module tb_sg_loopback_packing;
         req_ack = 0;
         cpl_valid = 0;
         cpl_last = 0;
+        cpl_dw_count = 0;
         cpl_data = 0;
         output_dw = 0;
         output_beats = 0;
@@ -79,38 +81,47 @@ module tb_sg_loopback_packing;
         desc_valid = 0;
 
         wait(req_valid);
-        if (req_len != 64)
-            $fatal(1, "Expected 64-DW MRd, got %0d", req_len);
+        if (req_len != 128)
+            $fatal(1, "Expected 128-DW MRd, got %0d", req_len);
         @(negedge clk);
         req_ack = 1;
         @(negedge clk);
         req_ack = 0;
 
-        // 7-Series RC alignment: first beat carries payload DW0 in lane 0,
-        // followed by 15 full beats and a final three-DW beat.
-        for (beat = 0; beat < 17; beat = beat + 1) begin
+        // Root-port MPS is 256 bytes, so one 512-byte MRd returns as two
+        // independently aligned 64-DW CplD packets with an idle gap.
+        for (packet = 0; packet < 2; packet = packet + 1) begin
+          for (beat = 0; beat < 17; beat = beat + 1) begin
             @(negedge clk);
             cpl_data = 0;
             if (beat == 0) begin
-                cpl_data[31:0] = 0;
+                cpl_data[31:0] = packet * 64;
+                cpl_dw_count = 1;
             end else begin
                 for (lane = 0; lane < 4; lane = lane + 1)
-                    if (1 + (beat-1)*4 + lane < 64)
-                        cpl_data[lane*32 +: 32] = 1 + (beat-1)*4 + lane;
+                    if (packet*64 + 1 + (beat-1)*4 + lane < (packet+1)*64)
+                        cpl_data[lane*32 +: 32] =
+                            packet*64 + 1 + (beat-1)*4 + lane;
+                cpl_dw_count = (beat == 16) ? 3 : 4;
+                if (beat == 16)
+                    cpl_data[127:96] = 32'hDEAD_BEEF;
             end
             cpl_valid = 1;
             cpl_last = (beat == 16);
+          end
+          @(negedge clk);
+          cpl_valid = 0;
+          cpl_last = 0;
+          cpl_dw_count = 0;
+          repeat (2) @(posedge clk);
         end
-        @(negedge clk);
-        cpl_valid = 0;
-        cpl_last = 0;
 
         wait(completed_count == 1);
         repeat (2) @(posedge clk);
-        if (output_beats != 16 || output_dw != 64)
-            $fatal(1, "Expected 16 packed beats/64 DW, got %0d/%0d",
+        if (output_beats != 32 || output_dw != 128)
+            $fatal(1, "Expected 32 packed beats/128 DW, got %0d/%0d",
                    output_beats, output_dw);
-        $display("SUCCESS: CplD payload repacked into 16 contiguous loopback beats");
+        $display("SUCCESS: split 512-byte MRd payload repacked into 32 contiguous loopback beats");
         $finish;
     end
 

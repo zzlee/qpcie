@@ -2,6 +2,7 @@
 module tb_sg_dma_engine;
     reg clk=0, rst_n=0;
     reg h2c_desc_valid=0, h2c_req_ack=0, h2c_cpl_valid=0, h2c_cpl_last=0;
+    reg [2:0] h2c_cpl_dw_count=0;
     reg [63:0] h2c_plane0_src=64'h1000;
     reg [63:0] h2c_plane1_src=64'd0;
     reg [15:0] h2c_line_width=16'd256, h2c_line_count=16'd1;
@@ -39,7 +40,7 @@ module tb_sg_dma_engine;
         .c2h_req_valid(), .c2h_req_addr(), .c2h_req_dw_len(), .c2h_req_data(),
         .c2h_req_last(), .c2h_req_data_ready(1'b0), .c2h_req_ack(1'b0),
         .h2c_cpl_valid(h2c_cpl_valid), .h2c_cpl_data(128'd0),
-        .h2c_cpl_last(h2c_cpl_last),
+        .h2c_cpl_last(h2c_cpl_last), .h2c_cpl_dw_count(h2c_cpl_dw_count),
         .h2c_y_almost_full(), .h2c_uv_almost_full(),
         .m_axis_loopback_tdata(), .m_axis_loopback_tvalid(),
         .m_axis_loopback_tlast(), .m_axis_loopback_tuser(),
@@ -57,9 +58,16 @@ module tb_sg_dma_engine;
                 @(posedge clk);
                 h2c_cpl_valid <= 1'b1;
                 h2c_cpl_last <= (beat == completion_beats - 1);
+                if (beat == 0)
+                    h2c_cpl_dw_count <= 3'd1;
+                else if (beat == completion_beats - 1 && ((request_dw - 1) % 4) != 0)
+                    h2c_cpl_dw_count <= (request_dw - 1) % 4;
+                else
+                    h2c_cpl_dw_count <= 3'd4;
             end
             @(posedge clk);
             h2c_cpl_valid <= 1'b0; h2c_cpl_last <= 1'b0;
+            h2c_cpl_dw_count <= 3'd0;
         end
     endtask
 
@@ -137,6 +145,7 @@ module tb_sg_dma_engine;
             h2c_req_ack = 0;
             h2c_cpl_valid = 0;
             h2c_cpl_last = 0;
+            h2c_cpl_dw_count = 0;
             sgl_h2c_y_wr_en = 0;
             h2c_plane1_src = 0;
             h2c_plane12_width = 0;
@@ -171,8 +180,7 @@ module tb_sg_dma_engine;
         start_h2c(64'h0, 16'd512, 16'h0020);
         push_y_segment(64'h00000000_20000ff0, 32'h00010000);
         service_request(64'h00000000_20000ff0, 11'd4);
-        service_request(64'h00000000_20001000, 11'd64);
-        service_request(64'h00000000_20001100, 11'd60);
+        service_request(64'h00000000_20001000, 11'd124);
         wait(completed_h2c_count == 1);
 
         reset_dut();

@@ -279,6 +279,7 @@ module custom_pcie_dma_top #(
 
     wire        h2c_fifo_wvalid, h2c_fifo_wlast;
     wire [PCIE_DATA_WIDTH-1:0] h2c_fifo_wdata;
+    wire [2:0]  h2c_fifo_wdw_count;
 
     wire        irq_req_valid, irq_req_ack;
     wire [7:0]  irq_req_code;
@@ -749,6 +750,7 @@ module custom_pcie_dma_top #(
         .h2c_fifo_wvalid(h2c_fifo_wvalid),
         .h2c_fifo_wdata(h2c_fifo_wdata),
         .h2c_fifo_wlast(h2c_fifo_wlast),
+        .h2c_fifo_wdw_count(h2c_fifo_wdw_count),
         .tag_free_req(tag_free_req),
         .tag_free_val(tag_free_val)
     );
@@ -903,6 +905,7 @@ module custom_pcie_dma_top #(
         .h2c_cpl_valid(h2c_fifo_wvalid),
         .h2c_cpl_data(h2c_fifo_wdata),
         .h2c_cpl_last(h2c_fifo_wlast),
+        .h2c_cpl_dw_count(h2c_fifo_wdw_count),
         .h2c_y_almost_full(h2c_y_almost_full),
         .h2c_uv_almost_full(h2c_uv_almost_full),
         .m_axis_loopback_tdata(lb_tdata),

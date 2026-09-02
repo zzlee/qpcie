@@ -37,6 +37,7 @@ TESTS=(
     "tb_axil_reg_space rtl/axil_reg_space.v tb/tb_axil_reg_space.v"
     "tb_rq_tx_encoder rtl/rq_tx_encoder.v tb/tb_rq_tx_encoder.v"
     "tb_rc_rx_decoder rtl/rc_rx_decoder.v tb/tb_rc_rx_decoder.v"
+    "tb_rc_h2c_dw_count rtl/rc_rx_decoder.v tb/tb_rc_h2c_dw_count.v"
     "tb_desc_fetch_engine rtl/desc_fetch_engine.v tb/tb_desc_fetch_engine.v"
     "tb_h2c_dma_engine rtl/h2c_dma_engine.v tb/tb_h2c_dma_engine.v"
     "tb_c2h_dma_engine rtl/c2h_dma_engine.v tb/tb_c2h_dma_engine.v"

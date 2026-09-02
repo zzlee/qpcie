@@ -65,6 +65,7 @@ module sg_dma_engine #(
     input  wire                          h2c_cpl_valid,
     input  wire [PCIE_DATA_WIDTH-1:0]    h2c_cpl_data,
     input  wire                          h2c_cpl_last,
+    input  wire [2:0]                    h2c_cpl_dw_count,
 
     // Flow Control Backpressure to SG Host Fetch Engine
     output wire                          h2c_y_almost_full,
@@ -113,7 +114,6 @@ module sg_dma_engine #(
     reg [15:0] h2c_calc_limit;
     reg [15:0] h2c_calc_avail;
     reg [10:0] h2c_burst_recv_dw;
-    reg        h2c_cpl_in_packet;
 
     reg [223:0] h2c_pack_data;
     reg [2:0]   h2c_pack_dw_count;
@@ -126,13 +126,18 @@ module sg_dma_engine #(
     assign m_axis_loopback_tlast  = loopback_tlast_q;
     assign m_axis_loopback_tuser  = loopback_tuser_q;
 
-    wire [10:0] h2c_cpl_step_dw = !h2c_cpl_in_packet ? 11'd1 :
-        ((h2c_burst_dw - h2c_burst_recv_dw) < (PCIE_DATA_WIDTH/32)) ?
-        (h2c_burst_dw - h2c_burst_recv_dw) : (PCIE_DATA_WIDTH/32);
-    wire [3:0] h2c_pack_total_dw = h2c_pack_dw_count + h2c_cpl_step_dw[2:0];
+    wire [10:0] h2c_cpl_step_dw = {8'd0, h2c_cpl_dw_count};
+    wire [3:0] h2c_pack_total_dw = h2c_pack_dw_count + h2c_cpl_dw_count;
+    wire h2c_request_complete =
+        (h2c_burst_recv_dw + h2c_cpl_step_dw) >= h2c_burst_dw;
+    wire [127:0] h2c_cpl_masked_data =
+        (h2c_cpl_dw_count == 1) ? {96'd0, h2c_cpl_data[31:0]} :
+        (h2c_cpl_dw_count == 2) ? {64'd0, h2c_cpl_data[63:0]} :
+        (h2c_cpl_dw_count == 3) ? {32'd0, h2c_cpl_data[95:0]} :
+                                  h2c_cpl_data;
     wire [255:0] h2c_pack_combined =
         {32'd0, h2c_pack_data} |
-        ({128'd0, h2c_cpl_data} << (h2c_pack_dw_count * 32));
+        ({128'd0, h2c_cpl_masked_data} << (h2c_pack_dw_count * 32));
 
     // Strip the three-DW CplD header gap from the first RC beat and repack the
     // payload into contiguous 128-bit beats for the raw video loopback path.
@@ -158,7 +163,7 @@ module sg_dma_engine #(
                 if (h2c_pack_total_dw >= 4) begin
                     loopback_tdata_q <= h2c_pack_combined[127:0];
                     loopback_tvalid_q <= 1;
-                    loopback_tlast_q <= h2c_cpl_last &&
+                    loopback_tlast_q <= h2c_request_complete &&
                                         (h2c_rem_bytes == 0) &&
                                         (h2c_pack_total_dw == 4);
                     loopback_tuser_q <= (h2c_output_bytes == 0);
@@ -239,8 +244,8 @@ module sg_dma_engine #(
                                            {19'd0, h2c_bytes_to_4k};
     wire [31:0] h2c_plane_rem_bytes = (!h2c_is_uv && h2c_plane_cnt_q >= 4'd2) ?
         (h2c_rem_bytes - h2c_p1_bytes_q) : h2c_rem_bytes;
-    wire [15:0] h2c_limit_bytes = (h2c_plane_rem_bytes < 32'd256) ?
-        h2c_plane_rem_bytes[15:0] : 16'd256;
+    wire [15:0] h2c_limit_bytes = (h2c_plane_rem_bytes < 32'd512) ?
+        h2c_plane_rem_bytes[15:0] : 16'd512;
     wire [15:0] h2c_calc_burst_bytes =
         (h2c_calc_limit < h2c_calc_avail) ? h2c_calc_limit : h2c_calc_avail;
 
@@ -271,7 +276,6 @@ module sg_dma_engine #(
             h2c_calc_limit        <= 16'd0;
             h2c_calc_avail        <= 16'd0;
             h2c_burst_recv_dw     <= 11'd0;
-            h2c_cpl_in_packet     <= 1'b0;
         end else begin
             case (h2c_state)
                 H2C_IDLE: begin
@@ -286,7 +290,6 @@ module sg_dma_engine #(
                         h2c_plane_cnt_q   <= h2c_plane_count;
                         h2c_desc_ctrl_q   <= h2c_desc_ctrl;
                         h2c_burst_recv_dw <= 11'd0;
-                        h2c_cpl_in_packet <= 1'b0;
                         h2c_state         <= H2C_PRECALC;
                     end
                 end
@@ -337,17 +340,14 @@ module sg_dma_engine #(
                         h2c_rem_bytes     <= h2c_rem_bytes - (h2c_burst_dw << 2);
                         h2c_is_uv         <= ((h2c_rem_bytes - (h2c_burst_dw << 2)) <= h2c_p1_bytes_q) && (h2c_plane_cnt_q >= 4'd2);
                         h2c_burst_recv_dw <= 11'd0;
-                        h2c_cpl_in_packet <= 1'b0;
                         h2c_state         <= H2C_WAIT_CPLD;
                     end
                 end
 
                 H2C_WAIT_CPLD: begin
                     if (h2c_cpl_valid) begin
-                        h2c_cpl_in_packet <= !h2c_cpl_last;
                         if ((h2c_burst_recv_dw + h2c_cpl_step_dw) >= h2c_burst_dw) begin
                             h2c_burst_recv_dw     <= 11'd0;
-                            h2c_cpl_in_packet     <= 1'b0;
                             h2c_bytes_transferred <= h2c_bytes_transferred + (h2c_burst_dw << 2);
                             if (h2c_rem_bytes == 32'd0) begin
                                 completed_h2c_count <= completed_h2c_count + 1'b1;
