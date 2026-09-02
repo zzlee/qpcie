@@ -539,6 +539,12 @@ module tb_video_cdc_system;
         #1;
         if (!u_dma_top.ch1_owner_busy || u_dma_top.nv12_ch1_desc_ready)
             $fatal(1, "Channel 1 did not serialize the active descriptor");
+        release u_dma_top.hs1_send_q;
+        @(posedge clk);
+        #1;
+        if (u_dma_top.hs1_send_q)
+            $fatal(1, "Channel 1 resent a descriptor while ownership was busy");
+        force u_dma_top.hs1_send_q = 1'b0;
         force u_dma_top.c2h_desc_valid = 1'b0;
         force u_dma_top.pcie_frame_done_ch1 = 1'b1;
         @(posedge clk);

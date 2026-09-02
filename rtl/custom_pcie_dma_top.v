@@ -1267,7 +1267,7 @@ module custom_pcie_dma_top #(
     wire nv12_ch1_desc_select = (c2h_format == 4'd2) && (c2h_plane_count == 4'd2) && (c2h_desc_ctrl[7:6] == 2'd1);
     always @(posedge clk or negedge dma_rst_n) begin
         if (!dma_rst_n) begin hs1_send_q <= 1'b0; hs1_bus_q <= 241'd0; end
-        else if (!hs1_send_q && !hs1_src_rcv && c2h_desc_valid && nv12_ch1_desc_select) begin hs1_bus_q <= {(c2h_desc_ctrl[4] | c2h_desc_ctrl[5]), global_timestamp, c2h_dst_stride, c2h_line_count, c2h_line_width, c2h_plane1_dst, c2h_plane0_dst}; hs1_send_q <= 1'b1; end
+        else if (!hs1_send_q && !hs1_src_rcv && !ch1_owner_busy && c2h_desc_valid && nv12_ch1_desc_select) begin hs1_bus_q <= {(c2h_desc_ctrl[4] | c2h_desc_ctrl[5]), global_timestamp, c2h_dst_stride, c2h_line_count, c2h_line_width, c2h_plane1_dst, c2h_plane0_dst}; hs1_send_q <= 1'b1; end
         else if (hs1_send_q && hs1_src_rcv) begin hs1_send_q <= 1'b0; end
     end
     always @(posedge clk or negedge dma_rst_n) begin
@@ -1325,7 +1325,7 @@ module custom_pcie_dma_top #(
     wire nv12_ch2_desc_select = (c2h_format == 4'd2) && (c2h_plane_count == 4'd2) && (c2h_desc_ctrl[7:6] == 2'd2);
     always @(posedge clk or negedge dma_rst_n) begin
         if (!dma_rst_n) begin hs2_send_q <= 1'b0; hs2_bus_q <= 241'd0; end
-        else if (!hs2_send_q && !hs2_src_rcv && c2h_desc_valid && nv12_ch2_desc_select) begin hs2_bus_q <= {(c2h_desc_ctrl[4] | c2h_desc_ctrl[5]), global_timestamp, c2h_dst_stride, c2h_line_count, c2h_line_width, c2h_plane1_dst, c2h_plane0_dst}; hs2_send_q <= 1'b1; end
+        else if (!hs2_send_q && !hs2_src_rcv && !ch2_owner_busy && c2h_desc_valid && nv12_ch2_desc_select) begin hs2_bus_q <= {(c2h_desc_ctrl[4] | c2h_desc_ctrl[5]), global_timestamp, c2h_dst_stride, c2h_line_count, c2h_line_width, c2h_plane1_dst, c2h_plane0_dst}; hs2_send_q <= 1'b1; end
         else if (hs2_send_q && hs2_src_rcv) begin hs2_send_q <= 1'b0; end
     end
     always @(posedge clk or negedge dma_rst_n) begin
@@ -1381,7 +1381,7 @@ module custom_pcie_dma_top #(
     wire nv12_ch3_desc_select = (c2h_format == 4'd2) && (c2h_plane_count == 4'd2) && (c2h_desc_ctrl[7:6] == 2'd3);
     always @(posedge clk or negedge dma_rst_n) begin
         if (!dma_rst_n) begin hs3_send_q <= 1'b0; hs3_bus_q <= 241'd0; end
-        else if (!hs3_send_q && !hs3_src_rcv && c2h_desc_valid && nv12_ch3_desc_select) begin hs3_bus_q <= {(c2h_desc_ctrl[4] | c2h_desc_ctrl[5]), global_timestamp, c2h_dst_stride, c2h_line_count, c2h_line_width, c2h_plane1_dst, c2h_plane0_dst}; hs3_send_q <= 1'b1; end
+        else if (!hs3_send_q && !hs3_src_rcv && !ch3_owner_busy && c2h_desc_valid && nv12_ch3_desc_select) begin hs3_bus_q <= {(c2h_desc_ctrl[4] | c2h_desc_ctrl[5]), global_timestamp, c2h_dst_stride, c2h_line_count, c2h_line_width, c2h_plane1_dst, c2h_plane0_dst}; hs3_send_q <= 1'b1; end
         else if (hs3_send_q && hs3_src_rcv) begin hs3_send_q <= 1'b0; end
     end
     always @(posedge clk or negedge dma_rst_n) begin
