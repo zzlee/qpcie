@@ -34,7 +34,8 @@ module tb_sg_c2h_burst_boundary;
     sg_dma_engine #(.PCIE_DATA_WIDTH(128)) source (
         .clk(clk), .rst_n(rst_n),
         .h2c_desc_valid(1'b0), .h2c_plane0_src(64'd0),
-        .h2c_line_width(16'd0), .h2c_desc_ready(),
+        .h2c_line_width(16'd0), .h2c_format(4'd0), .h2c_desc_ready(),
+        .h2c_loopback_enable(), .h2c_loopback_channel(),
         .c2h_desc_valid(c2h_desc_valid),
         .c2h_plane0_dst(64'h0000_0001_0000_FFC0),
         .c2h_line_width(16'd256), .c2h_desc_ready(c2h_desc_ready),

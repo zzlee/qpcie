@@ -326,9 +326,12 @@ module custom_pcie_dma_top #(
     wire        sg_h2c_busy, sg_c2h_busy;
     wire [PCIE_DATA_WIDTH-1:0] lb_tdata;
     wire        lb_tvalid, lb_tlast, lb_tuser;
+    wire        sg_loopback_enable;
+    wire [1:0]  sg_loopback_channel;
     wire        ch1_loopback_full, ch2_loopback_full, ch3_loopback_full;
-    wire        lb_tready = (h2c_desc_ctrl[7:6] == 2'd2) ? !ch2_loopback_full :
-                              (h2c_desc_ctrl[7:6] == 2'd3) ? !ch3_loopback_full :
+    wire        lb_tready = !sg_loopback_enable ? 1'b1 :
+                            (sg_loopback_channel == 2'd2) ? !ch2_loopback_full :
+                            (sg_loopback_channel == 2'd3) ? !ch3_loopback_full :
                                                             !ch1_loopback_full;
 
     // Multiplexed C2H Request Signals
@@ -878,8 +881,11 @@ module custom_pcie_dma_top #(
         .h2c_plane12_width(h2c_plane12_width),
         .h2c_plane12_count(h2c_plane12_count),
         .h2c_plane_count(h2c_plane_count),
+        .h2c_format(h2c_format),
         .h2c_desc_ctrl(h2c_desc_ctrl),
         .h2c_desc_ready(sg_h2c_desc_ready),
+        .h2c_loopback_enable(sg_loopback_enable),
+        .h2c_loopback_channel(sg_loopback_channel),
         .sgl_h2c_y_wr_en(sgl_h2c_y_wr_en),
         .sgl_h2c_y_wr_addr(sgl_y_wr_addr),
         .sgl_h2c_y_wr_len(sgl_y_wr_len),
@@ -1269,7 +1275,7 @@ module custom_pcie_dma_top #(
     wire [129:0] ch1_fifo_dout;
     wire        ch1_fifo_empty, ch1_tready;
     xpm_fifo_async #(.FIFO_MEMORY_TYPE("distributed"), .FIFO_WRITE_DEPTH(64), .WRITE_DATA_WIDTH(130), .READ_DATA_WIDTH(130), .READ_MODE("fwft"), .FIFO_READ_LATENCY(0), .USE_ADV_FEATURES("0000"))
-    u_ch1_loopback_cdc (.rst(!rst_n || !video_rst_n), .wr_clk(clk), .wr_en(lb_tvalid && lb_tready && (h2c_desc_ctrl[7:6] == 2'd1 || h2c_desc_ctrl[7:6] == 2'd0)), .din({lb_tuser, lb_tlast, lb_tdata}), .full(ch1_loopback_full), .rd_clk(video_clk), .rd_en(!ch1_fifo_empty && ch1_tready), .dout(ch1_fifo_dout), .empty(ch1_fifo_empty), .sleep(1'b0), .injectsbiterr(1'b0), .injectdbiterr(1'b0), .sbiterr(), .dbiterr(), .wr_rst_busy(), .rd_rst_busy());
+    u_ch1_loopback_cdc (.rst(!rst_n || !video_rst_n), .wr_clk(clk), .wr_en(lb_tvalid && lb_tready && sg_loopback_enable && (sg_loopback_channel == 2'd1 || sg_loopback_channel == 2'd0)), .din({lb_tuser, lb_tlast, lb_tdata}), .full(ch1_loopback_full), .rd_clk(video_clk), .rd_en(!ch1_fifo_empty && ch1_tready), .dout(ch1_fifo_dout), .empty(ch1_fifo_empty), .sleep(1'b0), .injectsbiterr(1'b0), .injectdbiterr(1'b0), .sbiterr(), .dbiterr(), .wr_rst_busy(), .rd_rst_busy());
     wire [127:0] ch1_tdata = ch1_fifo_dout[127:0]; wire ch1_tlast = ch1_fifo_dout[128]; wire ch1_tuser = ch1_fifo_dout[129]; wire ch1_tvalid = !ch1_fifo_empty;
 
     reg hs1_send_q; reg [240:0] hs1_bus_q; wire hs1_src_rcv, hs1_dest_req; wire [240:0] hs1_dest_bus; reg hs1_dest_ack; reg eng1_desc_valid, eng1_desc_sg_mode; reg [63:0] eng1_y_addr, eng1_uv_addr, eng1_ts; reg [15:0] eng1_width, eng1_height, eng1_stride; wire nv12_ch1_desc_ready_v;
@@ -1327,7 +1333,7 @@ module custom_pcie_dma_top #(
     wire [129:0] ch2_fifo_dout;
     wire        ch2_fifo_empty, ch2_tready;
     xpm_fifo_async #(.FIFO_MEMORY_TYPE("distributed"), .FIFO_WRITE_DEPTH(64), .WRITE_DATA_WIDTH(130), .READ_DATA_WIDTH(130), .READ_MODE("fwft"), .FIFO_READ_LATENCY(0), .USE_ADV_FEATURES("0000"))
-    u_ch2_loopback_cdc (.rst(!rst_n || !video_rst_n), .wr_clk(clk), .wr_en(lb_tvalid && lb_tready && (h2c_desc_ctrl[7:6] == 2'd2)), .din({lb_tuser, lb_tlast, lb_tdata}), .full(ch2_loopback_full), .rd_clk(video_clk), .rd_en(!ch2_fifo_empty && ch2_tready), .dout(ch2_fifo_dout), .empty(ch2_fifo_empty), .sleep(1'b0), .injectsbiterr(1'b0), .injectdbiterr(1'b0), .sbiterr(), .dbiterr(), .wr_rst_busy(), .rd_rst_busy());
+    u_ch2_loopback_cdc (.rst(!rst_n || !video_rst_n), .wr_clk(clk), .wr_en(lb_tvalid && lb_tready && sg_loopback_enable && (sg_loopback_channel == 2'd2)), .din({lb_tuser, lb_tlast, lb_tdata}), .full(ch2_loopback_full), .rd_clk(video_clk), .rd_en(!ch2_fifo_empty && ch2_tready), .dout(ch2_fifo_dout), .empty(ch2_fifo_empty), .sleep(1'b0), .injectsbiterr(1'b0), .injectdbiterr(1'b0), .sbiterr(), .dbiterr(), .wr_rst_busy(), .rd_rst_busy());
     wire [127:0] ch2_tdata = ch2_fifo_dout[127:0]; wire ch2_tlast = ch2_fifo_dout[128]; wire ch2_tuser = ch2_fifo_dout[129]; wire ch2_tvalid = !ch2_fifo_empty;
 
     reg hs2_send_q; reg [240:0] hs2_bus_q; wire hs2_src_rcv, hs2_dest_req; wire [240:0] hs2_dest_bus; reg hs2_dest_ack; reg eng2_desc_valid, eng2_desc_sg_mode; reg [63:0] eng2_y_addr, eng2_uv_addr, eng2_ts; reg [15:0] eng2_width, eng2_height, eng2_stride; wire nv12_ch2_desc_ready_v;
@@ -1383,7 +1389,7 @@ module custom_pcie_dma_top #(
     wire [129:0] ch3_fifo_dout;
     wire        ch3_fifo_empty, ch3_tready;
     xpm_fifo_async #(.FIFO_MEMORY_TYPE("distributed"), .FIFO_WRITE_DEPTH(64), .WRITE_DATA_WIDTH(130), .READ_DATA_WIDTH(130), .READ_MODE("fwft"), .FIFO_READ_LATENCY(0), .USE_ADV_FEATURES("0000"))
-    u_ch3_loopback_cdc (.rst(!rst_n || !video_rst_n), .wr_clk(clk), .wr_en(lb_tvalid && lb_tready && (h2c_desc_ctrl[7:6] == 2'd3)), .din({lb_tuser, lb_tlast, lb_tdata}), .full(ch3_loopback_full), .rd_clk(video_clk), .rd_en(!ch3_fifo_empty && ch3_tready), .dout(ch3_fifo_dout), .empty(ch3_fifo_empty), .sleep(1'b0), .injectsbiterr(1'b0), .injectdbiterr(1'b0), .sbiterr(), .dbiterr(), .wr_rst_busy(), .rd_rst_busy());
+    u_ch3_loopback_cdc (.rst(!rst_n || !video_rst_n), .wr_clk(clk), .wr_en(lb_tvalid && lb_tready && sg_loopback_enable && (sg_loopback_channel == 2'd3)), .din({lb_tuser, lb_tlast, lb_tdata}), .full(ch3_loopback_full), .rd_clk(video_clk), .rd_en(!ch3_fifo_empty && ch3_tready), .dout(ch3_fifo_dout), .empty(ch3_fifo_empty), .sleep(1'b0), .injectsbiterr(1'b0), .injectdbiterr(1'b0), .sbiterr(), .dbiterr(), .wr_rst_busy(), .rd_rst_busy());
     wire [127:0] ch3_tdata = ch3_fifo_dout[127:0]; wire ch3_tlast = ch3_fifo_dout[128]; wire ch3_tuser = ch3_fifo_dout[129]; wire ch3_tvalid = !ch3_fifo_empty;
 
     reg hs3_send_q; reg [240:0] hs3_bus_q; wire hs3_src_rcv, hs3_dest_req; wire [240:0] hs3_dest_bus; reg hs3_dest_ack; reg eng3_desc_valid, eng3_desc_sg_mode; reg [63:0] eng3_y_addr, eng3_uv_addr, eng3_ts; reg [15:0] eng3_width, eng3_height, eng3_stride; wire nv12_ch3_desc_ready_v;

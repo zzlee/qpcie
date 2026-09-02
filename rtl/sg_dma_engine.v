@@ -22,8 +22,11 @@ module sg_dma_engine #(
     input  wire [15:0]                   h2c_plane12_width,
     input  wire [15:0]                   h2c_plane12_count,
     input  wire [3:0]                    h2c_plane_count,
+    input  wire [3:0]                    h2c_format,
     input  wire [15:0]                   h2c_desc_ctrl,
     output reg                           h2c_desc_ready,
+    output wire                          h2c_loopback_enable,
+    output wire [1:0]                    h2c_loopback_channel,
 
     // SGL Segment Push Ports for H2C (from sg_host_fetch_engine)
     input  wire                          sgl_h2c_y_wr_en,
@@ -108,6 +111,7 @@ module sg_dma_engine #(
     reg [63:0] h2c_p1_addr_q;
     reg [3:0]  h2c_plane_cnt_q;
     reg [15:0] h2c_desc_ctrl_q;
+    reg        h2c_loopback_enable_q;
     reg        h2c_is_uv;
     reg [10:0] h2c_burst_dw;
     wire [15:0] h2c_burst_bytes = {3'd0, h2c_burst_dw, 2'b00};
@@ -121,6 +125,8 @@ module sg_dma_engine #(
     wire [10:0] h2c_rob_retire_dw_len;
     wire h2c_rob_error;
     wire h2c_rob_alloc_commit = h2c_state == H2C_WAIT_ACK && h2c_req_ack;
+    assign h2c_loopback_enable = h2c_loopback_enable_q;
+    assign h2c_loopback_channel = h2c_desc_ctrl_q[7:6];
 
     h2c_reorder_buffer u_h2c_reorder_buffer (
         .clk(clk), .rst_n(rst_n),
@@ -233,6 +239,7 @@ module sg_dma_engine #(
             h2c_p1_addr_q         <= 64'd0;
             h2c_plane_cnt_q       <= 4'd0;
             h2c_desc_ctrl_q       <= 16'd0;
+            h2c_loopback_enable_q <= 1'b0;
             h2c_is_uv             <= 1'b0;
             h2c_burst_dw          <= 11'd0;
             h2c_calc_addr         <= 64'd0;
@@ -253,6 +260,7 @@ module sg_dma_engine #(
                         h2c_p1_addr_q     <= h2c_plane1_src;
                         h2c_plane_cnt_q   <= h2c_plane_count;
                         h2c_desc_ctrl_q   <= h2c_desc_ctrl;
+                        h2c_loopback_enable_q <= (h2c_format == 4'd2);
                         h2c_first_request <= 1'b1;
                         h2c_state         <= H2C_PRECALC;
                     end
