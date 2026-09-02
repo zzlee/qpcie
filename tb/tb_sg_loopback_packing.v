@@ -37,6 +37,7 @@ module tb_sg_loopback_packing;
         .c2h_req_data_ready(1'b0), .c2h_req_ack(1'b0),
         .h2c_cpl_valid(cpl_valid), .h2c_cpl_data(cpl_data),
         .h2c_cpl_last(cpl_last), .h2c_cpl_dw_count(cpl_dw_count),
+        .h2c_cpl_tag(8'd2),
         .h2c_y_almost_full(), .h2c_uv_almost_full(),
         .m_axis_loopback_tdata(loop_data),
         .m_axis_loopback_tvalid(loop_valid),

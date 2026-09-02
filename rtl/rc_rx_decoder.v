@@ -44,6 +44,7 @@ module rc_rx_decoder #(
     output reg  [DATA_WIDTH-1:0] h2c_fifo_wdata,
     output reg                   h2c_fifo_wlast,
     output reg  [2:0]            h2c_fifo_wdw_count,
+    output reg  [7:0]            h2c_fifo_wtag,
 
     // Tag Recycle Interface
     output reg                   tag_free_req,
@@ -58,6 +59,7 @@ module rc_rx_decoder #(
     reg [1:0] state;
     reg [2:0] desc_beat_cnt;
     reg [10:0] h2c_cpl_dw_remaining;
+    reg [7:0] h2c_cpl_tag;
 
     // Header Extraction from first beat according to pg213 Table 2-19
     wire [7:0]  rc_tag       = s_axis_rc_tdata[71:64];  // pg213 Table 2-19: Tag is at [71:64]
@@ -79,10 +81,12 @@ module rc_rx_decoder #(
             h2c_fifo_wdata   <= {DATA_WIDTH{1'b0}};
             h2c_fifo_wlast   <= 1'b0;
             h2c_fifo_wdw_count <= 3'd0;
+            h2c_fifo_wtag    <= 8'd0;
             tag_free_req     <= 1'b0;
             tag_free_val     <= 8'd0;
             desc_beat_cnt    <= 3'd0;
             h2c_cpl_dw_remaining <= 11'd0;
+            h2c_cpl_tag      <= 8'd0;
         end else begin
             h2c_fifo_wvalid <= 1'b0;
             h2c_fifo_wdw_count <= 3'd0;
@@ -124,11 +128,10 @@ module rc_rx_decoder #(
                             h2c_fifo_wdata  <= {96'd0, s_axis_rc_tdata[127:96]};
                             h2c_fifo_wlast  <= s_axis_rc_tlast;
                             h2c_fifo_wdw_count <= (rc_dword_len != 0) ? 3'd1 : 3'd0;
+                            h2c_fifo_wtag <= rc_tag;
+                            h2c_cpl_tag <= rc_tag;
                             h2c_cpl_dw_remaining <=
                                 (rc_dword_len > 0) ? rc_dword_len - 1'b1 : 11'd0;
-                            tag_free_req    <= s_axis_rc_tlast;
-                            tag_free_val    <= rc_tag;
-
                             if (!s_axis_rc_tlast) begin
                                 state <= ROUTE_H2C;
                             end
@@ -176,6 +179,7 @@ module rc_rx_decoder #(
                         h2c_fifo_wvalid <= 1'b1;
                         h2c_fifo_wdata  <= s_axis_rc_tdata;
                         h2c_fifo_wlast  <= s_axis_rc_tlast;
+                        h2c_fifo_wtag   <= h2c_cpl_tag;
                         h2c_fifo_wdw_count <=
                             (h2c_cpl_dw_remaining >= 4) ? 3'd4 :
                             h2c_cpl_dw_remaining[2:0];
@@ -185,8 +189,6 @@ module rc_rx_decoder #(
                             h2c_cpl_dw_remaining <= 0;
 
                         if (s_axis_rc_tlast) begin
-                            tag_free_req <= 1'b1;
-                            tag_free_val <= rc_tag;
                             state        <= IDLE;
                         end
                     end

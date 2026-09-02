@@ -10,6 +10,8 @@ module tb_rc_h2c_dw_count;
     wire h2c_valid, h2c_last;
     wire [127:0] h2c_data;
     wire [2:0] h2c_dw_count;
+    wire [7:0] h2c_tag;
+    wire tag_free_req;
     integer beat, lane;
 
     rc_rx_decoder #(.DATA_WIDTH(128)) dut (
@@ -21,7 +23,8 @@ module tb_rc_h2c_dw_count;
         .sg_cpl_valid(), .sg_cpl_data(), .sg_cpl_last(), .sg_cpl_tag(),
         .h2c_fifo_wvalid(h2c_valid), .h2c_fifo_wdata(h2c_data),
         .h2c_fifo_wlast(h2c_last), .h2c_fifo_wdw_count(h2c_dw_count),
-        .tag_free_req(), .tag_free_val()
+        .h2c_fifo_wtag(h2c_tag),
+        .tag_free_req(tag_free_req), .tag_free_val()
     );
 
     initial begin
@@ -72,6 +75,13 @@ module tb_rc_h2c_dw_count;
             $fatal(1, "H2C valid remained asserted after CplD");
         $display("SUCCESS: RC H2C payload reports exact DW counts across gaps");
         $finish;
+    end
+
+    always @(posedge clk) begin
+        if (rst_n && h2c_valid && h2c_tag != 8'h02)
+            $fatal(1, "H2C packet tag changed on a continuation beat: %0h", h2c_tag);
+        if (rst_n && tag_free_req)
+            $fatal(1, "H2C tag was recycled at CplD packet end");
     end
 
     initial begin

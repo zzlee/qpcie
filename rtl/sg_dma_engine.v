@@ -66,6 +66,7 @@ module sg_dma_engine #(
     input  wire [PCIE_DATA_WIDTH-1:0]    h2c_cpl_data,
     input  wire                          h2c_cpl_last,
     input  wire [2:0]                    h2c_cpl_dw_count,
+    input  wire [7:0]                    h2c_cpl_tag,
 
     // Flow Control Backpressure to SG Host Fetch Engine
     output wire                          h2c_y_almost_full,
@@ -113,70 +114,32 @@ module sg_dma_engine #(
     reg [63:0] h2c_calc_addr;
     reg [15:0] h2c_calc_limit;
     reg [15:0] h2c_calc_avail;
-    reg [10:0] h2c_burst_recv_dw;
+    reg h2c_first_request;
+    wire h2c_rob_alloc_ready;
+    wire [7:0] h2c_rob_alloc_tag;
+    wire h2c_rob_retire_valid, h2c_rob_retire_frame_last;
+    wire [10:0] h2c_rob_retire_dw_len;
+    wire h2c_rob_error;
+    wire h2c_rob_alloc_commit = h2c_state == H2C_WAIT_ACK && h2c_req_ack;
 
-    reg [223:0] h2c_pack_data;
-    reg [2:0]   h2c_pack_dw_count;
-    reg [31:0]  h2c_output_bytes;
-    reg [PCIE_DATA_WIDTH-1:0] loopback_tdata_q;
-    reg loopback_tvalid_q, loopback_tlast_q, loopback_tuser_q;
-
-    assign m_axis_loopback_tdata  = loopback_tdata_q;
-    assign m_axis_loopback_tvalid = loopback_tvalid_q;
-    assign m_axis_loopback_tlast  = loopback_tlast_q;
-    assign m_axis_loopback_tuser  = loopback_tuser_q;
-
-    wire [10:0] h2c_cpl_step_dw = {8'd0, h2c_cpl_dw_count};
-    wire [3:0] h2c_pack_total_dw = h2c_pack_dw_count + h2c_cpl_dw_count;
-    wire h2c_request_complete =
-        (h2c_burst_recv_dw + h2c_cpl_step_dw) >= h2c_burst_dw;
-    wire [127:0] h2c_cpl_masked_data =
-        (h2c_cpl_dw_count == 1) ? {96'd0, h2c_cpl_data[31:0]} :
-        (h2c_cpl_dw_count == 2) ? {64'd0, h2c_cpl_data[63:0]} :
-        (h2c_cpl_dw_count == 3) ? {32'd0, h2c_cpl_data[95:0]} :
-                                  h2c_cpl_data;
-    wire [255:0] h2c_pack_combined =
-        {32'd0, h2c_pack_data} |
-        ({128'd0, h2c_cpl_masked_data} << (h2c_pack_dw_count * 32));
-
-    // Strip the three-DW CplD header gap from the first RC beat and repack the
-    // payload into contiguous 128-bit beats for the raw video loopback path.
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            h2c_pack_data <= 0;
-            h2c_pack_dw_count <= 0;
-            h2c_output_bytes <= 0;
-            loopback_tdata_q <= 0;
-            loopback_tvalid_q <= 0;
-            loopback_tlast_q <= 0;
-            loopback_tuser_q <= 0;
-        end else begin
-            loopback_tvalid_q <= 0;
-            loopback_tlast_q <= 0;
-            loopback_tuser_q <= 0;
-
-            if (h2c_state == H2C_IDLE && h2c_desc_valid) begin
-                h2c_pack_data <= 0;
-                h2c_pack_dw_count <= 0;
-                h2c_output_bytes <= 0;
-            end else if (h2c_cpl_valid) begin
-                if (h2c_pack_total_dw >= 4) begin
-                    loopback_tdata_q <= h2c_pack_combined[127:0];
-                    loopback_tvalid_q <= 1;
-                    loopback_tlast_q <= h2c_request_complete &&
-                                        (h2c_rem_bytes == 0) &&
-                                        (h2c_pack_total_dw == 4);
-                    loopback_tuser_q <= (h2c_output_bytes == 0);
-                    h2c_output_bytes <= h2c_output_bytes + 16;
-                    h2c_pack_data <= h2c_pack_combined[255:128];
-                    h2c_pack_dw_count <= h2c_pack_total_dw - 4;
-                end else begin
-                    h2c_pack_data <= h2c_pack_combined[223:0];
-                    h2c_pack_dw_count <= h2c_pack_total_dw[2:0];
-                end
-            end
-        end
-    end
+    h2c_reorder_buffer u_h2c_reorder_buffer (
+        .clk(clk), .rst_n(rst_n),
+        .alloc_ready(h2c_rob_alloc_ready), .alloc_tag(h2c_rob_alloc_tag),
+        .alloc_commit(h2c_rob_alloc_commit), .alloc_dw_len(h2c_burst_dw),
+        .alloc_frame_first(h2c_first_request),
+        .alloc_frame_last(h2c_rem_bytes == (h2c_burst_dw << 2)),
+        .cpl_valid(h2c_cpl_valid), .cpl_tag(h2c_cpl_tag),
+        .cpl_data(h2c_cpl_data), .cpl_dw_count(h2c_cpl_dw_count),
+        .m_axis_tdata(m_axis_loopback_tdata),
+        .m_axis_tvalid(m_axis_loopback_tvalid),
+        .m_axis_tlast(m_axis_loopback_tlast),
+        .m_axis_tuser(m_axis_loopback_tuser),
+        .m_axis_tready(m_axis_loopback_tready),
+        .retire_valid(h2c_rob_retire_valid),
+        .retire_dw_len(h2c_rob_retire_dw_len),
+        .retire_frame_last(h2c_rob_retire_frame_last),
+        .error_valid(h2c_rob_error)
+    );
 
     wire h2c_sg_mode = h2c_desc_ctrl_q[5] || h2c_desc_ctrl_q[4];
 
@@ -275,7 +238,8 @@ module sg_dma_engine #(
             h2c_calc_addr         <= 64'd0;
             h2c_calc_limit        <= 16'd0;
             h2c_calc_avail        <= 16'd0;
-            h2c_burst_recv_dw     <= 11'd0;
+            h2c_first_request     <= 1'b1;
+            dma_error_count       <= 32'd0;
         end else begin
             case (h2c_state)
                 H2C_IDLE: begin
@@ -289,7 +253,7 @@ module sg_dma_engine #(
                         h2c_p1_addr_q     <= h2c_plane1_src;
                         h2c_plane_cnt_q   <= h2c_plane_count;
                         h2c_desc_ctrl_q   <= h2c_desc_ctrl;
-                        h2c_burst_recv_dw <= 11'd0;
+                        h2c_first_request <= 1'b1;
                         h2c_state         <= H2C_PRECALC;
                     end
                 end
@@ -303,7 +267,8 @@ module sg_dma_engine #(
 
                 H2C_LOAD_LIMIT: begin
                     h2c_desc_ready <= 1'b0;
-                    if (h2c_rem_bytes > 32'd0 && h2c_walker_ready) begin
+                    if (h2c_rem_bytes > 32'd0 && h2c_walker_ready &&
+                        h2c_rob_alloc_ready) begin
                         h2c_calc_addr  <= h2c_target_addr;
                         h2c_calc_limit <= h2c_limit_bytes;
                         h2c_calc_avail <= h2c_avail_bytes[15:0];
@@ -323,7 +288,7 @@ module sg_dma_engine #(
 
                 H2C_ISSUE_MRD: begin
                     h2c_req_dw_len <= h2c_burst_dw;
-                    h2c_req_tag    <= 8'h02;
+                    h2c_req_tag    <= h2c_rob_alloc_tag;
                     h2c_req_valid  <= 1'b1;
                     h2c_state      <= H2C_WAIT_ACK;
                 end
@@ -339,29 +304,26 @@ module sg_dma_engine #(
                             h2c_cur_addr <= h2c_cur_addr + (h2c_burst_dw << 2);
                         h2c_rem_bytes     <= h2c_rem_bytes - (h2c_burst_dw << 2);
                         h2c_is_uv         <= ((h2c_rem_bytes - (h2c_burst_dw << 2)) <= h2c_p1_bytes_q) && (h2c_plane_cnt_q >= 4'd2);
-                        h2c_burst_recv_dw <= 11'd0;
-                        h2c_state         <= H2C_WAIT_CPLD;
+                        h2c_first_request <= 1'b0;
+                        h2c_state <= (h2c_rem_bytes == (h2c_burst_dw << 2)) ?
+                                     H2C_WAIT_CPLD : H2C_LOAD_LIMIT;
                     end
                 end
 
                 H2C_WAIT_CPLD: begin
-                    if (h2c_cpl_valid) begin
-                        if ((h2c_burst_recv_dw + h2c_cpl_step_dw) >= h2c_burst_dw) begin
-                            h2c_burst_recv_dw     <= 11'd0;
-                            h2c_bytes_transferred <= h2c_bytes_transferred + (h2c_burst_dw << 2);
-                            if (h2c_rem_bytes == 32'd0) begin
-                                completed_h2c_count <= completed_h2c_count + 1'b1;
-                                h2c_desc_ready      <= 1'b1;
-                                h2c_state           <= H2C_IDLE;
-                            end else begin
-                                h2c_state           <= H2C_LOAD_LIMIT;
-                            end
-                        end else begin
-                            h2c_burst_recv_dw <= h2c_burst_recv_dw + h2c_cpl_step_dw;
-                        end
+                    if (h2c_rob_retire_valid && h2c_rob_retire_frame_last) begin
+                        completed_h2c_count <= completed_h2c_count + 1'b1;
+                        h2c_desc_ready <= 1'b1;
+                        h2c_state <= H2C_IDLE;
                     end
                 end
             endcase
+
+            if (h2c_rob_retire_valid)
+                h2c_bytes_transferred <= h2c_bytes_transferred +
+                                         (h2c_rob_retire_dw_len << 2);
+            if (h2c_rob_error)
+                dma_error_count <= dma_error_count + 1'b1;
         end
     end
 

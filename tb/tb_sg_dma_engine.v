@@ -3,6 +3,7 @@ module tb_sg_dma_engine;
     reg clk=0, rst_n=0;
     reg h2c_desc_valid=0, h2c_req_ack=0, h2c_cpl_valid=0, h2c_cpl_last=0;
     reg [2:0] h2c_cpl_dw_count=0;
+    reg [7:0] h2c_cpl_tag=2;
     reg [63:0] h2c_plane0_src=64'h1000;
     reg [63:0] h2c_plane1_src=64'd0;
     reg [15:0] h2c_line_width=16'd256, h2c_line_count=16'd1;
@@ -41,6 +42,7 @@ module tb_sg_dma_engine;
         .c2h_req_last(), .c2h_req_data_ready(1'b0), .c2h_req_ack(1'b0),
         .h2c_cpl_valid(h2c_cpl_valid), .h2c_cpl_data(128'd0),
         .h2c_cpl_last(h2c_cpl_last), .h2c_cpl_dw_count(h2c_cpl_dw_count),
+        .h2c_cpl_tag(h2c_cpl_tag),
         .h2c_y_almost_full(), .h2c_uv_almost_full(),
         .m_axis_loopback_tdata(), .m_axis_loopback_tvalid(),
         .m_axis_loopback_tlast(), .m_axis_loopback_tuser(),
@@ -114,7 +116,7 @@ module tb_sg_dma_engine;
                          dut.h2c_y_walker_addr, dut.h2c_y_walker_bytes_left);
                 $finish;
             end
-            if (h2c_req_dw_len !== expected_dw || h2c_req_tag !== 8'h02 ||
+            if (h2c_req_dw_len !== expected_dw ||
                 h2c_req_addr !== expected_addr) begin
                 $display("FAIL: H2C request expected addr=%h len=%0d, got addr=%h len=%0d",
                          expected_addr, expected_dw, h2c_req_addr, h2c_req_dw_len);
@@ -124,15 +126,9 @@ module tb_sg_dma_engine;
                 $display("FAIL: zero-length MRd emitted");
                 $finish;
             end
+            h2c_cpl_tag = h2c_req_tag;
             @(posedge clk); h2c_req_ack<=1;
             @(posedge clk); h2c_req_ack<=0;
-            repeat (3) begin
-                @(posedge clk);
-                if (h2c_req_valid) begin
-                    $display("FAIL: duplicate MRd issued before completion");
-                    $finish;
-                end
-            end
             complete_request(expected_dw);
             $display("  request addr=%h len=%0d DW completed", expected_addr, expected_dw);
         end
@@ -160,7 +156,7 @@ module tb_sg_dma_engine;
     initial begin
         reset_dut();
 
-        $display("[TEST 1] Linear H2C completion serialization");
+        $display("[TEST 1] Linear H2C completion accounting");
         start_h2c(64'h1000, 16'd256, 16'd0);
         service_request(64'h1000, 11'd64);
         wait(completed_h2c_count == 1);
