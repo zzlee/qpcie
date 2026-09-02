@@ -22,7 +22,7 @@ module tb_sg_h2c_multitag;
     sg_dma_engine dut (
         .clk(clk), .rst_n(rst_n),
         .h2c_desc_valid(desc_valid), .h2c_plane0_src(64'h1000),
-        .h2c_plane1_src(64'd0), .h2c_line_width(16'd4608),
+        .h2c_plane1_src(64'd0), .h2c_line_width(16'd8704),
         .h2c_line_count(16'd1), .h2c_plane12_width(16'd0),
         .h2c_plane12_count(16'd0), .h2c_plane_count(4'd1),
         .h2c_format(4'd2), .h2c_desc_ctrl(16'd0),
@@ -60,7 +60,7 @@ module tb_sg_h2c_multitag;
                            output_beat, lane, out_data[lane*32 +: 32]);
             if (out_user !== (output_beat == 0))
                 $fatal(1, "SOF mismatch at beat %0d", output_beat);
-            if (out_last !== (output_beat == 287))
+            if (out_last !== (output_beat == 543))
                 $fatal(1, "TLAST mismatch at beat %0d", output_beat);
             output_beat <= output_beat + 1;
         end
@@ -102,8 +102,8 @@ module tb_sg_h2c_multitag;
         @(negedge clk);
         desc_valid = 0;
 
-        // Fill the complete eight-request window before returning any data.
-        for (request = 0; request < 8; request = request + 1) begin
+        // Fill the complete sixteen-request window before returning any data.
+        for (request = 0; request < 16; request = request + 1) begin
             wait(req_valid);
             if (req_addr != 64'h1000 + request*512 || req_len != 128 ||
                 req_tag != request + 2)
@@ -116,26 +116,26 @@ module tb_sg_h2c_multitag;
         end
 
         // Return all requests in reverse order; retirement must remain ordered.
-        for (request = 7; request >= 0; request = request - 1)
+        for (request = 15; request >= 0; request = request - 1)
             return_512b(request + 2, request*128);
 
         // Retirement of the oldest slot must permit safe tag-2 reuse while
-        // the other seven slots are still draining in issue order.
+        // the other fifteen slots are still draining in issue order.
         wait(req_valid);
-        if (req_addr != 64'h2000 || req_len != 128 || req_tag != 2)
+        if (req_addr != 64'h3000 || req_len != 128 || req_tag != 2)
             $fatal(1, "Wrapped request mismatch addr=%h len=%0d tag=%0d",
                    req_addr, req_len, req_tag);
         @(negedge clk);
         req_ack = 1;
         @(negedge clk);
         req_ack = 0;
-        return_512b(2, 1024);
+        return_512b(2, 2048);
 
         wait(completed_count == 1);
-        wait(output_beat == 288);
+        wait(output_beat == 544);
         if (error_count != 0)
             $fatal(1, "DMA error count is %0d", error_count);
-        $display("SUCCESS: eight-tag window reordered responses and safely reused tag 2");
+        $display("SUCCESS: sixteen-tag window reordered responses and safely reused tag 2");
         $finish;
     end
 

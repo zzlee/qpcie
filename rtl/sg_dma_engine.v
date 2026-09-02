@@ -128,7 +128,9 @@ module sg_dma_engine #(
     assign h2c_loopback_enable = h2c_loopback_enable_q;
     assign h2c_loopback_channel = h2c_desc_ctrl_q[7:6];
 
-    h2c_reorder_buffer u_h2c_reorder_buffer (
+    h2c_reorder_buffer #(
+        .DEPTH(16)
+    ) u_h2c_reorder_buffer (
         .clk(clk), .rst_n(rst_n),
         .alloc_ready(h2c_rob_alloc_ready), .alloc_tag(h2c_rob_alloc_tag),
         .alloc_commit(h2c_rob_alloc_commit), .alloc_dw_len(h2c_burst_dw),
