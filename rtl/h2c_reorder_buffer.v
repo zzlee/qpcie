@@ -136,11 +136,15 @@ module h2c_reorder_buffer #(
             end
 
             if (cpl_valid) begin
-                if (!cpl_tag_valid || !slot_valid[cpl_slot] || cpl_dw_count == 0 ||
-                    slot_recv_dw[cpl_slot] + cpl_dw_count > slot_dw_len[cpl_slot]) begin
+                if (!cpl_tag_valid || !slot_valid[cpl_slot] || cpl_dw_count == 0) begin
                     error_valid <= 1;
                 end else begin
-                    slot_recv_dw[cpl_slot] <= slot_recv_dw[cpl_slot] + cpl_dw_count;
+                    // Keep malformed-length detection out of the payload pack
+                    // enable path so a larger tag window meets userclk2 timing.
+                    if (slot_recv_dw[cpl_slot] + cpl_dw_count > slot_dw_len[cpl_slot])
+                        error_valid <= 1;
+                    else
+                        slot_recv_dw[cpl_slot] <= slot_recv_dw[cpl_slot] + cpl_dw_count;
                     if (cpl_total_dw >= 4) begin
                         slot_write_word[cpl_slot] <= slot_write_word[cpl_slot] + 1'b1;
                         slot_pack_data[cpl_slot] <= cpl_combined[223:128];
