@@ -529,14 +529,25 @@ module tb_video_cdc_system;
         force u_dma_top.c2h_plane_count = 4'd2;
         force u_dma_top.c2h_desc_ctrl = 16'h006B;
         force u_dma_top.hs1_send_q = 1'b0;
-        force u_dma_top.v1_busy_sync = 2'b11;
-        #1;
-        if (u_dma_top.nv12_ch1_desc_ready)
-            $fatal(1, "Channel 1 accepted a second descriptor while busy");
-        force u_dma_top.v1_busy_sync = 2'b00;
+        force u_dma_top.hs1_src_rcv = 1'b0;
+        force u_dma_top.ch1_owner_busy = 1'b0;
         #1;
         if (!u_dma_top.nv12_ch1_desc_ready)
-            $fatal(1, "Channel 1 did not accept a descriptor after becoming idle");
+            $fatal(1, "Channel 1 did not accept its first owned descriptor");
+        release u_dma_top.ch1_owner_busy;
+        @(posedge clk);
+        #1;
+        if (!u_dma_top.ch1_owner_busy || u_dma_top.nv12_ch1_desc_ready)
+            $fatal(1, "Channel 1 did not serialize the active descriptor");
+        force u_dma_top.c2h_desc_valid = 1'b0;
+        force u_dma_top.pcie_frame_done_ch1 = 1'b1;
+        @(posedge clk);
+        #1;
+        force u_dma_top.pcie_frame_done_ch1 = 1'b0;
+        force u_dma_top.c2h_desc_valid = 1'b1;
+        #1;
+        if (u_dma_top.ch1_owner_busy || !u_dma_top.nv12_ch1_desc_ready)
+            $fatal(1, "Channel 1 did not re-arm after PCIe frame completion");
 
         force u_dma_top.ch1_sgl_y_empty = 1'b0;
         force u_dma_top.ch1_sgl_uv_empty = 1'b0;
@@ -556,7 +567,8 @@ module tb_video_cdc_system;
         release u_dma_top.c2h_plane_count;
         release u_dma_top.c2h_desc_ctrl;
         release u_dma_top.hs1_send_q;
-        release u_dma_top.v1_busy_sync;
+        release u_dma_top.hs1_src_rcv;
+        release u_dma_top.pcie_frame_done_ch1;
         release u_dma_top.ch1_sgl_y_empty;
         release u_dma_top.ch1_sgl_uv_empty;
         release u_dma_top.ch1_sgl_y_pop_ready;
