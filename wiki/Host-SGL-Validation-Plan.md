@@ -201,12 +201,29 @@ sudo insmod driver/custom_pcie_av.ko force_sgl_fetch=0
 3. Capture engine 只有在寫出 C2H 資料（consuming SGL entries）時才會 drain FIFO，而 C2H 資料需要 loopback input —— 由 H2C DMA 產生。
 4. 舊 driver 每個 pair 先 publish C2H、後 publish H2C：C2H0 的 fetch 停在 FIFO 滿 → `desc_fetch` 卡在 `WAIT_SGL_FETCH` → H2C0 永遠不會被 dispatch → 沒有 input → engine 無法 drain → **全系統死鎖**。
 
-**修復（driver-only，無 RTL 變更，不需要重新 flash）**：`qpcie_buf_queue()` 改為先 publish H2C（output）、後 publish C2H（capture）。H2C fetch 是 self-driven（walker 隨 MRd 發出即消耗），完成後 H2C frame 開始串流，capture engine 隨寫出消耗 SGL entries，C2H fetch 因此能完成。IRQ completion matching 是按方向分開的 FIFO，與 ring 內跨方向順序無關，故 reorder 安全。
+**第一次修復嘗試（driver-only）**：`qpcie_buf_queue()` 改為先 publish H2C（output）、後 publish C2H（capture），預期 H2C frame 先串流、capture engine 隨寫出消耗 SGL entries。IRQ completion matching 是按方向分開的 FIFO，reorder 安全。**但 2026-09-03 第二次實測（H2C-first 順序已生效、dmesg 確認 `SGL ch1 H2C bufX` 先於 `SGL ch1 C2H bufX`）仍然 `TX: 7 / RX: 0` 全死鎖** —— 死鎖與 ring 順序無關。
 
-驗證步驟不變，但重新測試前只需：
+**真正 root cause（RTL 整合缺陷）**：`desc_fetch_engine` 在 `WAIT_SGL_FETCH` 等整個 table 被 push 進 consumer FIFO 才前進，但 consumer FIFO 只能靠自己的 engine 消耗來 drain：
+
+1. H2C 方向：H2C walker FIFO（64-deep, almost_full≈44）只有 H2C engine 發出 MRd 才 drain；H2C engine 又受 loopback FIFO（64×16B = 1KB！）與 capture 端 sink 限制 —— 16 個 outstanding MRd（ROB=16×512B）推完 ~10-20KB 就停。
+2. C2H 方向：capture walker/CDC FIFO（64-deep, prog_full≈48）只有 capture engine 寫出 C2H 資料才 drain，而寫出需要 loopback input（來自 H2C）。
+3. 任一方向：fetch 停在 FIFO 滿 → `sg_fetch_busy` 保持 high → `desc_fetch` 卡在 `WAIT_SGL_FETCH` → 對向 descriptor 永遠不 dispatch → 對向 engine 不跑 → FIFO 永不 drain → **雙向全死鎖**。無論 H2C-first 或 C2H-first 都死鎖（只是對稱）。
+
+**修復（RTL，需要重新 flash bitstream）**：`rtl/sg_host_fetch_engine.v` 改為 direction-decoupled table buffering：
+
+- 每個方向各有一對 internal block-RAM FIFO（Y 2048 entries = 4K Y table 2025、UV 1024 entries = 4K UV table 1013），fetch 直接把 table 全部 buffer 進 internal FIFO，**不再因 consumer almost-full 停住**。
+- fetch 完成（`sg_fetch_busy` low）只需 table 全部上片（約 1-2µs/64B MRd × 760 MRds），`desc_fetch` 立即前進、對向 descriptor 被 dispatch、對向 engine 開始跑，死鎖鏈斷開。
+- Background drain 依 consumer backpressure 把 entries 依序 push 到各 walker/CDC FIFO（round-robin 仲裁 H2C/C2H，Y/UV 獨立）。
+- 同方向的下一個 fetch 只有在該方向前一個 descriptor 的 DMA 完成後才會被 dispatch，此時 internal FIFO 必已完全 drain/consumed，故不會混入殘留 entries。
+- SGL push port 由單一 `sgl_channel` 改為 `sgl_y_channel`/`sgl_uv_channel`（Y/UV push 各自帶 channel），`custom_pcie_dma_top.v` demux 同步更新。
+
+驗證：sim 26/26 PASS（`tb_sg_host_fetch_engine` 新增 deadlock 測試：consumer 全程 almost-full 時 fetch 仍完成、釋放後 entries 依序 drain；以及 H2C/C2H 雙方向並行 drain 測試）。
+
+重新測試前（driver 不變，只需重刷 bitstream）：
 
 ```bash
-make -C driver clean && make -C driver
+cd ~/qpcie
+./scripts/flash_a50t.sh        # 新 bitstream（含 deadlock fix）
 sudo rmmod custom_pcie_av; sudo insmod driver/custom_pcie_av.ko force_sgl_fetch=1
 ```
 

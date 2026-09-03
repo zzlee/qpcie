@@ -765,21 +765,21 @@ module custom_pcie_dma_top #(
     );
 
     // 6.1 SG Host Variable-Length SGL Fetch Engine
-    wire [2:0]  sgl_channel;
-    wire        sgl_h2c_y_wr_en  = sgl_y_wr_en  && (sgl_channel == 3'd4);
-    wire        sgl_h2c_uv_wr_en = sgl_uv_wr_en && (sgl_channel == 3'd4);
+    wire [2:0]  sgl_y_channel, sgl_uv_channel;
+    wire        sgl_h2c_y_wr_en  = sgl_y_wr_en  && (sgl_y_channel == 3'd4);
+    wire        sgl_h2c_uv_wr_en = sgl_uv_wr_en && (sgl_uv_channel == 3'd4);
 
-    wire        sgl_ch0_y_wr_en  = sgl_y_wr_en  && (sgl_channel == 3'd0);
-    wire        sgl_ch0_uv_wr_en = sgl_uv_wr_en && (sgl_channel == 3'd0);
+    wire        sgl_ch0_y_wr_en  = sgl_y_wr_en  && (sgl_y_channel == 3'd0);
+    wire        sgl_ch0_uv_wr_en = sgl_uv_wr_en && (sgl_uv_channel == 3'd0);
 
-    wire        sgl_ch1_y_wr_en  = sgl_y_wr_en  && (sgl_channel == 3'd1);
-    wire        sgl_ch1_uv_wr_en = sgl_uv_wr_en && (sgl_channel == 3'd1);
+    wire        sgl_ch1_y_wr_en  = sgl_y_wr_en  && (sgl_y_channel == 3'd1);
+    wire        sgl_ch1_uv_wr_en = sgl_uv_wr_en && (sgl_uv_channel == 3'd1);
 
-    wire        sgl_ch2_y_wr_en  = sgl_y_wr_en  && (sgl_channel == 3'd2);
-    wire        sgl_ch2_uv_wr_en = sgl_uv_wr_en && (sgl_channel == 3'd2);
+    wire        sgl_ch2_y_wr_en  = sgl_y_wr_en  && (sgl_y_channel == 3'd2);
+    wire        sgl_ch2_uv_wr_en = sgl_uv_wr_en && (sgl_uv_channel == 3'd2);
 
-    wire        sgl_ch3_y_wr_en  = sgl_y_wr_en  && (sgl_channel == 3'd3);
-    wire        sgl_ch3_uv_wr_en = sgl_uv_wr_en && (sgl_channel == 3'd3);
+    wire        sgl_ch3_y_wr_en  = sgl_y_wr_en  && (sgl_y_channel == 3'd3);
+    wire        sgl_ch3_uv_wr_en = sgl_uv_wr_en && (sgl_uv_channel == 3'd3);
 
     wire        h2c_y_almost_full, h2c_uv_almost_full;
     wire        ch0_sgl_y_almost_full, ch0_sgl_uv_almost_full;
@@ -813,7 +813,8 @@ module custom_pcie_dma_top #(
         .cpld_data(sg_cpl_data),
         .cpld_last(sg_cpl_last),
         .cpld_tag(sg_cpl_tag),
-        .sgl_channel(sgl_channel),
+        .sgl_y_channel(sgl_y_channel),
+        .sgl_uv_channel(sgl_uv_channel),
         .sgl_y_wr_en(sgl_y_wr_en),
         .sgl_y_wr_addr(sgl_y_wr_addr),
         .sgl_y_wr_len(sgl_y_wr_len),

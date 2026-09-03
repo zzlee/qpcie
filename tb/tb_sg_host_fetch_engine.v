@@ -1,11 +1,15 @@
 // ============================================================================
 // Testbench: tb_sg_host_fetch_engine
-// Description: Unit testbench for PCIe MRd Host Variable-Length SGL Fetch Engine.
+// Description: Unit testbench for the direction-decoupled SGL fetch engine.
 //              Verifies 64B burst MRd generation, 128-bit SGL unpacking,
 //              chained 4KB slot traversal (following Entry[255] link pointer),
 //              LAST_SEG handling across a slot boundary, and the Y->UV plane
-//              switch.  Also verifies the engine stalls while the destination
-//              SGL FIFO is almost-full.
+//              switch.  Also verifies the deadlock fix: the fetch completes
+//              while the destination SGL FIFO remains almost-full (the table
+//              is buffered on-chip), and the buffered entries drain in order
+//              once backpressure clears.  A dual-direction test verifies that
+//              an H2C table and a C2H table buffer/drain concurrently to their
+//              respective channels.
 // ============================================================================
 
 `timescale 1ns / 1ps
@@ -45,25 +49,28 @@ module tb_sg_host_fetch_engine;
     wire [63:0] sgl_y_wr_addr;
     wire [31:0] sgl_y_wr_len;
     wire [31:0] sgl_y_wr_flags;
+    wire [2:0]  sgl_y_channel;
 
     wire        sgl_uv_wr_en;
     wire [63:0] sgl_uv_wr_addr;
     wire [31:0] sgl_uv_wr_len;
     wire [31:0] sgl_uv_wr_flags;
-    wire [2:0]  sgl_channel;
+    wire [2:0]  sgl_uv_channel;
     reg  [4:0]  channel_y_almost_full;
     reg  [4:0]  channel_uv_almost_full;
 
-    // Captured SGL entries pushed to the Y walker FIFO
-    reg [63:0] captured_addr  [0:511];
-    reg [31:0] captured_len   [0:511];
-    reg [31:0] captured_flags [0:511];
+    // Captured SGL entries pushed to the Y walker FIFOs (with destination channel)
+    reg [63:0] captured_addr  [0:2047];
+    reg [31:0] captured_len   [0:2047];
+    reg [31:0] captured_flags [0:2047];
+    reg [2:0]  captured_y_ch  [0:2047];
     integer    captured_cnt;
 
-    // Captured SGL entries pushed to the UV walker FIFO
-    reg [63:0] captured_uv_addr  [0:511];
-    reg [31:0] captured_uv_len   [0:511];
-    reg [31:0] captured_uv_flags [0:511];
+    // Captured SGL entries pushed to the UV walker FIFOs (with destination channel)
+    reg [63:0] captured_uv_addr  [0:2047];
+    reg [31:0] captured_uv_len   [0:2047];
+    reg [31:0] captured_uv_flags [0:2047];
+    reg [2:0]  captured_uv_ch    [0:2047];
     integer    captured_uv_cnt;
 
     always @(posedge clk) begin
@@ -71,12 +78,14 @@ module tb_sg_host_fetch_engine;
             captured_addr[captured_cnt]  <= sgl_y_wr_addr;
             captured_len[captured_cnt]   <= sgl_y_wr_len;
             captured_flags[captured_cnt] <= sgl_y_wr_flags;
+            captured_y_ch[captured_cnt]  <= sgl_y_channel;
             captured_cnt <= captured_cnt + 1;
         end
         if (sgl_uv_wr_en) begin
             captured_uv_addr[captured_uv_cnt]  <= sgl_uv_wr_addr;
             captured_uv_len[captured_uv_cnt]   <= sgl_uv_wr_len;
             captured_uv_flags[captured_uv_cnt] <= sgl_uv_wr_flags;
+            captured_uv_ch[captured_uv_cnt]    <= sgl_uv_channel;
             captured_uv_cnt <= captured_uv_cnt + 1;
         end
     end
@@ -104,11 +113,12 @@ module tb_sg_host_fetch_engine;
         .cpld_data(cpld_data),
         .cpld_last(cpld_last),
         .cpld_tag(cpld_tag),
-        .sgl_channel(sgl_channel),
+        .sgl_y_channel(sgl_y_channel),
         .sgl_y_wr_en(sgl_y_wr_en),
         .sgl_y_wr_addr(sgl_y_wr_addr),
         .sgl_y_wr_len(sgl_y_wr_len),
         .sgl_y_wr_flags(sgl_y_wr_flags),
+        .sgl_uv_channel(sgl_uv_channel),
         .sgl_uv_wr_en(sgl_uv_wr_en),
         .sgl_uv_wr_addr(sgl_uv_wr_addr),
         .sgl_uv_wr_len(sgl_uv_wr_len),
@@ -142,29 +152,51 @@ module tb_sg_host_fetch_engine;
             host_slot1_addr[i]  = 64'd0; host_slot1_len[i]  = 32'd0; host_slot1_flags[i] = 32'd0;
             host_uv0_addr[i]    = 64'd0; host_uv0_len[i]    = 32'd0; host_uv0_flags[i]   = 32'd0;
         end
-
-        // ---------------- TEST 1: two chained slots, 300 entries total -------
-        // Slot 0: 255 variable segments (64KB each), chain at Entry 255
-        for (i = 0; i < 255; i = i + 1) begin
-            host_slot0_addr[i]  = 64'h0000000300000000 + (i * 64'h10000);
-            host_slot0_len[i]   = 32'h00010000; // 64 KB per chunk
-            host_slot0_flags[i] = 32'h00000000;
-        end
-        host_slot0_addr[255]  = SLOT1_BASE; // Pointer to Slot 1!
-        host_slot0_len[255]   = 32'd0;
-        host_slot0_flags[255] = 32'h00000001; // Bit 0: CHAIN_PTR
-
-        // Slot 1: 45 more segments, LAST_SEG at entry 44
-        for (i = 0; i < 45; i = i + 1) begin
-            host_slot1_addr[i]  = 64'h0000000400000000 + (i * 64'h10000);
-            host_slot1_len[i]   = 32'h00010000;
-            host_slot1_flags[i] = (i == 44) ? 32'h00000002 : 32'h00000000; // Bit 1: LAST_SEG
-        end
-
-        // ----------- TEST 2: 255-entry slot + chain, LAST_SEG across ---------
-        //          slots, then Y->UV plane switch (257 Y + 2 UV entries)
-        // (Re-initialized in the test 2 sequence below.)
     end
+
+    // Load the Y plane: slot 0 fully packed (255 entries + chain at 255),
+    // slot 1 holds the final entries with LAST_SEG on the last one.
+    // last1 = index of the LAST_SEG entry in slot 1 (inclusive count = last1+1)
+    task load_y_table;
+        input integer last1;
+        integer k;
+        begin
+            for (k = 0; k < 256; k = k + 1) begin
+                host_slot0_addr[k]  = 64'd0; host_slot0_len[k]  = 32'd0; host_slot0_flags[k] = 32'd0;
+                host_slot1_addr[k]  = 64'd0; host_slot1_len[k]  = 32'd0; host_slot1_flags[k] = 32'd0;
+            end
+            for (k = 0; k < 255; k = k + 1) begin
+                host_slot0_addr[k]  = 64'h0000000100000000 + (k * 64'h1000); // 4KiB pages
+                host_slot0_len[k]   = 32'h00001000;
+                host_slot0_flags[k] = 32'h00000000;
+            end
+            host_slot0_addr[255]  = SLOT1_BASE;
+            host_slot0_len[255]   = 32'd0;
+            host_slot0_flags[255] = 32'h00000001; // CHAIN_PTR
+
+            for (k = 0; k <= last1; k = k + 1) begin
+                host_slot1_addr[k]  = 64'h0000000400000000 + (k * 64'h1000);
+                host_slot1_len[k]   = 32'h00001000;
+                host_slot1_flags[k] = (k == last1) ? 32'h00000002 : 32'h00000000;
+            end
+        end
+    endtask
+
+    // Load the UV plane: 2 entries, LAST_SEG on the last (partial) one
+    task load_uv_table;
+        integer k;
+        begin
+            for (k = 0; k < 256; k = k + 1) begin
+                host_uv0_addr[k]  = 64'd0; host_uv0_len[k]  = 32'd0; host_uv0_flags[k] = 32'd0;
+            end
+            host_uv0_addr[0]  = 64'h0000000500000000;
+            host_uv0_len[0]   = 32'h00001000;
+            host_uv0_flags[0] = 32'h00000000;
+            host_uv0_addr[1]  = 64'h0000000500001000;
+            host_uv0_len[1]   = 32'h00000800; // partial final UV entry
+            host_uv0_flags[1] = 32'h00000002; // LAST_SEG
+        end
+    endtask
 
     // Map a burst address to a host RAM slot: 0 = Y slot0, 1 = Y slot1, 2 = UV
     function integer which_slot;
@@ -282,50 +314,117 @@ module tb_sg_host_fetch_engine;
         end
     end
 
-    // ------------------------------------------------------------------------
-    // TEST 1: Chained slot traversal with FIFO almost-full stall
-    // ------------------------------------------------------------------------
-    task run_test1;
+    task pulse_fetch_start;
         begin
-            $display("[TEST 1] Triggering Variable SGL Fetch across chained slots...");
-            channel_y_almost_full[0] <= 1'b1;
             @(posedge clk);
             fetch_start <= 1'b1;
             @(posedge clk);
             fetch_start <= 1'b0;
+        end
+    endtask
 
-            repeat (8) begin
-                @(posedge clk);
-                if (mrd_req_valid)
-                    $fatal(1, "FAIL: MRd issued while channel-0 SGL FIFO is prog_full");
+    // Wait until the capture counts reach the expected totals, plus a small
+    // settling margin for the final in-flight push.
+    task wait_drain_complete;
+        input integer y_exp;
+        input integer uv_exp;
+        begin
+            while (captured_cnt < y_exp || captured_uv_cnt < uv_exp) @(posedge clk);
+            repeat (8) @(posedge clk);
+        end
+    endtask
+
+    // Verify the captured Y entries for one channel against the host table
+    task verify_y_entries;
+        input integer ch;
+        input integer y_exp; // total Y entries expected for this channel
+        integer n, k;
+        begin
+            n = 0;
+            for (k = 0; k < captured_cnt; k = k + 1) begin
+                if (captured_y_ch[k] == ch) begin
+                    if (n < 255) begin
+                        if (captured_addr[k] !== host_slot0_addr[n] ||
+                            captured_len[k]  !== host_slot0_len[n])
+                            $fatal(1, "FAIL: ch%0d Y slot0 entry %0d mismatch (addr=%h len=%h)",
+                                   ch, n, captured_addr[k], captured_len[k]);
+                    end else begin
+                        if (captured_addr[k] !== host_slot1_addr[n - 255] ||
+                            captured_len[k]  !== host_slot1_len[n - 255])
+                            $fatal(1, "FAIL: ch%0d Y slot1 entry %0d mismatch (addr=%h len=%h)",
+                                   ch, n - 255, captured_addr[k], captured_len[k]);
+                    end
+                    n = n + 1;
+                end
             end
-            channel_y_almost_full[0] <= 1'b0;
+            if (n != y_exp)
+                $fatal(1, "FAIL: ch%0d expected %0d Y entries, got %0d", ch, y_exp, n);
+        end
+    endtask
 
-            // Wait until fetch_done
+    // Verify the captured UV entries for one channel against the host table
+    task verify_uv_entries;
+        input integer ch;
+        input integer uv_exp;
+        integer n, k;
+        begin
+            n = 0;
+            for (k = 0; k < captured_uv_cnt; k = k + 1) begin
+                if (captured_uv_ch[k] == ch) begin
+                    if (captured_uv_addr[k] !== host_uv0_addr[n] ||
+                        captured_uv_len[k]  !== host_uv0_len[n]  ||
+                        captured_uv_flags[k] !== host_uv0_flags[n])
+                        $fatal(1, "FAIL: ch%0d UV entry %0d mismatch", ch, n);
+                    n = n + 1;
+                end
+            end
+            if (n != uv_exp)
+                $fatal(1, "FAIL: ch%0d expected %0d UV entries, got %0d", ch, uv_exp, n);
+        end
+    endtask
+
+    // ------------------------------------------------------------------------
+    // TEST 1: Deadlock fix + chained slot traversal with consumer almost-full
+    // ------------------------------------------------------------------------
+    task run_test1;
+        integer n;
+        begin
+            load_y_table(44); // 255 + 45 = 300 Y entries
+            load_uv_table();
+
+            captured_cnt    = 0;
+            captured_uv_cnt = 0;
+
+            $display("[TEST 1] Fetching with destination FIFO almost-full (deadlock scenario)...");
+            // Destination C2H ch0 is held almost-full for the whole fetch
+            channel_y_almost_full[0] <= 1'b1;
+            channel_uv_almost_full[0] <= 1'b1;
+
+            @(posedge clk);
+            pulse_fetch_start(); // fetch_channel = 0 (C2H ch0)
+
+            // While the consumer is full, the fetch must still complete (the
+            // whole table is buffered internally) -- this is the deadlock fix.
             while (!fetch_done) @(posedge clk);
 
-            $display("[TEST 1] Verifying SGL Segments (captured %0d entries)...", captured_cnt);
-            if (captured_cnt != 300) begin
-                $fatal(1, "FAIL: Expected exactly 300 entries, got %0d", captured_cnt);
-            end
+            if (captured_cnt != 0 || captured_uv_cnt != 0)
+                $fatal(1, "FAIL: entries pushed while destination FIFO was almost-full");
 
-            // Verify entries from Slot 0
-            for (i = 0; i < 255; i = i + 1) begin
-                if (captured_addr[i] !== host_slot0_addr[i] || captured_len[i] !== host_slot0_len[i]) begin
-                    $fatal(1, "FAIL: Entry %0d mismatch! Expected addr=%h len=%h, got addr=%h len=%h",
-                           i, host_slot0_addr[i], host_slot0_len[i], captured_addr[i], captured_len[i]);
-                end
-            end
+            $display("  [PASS] fetch completed while consumer was stalled (no deadlock)");
 
-            // Verify entries from Slot 1 (following chain pointer; the chain
-            // entry itself must NOT be pushed to the walker FIFO)
-            for (i = 0; i < 45; i = i + 1) begin
-                if (captured_addr[255 + i] !== host_slot1_addr[i] || captured_len[255 + i] !== host_slot1_len[i]) begin
-                    $fatal(1, "FAIL: Slot1 Entry %0d mismatch! Expected addr=%h, got %h",
-                           i, host_slot1_addr[i], captured_addr[255 + i]);
-                end
-            end
-            $display("  [PASS] TEST 1: chained slot traversal, no chain entry pushed, FIFO stall respected");
+            // Release backpressure: all 300 + 2 entries must drain in order
+            channel_y_almost_full[0] <= 1'b0;
+            channel_uv_almost_full[0] <= 1'b0;
+
+            wait_drain_complete(300, 2);
+
+            verify_y_entries(0, 300);
+            verify_uv_entries(0, 2);
+
+            if (!captured_flags[299][1])
+                $fatal(1, "FAIL: LAST_SEG missing on final Y entry (flags=0x%x)", captured_flags[299]);
+
+            $display("  [PASS] TEST 1: deadlock broken, chained slots traversed, entries drained in order");
         end
     endtask
 
@@ -334,88 +433,76 @@ module tb_sg_host_fetch_engine;
     //         slot (crossing the slot boundary), then Y -> UV plane switch
     // ------------------------------------------------------------------------
     task run_test2;
+        integer n;
         begin
-            // Re-initialize Y plane: slot 0 fully packed (255 entries + chain),
-            // slot 1 holds the final 2 entries with LAST_SEG on the last one.
-            for (i = 0; i < 256; i = i + 1) begin
-                host_slot0_addr[i]  = 64'd0; host_slot0_len[i]  = 32'd0; host_slot0_flags[i] = 32'd0;
-                host_slot1_addr[i]  = 64'd0; host_slot1_len[i]  = 32'd0; host_slot1_flags[i] = 32'd0;
-                host_uv0_addr[i]    = 64'd0; host_uv0_len[i]    = 32'd0; host_uv0_flags[i]   = 32'd0;
-            end
-            for (i = 0; i < 255; i = i + 1) begin
-                host_slot0_addr[i]  = 64'h0000000100000000 + (i * 64'h1000); // 4KiB pages
-                host_slot0_len[i]   = 32'h00001000;
-                host_slot0_flags[i] = 32'h00000000;
-            end
-            host_slot0_addr[255]  = SLOT1_BASE;
-            host_slot0_len[255]   = 32'd0;
-            host_slot0_flags[255] = 32'h00000001; // CHAIN_PTR
-
-            // LAST_SEG crosses the slot boundary: it lands in slot 1, entry 1
-            host_slot1_addr[0]  = 64'h0000000400000000;
-            host_slot1_len[0]   = 32'h00001000;
-            host_slot1_flags[0] = 32'h00000000;
-            host_slot1_addr[1]  = 64'h0000000400001000;
-            host_slot1_len[1]   = 32'h00001000;
-            host_slot1_flags[1] = 32'h00000002; // LAST_SEG
-
-            // UV plane: 2 entries, LAST_SEG on the last (partial) one
-            host_uv0_addr[0]  = 64'h0000000500000000;
-            host_uv0_len[0]   = 32'h00001000;
-            host_uv0_flags[0] = 32'h00000000;
-            host_uv0_addr[1]  = 64'h0000000500001000;
-            host_uv0_len[1]   = 32'h00000800; // partial final UV entry
-            host_uv0_flags[1] = 32'h00000002; // LAST_SEG
+            load_y_table(1);  // 255 + 2 = 257 Y entries, LAST_SEG in slot 1
+            load_uv_table();
 
             captured_cnt    = 0;
             captured_uv_cnt = 0;
 
-            plane0_slot_addr <= SLOT0_BASE;
-            plane1_slot_addr <= UV0_BASE;
-
-            $display("[TEST 2] Triggering fetch with full-slot chain and Y->UV switch...");
-            @(posedge clk);
-            fetch_start <= 1'b1;
-            @(posedge clk);
-            fetch_start <= 1'b0;
+            $display("[TEST 2] Full-slot chain and LAST_SEG crossing slot boundary, Y->UV switch...");
+            pulse_fetch_start();
 
             while (!fetch_done) @(posedge clk);
+            wait_drain_complete(257, 2);
 
-            $display("[TEST 2] Verifying Y entries (captured %0d) and UV entries (captured %0d)...",
-                     captured_cnt, captured_uv_cnt);
-
-            // 255 (slot 0) + 2 (slot 1); the chain entry must not be pushed
-            if (captured_cnt != 257)
-                $fatal(1, "FAIL: Expected 257 Y entries, got %0d", captured_cnt);
-            if (captured_uv_cnt != 2)
-                $fatal(1, "FAIL: Expected 2 UV entries, got %0d", captured_uv_cnt);
-
-            for (i = 0; i < 255; i = i + 1) begin
-                if (captured_addr[i] !== host_slot0_addr[i] || captured_len[i] !== host_slot0_len[i])
-                    $fatal(1, "FAIL: Y slot0 entry %0d mismatch (addr=%h len=%h vs %h/%h)",
-                           i, captured_addr[i], captured_len[i],
-                           host_slot0_addr[i], host_slot0_len[i]);
-            end
-            for (i = 0; i < 2; i = i + 1) begin
-                if (captured_addr[255 + i] !== host_slot1_addr[i] ||
-                    captured_len[255 + i]  !== host_slot1_len[i]  ||
-                    captured_flags[255 + i] !== host_slot1_flags[i])
-                    $fatal(1, "FAIL: Y slot1 entry %0d mismatch", i);
-            end
-            for (i = 0; i < 2; i = i + 1) begin
-                if (captured_uv_addr[i] !== host_uv0_addr[i] ||
-                    captured_uv_len[i]  !== host_uv0_len[i]  ||
-                    captured_uv_flags[i] !== host_uv0_flags[i])
-                    $fatal(1, "FAIL: UV entry %0d mismatch", i);
-            end
+            verify_y_entries(0, 257);
+            verify_uv_entries(0, 2);
 
             // LAST_SEG must be carried on the final Y entry and the partial UV entry
-            if (!captured_flags[256][1])
-                $fatal(1, "FAIL: LAST_SEG missing on final Y entry (flags=0x%x)", captured_flags[256]);
-            if (!captured_uv_flags[1][1])
-                $fatal(1, "FAIL: LAST_SEG missing on partial UV entry (flags=0x%x)", captured_uv_flags[1]);
+            n = 0;
+            for (i = 0; i < captured_cnt; i = i + 1)
+                if (captured_y_ch[i] == 0) n = n + 1;
+            // n == 257; find the last channel-0 entry
+            begin : find_last
+                integer k;
+                integer last_idx;
+                last_idx = -1;
+                for (k = 0; k < captured_cnt; k = k + 1)
+                    if (captured_y_ch[k] == 0) last_idx = k;
+                if (!captured_flags[last_idx][1])
+                    $fatal(1, "FAIL: LAST_SEG missing on final Y entry (flags=0x%x)", captured_flags[last_idx]);
+                if (!captured_uv_flags[1][1])
+                    $fatal(1, "FAIL: LAST_SEG missing on partial UV entry (flags=0x%x)", captured_uv_flags[1]);
+            end
 
             $display("  [PASS] TEST 2: full-slot chain followed, LAST_SEG crossed slot boundary, Y->UV switch");
+        end
+    endtask
+
+    // ------------------------------------------------------------------------
+    // TEST 3: Dual direction -- an H2C table and a C2H ch1 table buffer and
+    //         drain concurrently to their respective channels
+    // ------------------------------------------------------------------------
+    task run_test3;
+        begin
+            load_y_table(1);  // 257 Y entries
+            load_uv_table();  // 2 UV entries
+
+            captured_cnt    = 0;
+            captured_uv_cnt = 0;
+
+            $display("[TEST 3] H2C fetch (ch4) then C2H ch1 fetch with concurrent drain...");
+
+            // H2C request
+            fetch_channel <= 3'd4;
+            pulse_fetch_start();
+            while (!fetch_done) @(posedge clk);
+
+            // C2H ch1 request -- starts while the H2C drain is still delivering
+            fetch_channel <= 3'd1;
+            pulse_fetch_start();
+            while (!fetch_done) @(posedge clk);
+
+            wait_drain_complete(257 * 2, 2 * 2);
+
+            verify_y_entries(4, 257);
+            verify_y_entries(1, 257);
+            verify_uv_entries(4, 2);
+            verify_uv_entries(1, 2);
+
+            $display("  [PASS] TEST 3: H2C (ch4) and C2H ch1 tables buffered/drained concurrently");
         end
     endtask
 
@@ -426,9 +513,9 @@ module tb_sg_host_fetch_engine;
         fetch_start = 0;
         fetch_channel = 3'd0;
         plane0_slot_addr = SLOT0_BASE;
-        plane1_slot_addr = 64'd0;
+        plane1_slot_addr = UV0_BASE;
         plane0_pages_req = 16'd300;
-        plane1_pages_req = 16'd0;
+        plane1_pages_req = 16'd2;
         cpld_valid = 0;
         cpld_data = 0;
         cpld_last = 0;
@@ -447,8 +534,8 @@ module tb_sg_host_fetch_engine;
         $display("=========================================================");
 
         run_test1();
-
         run_test2();
+        run_test3();
 
         $display("=========================================================");
         $display(" ALL TESTS PASSED: Variable-Length SGL Fetch Verified!");
