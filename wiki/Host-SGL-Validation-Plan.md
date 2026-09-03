@@ -190,6 +190,26 @@ sudo insmod driver/custom_pcie_av.ko force_sgl_fetch=0
 
 預設direct模式必須維持目前`nents=1`時不建立SGL、不設control bit 5的行為。
 
+## 已發現的死鎖與修復（2026-09-03 實測回報）
+
+第一次 1080p forced-SGL 實測（`force_sgl_fetch=1`）結果：`TX: 7 / RX: 0`，capture DQBUF timeout，FPGA head 完全沒有前進，兩方向零 completion。
+
+**Root cause（硬體整合死鎖，非 RTL 單一模組 bug）**：
+
+1. `desc_fetch_engine` 的 `WAIT_SGL_FETCH` 會阻塞整個 descriptor pipeline，直到共享的 `sg_host_fetch_engine` 完成該 descriptor 的 SGL table fetch。
+2. C2H descriptor 的 SGL entries 經 64-deep CDC FIFO（prog_full=48）餵給 capture engine；fetch 在 FIFO 滿時停住。
+3. Capture engine 只有在寫出 C2H 資料（consuming SGL entries）時才會 drain FIFO，而 C2H 資料需要 loopback input —— 由 H2C DMA 產生。
+4. 舊 driver 每個 pair 先 publish C2H、後 publish H2C：C2H0 的 fetch 停在 FIFO 滿 → `desc_fetch` 卡在 `WAIT_SGL_FETCH` → H2C0 永遠不會被 dispatch → 沒有 input → engine 無法 drain → **全系統死鎖**。
+
+**修復（driver-only，無 RTL 變更，不需要重新 flash）**：`qpcie_buf_queue()` 改為先 publish H2C（output）、後 publish C2H（capture）。H2C fetch 是 self-driven（walker 隨 MRd 發出即消耗），完成後 H2C frame 開始串流，capture engine 隨寫出消耗 SGL entries，C2H fetch 因此能完成。IRQ completion matching 是按方向分開的 FIFO，與 ring 內跨方向順序無關，故 reorder 安全。
+
+驗證步驟不變，但重新測試前只需：
+
+```bash
+make -C driver clean && make -C driver
+sudo rmmod custom_pcie_av; sudo insmod driver/custom_pcie_av.ko force_sgl_fetch=1
+```
+
 ## Out of Scope
 
 - 不要把descriptor ring改為linked list。

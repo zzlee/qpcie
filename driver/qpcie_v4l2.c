@@ -775,24 +775,31 @@ static void qpcie_buf_queue(struct vb2_buffer *vb)
         list_del(&out_buf->list);
         list_del(&cap_buf->list);
 
-        if (qpcie_publish_buffer(cap_vch, cap_buf)) {
-            /* Reject both halves: the H2C partner was never published. */
-            spin_unlock_irqrestore(&qdev->ring_lock, flags);
-            dev_err(&qdev->pdev->dev,
-                    "V4L2 ch%u loopback: capture buf%u publish rejected; dropping pair\n",
-                    vch->channel_id, cap_buf->vb.vb2_buf.index);
-            vb2_buffer_done(&cap_buf->vb.vb2_buf, VB2_BUF_STATE_ERROR);
-            vb2_buffer_done(&out_buf->vb.vb2_buf, VB2_BUF_STATE_ERROR);
-            return;
-        }
+        /* Publish the H2C half before the C2H half.  The FPGA descriptor
+         * pipeline blocks on the shared SGL fetch of the C2H descriptor until
+         * its table is consumed by the capture engine, and the capture engine
+         * only consumes SGL entries as it writes loopback input -- which the
+         * H2C DMA produces.  H2C-first lets the H2C frame stream start so the
+         * C2H SGL fetch can drain and complete; C2H-first deadlocks the whole
+         * descriptor pipeline (observed: zero completions, head never advances). */
         ret = qpcie_publish_buffer(out_vch, out_buf);
         if (ret) {
-            /* Capture already in the ring; only the H2C half is rejected. */
+            /* Reject both halves: the C2H partner was never published. */
             spin_unlock_irqrestore(&qdev->ring_lock, flags);
             dev_err(&qdev->pdev->dev,
-                    "V4L2 ch%u loopback: output buf%u publish rejected (%d)\n",
+                    "V4L2 ch%u loopback: output buf%u publish rejected (%d); dropping pair\n",
                     vch->channel_id, out_buf->vb.vb2_buf.index, ret);
             vb2_buffer_done(&out_buf->vb.vb2_buf, VB2_BUF_STATE_ERROR);
+            vb2_buffer_done(&cap_buf->vb.vb2_buf, VB2_BUF_STATE_ERROR);
+            return;
+        }
+        if (qpcie_publish_buffer(cap_vch, cap_buf)) {
+            /* Output already in the ring; only the C2H half is rejected. */
+            spin_unlock_irqrestore(&qdev->ring_lock, flags);
+            dev_err(&qdev->pdev->dev,
+                    "V4L2 ch%u loopback: capture buf%u publish rejected; dropping capture\n",
+                    vch->channel_id, cap_buf->vb.vb2_buf.index);
+            vb2_buffer_done(&cap_buf->vb.vb2_buf, VB2_BUF_STATE_ERROR);
             return;
         }
     }
