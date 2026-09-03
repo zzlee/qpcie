@@ -23,6 +23,7 @@
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
+#include <pthread.h>
 
 #define DEFAULT_OUT_DEV   "/dev/video1"
 #define DEFAULT_CAP_DEV   "/dev/video2"
@@ -41,6 +42,14 @@ struct plane_map {
 
 struct v4l2_buf_entry {
     struct plane_map plane[NV12_PLANES];
+};
+
+
+struct thread_arg {
+    int channel_idx;
+    struct loopback_ctx *ctx;
+    pthread_t thread;
+    int success;
 };
 
 struct loopback_ctx {
@@ -294,115 +303,66 @@ static void print_usage(const char *prog)
            "  -f, --frames COUNT     Total frames to transfer (default %u)\n"
            "  -r, --fps RATE         Pacer target frame rate (default 60)\n"
            "  -b, --benchmark        Uncapped benchmark mode (maximum DMA rate)\n"
-           "  -n, --buffers COUNT    VB2 buffers per node (default %u)\n"
+           "  -n, --buffers COUNT    VB2 buffers per node (default %u)\n" \
+           "  -c, --channels COUNT   Number of concurrent channels to test (default 1)\n"
            "  -H, --help             Show this help\n",
            prog, DEFAULT_OUT_DEV, DEFAULT_CAP_DEV, DEFAULT_WIDTH,
            DEFAULT_HEIGHT, DEFAULT_FRAMES, DEFAULT_BUFFERS);
 }
 
-int main(int argc, char **argv)
+
+static void *loopback_thread(void *arg)
 {
-    struct loopback_ctx ctx;
-    int opt;
-    unsigned int i;
+    struct thread_arg *targ = (struct thread_arg *)arg;
+    struct loopback_ctx *ctx = targ->ctx;
     unsigned int initial_pairs;
+    unsigned int i;
     double start_time_us, end_time_us, total_sec;
-    double tx_throughput_mibs, rx_throughput_mibs, total_throughput_mibs;
+    enum v4l2_buf_type out_type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+    enum v4l2_buf_type cap_type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
 
-    memset(&ctx, 0, sizeof(ctx));
-    ctx.out_dev = DEFAULT_OUT_DEV;
-    ctx.cap_dev = DEFAULT_CAP_DEV;
-    ctx.width = DEFAULT_WIDTH;
-    ctx.height = DEFAULT_HEIGHT;
-    ctx.frame_target = DEFAULT_FRAMES;
-    ctx.num_buffers = DEFAULT_BUFFERS;
-    ctx.target_fps = 60.0;
-    ctx.benchmark_mode = 0;
-    ctx.min_rtt_us = 1e9;
-    ctx.max_rtt_us = 0.0;
-    ctx.sum_rtt_us = 0.0;
+    targ->success = 0;
 
-    static const struct option options[] = {
-        {"out-dev", required_argument, NULL, 'o'},
-        {"cap-dev", required_argument, NULL, 'd'},
-        {"width", required_argument, NULL, 'w'},
-        {"height", required_argument, NULL, 'h'},
-        {"frames", required_argument, NULL, 'f'},
-        {"fps", required_argument, NULL, 'r'},
-        {"benchmark", no_argument, NULL, 'b'},
-        {"buffers", required_argument, NULL, 'n'},
-        {"help", no_argument, NULL, 'H'},
-        {NULL, 0, NULL, 0}
-    };
+    printf("[CH%d] Starting test: %s -> %s\n", targ->channel_idx, ctx->out_dev, ctx->cap_dev);
 
-    while ((opt = getopt_long(argc, argv, "o:d:w:h:f:r:bn:H", options, NULL)) != -1) {
-        switch (opt) {
-        case 'o': ctx.out_dev = optarg; break;
-        case 'd': ctx.cap_dev = optarg; break;
-        case 'w': ctx.width = (unsigned int)strtoul(optarg, NULL, 10); break;
-        case 'h': ctx.height = (unsigned int)strtoul(optarg, NULL, 10); break;
-        case 'f': ctx.frame_target = (unsigned int)strtoul(optarg, NULL, 10); break;
-        case 'r': ctx.target_fps = strtod(optarg, NULL); break;
-        case 'b': ctx.benchmark_mode = 1; break;
-        case 'n': ctx.num_buffers = (unsigned int)strtoul(optarg, NULL, 10); break;
-        case 'H':
-        default:
-            print_usage(argv[0]);
-            return (opt == 'H') ? EXIT_SUCCESS : EXIT_FAILURE;
-        }
-    }
-
-    printf("=================================================================\n"
-           " QPCIe Full-Duplex Hardware Video Loopback Test (H2C -> C2H)\n"
-           " Output Node : %s (Host -> H2C DMA)\n"
-           " Capture Node: %s (FPGA Loopback -> C2H DMA)\n"
-           " Resolution  : %ux%u NV12M, Frames: %u\n"
-           " Mode        : %s\n"
-           "=================================================================\n",
-           ctx.out_dev, ctx.cap_dev, ctx.width, ctx.height, ctx.frame_target,
-           ctx.benchmark_mode ? "UNCAPPED DMA BENCHMARK" : "PACED 60 FPS STREAMING");
-
-    ctx.out_fd = open(ctx.out_dev, O_RDWR | O_NONBLOCK);
-    if (ctx.out_fd < 0) {
+    ctx->out_fd = open(ctx->out_dev, O_RDWR | O_NONBLOCK);
+    if (ctx->out_fd < 0) {
         perror("Open output device");
-        return EXIT_FAILURE;
+        return NULL;
     }
 
-    ctx.cap_fd = open(ctx.cap_dev, O_RDWR | O_NONBLOCK);
-    if (ctx.cap_fd < 0) {
+    ctx->cap_fd = open(ctx->cap_dev, O_RDWR | O_NONBLOCK);
+    if (ctx->cap_fd < 0) {
         perror("Open capture device");
-        close(ctx.out_fd);
-        return EXIT_FAILURE;
+        close(ctx->out_fd);
+        return NULL;
     }
 
-    if (init_v4l2_node(ctx.out_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
-                       ctx.width, ctx.height, ctx.num_buffers,
-                       &ctx.out_bufs, &ctx.y_size, &ctx.uv_size) < 0) {
-        fprintf(stderr, "[FAIL] Failed to initialize Output Node\n");
-        return EXIT_FAILURE;
+    if (init_v4l2_node(ctx->out_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
+                       ctx->width, ctx->height, ctx->num_buffers,
+                       &ctx->out_bufs, &ctx->y_size, &ctx->uv_size) < 0) {
+        fprintf(stderr, "[CH%d] Failed to initialize Output Node\n", targ->channel_idx);
+        return NULL;
     }
 
-    if (init_v4l2_node(ctx.cap_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
-                       ctx.width, ctx.height, ctx.num_buffers,
-                       &ctx.cap_bufs, &ctx.y_size, &ctx.uv_size) < 0) {
-        fprintf(stderr, "[FAIL] Failed to initialize Capture Node\n");
-        return EXIT_FAILURE;
+    if (init_v4l2_node(ctx->cap_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
+                       ctx->width, ctx->height, ctx->num_buffers,
+                       &ctx->cap_bufs, &ctx->y_size, &ctx->uv_size) < 0) {
+        fprintf(stderr, "[CH%d] Failed to initialize Capture Node\n", targ->channel_idx);
+        return NULL;
     }
 
-    ctx.total_frame_bytes = ctx.y_size + ctx.uv_size;
-    initial_pairs = ctx.num_buffers;
-    if (initial_pairs > ctx.frame_target)
-        initial_pairs = ctx.frame_target;
+    ctx->total_frame_bytes = ctx->y_size + ctx->uv_size;
+    initial_pairs = ctx->num_buffers;
+    if (initial_pairs > ctx->frame_target)
+        initial_pairs = ctx->frame_target;
     if (initial_pairs > MAX_INITIAL_PAIRS)
         initial_pairs = MAX_INITIAL_PAIRS;
     if (initial_pairs < 2) {
-        fprintf(stderr, "[FAIL] At least two frames and buffers are required\n");
-        return EXIT_FAILURE;
+        fprintf(stderr, "[CH%d] At least two frames and buffers are required\n", targ->channel_idx);
+        return NULL;
     }
 
-    /* The hardware consumes one shared descriptor ring. Queue each capture
-     * target before its matching output so the loopback sink is armed before
-     * H2C data can reach the small clock-crossing FIFO. */
     for (i = 0; i < initial_pairs; i++) {
         struct v4l2_plane cap_planes[NV12_PLANES];
         struct v4l2_plane out_planes[NV12_PLANES];
@@ -417,14 +377,14 @@ int main(int argc, char **argv)
         cap_buf.index = i;
         cap_buf.length = NV12_PLANES;
         cap_buf.m.planes = cap_planes;
-        if (xioctl(ctx.cap_fd, VIDIOC_QBUF, &cap_buf) < 0) {
+        if (xioctl(ctx->cap_fd, VIDIOC_QBUF, &cap_buf) < 0) {
             perror("Initial Capture VIDIOC_QBUF");
-            return EXIT_FAILURE;
+            return NULL;
         }
 
-        fill_frame_pattern(ctx.out_bufs[i].plane[0].addr,
-                           ctx.out_bufs[i].plane[1].addr,
-                           ctx.y_size, ctx.uv_size,
+        fill_frame_pattern(ctx->out_bufs[i].plane[0].addr,
+                           ctx->out_bufs[i].plane[1].addr,
+                           ctx->y_size, ctx->uv_size,
                            i, now_us);
 
         memset(&out_buf, 0, sizeof(out_buf));
@@ -434,33 +394,27 @@ int main(int argc, char **argv)
         out_buf.index = i;
         out_buf.length = NV12_PLANES;
         out_buf.m.planes = out_planes;
-        out_planes[0].bytesused = ctx.y_size;
-        out_planes[1].bytesused = ctx.uv_size;
-        if (xioctl(ctx.out_fd, VIDIOC_QBUF, &out_buf) < 0) {
+        out_planes[0].bytesused = ctx->y_size;
+        out_planes[1].bytesused = ctx->uv_size;
+        if (xioctl(ctx->out_fd, VIDIOC_QBUF, &out_buf) < 0) {
             perror("Initial Output VIDIOC_QBUF");
-            return EXIT_FAILURE;
+            return NULL;
         }
-        ctx.tx_frames++;
+        ctx->tx_frames++;
     }
 
-    /* STREAMON on both nodes */
-    enum v4l2_buf_type out_type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
-    enum v4l2_buf_type cap_type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
-
-    if (xioctl(ctx.out_fd, VIDIOC_STREAMON, &out_type) < 0) {
+    if (xioctl(ctx->out_fd, VIDIOC_STREAMON, &out_type) < 0) {
         perror("Output VIDIOC_STREAMON");
-        return EXIT_FAILURE;
+        return NULL;
     }
-    if (xioctl(ctx.cap_fd, VIDIOC_STREAMON, &cap_type) < 0) {
+    if (xioctl(ctx->cap_fd, VIDIOC_STREAMON, &cap_type) < 0) {
         perror("Capture VIDIOC_STREAMON");
-        return EXIT_FAILURE;
+        return NULL;
     }
-    printf("[PASS] STREAMON on both nodes; waiting for frame completion...\n");
 
     start_time_us = monotonic_us();
 
-    /* Main RX Loop */
-    while (ctx.rx_frames < ctx.frame_target) {
+    while (ctx->rx_frames < ctx->frame_target) {
         struct v4l2_plane planes[NV12_PLANES];
         struct v4l2_plane out_planes[NV12_PLANES];
         struct v4l2_buffer buf;
@@ -475,36 +429,36 @@ int main(int argc, char **argv)
         buf.length = NV12_PLANES;
         buf.m.planes = planes;
 
-        if (dequeue_buffer(ctx.cap_fd, &buf, "Capture VIDIOC_DQBUF") < 0)
+        if (dequeue_buffer(ctx->cap_fd, &buf, "Capture VIDIOC_DQBUF") < 0)
             break;
 
         recv_us = monotonic_us();
-        err = verify_frame_pattern(ctx.cap_bufs[buf.index].plane[0].addr,
-                                   ctx.cap_bufs[buf.index].plane[1].addr,
-                                   ctx.y_size, ctx.uv_size,
-                                   ctx.rx_frames, &send_us);
+        err = verify_frame_pattern(ctx->cap_bufs[buf.index].plane[0].addr,
+                                   ctx->cap_bufs[buf.index].plane[1].addr,
+                                   ctx->y_size, ctx->uv_size,
+                                   ctx->rx_frames, &send_us);
         if (err > 0)
-            ctx.data_errors += err;
+            ctx->data_errors += err;
 
         rtt_us = recv_us - send_us;
         if (rtt_us > 0) {
-            if (rtt_us < ctx.min_rtt_us) ctx.min_rtt_us = rtt_us;
-            if (rtt_us > ctx.max_rtt_us) ctx.max_rtt_us = rtt_us;
-            ctx.sum_rtt_us += rtt_us;
-            ctx.rtt_count++;
+            if (rtt_us < ctx->min_rtt_us) ctx->min_rtt_us = rtt_us;
+            if (rtt_us > ctx->max_rtt_us) ctx->max_rtt_us = rtt_us;
+            ctx->sum_rtt_us += rtt_us;
+            ctx->rtt_count++;
         }
 
-        if (ctx.rx_frames == 0 ||
-            ctx.rx_frames % (ctx.benchmark_mode ? 100U : 30U) == 0 ||
-            ctx.rx_frames == ctx.frame_target - 1) {
-            uint64_t y_h = fnv1a64(ctx.cap_bufs[buf.index].plane[0].addr, ctx.y_size);
-            uint64_t uv_h = fnv1a64(ctx.cap_bufs[buf.index].plane[1].addr, ctx.uv_size);
-            printf("[FRAME %4u] seq=%4u RTT=%.2f ms Y-hash=%016" PRIx64 " UV-hash=%016" PRIx64 " [%s]\n",
-                   ctx.rx_frames + 1, ctx.rx_frames, rtt_us / 1000.0,
+        if (ctx->rx_frames == 0 ||
+            ctx->rx_frames % (ctx->benchmark_mode ? 100U : 30U) == 0 ||
+            ctx->rx_frames == ctx->frame_target - 1) {
+            uint64_t y_h = fnv1a64(ctx->cap_bufs[buf.index].plane[0].addr, ctx->y_size);
+            uint64_t uv_h = fnv1a64(ctx->cap_bufs[buf.index].plane[1].addr, ctx->uv_size);
+            printf("[CH%d FRAME %4u] seq=%4u RTT=%.2f ms Y-hash=%016" PRIx64 " UV-hash=%016" PRIx64 " [%s]\n",
+                   targ->channel_idx, ctx->rx_frames + 1, ctx->rx_frames, rtt_us / 1000.0,
                    y_h, uv_h, (err == 0) ? "PASS" : "FAIL");
         }
 
-        ctx.rx_frames++;
+        ctx->rx_frames++;
 
         memset(&out_buf, 0, sizeof(out_buf));
         memset(out_planes, 0, sizeof(out_planes));
@@ -512,55 +466,180 @@ int main(int argc, char **argv)
         out_buf.memory = V4L2_MEMORY_MMAP;
         out_buf.length = NV12_PLANES;
         out_buf.m.planes = out_planes;
-        if (dequeue_buffer(ctx.out_fd, &out_buf, "Output VIDIOC_DQBUF") < 0)
+        if (dequeue_buffer(ctx->out_fd, &out_buf, "Output VIDIOC_DQBUF") < 0)
             break;
 
-        if (ctx.tx_frames < ctx.frame_target) {
-            if (xioctl(ctx.cap_fd, VIDIOC_QBUF, &buf) < 0) {
+        if (ctx->tx_frames < ctx->frame_target) {
+            if (xioctl(ctx->cap_fd, VIDIOC_QBUF, &buf) < 0) {
                 perror("Capture VIDIOC_QBUF requeue");
                 break;
             }
             send_us = monotonic_us();
-            fill_frame_pattern(ctx.out_bufs[out_buf.index].plane[0].addr,
-                               ctx.out_bufs[out_buf.index].plane[1].addr,
-                               ctx.y_size, ctx.uv_size,
-                               ctx.tx_frames, send_us);
-            out_planes[0].bytesused = ctx.y_size;
-            out_planes[1].bytesused = ctx.uv_size;
-            if (xioctl(ctx.out_fd, VIDIOC_QBUF, &out_buf) < 0) {
+            fill_frame_pattern(ctx->out_bufs[out_buf.index].plane[0].addr,
+                               ctx->out_bufs[out_buf.index].plane[1].addr,
+                               ctx->y_size, ctx->uv_size,
+                               ctx->tx_frames, send_us);
+            out_planes[0].bytesused = ctx->y_size;
+            out_planes[1].bytesused = ctx->uv_size;
+            if (xioctl(ctx->out_fd, VIDIOC_QBUF, &out_buf) < 0) {
                 perror("Output VIDIOC_QBUF requeue");
                 break;
             }
-            ctx.tx_frames++;
+            ctx->tx_frames++;
         }
     }
 
     end_time_us = monotonic_us();
 
-    xioctl(ctx.out_fd, VIDIOC_STREAMOFF, &out_type);
-    xioctl(ctx.cap_fd, VIDIOC_STREAMOFF, &cap_type);
+    xioctl(ctx->out_fd, VIDIOC_STREAMOFF, &out_type);
+    xioctl(ctx->cap_fd, VIDIOC_STREAMOFF, &cap_type);
 
     total_sec = (end_time_us - start_time_us) / 1000000.0;
-    tx_throughput_mibs = (ctx.tx_frames * (double)ctx.total_frame_bytes) / (total_sec * 1024.0 * 1024.0);
-    rx_throughput_mibs = (ctx.rx_frames * (double)ctx.total_frame_bytes) / (total_sec * 1024.0 * 1024.0);
-    total_throughput_mibs = tx_throughput_mibs + rx_throughput_mibs;
 
-    printf("\n================ QPCIe Loopback Performance Report ================\n");
-    printf(" Transferred Frames   : TX: %u / RX: %u (Target: %u)\n", ctx.tx_frames, ctx.rx_frames, ctx.frame_target);
-    printf(" Elapsed Time         : %.3f seconds (FPS: %.2f)\n", total_sec, ctx.rx_frames / total_sec);
-    printf(" H2C Write Throughput : %.2f MiB/s (%.2f Gbps)\n", tx_throughput_mibs, tx_throughput_mibs * 8.0 / 1000.0);
-    printf(" C2H Read Throughput  : %.2f MiB/s (%.2f Gbps)\n", rx_throughput_mibs, rx_throughput_mibs * 8.0 / 1000.0);
-    printf(" Bidirectional Total  : %.2f MiB/s (%.2f Gbps)\n", total_throughput_mibs, total_throughput_mibs * 8.0 / 1000.0);
-    printf("---------------- Round-Trip Latency (RTT) Statistics ---------------\n");
-    printf(" Min Latency          : %.3f ms (%.1f us)\n", ctx.min_rtt_us / 1000.0, ctx.min_rtt_us);
-    printf(" Avg Latency          : %.3f ms (%.1f us)\n", (ctx.sum_rtt_us / ctx.rtt_count) / 1000.0, ctx.sum_rtt_us / ctx.rtt_count);
-    printf(" Max Latency          : %.3f ms (%.1f us)\n", ctx.max_rtt_us / 1000.0, ctx.max_rtt_us);
-    printf(" Data Mismatch Errors : %u\n", ctx.data_errors);
-    printf(" Verification Status  : %s\n", (ctx.data_errors == 0 && ctx.rx_frames == ctx.frame_target) ? "🎉 [100% BIT-EXACT MATCH PASS]" : "❌ [FAILED]");
-    printf("===================================================================\n");
+    close(ctx->out_fd);
+    close(ctx->cap_fd);
 
-    close(ctx.out_fd);
-    close(ctx.cap_fd);
+    if (ctx->data_errors == 0 && ctx->rx_frames == ctx->frame_target) {
+        targ->success = 1;
+    }
 
-    return (ctx.data_errors == 0 && ctx.rx_frames == ctx.frame_target) ? EXIT_SUCCESS : EXIT_FAILURE;
+    // Output stats for this thread
+    double tx_mibs = (ctx->tx_frames * (double)ctx->total_frame_bytes) / (total_sec * 1024.0 * 1024.0);
+    double rx_mibs = (ctx->rx_frames * (double)ctx->total_frame_bytes) / (total_sec * 1024.0 * 1024.0);
+    printf("[CH%d] Done. TX: %u, RX: %u, TX: %.2f MiB/s, RX: %.2f MiB/s, Avg RTT: %.2f ms\n",
+           targ->channel_idx, ctx->tx_frames, ctx->rx_frames, tx_mibs, rx_mibs,
+           (ctx->sum_rtt_us / ctx->rtt_count) / 1000.0);
+
+    return NULL;
+}
+
+int main(int argc, char **argv)
+{
+    struct loopback_ctx base_ctx;
+    int opt;
+    int num_channels = 1;
+    struct loopback_ctx *ctxs;
+    struct thread_arg *targs;
+    int i;
+    int all_success = 1;
+    char dev_name_buf[64][32];
+
+    memset(&base_ctx, 0, sizeof(base_ctx));
+    base_ctx.out_dev = DEFAULT_OUT_DEV;
+    base_ctx.cap_dev = DEFAULT_CAP_DEV;
+    base_ctx.width = DEFAULT_WIDTH;
+    base_ctx.height = DEFAULT_HEIGHT;
+    base_ctx.frame_target = DEFAULT_FRAMES;
+    base_ctx.num_buffers = DEFAULT_BUFFERS;
+    base_ctx.target_fps = 60.0;
+    base_ctx.benchmark_mode = 0;
+    base_ctx.min_rtt_us = 1e9;
+    base_ctx.max_rtt_us = 0.0;
+    base_ctx.sum_rtt_us = 0.0;
+
+    static const struct option options[] = {
+        {"out-dev", required_argument, NULL, 'o'},
+        {"cap-dev", required_argument, NULL, 'd'},
+        {"width", required_argument, NULL, 'w'},
+        {"height", required_argument, NULL, 'h'},
+        {"frames", required_argument, NULL, 'f'},
+        {"fps", required_argument, NULL, 'r'},
+        {"benchmark", no_argument, NULL, 'b'},
+        {"buffers", required_argument, NULL, 'n'},
+        {"channels", required_argument, NULL, 'c'},
+        {"help", no_argument, NULL, 'H'},
+        {NULL, 0, NULL, 0}
+    };
+
+    while ((opt = getopt_long(argc, argv, "o:d:w:h:f:r:bn:c:H", options, NULL)) != -1) {
+        switch (opt) {
+        case 'o': base_ctx.out_dev = optarg; break;
+        case 'd': base_ctx.cap_dev = optarg; break;
+        case 'w': base_ctx.width = (unsigned int)strtoul(optarg, NULL, 10); break;
+        case 'h': base_ctx.height = (unsigned int)strtoul(optarg, NULL, 10); break;
+        case 'f': base_ctx.frame_target = (unsigned int)strtoul(optarg, NULL, 10); break;
+        case 'r': base_ctx.target_fps = strtod(optarg, NULL); break;
+        case 'b': base_ctx.benchmark_mode = 1; break;
+        case 'n': base_ctx.num_buffers = (unsigned int)strtoul(optarg, NULL, 10); break;
+        case 'c': num_channels = atoi(optarg); break;
+        case 'H':
+        default:
+            print_usage(argv[0]);
+            return (opt == 'H') ? EXIT_SUCCESS : EXIT_FAILURE;
+        }
+    }
+
+    if (num_channels < 1 || num_channels > 32) {
+        fprintf(stderr, "Invalid number of channels (1-32).\n");
+        return EXIT_FAILURE;
+    }
+
+    printf("=================================================================\n"
+           " QPCIe Multi-Channel Hardware Video Loopback Test (H2C -> C2H)\n"
+           " Channels    : %d\n"
+           " Resolution  : %ux%u NV12M, Frames: %u per channel\n"
+           " Mode        : %s\n"
+           "=================================================================\n",
+           num_channels, base_ctx.width, base_ctx.height, base_ctx.frame_target,
+           base_ctx.benchmark_mode ? "UNCAPPED DMA BENCHMARK" : "PACED 60 FPS STREAMING");
+
+    ctxs = calloc(num_channels, sizeof(struct loopback_ctx));
+    targs = calloc(num_channels, sizeof(struct thread_arg));
+
+    for (i = 0; i < num_channels; i++) {
+        ctxs[i] = base_ctx;
+
+        if (num_channels > 1) {
+            snprintf(dev_name_buf[i*2], sizeof(dev_name_buf[0]), "/dev/video%d", 1 + 2*i);
+            snprintf(dev_name_buf[i*2+1], sizeof(dev_name_buf[0]), "/dev/video%d", 2 + 2*i);
+            ctxs[i].out_dev = dev_name_buf[i*2];
+            ctxs[i].cap_dev = dev_name_buf[i*2+1];
+        }
+
+        targs[i].channel_idx = i;
+        targs[i].ctx = &ctxs[i];
+    }
+
+    double test_start = monotonic_us();
+
+    for (i = 0; i < num_channels; i++) {
+        if (pthread_create(&targs[i].thread, NULL, loopback_thread, &targs[i]) != 0) {
+            perror("pthread_create");
+            return EXIT_FAILURE;
+        }
+    }
+
+    for (i = 0; i < num_channels; i++) {
+        pthread_join(targs[i].thread, NULL);
+        if (!targs[i].success) {
+            all_success = 0;
+        }
+    }
+
+    double test_end = monotonic_us();
+    double total_sec = (test_end - test_start) / 1000000.0;
+
+    unsigned int total_tx = 0, total_rx = 0, total_err = 0;
+    for (i = 0; i < num_channels; i++) {
+        total_tx += ctxs[i].tx_frames;
+        total_rx += ctxs[i].rx_frames;
+        total_err += ctxs[i].data_errors;
+    }
+
+    double total_bytes = total_rx * (double)(ctxs[0].y_size + ctxs[0].uv_size);
+    double total_throughput = total_bytes / (total_sec * 1024.0 * 1024.0);
+
+    printf("\n================ Multi-Channel Loopback Performance ================\n");
+    printf(" Channels             : %d\n", num_channels);
+    printf(" Total Elapsed Time   : %.3f seconds\n", total_sec);
+    printf(" Total RX Frames      : %u\n", total_rx);
+    printf(" Aggregate Throughput : %.2f MiB/s (%.2f Gbps)\n", total_throughput, total_throughput * 8.0 / 1000.0);
+    printf(" Total Data Errors    : %u\n", total_err);
+    printf(" Verification Status  : %s\n", (all_success) ? "🎉 [ALL CHANNELS PASS]" : "❌ [FAILED]");
+    printf("====================================================================\n");
+
+    free(ctxs);
+    free(targs);
+
+    return all_success ? EXIT_SUCCESS : EXIT_FAILURE;
 }

@@ -4,7 +4,7 @@
 
 CC ?= gcc
 CFLAGS ?= -O2 -Wall -I.
-LDFLAGS ?= -lm
+LDFLAGS ?= -lm -pthread
 
 TARGETS = qpcie_sanity_check v4l2_test_app alsa_test_app dmabuf_p2p_test_app loopback_test_app
 
