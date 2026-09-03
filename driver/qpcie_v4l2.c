@@ -11,6 +11,16 @@
 #include <linux/jiffies.h>
 #include <media/v4l2-event.h>
 
+/*
+ * Validation-only knob: force every V4L2 H2C/C2H NV12 plane through the
+ * 4KiB host SGL fetch path even when the DMA API maps each plane to a single
+ * contiguous IOVA segment (nents == 1).  Default 0 keeps the direct-DMA path.
+ */
+static bool force_sgl_fetch;
+module_param(force_sgl_fetch, bool, 0644);
+MODULE_PARM_DESC(force_sgl_fetch,
+                 "Force 4KiB host SGL fetch tables for V4L2 DMA validation");
+
 static const struct v4l2_file_operations qpcie_v4l2_fops = {
     .owner          = THIS_MODULE,
     .open           = v4l2_fh_open,
@@ -500,56 +510,109 @@ static void qpcie_buf_cleanup(struct vb2_buffer *vb)
     }
 }
 
-static void qpcie_build_variable_sgl(struct scatterlist *sgl, unsigned int nents,
-                                     struct qpcie_sgl_entry *slots_virt, dma_addr_t slots_dma,
-                                     unsigned int max_slots)
+/*
+ * Build a 4KiB-slot host SGL table for one NV12 plane.
+ *
+ * Every SGL entry is capped at the next 4KiB boundary of its IOVA so the
+ * hardware page-table walker never crosses a page boundary inside a single
+ * entry.  A slot holds at most 255 data entries; entry index 255 is reserved
+ * for the chain pointer to the next slot.  The last data entry of the plane
+ * carries SGL_FLAG_LAST_SEG.
+ *
+ * Returns 0 on success (with the data-entry and chain counts filled in) or a
+ * negative error when the plane cannot fit within @max_slots; on error the
+ * table contents are undefined and must not be published.
+ */
+static int qpcie_build_variable_sgl(struct device *dev, struct scatterlist *sgl,
+                                    unsigned int nents,
+                                    struct qpcie_sgl_entry *slots_virt,
+                                    dma_addr_t slots_dma, unsigned int max_slots,
+                                    unsigned int *data_entries_out,
+                                    unsigned int *chain_count_out)
 {
     struct scatterlist *sg;
+    struct qpcie_sgl_entry *slot_ptr = slots_virt;
     unsigned int i;
     unsigned int cur_slot = 0;
     unsigned int cur_entry = 0;
-    struct qpcie_sgl_entry *slot_ptr = slots_virt;
+    unsigned int data_entries = 0;
+    unsigned int chain_count = 0;
+    u64 remaining;
+
+    *data_entries_out = 0;
+    *chain_count_out = 0;
 
     memset(slots_virt, 0, max_slots * 4096);
 
     for_each_sg(sgl, sg, nents, i) {
-        dma_addr_t chunk_addr = sg_dma_address(sg);
-        u32 chunk_len = sg_dma_len(sg);
+        u64 chunk_addr = sg_dma_address(sg);
+        u64 chunk_len = sg_dma_len(sg);
 
-        if (cur_slot >= max_slots)
-            break;
+        remaining = chunk_len;
+        while (remaining > 0) {
+            u64 bytes_to_4k;
+            u32 entry_len;
 
-        slot_ptr[cur_entry].phys_addr = (u64)chunk_addr;
-        slot_ptr[cur_entry].len_bytes = chunk_len;
-        slot_ptr[cur_entry].flags     = (i == nents - 1) ? SGL_FLAG_LAST_SEG : 0;
-        cur_entry++;
-
-        if (cur_entry == 255) {
-            /* Chained pointer at Entry 255 (offset 0xFF0) */
-            if (cur_slot + 1 < max_slots) {
+            if (cur_entry == 255) {
+                /* Slot full: link to the next slot via entry index 255. */
+                if (cur_slot + 1 >= max_slots) {
+                    dev_err(dev,
+                            "SGL table overflow: plane needs more than %u entries (%u data, %u chains)\n",
+                            max_slots * 255, data_entries, chain_count);
+                    return -ENOSPC;
+                }
                 slot_ptr[255].phys_addr = (u64)(slots_dma + (cur_slot + 1) * 4096);
                 slot_ptr[255].len_bytes = 0;
                 slot_ptr[255].flags     = SGL_FLAG_CHAIN_PTR;
+                chain_count++;
                 cur_slot++;
                 slot_ptr = (struct qpcie_sgl_entry *)((u8 *)slots_virt + cur_slot * 4096);
                 cur_entry = 0;
-            } else {
-                slot_ptr[255].flags = 0;
-                break;
             }
+
+            /* Never let a single entry cross a 4KiB IOVA boundary. */
+            bytes_to_4k = 4096 - (chunk_addr & 0xFFF);
+            entry_len = (remaining < bytes_to_4k) ? (u32)remaining : (u32)bytes_to_4k;
+
+            slot_ptr[cur_entry].phys_addr = chunk_addr;
+            slot_ptr[cur_entry].len_bytes = entry_len;
+            slot_ptr[cur_entry].flags     = 0;
+            cur_entry++;
+            data_entries++;
+            chunk_addr += entry_len;
+            remaining  -= entry_len;
         }
     }
+
+    if (data_entries == 0) {
+        dev_err(dev, "SGL table build: empty plane (nents=%u)\n", nents);
+        return -EINVAL;
+    }
+
+    /* Mark the final data entry of the plane as the last segment. */
+    slot_ptr[cur_entry - 1].flags |= SGL_FLAG_LAST_SEG;
+
+    *data_entries_out = data_entries;
+    *chain_count_out = chain_count;
+    return 0;
 }
 
-static void qpcie_publish_buffer(struct qpcie_v4l2_channel *vch,
-                                 struct qpcie_v4l2_buffer *buf)
+static int qpcie_publish_buffer(struct qpcie_v4l2_channel *vch,
+                                struct qpcie_v4l2_buffer *buf)
 {
     struct vb2_buffer *vb = &buf->vb.vb2_buf;
     struct qpcie_dev *qdev = vch->qdev;
     struct qpcie_dma_desc_2d *desc;
+    struct sg_table *sgt0, *sgt1;
     dma_addr_t plane0_dma, plane1_dma;
+    const char *dir = vch->buf_type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE ?
+                      "H2C" : "C2H";
+    unsigned int y_entries = 0, y_chains = 0;
+    unsigned int uv_entries = 0, uv_chains = 0;
     bool host_sgl;
+    u32 control;
     u32 tail;
+    int ret;
 
     tail = qdev->h2c_tail;
     desc = &qdev->h2c_ring_virt[tail];
@@ -564,78 +627,92 @@ static void qpcie_publish_buffer(struct qpcie_v4l2_channel *vch,
     desc->format          = 0x2; /* NV12M */
     desc->plane_count     = 2;
 
-    struct sg_table *sgt0 = vb2_dma_sg_plane_desc(vb, 0);
-    struct sg_table *sgt1 = vb2_dma_sg_plane_desc(vb, 1);
+    sgt0 = vb2_dma_sg_plane_desc(vb, 0);
+    sgt1 = vb2_dma_sg_plane_desc(vb, 1);
     if (WARN_ON(!sgt0 || !sgt1))
-        return;
+        return -EINVAL;
 
     plane0_dma = sg_dma_address(sgt0->sgl);
     plane1_dma = sg_dma_address(sgt1->sgl);
 
-    host_sgl = sgt0->nents > 1 || sgt1->nents > 1;
+    host_sgl = force_sgl_fetch || sgt0->nents > 1 || sgt1->nents > 1;
     if (host_sgl) {
-        qpcie_build_variable_sgl(sgt0->sgl, sgt0->nents,
-                                 (struct qpcie_sgl_entry *)buf->y_slots_virt,
-                                 buf->y_slots_dma, QPCIE_MAX_PAGE_SLOTS_Y);
-        qpcie_build_variable_sgl(sgt1->sgl, sgt1->nents,
-                                 (struct qpcie_sgl_entry *)buf->uv_slots_virt,
-                                 buf->uv_slots_dma, QPCIE_MAX_PAGE_SLOTS_UV);
+        ret = qpcie_build_variable_sgl(&qdev->pdev->dev, sgt0->sgl, sgt0->nents,
+                                       (struct qpcie_sgl_entry *)buf->y_slots_virt,
+                                       buf->y_slots_dma, QPCIE_MAX_PAGE_SLOTS_Y,
+                                       &y_entries, &y_chains);
+        if (ret) {
+            dev_err(&qdev->pdev->dev,
+                    "SGL ch%u %s buf%u: Y plane table build failed (%d); buffer rejected\n",
+                    vch->channel_id, dir, vb->index, ret);
+            return ret;
+        }
+        ret = qpcie_build_variable_sgl(&qdev->pdev->dev, sgt1->sgl, sgt1->nents,
+                                       (struct qpcie_sgl_entry *)buf->uv_slots_virt,
+                                       buf->uv_slots_dma, QPCIE_MAX_PAGE_SLOTS_UV,
+                                       &uv_entries, &uv_chains);
+        if (ret) {
+            dev_err(&qdev->pdev->dev,
+                    "SGL ch%u %s buf%u: UV plane table build failed (%d); buffer rejected\n",
+                    vch->channel_id, dir, vb->index, ret);
+            return ret;
+        }
+
+        if (vch->buf_type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
+            control = 0x09 | (vch->channel_id << DESC_CTRL_CHANNEL_SHIFT) |
+                      DESC_CTRL_SG_FETCH_MODE;
+            desc->plane0_src_addr = buf->y_slots_dma;
+            desc->plane1_src_addr = buf->uv_slots_dma;
+        } else {
+            control = 0x0B | (vch->channel_id << DESC_CTRL_CHANNEL_SHIFT) |
+                      DESC_CTRL_SG_FETCH_MODE;
+            desc->plane0_dst_addr = buf->y_slots_dma;
+            desc->plane1_dst_addr = buf->uv_slots_dma;
+        }
+        desc->control = control;
 
         if (!buf->sgl_logged) {
-            struct qpcie_sgl_entry *y_entries = buf->y_slots_virt;
-            struct qpcie_sgl_entry *uv_entries = buf->uv_slots_virt;
-            unsigned int y_log_nents = min_t(unsigned int, sgt0->nents, 8);
-            unsigned int uv_log_nents = min_t(unsigned int, sgt1->nents, 8);
+            struct qpcie_sgl_entry *y_entries_p = buf->y_slots_virt;
+            struct qpcie_sgl_entry *uv_entries_p = buf->uv_slots_virt;
+            unsigned int y_log_nents = min_t(unsigned int, y_entries, 8);
+            unsigned int uv_log_nents = min_t(unsigned int, uv_entries, 8);
             unsigned int i;
 
             dev_info(&qdev->pdev->dev,
-                     "SGL ch%u %s buf%u: Y slot=%pad nents=%u/%u, UV slot=%pad nents=%u/%u\n",
-                     vch->channel_id,
-                     vch->buf_type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE ?
-                     "H2C" : "C2H", vb->index,
-                     &buf->y_slots_dma, sgt0->nents, sgt0->orig_nents,
-                     &buf->uv_slots_dma, sgt1->nents, sgt1->orig_nents);
+                     "SGL ch%u %s buf%u: host SGL fetch enabled (force=%d) Y nents=%u/%u entries=%u chains=%u slot=%pad | UV nents=%u/%u entries=%u chains=%u slot=%pad ctrl=0x%02x\n",
+                     vch->channel_id, dir, vb->index, force_sgl_fetch,
+                     sgt0->nents, sgt0->orig_nents, y_entries, y_chains,
+                     &buf->y_slots_dma,
+                     sgt1->nents, sgt1->orig_nents, uv_entries, uv_chains,
+                     &buf->uv_slots_dma, control);
             for (i = 0; i < y_log_nents; i++)
                 dev_info(&qdev->pdev->dev,
                          "  Y[%u] addr=0x%016llx len=%u flags=0x%x\n",
-                         i, y_entries[i].phys_addr,
-                         y_entries[i].len_bytes, y_entries[i].flags);
+                         i, y_entries_p[i].phys_addr,
+                         y_entries_p[i].len_bytes, y_entries_p[i].flags);
             for (i = 0; i < uv_log_nents; i++)
                 dev_info(&qdev->pdev->dev,
                          " UV[%u] addr=0x%016llx len=%u flags=0x%x\n",
-                         i, uv_entries[i].phys_addr,
-                         uv_entries[i].len_bytes, uv_entries[i].flags);
+                         i, uv_entries_p[i].phys_addr,
+                         uv_entries_p[i].len_bytes, uv_entries_p[i].flags);
             buf->sgl_logged = true;
-        }
-
-        if (vch->buf_type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
-            desc->plane0_src_addr = buf->y_slots_dma;
-            desc->plane1_src_addr = buf->uv_slots_dma;
-            desc->control = 0x09 | (vch->channel_id << DESC_CTRL_CHANNEL_SHIFT) |
-                            DESC_CTRL_SG_FETCH_MODE;
-        } else {
-            desc->plane0_dst_addr = buf->y_slots_dma;
-            desc->plane1_dst_addr = buf->uv_slots_dma;
-            desc->control = 0x0B | (vch->channel_id << DESC_CTRL_CHANNEL_SHIFT) |
-                            DESC_CTRL_SG_FETCH_MODE;
         }
     } else {
         if (vch->buf_type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
+            control = 0x09 | (vch->channel_id << DESC_CTRL_CHANNEL_SHIFT);
             desc->plane0_src_addr = plane0_dma;
             desc->plane1_src_addr = plane1_dma;
-            desc->control = 0x09 | (vch->channel_id << DESC_CTRL_CHANNEL_SHIFT);
         } else {
+            control = 0x0B | (vch->channel_id << DESC_CTRL_CHANNEL_SHIFT);
             desc->plane0_dst_addr = plane0_dma;
             desc->plane1_dst_addr = plane1_dma;
-            desc->control = 0x0B | (vch->channel_id << DESC_CTRL_CHANNEL_SHIFT);
         }
+        desc->control = control;
 
         if (!buf->sgl_logged) {
             dev_info(&qdev->pdev->dev,
                      "DMA ch%u %s buf%u: direct DMA (Y nents=%u IOVA=%pad, UV nents=%u IOVA=%pad); host SGL fetch disabled\n",
-                     vch->channel_id,
-                     vch->buf_type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE ?
-                     "H2C" : "C2H", vb->index,
+                     vch->channel_id, dir, vb->index,
                      sgt0->nents, &plane0_dma, sgt1->nents, &plane1_dma);
             buf->sgl_logged = true;
         }
@@ -656,6 +733,7 @@ static void qpcie_publish_buffer(struct qpcie_v4l2_channel *vch,
               qdev->bar0_mmio + REG_H2C_RING_CFG);
     ioread32(qdev->bar0_mmio + REG_H2C_RING_CFG);
 
+    return 0;
 }
 
 static void qpcie_buf_queue(struct vb2_buffer *vb)
@@ -668,11 +746,18 @@ static void qpcie_buf_queue(struct vb2_buffer *vb)
     struct qpcie_v4l2_channel *out_vch, *cap_vch;
     struct qpcie_v4l2_buffer *out_buf, *cap_buf;
     unsigned long flags;
+    int ret;
 
     if (vch->channel_id == 0) {
         spin_lock_irqsave(&qdev->ring_lock, flags);
-        qpcie_publish_buffer(vch, buf);
+        ret = qpcie_publish_buffer(vch, buf);
         spin_unlock_irqrestore(&qdev->ring_lock, flags);
+        if (ret) {
+            dev_err(&qdev->pdev->dev,
+                    "V4L2 ch%u buf%u: descriptor publish rejected (%d)\n",
+                    vch->channel_id, buf->vb.vb2_buf.index, ret);
+            vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_ERROR);
+        }
         return;
     }
 
@@ -690,8 +775,26 @@ static void qpcie_buf_queue(struct vb2_buffer *vb)
         list_del(&out_buf->list);
         list_del(&cap_buf->list);
 
-        qpcie_publish_buffer(cap_vch, cap_buf);
-        qpcie_publish_buffer(out_vch, out_buf);
+        if (qpcie_publish_buffer(cap_vch, cap_buf)) {
+            /* Reject both halves: the H2C partner was never published. */
+            spin_unlock_irqrestore(&qdev->ring_lock, flags);
+            dev_err(&qdev->pdev->dev,
+                    "V4L2 ch%u loopback: capture buf%u publish rejected; dropping pair\n",
+                    vch->channel_id, cap_buf->vb.vb2_buf.index);
+            vb2_buffer_done(&cap_buf->vb.vb2_buf, VB2_BUF_STATE_ERROR);
+            vb2_buffer_done(&out_buf->vb.vb2_buf, VB2_BUF_STATE_ERROR);
+            return;
+        }
+        ret = qpcie_publish_buffer(out_vch, out_buf);
+        if (ret) {
+            /* Capture already in the ring; only the H2C half is rejected. */
+            spin_unlock_irqrestore(&qdev->ring_lock, flags);
+            dev_err(&qdev->pdev->dev,
+                    "V4L2 ch%u loopback: output buf%u publish rejected (%d)\n",
+                    vch->channel_id, out_buf->vb.vb2_buf.index, ret);
+            vb2_buffer_done(&out_buf->vb.vb2_buf, VB2_BUF_STATE_ERROR);
+            return;
+        }
     }
     spin_unlock_irqrestore(&qdev->ring_lock, flags);
 }
