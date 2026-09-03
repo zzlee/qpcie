@@ -548,6 +548,7 @@ static void qpcie_publish_buffer(struct qpcie_v4l2_channel *vch,
     struct qpcie_dev *qdev = vch->qdev;
     struct qpcie_dma_desc_2d *desc;
     dma_addr_t plane0_dma, plane1_dma;
+    bool host_sgl;
     u32 tail;
 
     tail = qdev->h2c_tail;
@@ -571,7 +572,8 @@ static void qpcie_publish_buffer(struct qpcie_v4l2_channel *vch,
     plane0_dma = sg_dma_address(sgt0->sgl);
     plane1_dma = sg_dma_address(sgt1->sgl);
 
-    if (sgt0->nents > 1 || sgt1->nents > 1) {
+    host_sgl = sgt0->nents > 1 || sgt1->nents > 1;
+    if (host_sgl) {
         qpcie_build_variable_sgl(sgt0->sgl, sgt0->nents,
                                  (struct qpcie_sgl_entry *)buf->y_slots_virt,
                                  buf->y_slots_dma, QPCIE_MAX_PAGE_SLOTS_Y);
@@ -626,6 +628,16 @@ static void qpcie_publish_buffer(struct qpcie_v4l2_channel *vch,
             desc->plane0_dst_addr = plane0_dma;
             desc->plane1_dst_addr = plane1_dma;
             desc->control = 0x0B | (vch->channel_id << DESC_CTRL_CHANNEL_SHIFT);
+        }
+
+        if (!buf->sgl_logged) {
+            dev_info(&qdev->pdev->dev,
+                     "DMA ch%u %s buf%u: direct DMA (Y nents=%u IOVA=%pad, UV nents=%u IOVA=%pad); host SGL fetch disabled\n",
+                     vch->channel_id,
+                     vch->buf_type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE ?
+                     "H2C" : "C2H", vb->index,
+                     sgt0->nents, &plane0_dma, sgt1->nents, &plane1_dma);
+            buf->sgl_logged = true;
         }
     }
 
