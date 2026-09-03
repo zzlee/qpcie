@@ -795,7 +795,7 @@ module custom_pcie_dma_top #(
     ) u_sg_host_fetch_engine (
         .clk(clk),
         .rst_n(dma_rst_n),
-        .fetch_start((h2c_desc_valid && h2c_desc_ready && (h2c_desc_ctrl[4] || h2c_desc_ctrl[5])) ||
+        .fetch_start((h2c_desc_valid && sg_h2c_desc_ready && (h2c_desc_ctrl[4] || h2c_desc_ctrl[5])) ||
                      (c2h_desc_valid && c2h_desc_ready && (c2h_desc_ctrl[4] || c2h_desc_ctrl[5]))),
         .fetch_channel(h2c_desc_valid ? 3'd4 : {1'b0, c2h_desc_ctrl[7:6]}),
         .plane0_slot_addr(h2c_desc_valid ? h2c_plane0_src : c2h_plane0_dst),

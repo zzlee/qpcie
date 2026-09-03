@@ -95,6 +95,7 @@ module sg_host_fetch_engine #(
     reg [2:0]  curr_channel;
     reg        curr_plane; // 0 = Y Plane, 1 = UV Plane
     reg [63:0] curr_slot_base;
+    reg [63:0] curr_plane1_slot_addr;
 
     reg [11:0] curr_slot_offset; // 0 .. 4095
     reg [63:0] next_slot_ptr;
@@ -208,6 +209,7 @@ module sg_host_fetch_engine #(
             c2h_channel          <= 3'd0;
             curr_plane           <= 1'b0;
             curr_slot_base       <= 64'd0;
+            curr_plane1_slot_addr<= 64'd0;
             curr_slot_offset     <= 12'd0;
             next_slot_ptr        <= 64'd0;
             curr_plane_last_seen <= 1'b0;
@@ -229,6 +231,7 @@ module sg_host_fetch_engine #(
                         curr_channel         <= fetch_channel;
                         curr_plane           <= 1'b0; // Start with Y Plane
                         curr_slot_base       <= plane0_slot_addr;
+                        curr_plane1_slot_addr<= plane1_slot_addr;
                         curr_slot_offset     <= 12'd0;
                         curr_plane_last_seen <= 1'b0;
                         if (fetch_channel != 3'd4)
@@ -315,7 +318,7 @@ module sg_host_fetch_engine #(
                 S_NEXT_BURST: begin
                     if (curr_plane_last_seen) begin
                         // Current plane is finished
-                        if (curr_plane == 1'b0 && plane1_slot_addr != 64'd0) begin
+                        if (curr_plane == 1'b0 && curr_plane1_slot_addr != 64'd0) begin
                             state <= S_SWITCH_UV;
                         end else begin
                             state <= S_DONE;
@@ -327,7 +330,7 @@ module sg_host_fetch_engine #(
                             curr_slot_offset <= 12'd0;
                             state            <= S_REQ_BURST;
                         end else begin
-                            if (curr_plane == 1'b0 && plane1_slot_addr != 64'd0) begin
+                            if (curr_plane == 1'b0 && curr_plane1_slot_addr != 64'd0) begin
                                 state <= S_SWITCH_UV;
                             end else begin
                                 state <= S_DONE;
@@ -342,7 +345,7 @@ module sg_host_fetch_engine #(
 
                 S_SWITCH_UV: begin
                     curr_plane           <= 1'b1; // Switch to UV Plane
-                    curr_slot_base       <= plane1_slot_addr;
+                    curr_slot_base       <= curr_plane1_slot_addr;
                     curr_slot_offset     <= 12'd0;
                     curr_plane_last_seen <= 1'b0;
                     next_slot_ptr        <= 64'd0;
