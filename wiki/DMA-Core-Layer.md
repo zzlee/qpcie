@@ -92,11 +92,11 @@ Owner 在 packet 結束前鎖定。`data_ready` 只在真正接受 payload beat 
 | 128-byte pipeline、125 MHz source | 230.482 | 683.68 MiB/s | 約 5.6M MWr/s |
 | 128-byte pipeline、150 MHz source+CDC | 240.526 | 713.47 MiB/s | 5.845M MWr/s |
 
-4K60 需求是 711.91 MiB/s。最新實機等效餘裕只有 0.22%，所以仍需直接 4K physical gate。
+4K60需求是711.91 MiB/s。16-tag H2C direct-I/O-VA 4K loopback已實測H2C/C2H各934.60 MiB/s、100% bit-exact；此結果不包含host SGL fetch linked-page。
 
 ## 8. 目前範圍
 
-- 已實機驗證：SG DMA、1080p NV12M、128-byte requester。
+- 已實機驗證：SG DMA、1080p/4K NV12M loopback、128-byte requester、16-tag H2C direct-I/O-VA loopback。
 - 已仿真驗證：4K NV12M performance/backpressure。
-- 待實機：commit `2450dcb7` 的 4K60 600 frames。
+- 待實機：強制host SGL fetch linked-page的4K correctness與throughput驗證。
 - 尚未交付：YUV420M 三平面、USERPTR/DMABUF、multi-channel、ALSA。

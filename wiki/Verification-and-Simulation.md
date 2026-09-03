@@ -7,7 +7,7 @@ cd /home/zzlee/qpcie
 ./sim/run_sim.sh
 ```
 
-目前 suite 為 18 個 self-checking tests：
+目前 suite 為 26 個 self-checking tests：
 
 | Testbench | 驗證重點 |
 |---|---|
@@ -33,7 +33,7 @@ cd /home/zzlee/qpcie
 最新結果：
 
 ```text
-Simulation Summary: 18 Passed, 0 Failed
+Simulation Summary: 26 Passed, 0 Failed
 ```
 
 ## 2. 關鍵 performance assertions
@@ -76,10 +76,10 @@ rm -rf build/qpcie_a50t_proj
 .../impl_1/a50t_pcie_card_top_drc_routed.rpt
 ```
 
-commit `2450dcb7` signoff：
+latest signoff（build ID `0x14CEA1AD`）：
 
 ```text
-WNS +0.069 ns, TNS 0
+WNS +0.079 ns, TNS 0
 WHS +0.041 ns, THS 0
 0 critical warnings, 0 errors
 LUT 31.33%, FF 16.01%, BRAM 36.67%, DSP 31.67%

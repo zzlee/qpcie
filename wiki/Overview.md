@@ -12,7 +12,7 @@ TPG YUV444 @150 MHz
 → Host V4L2 MMAP buffers
 ```
 
-1080p60 已實機通過；4K60 RTL、driver、timing 已完成，commit `2450dcb7` 等待最新實機 gate。
+1080p60與4K loopback已實機通過。最新16-tag H2C direct-I/O-VA 4K loopback為78.77 FPS、H2C/C2H各934.60 MiB/s、100% bit-exact；host SGL linked-page仍待獨立驗證。
 
 ## 2. 分層架構
 

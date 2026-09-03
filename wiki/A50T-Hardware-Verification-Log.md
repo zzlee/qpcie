@@ -13,8 +13,8 @@
 | 1080p60 paced NV12M | ✅ | 60/60、59.394 FPS、sequence 0..59、彩條正確 |
 | 128-byte requester | ✅ | SG 與 video benchmark 實機通過 |
 | 150 MHz TPG + CDC | ✅ | 240.526 FPS / 713.47 MiB/s / data errors 0 |
-| 最新 1080p/4K mode switch | ⏳ | commit `2450dcb7` 等待實機 |
-| 4K60 600 frames | ⏳ | 尚待直接實機驗證 |
+| 16-tag H2C 4K loopback | ✅ | 600/600、78.77 FPS、934.60 MiB/s each direction、100% bit-exact |
+| Host SGL fetch linked pages | ⏳ | 實測planes均為`nents=1` direct IOVA DMA；尚待強制SGL測試 |
 
 ## 2. 重大除錯歷程
 
@@ -122,13 +122,27 @@ Data errors: 0
 
 已超過 4K60 payload 門檻，但只有 0.22% 餘裕，仍必須測試真正 3840×2160 buffers。
 
-## 5. 最新待驗證 checkpoint
+### 4.5 16-tag H2C direct-I/O-VA loopback
 
 ```text
-Commit: 2450dcb7
-Bitstream SHA256:
-52b4b02c6fa747bd9f5e1a340e395c18322b4fb5adf884654a36730eb61f7a81
-Firmware hash: 0x2450DCB7
+Build ID: 0x14CEA1AD
+Bitstream SHA256: d7e3b29f517837177af373cc32544889b4abc58ad7677c12693842d89704633c
+600/600 frames
+78.77 FPS
+934.60 MiB/s each direction (1.869 GiB/s bidirectional)
+RTT average: 83.707 ms
+100% BIT-EXACT MATCH PASS
 ```
 
-實機 gate：600/600 frames、`>=711.91 MiB/s`、sequence 連續、data errors 0、`drained=1`、head=tail、`video_errors=0`、無 SMMU fault。
+driver log顯示每個NV12 plane均為`nents=1`，故本次走direct DMA且未啟用host SGL fetch。Jetson IOMMU/SMMU仍處於strict DMA mapping；詳見[Host SGL Fetch 驗證與實施計畫](Host-SGL-Validation-Plan.md)。
+
+## 5. 下一個驗證 checkpoint
+
+```text
+Baseline commits: `88f534b`, `14cea1a`, `330b251`
+Baseline build ID: 0x14CEA1AD
+Baseline bitstream SHA256:
+d7e3b29f517837177af373cc32544889b4abc58ad7677c12693842d89704633c
+```
+
+下一個實機gate是`force_sgl_fetch=1`下的host SGL fetch linked-page correctness，而非重複direct-DMA benchmark。要求詳見[Host SGL Fetch 驗證與實施計畫](Host-SGL-Validation-Plan.md)。

@@ -1,6 +1,6 @@
 # Wiki - Linux Kernel Scatterlist 轉置至 PCIe DMA Descriptor 範例
 
-> **狀態：通用/未啟用路徑。** 目前 A50T V4L2 bring-up 使用 `vb2_dma_contig_memops` 與 MMAP，沒有啟用 USERPTR/DMABUF scatterlist。本文保留作未來 SG memory support 參考，不代表目前 driver 的 capture 實作。
+> **狀態：條件式啟用。** A50T V4L2使用`vb2_dma_sg`取得DMA-mapped `sg_table`；只有任一plane的`nents > 1`時才啟用FPGA host SGL fetch。Jetson Orin NX最新4K實測中每個plane均為`nents=1`，因此實際走direct IOVA DMA。強制SGL linked-page驗證計畫見[Host SGL Fetch 驗證與實施計畫](Host-SGL-Validation-Plan.md)。
 
 在 Linux Kernel PCIe 驅動程式中，系統記憶體通常以不連續的頁面 (Pages) 形式存在，並透過 Linux Kernel 的 **`struct scatterlist` (SG List / `struct sg_table`)** 來描述實體記憶體分段。
 
@@ -11,7 +11,7 @@
 ## 1. Linux Kernel DMA 映射基本概念
 
 1. **`dma_map_sgtable()`**：將系統 Kernel/User 頁面進行 IOMMU / Cache 快取同步，並取得 PCIe 總線可存取的 DMA 位址 (`dma_addr_t`)。
-2. **`sg_dma_address(sg)`**：取得第 $i$ 個記憶體分段的 PCIe DMA 實體位址（對應 Descriptor 之 `src_addr` 或 `dst_addr`）。
+2. **`sg_dma_address(sg)`**：取得第 $i$ 個記憶體分段的device-visible DMA位址（可能是IOMMU IOVA，對應Descriptor之`src_addr`或`dst_addr`）。
 3. **`sg_dma_len(sg)`**：取得第 $i$ 個分段的傳輸位元組長度（對應 Descriptor 之 `len`）。
 
 ---

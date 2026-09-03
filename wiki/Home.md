@@ -10,7 +10,7 @@ Xilinx TPG YUV444 → rounded 2×2 chroma downsample → NV12M
 ```
 
 > **先讀：[A50T NV12M 實作總結與驗證結果](A50T-NV12M-Implementation-and-Results.md)**
-> 這是目前 commit、架構、效能、bitstream 與待驗證項目的權威摘要。注意：1080p60 已實機通過；最新 4K60 mode 尚待直接實機驗證。
+> 這是目前 commit、架構、效能、bitstream 與待驗證項目的權威摘要。16-tag H2C direct-I/O-VA loopback已於4K 600 frames實機通過；host SGL fetch linked-page尚待獨立驗證。
 
 ## 文件導覽
 
@@ -40,6 +40,7 @@ Xilinx TPG YUV444 → rounded 2×2 chroma downsample → NV12M
 - [Multi-Channel Stream Architecture](Multi-Channel-Stream-Architecture.md)
 - [Multi-Channel Video/Audio Config](Multi-Channel-Video-Audio-Config.md)
 - [Linux Scatterlist Guide](Linux-Driver-Scatterlist-Guide.md)
+- [Host SGL Fetch 驗證與實施計畫](Host-SGL-Validation-Plan.md)
 - [Low-Latency Slice Capture](Low-Latency-Capture-Guide.md)
 - [System Support Layer](System-Support-Layer.md)
 - [AU15P Feasibility](AU15P_FEASIBILITY.md)

@@ -1,6 +1,6 @@
 # A50T NV12M 實作總結與驗證結果
 
-> **文件基準：commit `2450dcb7`**  
+> **文件基準：commits `88f534b`、`14cea1a`、`330b251`**
 > 本文件是目前 A50T 實作、驗證結果與限制的唯一摘要來源。歷史設計文件若與本文衝突，以本文及目前 RTL/driver 原始碼為準。
 
 ## 1. 目前交付狀態
@@ -13,8 +13,9 @@
 | 128-byte MWr requester | ✅ 仿真與實機通過 | 4 KiB boundary 自動切割、多 beat backpressure 正確 |
 | Pipeline NV12 frontend | ✅ 仿真與實機通過 | 1080p benchmark `240.526 FPS / 713.47 MiB/s` |
 | 150 MHz TPG + CDC | ✅ 實機通過 | 1080p benchmark 超過 4K60 payload 門檻 |
-| V4L2 1080p60/4K60 modes | ✅ 已實作 | commit `2450dcb7`，等待最新 bitstream 實機驗證 |
-| 4K60 600-frame capture | ⏳ 待實機驗證 | 仿真達標；尚不可宣稱實機 4K60 已通過 |
+| V4L2 1080p60/4K60 modes | ✅ 實機通過 | 4K loopback 600 frames已驗證 |
+| 16-tag H2C 4K loopback | ✅ 實機通過 | 78.77 FPS、934.60 MiB/s each direction、100% bit-exact |
+| Host SGL fetch linked pages | ⏳ 待驗證 | 當前實測planes均為`nents=1`，故使用direct IOVA DMA |
 | ALSA、Video channel 1–3 | 暫停 | bring-up 階段刻意停用 |
 
 ## 2. 目標平台與固定規格
@@ -25,7 +26,7 @@
 - Host 驗證平台：ARM64 NVIDIA Jetson Orin NX。
 - 視訊輸出格式：V4L2 multi-planar `NV12M` (`NM12`)。
 - 已實作 modes：`1920×1080@60`、`3840×2160@60`。
-- 目前只註冊一個 capture node；只啟用 `V4L2_MEMORY_MMAP` 與 `vb2_dma_contig_memops`。
+- 目前只註冊一個capture node；只啟用`V4L2_MEMORY_MMAP`與`vb2_dma_sg`。DMA API可將planes合併為單一IOVA segment。
 
 ## 3. 最終視訊資料路徑
 
@@ -233,10 +234,25 @@ driver 另修正：STREAMON 讀回 `REG_PACER_CTRL` 驗證（不符即 `-EIO`）
 
 對 4K60 需求 711.91 MiB/s 的餘裕從 `0.22%` 提升為 **`12.6%`**。
 
+### 7.6 16-tag H2C direct-I/O-VA loopback（最新）
+
+commits `88f534b`與`14cea1a`將H2C host MRd window擴為16個outstanding requests（Tags 2..17），並修正reorder packing control path。commit `330b251`新增V4L2 DMA模式診斷。
+
+```text
+Build ID              : 0x14CEA1AD
+Bitstream SHA256      : d7e3b29f517837177af373cc32544889b4abc58ad7677c12693842d89704633c
+4K loopback           : 600/600 frames, 78.77 FPS
+H2C / C2H throughput  : 934.60 MiB/s each direction
+Bidirectional         : 1.869 GiB/s
+RTT average           : 83.707 ms
+Data integrity        : 100% BIT-EXACT MATCH PASS
+```
+
+每個Y/UV plane為`nents=1`，所以這是direct contiguous-I/O-VA DMA，不是host SGL fetch。Jetson啟用Tegra SMMU strict DMA mapping；SGL linked-page驗證計畫見[Host SGL Fetch 驗證與實施計畫](Host-SGL-Validation-Plan.md)。
+
 ## 8. 仿真與 timing 結果
 
-完整 regression：`19/19 PASS`（含 `tb_video_cdc_system` 整合 TB 與
-`tb_interrupt_ctrl` MSI in-flight 回歸測試）。
+完整 regression：`26/26 PASS`，包含16-tag H2C reorder、out-of-order CplD與Tag reuse回歸測試。
 
 關鍵性能仿真：
 
@@ -247,10 +263,10 @@ driver 另修正：STREAMON 讀回 `REG_PACER_CTRL` 驗證（不符即 `-EIO`）
 
 4K test 使用約 75% random RQ ready，input stalls 為 0。
 
-最新 implementation（commit `2450dcb7`）：
+最新 implementation（build ID `0x14CEA1AD`）：
 
 ```text
-WNS  +0.069 ns
+WNS  +0.079 ns
 TNS   0.000 ns
 WHS  +0.041 ns
 Critical warnings: 0
@@ -266,8 +282,8 @@ Bitstream：
 
 ```text
 build/qpcie_a50t_proj/qpcie_a50t_card.runs/impl_1/a50t_pcie_card_top.bit
-SHA256: 52b4b02c6fa747bd9f5e1a340e395c18322b4fb5adf884654a36730eb61f7a81
-Firmware hash: 0x2450DCB7
+SHA256: d7e3b29f517837177af373cc32544889b4abc58ad7677c12693842d89704633c
+Firmware hash: 0x14CEA1AD
 ```
 
 ## 9. 實作提交歷程
@@ -287,10 +303,13 @@ Firmware hash: 0x2450DCB7
 | `ffff925` | NV12 引擎遷入 150 MHz video domain、`video_req_cdc` |
 | `21d6b79` | CDC 拍數/重複接受/FWFT 潛後修正、completion toggle CDC、pacer readback |
 | `3d9c228` | interrupt pending counter（MSI in-flight 不丟 completion）、S_PARM 覆寫移除 |
+| `88f534b` | H2C tagged-read window擴為16 outstanding requests |
+| `14cea1a` | 縮短H2C reorder pack control path，維持正timing |
+| `330b251` | V4L2 runtime log標示direct DMA或host SGL fetch模式 |
 
-## 10. 最新 checkpoint 驗證步驟
+## 10. 硬體驗證程序
 
-請勿由自動化代理直接燒錄；由使用者執行：
+自動化coding agent不得燒錄bitstream或操作實機；由持有測試機的使用者執行。
 
 ```bash
 cd ~/qpcie
@@ -315,19 +334,19 @@ v4l2-ctl -d /dev/video0 --list-formats-ext
   --out /tmp/qpcie-4k-nv12.yuv
 ```
 
-4K 600-frame gate：
+direct-DMA 4K 600-frame baseline gate：
 
 ```bash
 ./test_app/v4l2_test_app --dev /dev/video0 \
   --width 3840 --height 2160 --benchmark --frames 600 --pattern 9
 ```
 
-必要條件：
+已通過的必要條件：
 
 - `Captured: 600/600`。
 - sequence 連續。
 - `Data errors: 0`。
-- throughput `>= 711.91 MiB/s`。
+- H2C/C2H各自`934.60 MiB/s`。
 - `drained=1`、`head == tail`、`video_errors=0`。
 - 無 SMMU/context fault/decode error。
 
@@ -337,4 +356,4 @@ v4l2-ctl -d /dev/video0 --list-formats-ext
    801 MiB/s、4K60 uncapped 67.5 FPS / 801.30 MiB/s、back-to-back 再現、
    data errors 0。
 2. ALSA、channel 1–3、USERPTR、DMABUF import/export、slice DMA 與 GPU P2P 都不是目前已驗證交付範圍。
-3. 目前 capture bring-up 只保證 DMA-contiguous MMAP buffers。
+3. 目前production baseline是DMA API合併後的direct-I/O-VA MMAP buffers；host SGL linked-page雖已實作但尚未完成實機驗證。
