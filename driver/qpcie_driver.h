@@ -46,6 +46,17 @@
     #endif
 #endif
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
+    #define qpcie_hrtimer_init(timer, fn, clkid, mode) \
+        hrtimer_setup(timer, fn, clkid, mode)
+#else
+    #define qpcie_hrtimer_init(timer, fn, clkid, mode) \
+        do { \
+            hrtimer_init(timer, clkid, mode); \
+            (timer)->function = (fn); \
+        } while (0)
+#endif
+
 #define QPCIE_VENDOR_ID   0x12AB /* Custom PCI Vendor ID */
 #define QPCIE_DEVICE_ID   0xE380 /* Custom PCIe DMA Device ID */
 
@@ -243,6 +254,10 @@ struct qpcie_alsa_channel {
     spinlock_t slock;
     u32 play_buffer_pos;
     u32 cap_buffer_pos;
+    struct hrtimer play_timer;
+    bool play_timer_active;
+    snd_pcm_uframes_t play_hw_ptr;
+    snd_pcm_uframes_t play_period_accum;
     u32 pattern_id;
     u32 volume;
 };

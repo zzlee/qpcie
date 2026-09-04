@@ -128,26 +128,26 @@ static int find_channel_card(int channel_id) {
     if (!fp) return -1;
 
     char line[256];
-    int card_num = -1;
-    char target_str1[32], target_str2[32];
-    snprintf(target_str1, sizeof(target_str1), "Audio-%d", channel_id);
-    snprintf(target_str2, sizeof(target_str2), "Audio Ch%d", channel_id);
+    int cur_card = -1;
+    char pat1[32], pat2[32], pat3[32], pat4[32];
+    snprintf(pat1, sizeof(pat1), "Audio%d", channel_id);
+    snprintf(pat2, sizeof(pat2), "Audio-%d", channel_id);
+    snprintf(pat3, sizeof(pat3), "Audio Ch%d", channel_id);
+    snprintf(pat4, sizeof(pat4), "Channel %d", channel_id);
 
     while (fgets(line, sizeof(line), fp)) {
         int num;
-        char id[64];
-        if (sscanf(line, " %d [%63[^]:]", &num, id) == 2) {
-            if (strstr(id, target_str1) || strstr(id, target_str2)) {
-                card_num = num;
-                break;
-            }
+        if (sscanf(line, " %d [", &num) == 1) {
+            cur_card = num;
         }
-        if (strstr(line, target_str1) || strstr(line, target_str2)) {
-            if (card_num >= 0) break;
+        if (cur_card >= 0 && (strstr(line, pat1) || strstr(line, pat2) ||
+                              strstr(line, pat3) || strstr(line, pat4))) {
+            fclose(fp);
+            return cur_card;
         }
     }
     fclose(fp);
-    return card_num;
+    return -1;
 }
 
 struct channel_test_context {
@@ -209,7 +209,7 @@ static void *playback_thread_fn(void *arg) {
     uint64_t frame_idx = 0;
     double tone_freq = 440.0 * ctx->channel_id; // Unique frequency per channel (440, 880, 1320 Hz)
 
-    while (!ctx->stop && frame_idx < total_frames) {
+    while (!ctx->stop && frame_idx < total_frames + (ctx->sample_rate * 2)) {
         for (int i = 0; i < PERIOD_FRAMES; i++) {
             double t = (double)(frame_idx + i) / (double)ctx->sample_rate;
             int32_t pcm_l = (int32_t)(sin(2.0 * M_PI * tone_freq * t) * 8388600.0);
@@ -337,6 +337,8 @@ static void *capture_thread_fn(void *arg) {
         ctx->frames_recv = frames_captured;
     }
 
+    ctx->stop = true; // Signal playback thread to finish cleanly
+
     if (ctx->latency_count > 0) {
         ctx->avg_latency_us /= (double)ctx->latency_count;
     }
@@ -434,7 +436,18 @@ int main(int argc, char **argv) {
 
     printf("\n--> Starting Concurrent Playback & Capture Streams on %d Channel(s)...\n", active_channels);
 
-    // Launch Capture Threads first
+    // Launch Playback Threads first so samples fill FIFO
+    for (int ch = start_ch; ch <= end_ch; ch++) {
+        if (pthread_create(&play_threads[ch], NULL, playback_thread_fn, &ctxs[ch]) != 0) {
+            perror("Failed to create playback thread");
+            return EXIT_FAILURE;
+        }
+    }
+
+    // Brief settling delay before starting capture
+    usleep(20000);
+
+    // Launch Capture Threads
     for (int ch = start_ch; ch <= end_ch; ch++) {
         if (pthread_create(&cap_threads[ch], NULL, capture_thread_fn, &ctxs[ch]) != 0) {
             perror("Failed to create capture thread");
@@ -442,16 +455,6 @@ int main(int argc, char **argv) {
         }
     }
 
-    // Brief settling delay before starting playback
-    usleep(50000);
-
-    // Launch Playback Threads
-    for (int ch = start_ch; ch <= end_ch; ch++) {
-        if (pthread_create(&play_threads[ch], NULL, playback_thread_fn, &ctxs[ch]) != 0) {
-            perror("Failed to create playback thread");
-            return EXIT_FAILURE;
-        }
-    }
 
     // Wait for all threads to complete
     for (int ch = start_ch; ch <= end_ch; ch++) {

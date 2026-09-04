@@ -7,6 +7,8 @@
  */
 
 #include "qpcie_driver.h"
+#include <linux/ktime.h>
+#include <linux/hrtimer.h>
 
 static const struct snd_pcm_hardware qpcie_alsa_hardware = {
     .info = (SNDRV_PCM_INFO_MMAP |
@@ -136,8 +138,103 @@ static const struct snd_pcm_ops qpcie_alsa_capture_ops = {
 };
 
 /* ========================================================================= */
-/* ALSA Playback Stream Callbacks (H2C Loopback FIFO)                        */
+/* ALSA Playback Stream Callbacks (H2C Loopback FIFO + HRTimer Pacer)        */
 /* ========================================================================= */
+
+static void qpcie_alsa_pump_playback(struct qpcie_alsa_channel *ach)
+{
+    struct qpcie_dev *qdev = ach->qdev;
+    struct snd_pcm_substream *substream;
+    struct snd_pcm_runtime *runtime;
+    snd_pcm_uframes_t appl_ptr, buf_frames, period_frames;
+    snd_pcm_sframes_t avail;
+    u32 *buf;
+    u32 reg_data;
+    unsigned long flags;
+    int periods_elapsed = 0;
+
+    spin_lock_irqsave(&ach->slock, flags);
+    substream = ach->play_substream;
+    if (!substream || !snd_pcm_running(substream)) {
+        spin_unlock_irqrestore(&ach->slock, flags);
+        return;
+    }
+
+    runtime = substream->runtime;
+    if (!runtime || !runtime->dma_area || !runtime->control) {
+        spin_unlock_irqrestore(&ach->slock, flags);
+        return;
+    }
+
+    appl_ptr = READ_ONCE(runtime->control->appl_ptr);
+    buf_frames = runtime->buffer_size;
+    period_frames = runtime->period_size;
+    buf = (u32 *)runtime->dma_area;
+    reg_data = REG_AUDIO_H2C_DATA_CH(ach->channel_id);
+
+    avail = (snd_pcm_sframes_t)(appl_ptr - ach->play_hw_ptr);
+    if (avail <= 0) {
+        spin_unlock_irqrestore(&ach->slock, flags);
+        return;
+    }
+    if (avail > (snd_pcm_sframes_t)buf_frames) {
+        avail = buf_frames;
+    }
+
+    while (avail > 0) {
+        u32 st = ioread32(qdev->bar0_mmio + REG_AUDIO_H2C_STATUS);
+        if (H2C_FIFO_FULL_CH(st, ach->channel_id))
+            break;
+
+        u32 cur_frame_idx = (u32)(ach->play_hw_ptr % buf_frames);
+        u32 ch;
+        for (ch = 0; ch < runtime->channels; ch++) {
+            u32 sample = buf[cur_frame_idx * runtime->channels + ch];
+            iowrite32(sample, qdev->bar0_mmio + reg_data);
+        }
+
+        ach->play_hw_ptr++;
+        ach->play_period_accum++;
+        avail--;
+
+        while (ach->play_period_accum >= period_frames) {
+            ach->play_period_accum -= period_frames;
+            periods_elapsed++;
+        }
+    }
+
+    spin_unlock_irqrestore(&ach->slock, flags);
+
+    while (periods_elapsed-- > 0) {
+        snd_pcm_period_elapsed(substream);
+    }
+}
+
+static enum hrtimer_restart qpcie_alsa_play_timer_callback(struct hrtimer *timer)
+{
+    struct qpcie_alsa_channel *ach = container_of(timer, struct qpcie_alsa_channel, play_timer);
+    bool active;
+    unsigned long flags;
+
+    spin_lock_irqsave(&ach->slock, flags);
+    active = ach->play_timer_active;
+    spin_unlock_irqrestore(&ach->slock, flags);
+
+    if (!active)
+        return HRTIMER_NORESTART;
+
+    qpcie_alsa_pump_playback(ach);
+
+    spin_lock_irqsave(&ach->slock, flags);
+    active = ach->play_timer_active;
+    spin_unlock_irqrestore(&ach->slock, flags);
+
+    if (!active)
+        return HRTIMER_NORESTART;
+
+    hrtimer_forward_now(timer, ms_to_ktime(1));
+    return HRTIMER_RESTART;
+}
 
 static int qpcie_alsa_play_open(struct snd_pcm_substream *substream)
 {
@@ -152,6 +249,13 @@ static int qpcie_alsa_play_open(struct snd_pcm_substream *substream)
 static int qpcie_alsa_play_close(struct snd_pcm_substream *substream)
 {
     struct qpcie_alsa_channel *ach = snd_pcm_substream_chip(substream);
+    unsigned long flags;
+
+    spin_lock_irqsave(&ach->slock, flags);
+    ach->play_timer_active = false;
+    spin_unlock_irqrestore(&ach->slock, flags);
+
+    hrtimer_cancel(&ach->play_timer);
     ach->play_substream = NULL;
     return 0;
 }
@@ -160,8 +264,16 @@ static int qpcie_alsa_play_prepare(struct snd_pcm_substream *substream)
 {
     struct qpcie_alsa_channel *ach = snd_pcm_substream_chip(substream);
     struct qpcie_dev *qdev = ach->qdev;
+    unsigned long flags;
 
+    spin_lock_irqsave(&ach->slock, flags);
+    ach->play_timer_active = false;
+    ach->play_hw_ptr = 0;
+    ach->play_period_accum = 0;
     ach->play_buffer_pos = 0;
+    spin_unlock_irqrestore(&ach->slock, flags);
+
+    hrtimer_cancel(&ach->play_timer);
 
     // Reset/flush H2C FIFO on prepare
     if (ach->channel_id >= 1 && ach->channel_id <= 3) {
@@ -177,14 +289,30 @@ static int qpcie_alsa_play_trigger(struct snd_pcm_substream *substream, int cmd)
 {
     struct qpcie_alsa_channel *ach = snd_pcm_substream_chip(substream);
     struct qpcie_dev *qdev = ach->qdev;
+    unsigned long flags;
 
     switch (cmd) {
     case SNDRV_PCM_TRIGGER_START:
+    case SNDRV_PCM_TRIGGER_RESUME:
+        spin_lock_irqsave(&ach->slock, flags);
+        ach->play_timer_active = true;
+        spin_unlock_irqrestore(&ach->slock, flags);
+
+        hrtimer_start(&ach->play_timer, ms_to_ktime(1), HRTIMER_MODE_REL);
+        qpcie_alsa_pump_playback(ach);
         dev_info(&qdev->pdev->dev, "[ALSA Ch%d Playback] Started\n", ach->channel_id);
         break;
+
     case SNDRV_PCM_TRIGGER_STOP:
+    case SNDRV_PCM_TRIGGER_SUSPEND:
+        spin_lock_irqsave(&ach->slock, flags);
+        ach->play_timer_active = false;
+        spin_unlock_irqrestore(&ach->slock, flags);
+
+        hrtimer_cancel(&ach->play_timer);
         dev_info(&qdev->pdev->dev, "[ALSA Ch%d Playback] Stopped\n", ach->channel_id);
         break;
+
     default:
         return -EINVAL;
     }
@@ -194,55 +322,25 @@ static int qpcie_alsa_play_trigger(struct snd_pcm_substream *substream, int cmd)
 static snd_pcm_uframes_t qpcie_alsa_play_pointer(struct snd_pcm_substream *substream)
 {
     struct qpcie_alsa_channel *ach = snd_pcm_substream_chip(substream);
-    return bytes_to_frames(substream->runtime, ach->play_buffer_pos);
+    struct snd_pcm_runtime *runtime = substream->runtime;
+    snd_pcm_uframes_t pos;
+    unsigned long flags;
+
+    spin_lock_irqsave(&ach->slock, flags);
+    pos = ach->play_hw_ptr % runtime->buffer_size;
+    spin_unlock_irqrestore(&ach->slock, flags);
+
+    return pos;
 }
 
 static int qpcie_alsa_play_ack(struct snd_pcm_substream *substream)
 {
     struct qpcie_alsa_channel *ach = snd_pcm_substream_chip(substream);
-    struct qpcie_dev *qdev = ach->qdev;
-    struct snd_pcm_runtime *runtime = substream->runtime;
-    snd_pcm_uframes_t appl_ptr;
-    snd_pcm_uframes_t buf_frames;
-    snd_pcm_uframes_t cur_frames;
-    snd_pcm_uframes_t avail_frames;
-    u32 *buf;
-    u32 reg_data;
-    size_t i;
-
-    if (!runtime || !runtime->dma_area || !runtime->control)
-        return 0;
 
     if (ach->channel_id < 1 || ach->channel_id > 3)
         return 0;
 
-    appl_ptr = runtime->control->appl_ptr;
-    buf_frames = runtime->buffer_size;
-    cur_frames = bytes_to_frames(runtime, ach->play_buffer_pos);
-    buf = (u32 *)runtime->dma_area;
-    reg_data = REG_AUDIO_H2C_DATA_CH(ach->channel_id);
-
-    if (appl_ptr >= cur_frames)
-        avail_frames = appl_ptr - cur_frames;
-    else
-        avail_frames = (appl_ptr + buf_frames) - cur_frames;
-
-    if (avail_frames > buf_frames)
-        avail_frames = buf_frames;
-
-    while (avail_frames > 0) {
-        u32 st = ioread32(qdev->bar0_mmio + REG_AUDIO_H2C_STATUS);
-        if (H2C_FIFO_FULL_CH(st, ach->channel_id))
-            break;
-
-        for (i = 0; i < runtime->channels; i++) {
-            u32 sample_idx = (cur_frames * runtime->channels + i) % (buf_frames * runtime->channels);
-            iowrite32(buf[sample_idx], qdev->bar0_mmio + reg_data);
-        }
-        cur_frames = (cur_frames + 1) % buf_frames;
-        avail_frames--;
-    }
-    ach->play_buffer_pos = frames_to_bytes(runtime, cur_frames);
+    qpcie_alsa_pump_playback(ach);
     return 0;
 }
 
@@ -256,6 +354,7 @@ static const struct snd_pcm_ops qpcie_alsa_playback_ops = {
     .pointer     = qpcie_alsa_play_pointer,
     .ack         = qpcie_alsa_play_ack,
 };
+
 
 /* ========================================================================= */
 /* ALSA Control Framework (BAR1 Audio Pattern Gen Controls for Ch0)         */
@@ -381,6 +480,13 @@ int qpcie_alsa_init(struct qpcie_dev *qdev)
         ach->channel_id = i;
         spin_lock_init(&ach->slock);
 
+        if (i > 0) {
+            qpcie_hrtimer_init(&ach->play_timer, qpcie_alsa_play_timer_callback, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+            ach->play_timer_active = false;
+            ach->play_hw_ptr = 0;
+            ach->play_period_accum = 0;
+        }
+
         snprintf(card_id, sizeof(card_id), "QPCIe-Audio-%d", i);
         ret = snd_card_new(&qdev->pdev->dev, -1, card_id, THIS_MODULE, 0, &card);
         if (ret) {
@@ -464,8 +570,13 @@ void qpcie_alsa_remove(struct qpcie_dev *qdev)
 {
     int i;
     for (i = 0; i < NUM_AUDIO_CHANNELS; i++) {
-        if (qdev->alsa_ch[i].card)
-            snd_card_free(qdev->alsa_ch[i].card);
+        struct qpcie_alsa_channel *ach = &qdev->alsa_ch[i];
+        if (i > 0) {
+            ach->play_timer_active = false;
+            hrtimer_cancel(&ach->play_timer);
+        }
+        if (ach->card)
+            snd_card_free(ach->card);
     }
 }
 
@@ -485,12 +596,7 @@ void qpcie_alsa_irq_handler(struct qpcie_dev *qdev, u32 status)
                 ach->cap_buffer_pos = hw_pos;
                 snd_pcm_period_elapsed(ach->cap_substream);
             }
-
-            // Advance playback period if playback substream is running
-            if (i > 0 && ach->play_substream && snd_pcm_running(ach->play_substream)) {
-                qpcie_alsa_play_ack(ach->play_substream);
-                snd_pcm_period_elapsed(ach->play_substream);
-            }
         }
     }
 }
+
