@@ -33,14 +33,16 @@ Xilinx TPG YUV444 → rounded 2×2 chroma downsample → NV12M
 - [A50T pg054 移植記錄](A50T_MIGRATION.md)
 - [歷史 A50T TLP Loopback](A50T-TLP-Loopback-Test.md)
 
-### 設計延伸與歷史文件
+### 設計延伸與未來規劃
 
-下列文件描述可參數化架構或未來方向，不代表目前 A50T bring-up 已啟用：
+下列文件描述未來規劃、可參數化架構或前瞻設計：
 
+- [影音同步驗證計畫 (AV Sync Verification Plan)](AV-Sync-Verification-Plan.md)
+- [SGL DMA 模式下 Stride 處理規劃 (SGL DMA Stride Handling Plan)](SGL-DMA-Stride-Handling-Plan.md)
+- [Host SGL Fetch 驗證與實施計畫](Host-SGL-Validation-Plan.md)
 - [Multi-Channel Stream Architecture](Multi-Channel-Stream-Architecture.md)
 - [Multi-Channel Video/Audio Config](Multi-Channel-Video-Audio-Config.md)
 - [Linux Scatterlist Guide](Linux-Driver-Scatterlist-Guide.md)
-- [Host SGL Fetch 驗證與實施計畫](Host-SGL-Validation-Plan.md)
 - [Low-Latency Slice Capture](Low-Latency-Capture-Guide.md)
 - [System Support Layer](System-Support-Layer.md)
 - [AU15P Feasibility](AU15P_FEASIBILITY.md)
