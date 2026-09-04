@@ -205,11 +205,10 @@ static void *playback_thread_fn(void *arg) {
         return NULL;
     }
 
-    uint64_t total_frames = (uint64_t)ctx->duration_sec * ctx->sample_rate;
     uint64_t frame_idx = 0;
     double tone_freq = 440.0 * ctx->channel_id; // Unique frequency per channel (440, 880, 1320 Hz)
 
-    while (!ctx->stop && frame_idx < total_frames + (ctx->sample_rate * 2)) {
+    while (!ctx->stop) {
         for (int i = 0; i < PERIOD_FRAMES; i++) {
             double t = (double)(frame_idx + i) / (double)ctx->sample_rate;
             int32_t pcm_l = (int32_t)(sin(2.0 * M_PI * tone_freq * t) * 8388600.0);
@@ -472,8 +471,8 @@ int main(int argc, char **argv) {
     bool all_passed = true;
 
     for (int ch = start_ch; ch <= end_ch; ch++) {
-        bool pass = (ctxs[ch].frames_recv >= (ctxs[ch].frames_sent * 90 / 100)) &&
-                    (ctxs[ch].frames_sent > 0) &&
+        uint64_t target_frames = (uint64_t)ctxs[ch].duration_sec * ctxs[ch].sample_rate;
+        bool pass = (ctxs[ch].frames_recv >= target_frames) &&
                     (ctxs[ch].swap_errors == 0) &&
                     (ctxs[ch].xrun_errors == 0);
 

@@ -183,7 +183,7 @@ static void qpcie_alsa_pump_playback(struct qpcie_alsa_channel *ach)
 
     while (avail > 0) {
         u32 st = ioread32(qdev->bar0_mmio + REG_AUDIO_H2C_STATUS);
-        if (H2C_FIFO_FULL_CH(st, ach->channel_id))
+        if (H2C_FIFO_FULL_CH(st, ach->channel_id) || H2C_FIFO_COUNT_CH(st, ach->channel_id) >= 240)
             break;
 
         u32 cur_frame_idx = (u32)(ach->play_hw_ptr % buf_frames);
