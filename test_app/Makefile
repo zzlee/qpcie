@@ -6,7 +6,7 @@ CC ?= gcc
 CFLAGS ?= -O2 -Wall -I.
 LDFLAGS ?= -lm -pthread
 
-TARGETS = qpcie_sanity_check v4l2_test_app alsa_test_app dmabuf_p2p_test_app loopback_test_app
+TARGETS = qpcie_sanity_check v4l2_test_app alsa_test_app alsa_loopback_test_app dmabuf_p2p_test_app loopback_test_app
 
 all: $(TARGETS)
 
@@ -18,6 +18,9 @@ v4l2_test_app: v4l2_test_app.c qpcie_control.h
 
 alsa_test_app: alsa_test_app.c qpcie_control.h
 	$(CC) $(CFLAGS) -o $@ alsa_test_app.c $(LDFLAGS)
+
+alsa_loopback_test_app: alsa_loopback_test_app.c
+	$(CC) $(CFLAGS) -o $@ alsa_loopback_test_app.c $(LDFLAGS)
 
 dmabuf_p2p_test_app: dmabuf_p2p_test_app.c qpcie_control.h
 	$(CC) $(CFLAGS) -o $@ dmabuf_p2p_test_app.c $(LDFLAGS)

@@ -18,6 +18,7 @@
 #include <linux/hrtimer.h>
 #include <linux/spinlock.h>
 #include <linux/sched.h>
+#include <linux/delay.h>
 #include <uapi/linux/sched/types.h>
 
 #include <media/v4l2-device.h>
@@ -50,7 +51,7 @@
 
 #define NUM_VIDEO_NODES    7
 #define NUM_VIDEO_CHANNELS 4
-#define NUM_AUDIO_CHANNELS 1
+#define NUM_AUDIO_CHANNELS 4
 #define RING_BUFFER_SIZE   128
 
 /* Per-channel IRQ status bits in REG_IRQ_STATUS (Offset 0x24) */
@@ -59,8 +60,10 @@
 #define IRQ_STATUS_C2H_CH(ch)       BIT(4 + (ch)) /* Bits 4..7: C2H Ch0..Ch3 */
 #define IRQ_STATUS_H2C_CH(ch)       BIT(7 + (ch)) /* Bits 8..10: H2C Ch1..Ch3 */
 #define IRQ_STATUS_AUDIO            BIT(11)       /* Bit 11: Audio Ch0 Period Done */
+#define IRQ_STATUS_AUDIO_CH(ch)     BIT(11 + (ch))/* Bits 11..14: Audio Ch0..Ch3 Period Done */
+#define IRQ_STATUS_AUDIO_MASK       (BIT(11) | BIT(12) | BIT(13) | BIT(14))
 #define IRQ_STATUS_CHANNEL_MASK     0x000007F0    /* Bits 4..10 */
-#define IRQ_STATUS_ALL_MASK         0x00000FF3    /* Bits 0..1, 4..11 */
+#define IRQ_STATUS_ALL_MASK         0x00007FF3    /* Bits 0..1, 4..14 */
 
 /* BAR1 Offsets */
 #define BAR1_OFFSET_TPG             0x0000
@@ -76,6 +79,7 @@
 #define DMA_CTRL_RUN         BIT(0)
 #define DMA_CTRL_RESET       BIT(1)
 #define DMA_CTRL_AUDIO_RUN   BIT(2)
+#define DMA_CTRL_AUDIO_RUN_CH(ch) BIT(2 + (ch))
 #define REG_H2C_RING_ADDR_L  0x08
 #define REG_H2C_RING_ADDR_H  0x0C
 #define REG_H2C_RING_CFG     0x10
@@ -94,6 +98,20 @@
 #define REG_AUDIO_DMA_ADDR_H 0x4C    /* Audio Ch0 Host Buffer Phys Addr High [63:32] */
 #define REG_AUDIO_DMA_CFG    0x94    /* [15:0]=buf_size_bytes, [31:16]=period_size_bytes */
 #define REG_AUDIO_DMA_PTR    0x98    /* Current hardware write pointer in bytes (RO) */
+
+/* Multi-Channel Audio C2H DMA & H2C Playback Registers (0x100..0x160) */
+#define REG_AUDIO_DMA_ADDR_CH_L(ch) (0x100 + ((ch) * 0x10))
+#define REG_AUDIO_DMA_ADDR_CH_H(ch) (0x104 + ((ch) * 0x10))
+#define REG_AUDIO_DMA_CFG_CH(ch)    (0x108 + ((ch) * 0x10))
+#define REG_AUDIO_DMA_PTR_CH(ch)    (0x10C + ((ch) * 0x10))
+
+#define REG_AUDIO_H2C_DATA_CH(ch)   (0x150 + (((ch) - 1) * 0x04))
+#define REG_AUDIO_H2C_STATUS        0x15C
+#define REG_AUDIO_LOOPBACK_CTRL     0x160
+
+#define H2C_FIFO_COUNT_CH(st, ch)   (((st) >> (((ch) - 1) * 8)) & 0xFF)
+#define H2C_FIFO_FULL_CH(st, ch)    (((st) >> (24 + ((ch) - 1))) & 0x01)
+#define H2C_FIFO_EMPTY_CH(st, ch)   (((st) >> (28 + ((ch) - 1))) & 0x01)
 #define REG_PACER_CTRL       0x74    /* Video Pacer Bypass Control (0=Bypass, 1=Enable) */
 #define REG_VIDEO_SUB_RESET  0x84    /* Bit0: TPG-only reset, Bit1: NV12 engine reset */
 #define REG_TPG_SOF_COUNT    0x88    /* Free-running TPG start-of-frame counter (RO) */
@@ -218,11 +236,13 @@ struct qpcie_alsa_channel {
     int channel_id;
     struct qpcie_dev *qdev;
     struct snd_card *card;
-    struct snd_pcm *pcm;
-    struct snd_pcm_substream *substream;
+    struct snd_pcm *pcm_play;              /* Device 0 on Cards 1..3 */
+    struct snd_pcm *pcm_cap;               /* Device 0 on Card 0, Device 1 on Cards 1..3 */
+    struct snd_pcm_substream *play_substream;
+    struct snd_pcm_substream *cap_substream;
     spinlock_t slock;
-    u32 buffer_pos;
-    u32 period_pos;
+    u32 play_buffer_pos;
+    u32 cap_buffer_pos;
     u32 pattern_id;
     u32 volume;
 };
@@ -280,7 +300,7 @@ void qpcie_dma_soft_reset(struct qpcie_dev *qdev);
 
 int qpcie_alsa_init(struct qpcie_dev *qdev);
 void qpcie_alsa_remove(struct qpcie_dev *qdev);
-void qpcie_alsa_irq_handler(struct qpcie_dev *qdev);
+void qpcie_alsa_irq_handler(struct qpcie_dev *qdev, u32 status);
 
 int qpcie_sysfs_init(struct qpcie_dev *qdev);
 void qpcie_sysfs_remove(struct qpcie_dev *qdev);

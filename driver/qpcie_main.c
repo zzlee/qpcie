@@ -33,8 +33,8 @@ static irqreturn_t qpcie_irq_handler(int irq, void *data)
         qpcie_v4l2_irq_handler(qdev);
 
     /* Pass completion interrupts to ALSA handler */
-    if (qdev->alsa_registered && (status & IRQ_STATUS_AUDIO))
-        qpcie_alsa_irq_handler(qdev);
+    if (qdev->alsa_registered && (status & IRQ_STATUS_AUDIO_MASK))
+        qpcie_alsa_irq_handler(qdev, status);
 
     iowrite32(status & IRQ_STATUS_ALL_MASK, qdev->bar0_mmio + REG_IRQ_STATUS);
     return IRQ_HANDLED;

@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Driver: qpcie_alsa.c
- * Description: ALSA Sound Card Driver for Custom PCIe AES3 Audio Streaming.
+ * Description: ALSA Sound Card Driver for Custom PCIe AES3 Multi-Channel Audio.
+ *              - Channel 0: Card 2 (Pattern Gen Capture Source, Device 0 Capture)
+ *              - Channels 1..3: Cards 3..5 (Loopback Channels, Device 0 Playback, Device 1 Capture)
  */
 
 #include "qpcie_driver.h"
@@ -24,36 +26,38 @@ static const struct snd_pcm_hardware qpcie_alsa_hardware = {
     .periods_max        = 16,
 };
 
-static int qpcie_alsa_open(struct snd_pcm_substream *substream)
+/* ========================================================================= */
+/* ALSA Capture Stream Callbacks (C2H DMA Engine)                            */
+/* ========================================================================= */
+
+static int qpcie_alsa_cap_open(struct snd_pcm_substream *substream)
 {
     struct qpcie_alsa_channel *ach = snd_pcm_substream_chip(substream);
     struct snd_pcm_runtime *runtime = substream->runtime;
 
-    ach->substream = substream;
+    ach->cap_substream = substream;
     runtime->hw = qpcie_alsa_hardware;
     return 0;
 }
 
-static int qpcie_alsa_close(struct snd_pcm_substream *substream)
+static int qpcie_alsa_cap_close(struct snd_pcm_substream *substream)
 {
     struct qpcie_alsa_channel *ach = snd_pcm_substream_chip(substream);
-    ach->substream = NULL;
+    ach->cap_substream = NULL;
     return 0;
 }
 
 static int qpcie_alsa_hw_params(struct snd_pcm_substream *substream, struct snd_pcm_hw_params *hw_params)
 {
-    /* Managed buffer allocated automatically by ALSA core via snd_pcm_set_managed_buffer_all */
     return 0;
 }
 
 static int qpcie_alsa_hw_free(struct snd_pcm_substream *substream)
 {
-    /* Managed buffer freed automatically by ALSA core */
     return 0;
 }
 
-static int qpcie_alsa_prepare(struct snd_pcm_substream *substream)
+static int qpcie_alsa_cap_prepare(struct snd_pcm_substream *substream)
 {
     struct qpcie_alsa_channel *ach = snd_pcm_substream_chip(substream);
     struct qpcie_dev *qdev = ach->qdev;
@@ -61,23 +65,29 @@ static int qpcie_alsa_prepare(struct snd_pcm_substream *substream)
     size_t buffer_bytes = snd_pcm_lib_buffer_bytes(substream);
     size_t period_bytes = snd_pcm_lib_period_bytes(substream);
 
-    ach->buffer_pos = 0;
-    ach->period_pos = 0;
+    ach->cap_buffer_pos = 0;
 
+    // Backward compatibility for Ch0 registers
     if (ach->channel_id == 0) {
         iowrite32(lower_32_bits(dma_addr), qdev->bar0_mmio + REG_AUDIO_DMA_ADDR_L);
         iowrite32(upper_32_bits(dma_addr), qdev->bar0_mmio + REG_AUDIO_DMA_ADDR_H);
         iowrite32(((u32)period_bytes << 16) | ((u32)buffer_bytes & 0xFFFF),
                   qdev->bar0_mmio + REG_AUDIO_DMA_CFG);
-
-        dev_info(&qdev->pdev->dev,
-                 "[ALSA Ch%d Prepare] DMA=0x%llX, buffer=%zu bytes, period=%zu bytes\n",
-                 ach->channel_id, (u64)dma_addr, buffer_bytes, period_bytes);
     }
+
+    // Program channel-specific C2H DMA address and config (0x100..0x13C)
+    iowrite32(lower_32_bits(dma_addr), qdev->bar0_mmio + REG_AUDIO_DMA_ADDR_CH_L(ach->channel_id));
+    iowrite32(upper_32_bits(dma_addr), qdev->bar0_mmio + REG_AUDIO_DMA_ADDR_CH_H(ach->channel_id));
+    iowrite32(((u32)period_bytes << 16) | ((u32)buffer_bytes & 0xFFFF),
+              qdev->bar0_mmio + REG_AUDIO_DMA_CFG_CH(ach->channel_id));
+
+    dev_info(&qdev->pdev->dev,
+             "[ALSA Ch%d Capture Prepare] DMA=0x%llX, buffer=%zu bytes, period=%zu bytes\n",
+             ach->channel_id, (u64)dma_addr, buffer_bytes, period_bytes);
     return 0;
 }
 
-static int qpcie_alsa_trigger(struct snd_pcm_substream *substream, int cmd)
+static int qpcie_alsa_cap_trigger(struct snd_pcm_substream *substream, int cmd)
 {
     struct qpcie_alsa_channel *ach = snd_pcm_substream_chip(substream);
     struct qpcie_dev *qdev = ach->qdev;
@@ -85,18 +95,15 @@ static int qpcie_alsa_trigger(struct snd_pcm_substream *substream, int cmd)
 
     switch (cmd) {
     case SNDRV_PCM_TRIGGER_START:
-        if (ach->channel_id == 0) {
-            ctrl = ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
-            iowrite32(ctrl | DMA_CTRL_AUDIO_RUN, qdev->bar0_mmio + REG_DMA_CTRL);
-            dev_info(&qdev->pdev->dev, "[ALSA Ch%d] Audio DMA Stream Started\n", ach->channel_id);
-        }
+        ctrl = ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
+        iowrite32(ctrl | DMA_CTRL_AUDIO_RUN_CH(ach->channel_id), qdev->bar0_mmio + REG_DMA_CTRL);
+        dev_info(&qdev->pdev->dev, "[ALSA Ch%d Capture] Started (DMA_CTRL=0x%08X)\n",
+                 ach->channel_id, (u32)(ctrl | DMA_CTRL_AUDIO_RUN_CH(ach->channel_id)));
         break;
     case SNDRV_PCM_TRIGGER_STOP:
-        if (ach->channel_id == 0) {
-            ctrl = ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
-            iowrite32(ctrl & ~DMA_CTRL_AUDIO_RUN, qdev->bar0_mmio + REG_DMA_CTRL);
-            dev_info(&qdev->pdev->dev, "[ALSA Ch%d] Audio DMA Stream Stopped\n", ach->channel_id);
-        }
+        ctrl = ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
+        iowrite32(ctrl & ~DMA_CTRL_AUDIO_RUN_CH(ach->channel_id), qdev->bar0_mmio + REG_DMA_CTRL);
+        dev_info(&qdev->pdev->dev, "[ALSA Ch%d Capture] Stopped\n", ach->channel_id);
         break;
     default:
         return -EINVAL;
@@ -104,33 +111,155 @@ static int qpcie_alsa_trigger(struct snd_pcm_substream *substream, int cmd)
     return 0;
 }
 
-static snd_pcm_uframes_t qpcie_alsa_pointer(struct snd_pcm_substream *substream)
+static snd_pcm_uframes_t qpcie_alsa_cap_pointer(struct snd_pcm_substream *substream)
 {
     struct qpcie_alsa_channel *ach = snd_pcm_substream_chip(substream);
     struct qpcie_dev *qdev = ach->qdev;
     u32 hw_pos;
     size_t buf_bytes = snd_pcm_lib_buffer_bytes(substream);
 
-    if (ach->channel_id == 0) {
-        hw_pos = ioread32(qdev->bar0_mmio + REG_AUDIO_DMA_PTR);
-        if (hw_pos >= buf_bytes)
-            hw_pos = 0;
-        ach->buffer_pos = hw_pos;
-    }
-    return bytes_to_frames(substream->runtime, ach->buffer_pos);
+    hw_pos = ioread32(qdev->bar0_mmio + REG_AUDIO_DMA_PTR_CH(ach->channel_id));
+    if (hw_pos >= buf_bytes)
+        hw_pos = 0;
+    ach->cap_buffer_pos = hw_pos;
+    return bytes_to_frames(substream->runtime, ach->cap_buffer_pos);
 }
 
-static const struct snd_pcm_ops qpcie_alsa_pcm_ops = {
-    .open        = qpcie_alsa_open,
-    .close       = qpcie_alsa_close,
+static const struct snd_pcm_ops qpcie_alsa_capture_ops = {
+    .open        = qpcie_alsa_cap_open,
+    .close       = qpcie_alsa_cap_close,
     .hw_params   = qpcie_alsa_hw_params,
     .hw_free     = qpcie_alsa_hw_free,
-    .prepare     = qpcie_alsa_prepare,
-    .trigger     = qpcie_alsa_trigger,
-    .pointer     = qpcie_alsa_pointer,
+    .prepare     = qpcie_alsa_cap_prepare,
+    .trigger     = qpcie_alsa_cap_trigger,
+    .pointer     = qpcie_alsa_cap_pointer,
 };
 
-/* ALSA Control Framework Integration ('Audio Pattern' and 'PCM Volume') */
+/* ========================================================================= */
+/* ALSA Playback Stream Callbacks (H2C Loopback FIFO)                        */
+/* ========================================================================= */
+
+static int qpcie_alsa_play_open(struct snd_pcm_substream *substream)
+{
+    struct qpcie_alsa_channel *ach = snd_pcm_substream_chip(substream);
+    struct snd_pcm_runtime *runtime = substream->runtime;
+
+    ach->play_substream = substream;
+    runtime->hw = qpcie_alsa_hardware;
+    return 0;
+}
+
+static int qpcie_alsa_play_close(struct snd_pcm_substream *substream)
+{
+    struct qpcie_alsa_channel *ach = snd_pcm_substream_chip(substream);
+    ach->play_substream = NULL;
+    return 0;
+}
+
+static int qpcie_alsa_play_prepare(struct snd_pcm_substream *substream)
+{
+    struct qpcie_alsa_channel *ach = snd_pcm_substream_chip(substream);
+    struct qpcie_dev *qdev = ach->qdev;
+
+    ach->play_buffer_pos = 0;
+
+    // Reset/flush H2C FIFO on prepare
+    if (ach->channel_id >= 1 && ach->channel_id <= 3) {
+        u32 ctrl = ioread32(qdev->bar0_mmio + REG_AUDIO_LOOPBACK_CTRL);
+        iowrite32(ctrl | BIT(7 + ach->channel_id), qdev->bar0_mmio + REG_AUDIO_LOOPBACK_CTRL);
+        iowrite32(ctrl & ~BIT(7 + ach->channel_id), qdev->bar0_mmio + REG_AUDIO_LOOPBACK_CTRL);
+    }
+    dev_info(&qdev->pdev->dev, "[ALSA Ch%d Playback Prepare]\n", ach->channel_id);
+    return 0;
+}
+
+static int qpcie_alsa_play_trigger(struct snd_pcm_substream *substream, int cmd)
+{
+    struct qpcie_alsa_channel *ach = snd_pcm_substream_chip(substream);
+    struct qpcie_dev *qdev = ach->qdev;
+
+    switch (cmd) {
+    case SNDRV_PCM_TRIGGER_START:
+        dev_info(&qdev->pdev->dev, "[ALSA Ch%d Playback] Started\n", ach->channel_id);
+        break;
+    case SNDRV_PCM_TRIGGER_STOP:
+        dev_info(&qdev->pdev->dev, "[ALSA Ch%d Playback] Stopped\n", ach->channel_id);
+        break;
+    default:
+        return -EINVAL;
+    }
+    return 0;
+}
+
+static snd_pcm_uframes_t qpcie_alsa_play_pointer(struct snd_pcm_substream *substream)
+{
+    struct qpcie_alsa_channel *ach = snd_pcm_substream_chip(substream);
+    return bytes_to_frames(substream->runtime, ach->play_buffer_pos);
+}
+
+static int qpcie_alsa_play_ack(struct snd_pcm_substream *substream)
+{
+    struct qpcie_alsa_channel *ach = snd_pcm_substream_chip(substream);
+    struct qpcie_dev *qdev = ach->qdev;
+    struct snd_pcm_runtime *runtime = substream->runtime;
+    snd_pcm_uframes_t appl_ptr;
+    snd_pcm_uframes_t buf_frames;
+    snd_pcm_uframes_t cur_frames;
+    snd_pcm_uframes_t avail_frames;
+    u32 *buf;
+    u32 reg_data;
+    size_t i;
+
+    if (!runtime || !runtime->dma_area || !runtime->control)
+        return 0;
+
+    if (ach->channel_id < 1 || ach->channel_id > 3)
+        return 0;
+
+    appl_ptr = runtime->control->appl_ptr;
+    buf_frames = runtime->buffer_size;
+    cur_frames = bytes_to_frames(runtime, ach->play_buffer_pos);
+    buf = (u32 *)runtime->dma_area;
+    reg_data = REG_AUDIO_H2C_DATA_CH(ach->channel_id);
+
+    if (appl_ptr >= cur_frames)
+        avail_frames = appl_ptr - cur_frames;
+    else
+        avail_frames = (appl_ptr + buf_frames) - cur_frames;
+
+    if (avail_frames > buf_frames)
+        avail_frames = buf_frames;
+
+    while (avail_frames > 0) {
+        u32 st = ioread32(qdev->bar0_mmio + REG_AUDIO_H2C_STATUS);
+        if (H2C_FIFO_FULL_CH(st, ach->channel_id))
+            break;
+
+        for (i = 0; i < runtime->channels; i++) {
+            u32 sample_idx = (cur_frames * runtime->channels + i) % (buf_frames * runtime->channels);
+            iowrite32(buf[sample_idx], qdev->bar0_mmio + reg_data);
+        }
+        cur_frames = (cur_frames + 1) % buf_frames;
+        avail_frames--;
+    }
+    ach->play_buffer_pos = frames_to_bytes(runtime, cur_frames);
+    return 0;
+}
+
+static const struct snd_pcm_ops qpcie_alsa_playback_ops = {
+    .open        = qpcie_alsa_play_open,
+    .close       = qpcie_alsa_play_close,
+    .hw_params   = qpcie_alsa_hw_params,
+    .hw_free     = qpcie_alsa_hw_free,
+    .prepare     = qpcie_alsa_play_prepare,
+    .trigger     = qpcie_alsa_play_trigger,
+    .pointer     = qpcie_alsa_play_pointer,
+    .ack         = qpcie_alsa_play_ack,
+};
+
+/* ========================================================================= */
+/* ALSA Control Framework (BAR1 Audio Pattern Gen Controls for Ch0)         */
+/* ========================================================================= */
 
 static int qpcie_alsa_pattern_info(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_info *uinfo)
 {
@@ -231,71 +360,103 @@ static const struct snd_kcontrol_new qpcie_alsa_controls[] = {
     },
 };
 
+/* ========================================================================= */
+/* ALSA Initialization & Cleanup                                             */
+/* ========================================================================= */
+
 int qpcie_alsa_init(struct qpcie_dev *qdev)
 {
     int i, ret;
 
-    dev_info(&qdev->pdev->dev, "[DEBUG STEP 3.1] Starting ALSA Audio Subsystem Init...\n");
+    dev_info(&qdev->pdev->dev, "Starting Multi-Channel ALSA Audio Subsystem Init (%d Channels)...\n",
+             NUM_AUDIO_CHANNELS);
 
     for (i = 0; i < NUM_AUDIO_CHANNELS; i++) {
         struct qpcie_alsa_channel *ach = &qdev->alsa_ch[i];
         struct snd_card *card;
-        struct snd_pcm *pcm;
+        char card_id[32];
         int k;
 
-        dev_info(&qdev->pdev->dev, "[DEBUG STEP 3.2] Initializing Audio Channel %d...\n", i);
         ach->qdev       = qdev;
         ach->channel_id = i;
         spin_lock_init(&ach->slock);
 
-        ret = snd_card_new(&qdev->pdev->dev, -1, "QPCIe-AES3", THIS_MODULE, 0, &card);
+        snprintf(card_id, sizeof(card_id), "QPCIe-Audio-%d", i);
+        ret = snd_card_new(&qdev->pdev->dev, -1, card_id, THIS_MODULE, 0, &card);
         if (ret) {
-            dev_err(&qdev->pdev->dev, "[DEBUG ERROR] Audio Ch %d: snd_card_new failed: %d\n", i, ret);
+            dev_err(&qdev->pdev->dev, "Audio Ch %d: snd_card_new failed: %d\n", i, ret);
             return ret;
         }
 
         ach->card = card;
         strscpy(card->driver, "qpcie-alsa", sizeof(card->driver));
-        strscpy(card->shortname, "QPCIe AES3 Audio", sizeof(card->shortname));
-        snprintf(card->longname, sizeof(card->longname), "QPCIe Multi-Channel AES3 Audio Channel %d", i);
 
-        ret = snd_pcm_new(card, "QPCIe AES3 PCM", 0, 1, 1, &pcm);
-        if (ret) {
-            dev_err(&qdev->pdev->dev, "[DEBUG ERROR] Audio Ch %d: snd_pcm_new failed: %d\n", i, ret);
-            goto free_card;
-        }
+        if (i == 0) {
+            strscpy(card->shortname, "QPCIe AES3 Audio", sizeof(card->shortname));
+            snprintf(card->longname, sizeof(card->longname), "QPCIe Audio Ch0 (Pattern Gen Source)");
 
-        ach->pcm = pcm;
-        pcm->private_data = ach;
-        strscpy(pcm->name, "QPCIe AES3 Subframe PCM", sizeof(pcm->name));
-
-        snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_CAPTURE, &qpcie_alsa_pcm_ops);
-        snd_pcm_set_ops(pcm, SNDRV_PCM_STREAM_PLAYBACK, &qpcie_alsa_pcm_ops);
-        snd_pcm_set_managed_buffer_all(pcm, SNDRV_DMA_TYPE_DEV, &qdev->pdev->dev, 64 * 1024, 128 * 1024);
-
-        /* Register ALSA Mixer Controls */
-        for (k = 0; k < ARRAY_SIZE(qpcie_alsa_controls); k++) {
-            ret = snd_ctl_add(card, snd_ctl_new1(&qpcie_alsa_controls[k], ach));
-            if (ret < 0) {
-                dev_err(&qdev->pdev->dev, "[DEBUG ERROR] Audio Ch %d: snd_ctl_add failed: %d\n", i, ret);
+            // Card 0: Device 0 = Capture Only (Pattern Gen Source) -> /dev/snd/pcmC<X>D0c
+            ret = snd_pcm_new(card, "QPCIe AES3 Capture", 0, 0, 1, &ach->pcm_cap);
+            if (ret) {
+                dev_err(&qdev->pdev->dev, "Audio Ch %d: snd_pcm_new capture failed: %d\n", i, ret);
                 goto free_card;
             }
+            ach->pcm_cap->private_data = ach;
+            strscpy(ach->pcm_cap->name, "QPCIe AES3 Subframe PCM", sizeof(ach->pcm_cap->name));
+            snd_pcm_set_ops(ach->pcm_cap, SNDRV_PCM_STREAM_CAPTURE, &qpcie_alsa_capture_ops);
+            snd_pcm_set_managed_buffer_all(ach->pcm_cap, SNDRV_DMA_TYPE_DEV, &qdev->pdev->dev, 64 * 1024, 128 * 1024);
+
+            // Register Mixer Controls for Ch0 Pattern Generator
+            for (k = 0; k < ARRAY_SIZE(qpcie_alsa_controls); k++) {
+                ret = snd_ctl_add(card, snd_ctl_new1(&qpcie_alsa_controls[k], ach));
+                if (ret < 0) {
+                    dev_err(&qdev->pdev->dev, "Audio Ch %d: snd_ctl_add failed: %d\n", i, ret);
+                    goto free_card;
+                }
+            }
+        } else {
+            snprintf(card->shortname, sizeof(card->shortname), "QPCIe Audio Ch%d", i);
+            snprintf(card->longname, sizeof(card->longname), "QPCIe Audio Loopback Channel %d", i);
+
+            // Cards 1..3: Device 0 = Output (Playback) -> /dev/snd/pcmC<X>D0p
+            ret = snd_pcm_new(card, "QPCIe Audio Playback", 0, 1, 0, &ach->pcm_play);
+            if (ret) {
+                dev_err(&qdev->pdev->dev, "Audio Ch %d: snd_pcm_new playback failed: %d\n", i, ret);
+                goto free_card;
+            }
+            ach->pcm_play->private_data = ach;
+            strscpy(ach->pcm_play->name, "QPCIe Audio Playback PCM", sizeof(ach->pcm_play->name));
+            snd_pcm_set_ops(ach->pcm_play, SNDRV_PCM_STREAM_PLAYBACK, &qpcie_alsa_playback_ops);
+            snd_pcm_set_managed_buffer_all(ach->pcm_play, SNDRV_DMA_TYPE_DEV, &qdev->pdev->dev, 64 * 1024, 128 * 1024);
+
+            // Cards 1..3: Device 1 = Input (Capture) -> /dev/snd/pcmC<X>D1c
+            ret = snd_pcm_new(card, "QPCIe Audio Capture", 1, 0, 1, &ach->pcm_cap);
+            if (ret) {
+                dev_err(&qdev->pdev->dev, "Audio Ch %d: snd_pcm_new capture failed: %d\n", i, ret);
+                goto free_card;
+            }
+            ach->pcm_cap->private_data = ach;
+            strscpy(ach->pcm_cap->name, "QPCIe Audio Capture PCM", sizeof(ach->pcm_cap->name));
+            snd_pcm_set_ops(ach->pcm_cap, SNDRV_PCM_STREAM_CAPTURE, &qpcie_alsa_capture_ops);
+            snd_pcm_set_managed_buffer_all(ach->pcm_cap, SNDRV_DMA_TYPE_DEV, &qdev->pdev->dev, 64 * 1024, 128 * 1024);
         }
 
         ret = snd_card_register(card);
         if (ret) {
-            dev_err(&qdev->pdev->dev, "[DEBUG ERROR] Audio Ch %d: snd_card_register failed: %d\n", i, ret);
+            dev_err(&qdev->pdev->dev, "Audio Ch %d: snd_card_register failed: %d\n", i, ret);
             goto free_card;
         }
 
-        dev_info(&qdev->pdev->dev, " -> Audio Channel %d registered as ALSA Card #%d\n", i, card->number);
+        dev_info(&qdev->pdev->dev, " -> Audio Channel %d registered as ALSA Card #%d ('%s')\n",
+                 i, card->number, card->shortname);
         continue;
 
 free_card:
         snd_card_free(card);
         return ret;
     }
-    dev_info(&qdev->pdev->dev, "🎉 [DEBUG STEP 3 COMPLETE] All ALSA Audio Cards Initialized Successfully!\n");
+    dev_info(&qdev->pdev->dev, "🎉 [ALSA INIT COMPLETE] All %d ALSA Audio Cards Initialized Successfully!\n",
+             NUM_AUDIO_CHANNELS);
     return 0;
 }
 
@@ -308,20 +469,28 @@ void qpcie_alsa_remove(struct qpcie_dev *qdev)
     }
 }
 
-void qpcie_alsa_irq_handler(struct qpcie_dev *qdev)
+void qpcie_alsa_irq_handler(struct qpcie_dev *qdev, u32 status)
 {
     int i;
     for (i = 0; i < NUM_AUDIO_CHANNELS; i++) {
         struct qpcie_alsa_channel *ach = &qdev->alsa_ch[i];
-        if (ach->substream && snd_pcm_running(ach->substream)) {
-            if (ach->channel_id == 0) {
-                u32 hw_pos = ioread32(qdev->bar0_mmio + REG_AUDIO_DMA_PTR);
-                size_t buf_bytes = snd_pcm_lib_buffer_bytes(ach->substream);
+
+        if (status & IRQ_STATUS_AUDIO_CH(i)) {
+            // Capture period done
+            if (ach->cap_substream && snd_pcm_running(ach->cap_substream)) {
+                u32 hw_pos = ioread32(qdev->bar0_mmio + REG_AUDIO_DMA_PTR_CH(i));
+                size_t buf_bytes = snd_pcm_lib_buffer_bytes(ach->cap_substream);
                 if (hw_pos >= buf_bytes)
                     hw_pos = 0;
-                ach->buffer_pos = hw_pos;
+                ach->cap_buffer_pos = hw_pos;
+                snd_pcm_period_elapsed(ach->cap_substream);
             }
-            snd_pcm_period_elapsed(ach->substream);
+
+            // Advance playback period if playback substream is running
+            if (i > 0 && ach->play_substream && snd_pcm_running(ach->play_substream)) {
+                qpcie_alsa_play_ack(ach->play_substream);
+                snd_pcm_period_elapsed(ach->play_substream);
+            }
         }
     }
 }
