@@ -307,11 +307,17 @@ module custom_pcie_dma_top #(
     wire        sg_h2c_desc_ready, sg_c2h_desc_ready;
     wire        nv12_desc_ready;
     wire        nv12_ch1_desc_ready;
+    wire        nv12_ch2_desc_ready;
+    wire        nv12_ch3_desc_ready;
     wire        sg_c2h_desc_select = (c2h_format == 4'd0);
     wire        nv12_desc_select   = (c2h_format == 4'd2) && (c2h_plane_count == 4'd2) && (c2h_desc_ctrl[7:6] == 2'd0);
     wire        nv12_ch1_desc_sel  = (c2h_format == 4'd2) && (c2h_plane_count == 4'd2) && (c2h_desc_ctrl[7:6] == 2'd1);
+    wire        nv12_ch2_desc_sel  = (c2h_format == 4'd2) && (c2h_plane_count == 4'd2) && (c2h_desc_ctrl[7:6] == 2'd2);
+    wire        nv12_ch3_desc_sel  = (c2h_format == 4'd2) && (c2h_plane_count == 4'd2) && (c2h_desc_ctrl[7:6] == 2'd3);
     assign c2h_desc_ready = nv12_desc_select ? nv12_desc_ready :
                             nv12_ch1_desc_sel ? nv12_ch1_desc_ready :
+                            nv12_ch2_desc_sel ? nv12_ch2_desc_ready :
+                            nv12_ch3_desc_sel ? nv12_ch3_desc_ready :
                             sg_c2h_desc_select ? sg_c2h_desc_ready : 1'b0;
     wire        sg_h2c_req_valid, sg_h2c_req_ack;
     wire [63:0] sg_h2c_req_addr;
@@ -1355,8 +1361,8 @@ module custom_pcie_dma_top #(
                  !hs2_send_q && !hs2_src_rcv && !ch2_owner_busy)
             ch2_owner_busy <= 1'b1;
     end
-    wire nv12_ch2_desc_ready = c2h_desc_valid && nv12_ch2_desc_select &&
-                               !hs2_send_q && !hs2_src_rcv && !ch2_owner_busy;
+    assign nv12_ch2_desc_ready = c2h_desc_valid && nv12_ch2_desc_select &&
+                                  !hs2_send_q && !hs2_src_rcv && !ch2_owner_busy;
     xpm_cdc_handshake #(.WIDTH(241), .DEST_EXT_HSK(1)) u_desc_cdc_ch2 (.src_clk(clk), .src_send(hs2_send_q), .src_rcv(hs2_src_rcv), .src_in(hs2_bus_q), .dest_clk(video_clk), .dest_req(hs2_dest_req), .dest_out(hs2_dest_bus), .dest_ack(hs2_dest_ack));
     reg [1:0] dest2_state;
     always @(posedge video_clk or negedge video_rst_n) begin
@@ -1411,8 +1417,8 @@ module custom_pcie_dma_top #(
                  !hs3_send_q && !hs3_src_rcv && !ch3_owner_busy)
             ch3_owner_busy <= 1'b1;
     end
-    wire nv12_ch3_desc_ready = c2h_desc_valid && nv12_ch3_desc_select &&
-                               !hs3_send_q && !hs3_src_rcv && !ch3_owner_busy;
+    assign nv12_ch3_desc_ready = c2h_desc_valid && nv12_ch3_desc_select &&
+                                  !hs3_send_q && !hs3_src_rcv && !ch3_owner_busy;
     xpm_cdc_handshake #(.WIDTH(241), .DEST_EXT_HSK(1)) u_desc_cdc_ch3 (.src_clk(clk), .src_send(hs3_send_q), .src_rcv(hs3_src_rcv), .src_in(hs3_bus_q), .dest_clk(video_clk), .dest_req(hs3_dest_req), .dest_out(hs3_dest_bus), .dest_ack(hs3_dest_ack));
     reg [1:0] dest3_state;
     always @(posedge video_clk or negedge video_rst_n) begin

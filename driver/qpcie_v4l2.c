@@ -1066,6 +1066,8 @@ static const struct v4l2_ctrl_config qpcie_pacer_ctrl_config = {
 
 int qpcie_v4l2_init(struct qpcie_dev *qdev)
 {
+    u32 hw_caps;
+    unsigned int hw_video_ch;
     int i, ret;
 
     /* The capture engines emit 256-byte MWr payloads. A host that has not
@@ -1087,6 +1089,18 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
              "[V4L2] negotiated MaxPayloadSize %d bytes supports 256-byte MWr\n",
              ret);
 
+    hw_caps = ioread32(qdev->bar0_mmio + REG_HARDWARE_CAPS);
+    hw_video_ch = (hw_caps >> 8) & 0xff;
+    if (hw_video_ch < NUM_VIDEO_CHANNELS) {
+        dev_err(&qdev->pdev->dev,
+                "[V4L2] FPGA reports only %u video channels (caps=0x%08x), need %u for TPG + 3 loopback channels\n",
+                hw_video_ch, hw_caps, NUM_VIDEO_CHANNELS);
+        return -EOPNOTSUPP;
+    }
+    dev_info(&qdev->pdev->dev,
+             "[V4L2] FPGA capability check passed: %u video channels (caps=0x%08x)\n",
+             hw_video_ch, hw_caps);
+
     dev_info(&qdev->pdev->dev, "[DEBUG STEP 2.1] Registering top-level v4l2_device...\n");
     spin_lock_init(&qdev->ring_lock);
     snprintf(qdev->v4l2_dev.name, sizeof(qdev->v4l2_dev.name), "qpcie-v4l2");
@@ -1096,11 +1110,12 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
         return ret;
     }
 
-    /* Bring up 3 V4L2 nodes:
+    /* Bring up all 7 V4L2 nodes:
      * - /dev/video0: Channel 0 TPG Hardware Video Capture
-     * - /dev/video1: Channel 1 Loopback Video Output (Host -> H2C)
-     * - /dev/video2: Channel 1 Loopback Video Capture (C2H -> Host) */
-    for (i = 0; i < 3; i++) {
+     * - /dev/video1/2: Channel 1 Loopback Output/Capture
+     * - /dev/video3/4: Channel 2 Loopback Output/Capture
+     * - /dev/video5/6: Channel 3 Loopback Output/Capture */
+    for (i = 0; i < NUM_VIDEO_NODES; i++) {
         struct qpcie_v4l2_channel *vch = &qdev->v4l2_ch[i];
         struct video_device *vdev = &vch->vdev;
 

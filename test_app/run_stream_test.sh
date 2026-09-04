@@ -47,9 +47,9 @@ echo "      --> ALSA AES3 Audio Subsystem [PASS]"
 
 # 5. Test Hardware H2C -> C2H Video & Audio Loopback
 echo "[5/6] Testing Hardware H2C -> C2H Streaming Loopback (Ch 1~3)..."
-./loopback_test_app 1
-./loopback_test_app 2
-./loopback_test_app 3
+./loopback_test_app -o /dev/video1 -d /dev/video2
+./loopback_test_app -o /dev/video3 -d /dev/video4
+./loopback_test_app -o /dev/video5 -d /dev/video6
 echo "      --> Hardware H2C -> C2H Streaming Loopback [PASS]"
 
 # 6. Check GStreamer / FFmpeg Pipelines Command Template

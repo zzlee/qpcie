@@ -42,6 +42,37 @@ cd /home/zzlee/qpcie
 
 ---
 
+## 🤖 Agent/User Hardware Validation Handoff Workflow
+
+When a task changes FPGA RTL plus host software, split responsibilities as follows:
+
+**AI agent responsibilities:**
+1. Modify RTL, Linux driver, and user-mode test applications as requested.
+2. Build the A50T bitstream with:
+   ```bash
+   cd /home/zzlee/qpcie
+   ./scripts/build_a50t.sh
+   ```
+3. Compile the driver with:
+   ```bash
+   cd /home/zzlee/qpcie/driver
+   make clean && make
+   ```
+4. Compile test applications with:
+   ```bash
+   cd /home/zzlee/qpcie/test_app
+   make clean && make all
+   ```
+5. Commit and push the verified source changes.
+
+**User responsibilities:**
+1. Flash the generated bitstream to the FPGA/SPI flash.
+2. Rebuild and reload the driver on the real target system.
+3. Run the relevant test applications on hardware.
+4. Report hardware results/logs back to the agent for the next debug loop.
+
+---
+
 ## 🐧 Driver Build, Load & Verification
 
 ### 1. Compile Driver
