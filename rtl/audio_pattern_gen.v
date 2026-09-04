@@ -62,7 +62,7 @@ module audio_pattern_gen #(
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             reg_ctrl     <= 32'h0000_0001; // Enabled by default, 1kHz Sine
-            reg_divisor  <= 32'd2604;      // 125MHz / 48kHz = ~2604
+            reg_divisor  <= 32'd1302;      // 125MHz / 96kHz subframes = ~1302 (48kHz stereo frames)
             reg_volume   <= 32'd200;       // Default Volume
             s_axil_awready <= 1'b0;
             s_axil_wready  <= 1'b0;
@@ -146,6 +146,27 @@ module audio_pattern_gen #(
         endcase
     end
 
+    // Selected audio sample based on pattern:
+    // Pattern 0: Stereo Split (Left = 1kHz Sine, Right = Sawtooth) - Distinguishes L/R
+    // Pattern 1: Stereo 1kHz Sine Wave
+    // Pattern 2: Stereo Sawtooth Wave
+    // Pattern 3: Stereo 440Hz Square Tone
+    // Pattern 4: Mute / Silence
+    reg [23:0] active_audio_sample;
+    always @* begin
+        case (reg_ctrl[3:1])
+            3'b000: active_audio_sample = channel_select ? {sine_index, 18'd0} : audio_sample; // Left=Sine, Right=Sawtooth
+            3'b001: active_audio_sample = audio_sample;                                        // Stereo Sine
+            3'b010: active_audio_sample = {sine_index, 18'd0};                                 // Stereo Sawtooth
+            3'b011: active_audio_sample = (sine_index[3] ? 24'h7FFFFF : 24'h800000);           // Stereo 440Hz
+            3'b100: active_audio_sample = 24'h000000;                                         // Mute / Silence
+            default: active_audio_sample = channel_select ? {sine_index, 18'd0} : audio_sample;
+        endcase
+    end
+
+    wire [3:0] cur_preamble = channel_select ? 4'hC : 4'hB;
+    wire cur_parity = ^active_audio_sample;
+
     // Sample Rate Tick Generation & Audio Stream Output Pipeline
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -169,7 +190,7 @@ module audio_pattern_gen #(
                     end
 
                     // Format 32-bit AES3 Audio Subframe:
-                    // Bit [3:0]   : Sync Preamble (4'hE: B = Frame Start, 4'hM: M = Left, 4'hW: W = Right)
+                    // Bit [3:0]   : Sync Preamble (4'hB: Left Block Start, 4'hC: Right Channel)
                     // Bit [27:4]  : 24-bit LSB-first Audio Sample Data
                     // Bit [28]    : Validity Bit (0 = Valid)
                     // Bit [29]    : User Data Bit
@@ -177,18 +198,13 @@ module audio_pattern_gen #(
                     // Bit [31]    : Even Parity Bit
                     m_axis_audio_tvalid <= 1'b1;
                     m_axis_audio_tlast  <= (subframe_count == 8'd191); // 192 subframes per AES3 Audio Block
+                    m_axis_audio_tdata  <= {cur_parity, 1'b0, 1'b0, 1'b0, active_audio_sample, cur_preamble};
 
                     if (subframe_count == 8'd191) begin
                         subframe_count <= 8'd0;
                     end else begin
                         subframe_count <= subframe_count + 1'b1;
                     end
-
-                    case (reg_ctrl[3:1])
-                        3'b000: m_axis_audio_tdata <= {^audio_sample, 1'b0, 1'b0, 1'b0, audio_sample, (channel_select ? 4'hC : 4'hB)}; // 1kHz Sine Wave
-                        3'b001: m_axis_audio_tdata <= {1'b0, 1'b0, 1'b0, 1'b0, {sine_index, 18'd0}, (channel_select ? 4'hC : 4'hB)};   // Sawtooth
-                        default: m_axis_audio_tdata <= 32'd0; // Mute
-                    endcase
                 end else begin
                     clk_divider <= clk_divider + 1'b1;
                     if (m_axis_audio_tready) begin
@@ -198,6 +214,9 @@ module audio_pattern_gen #(
             end else begin
                 m_axis_audio_tvalid <= 1'b0;
                 clk_divider         <= 32'd0;
+                channel_select      <= 1'b0;
+                subframe_count      <= 8'd0;
+                sine_index          <= 6'd0;
             end
         end
     end

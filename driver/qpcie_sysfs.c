@@ -293,10 +293,11 @@ static ssize_t aud_pattern_show(struct device *dev, struct device_attribute *att
     u32 pattern_id = (ctrl_val >> 1) & 0x07;
     const char *name = "Unknown";
     switch (pattern_id) {
-        case 0: name = "1kHz Sine Wave"; break;
-        case 1: name = "Sawtooth Wave"; break;
-        case 2: name = "440Hz Tone"; break;
-        case 3: name = "Mute / Silence"; break;
+        case 0: name = "L-Sine / R-Saw (Stereo Split)"; break;
+        case 1: name = "1kHz Sine Wave (Stereo)"; break;
+        case 2: name = "Sawtooth Wave (Stereo)"; break;
+        case 3: name = "440Hz Tone (Stereo)"; break;
+        case 4: name = "Mute / Silence"; break;
         default: name = "Custom Pattern"; break;
     }
 

@@ -55,7 +55,12 @@ static void print_usage(const char *prog_name) {
     printf("  -r, --rate <hz>        Sample rate in Hz (default: %d)\n", DEFAULT_SAMPLE_RATE);
     printf("  -c, --channels <count> Number of channels (default: %d)\n", DEFAULT_CHANNELS);
     printf("  -s, --seconds <sec>    Capture duration in seconds (default: %d)\n", DEFAULT_DURATION);
-    printf("  -p, --pattern <id>     Set Audio Pattern (0: 1kHz Sine, 1: Sawtooth, 2: 440Hz, 3: Mute)\n");
+    printf("  -p, --pattern <id>     Set Audio Pattern:\n");
+    printf("                           0: L-Sine / R-Saw (Stereo Split, distinguishes L/R)\n");
+    printf("                           1: Stereo 1kHz Sine Wave\n");
+    printf("                           2: Stereo Sawtooth Wave\n");
+    printf("                           3: Stereo 440Hz Tone\n");
+    printf("                           4: Mute / Silence\n");
     printf("  -o, --out <file>       Save captured PCM/AES3 audio to file\n");
     printf("  -h, --help             Show this help message\n");
 }
@@ -289,11 +294,15 @@ int main(int argc, char **argv) {
 
     uint64_t total_frames_target = (uint64_t)sample_rate * duration_sec;
     uint64_t total_frames_read = 0;
-    double sum_sq_samples = 0.0;
-    uint64_t total_sample_count = 0;
 
-    int32_t prev_pcm = 0;
-    uint64_t zero_crossings = 0;
+    double sum_sq_l = 0.0, sum_sq_r = 0.0;
+    uint64_t total_samples_l = 0, total_samples_r = 0;
+    int32_t min_l = 0x7FFFFFFF, max_l = -0x7FFFFFFF;
+    int32_t min_r = 0x7FFFFFFF, max_r = -0x7FFFFFFF;
+
+    int32_t prev_pcm_l = 0, prev_pcm_r = 0;
+    uint64_t zero_crossings_l = 0, zero_crossings_r = 0;
+    uint64_t channel_swap_errors = 0;
     int sample_preview_printed = 0;
 
     printf("--> Capturing %u seconds of AES3 Audio Data...\n", duration_sec);
@@ -340,6 +349,7 @@ int main(int argc, char **argv) {
                 printf("  Sample[%d]: Raw=0x%08X | Preamble=0x%X (%s) | 24-bit PCM=%d (0x%06X)\n",
                        k, raw, preamble,
                        (preamble == 0x0B) ? "Left / Block Start" :
+                       (preamble == 0x09) ? "Left Channel" :
                        (preamble == 0x0C) ? "Right Channel" : "Other",
                        pcm, pcm & 0x00FFFFFF);
             }
@@ -347,9 +357,17 @@ int main(int argc, char **argv) {
             sample_preview_printed = 1;
         }
 
-        // Parse AES3 Subframes, Calculate RMS Energy & Zero Crossings
+        // Parse AES3 Subframes, Calculate RMS Energy & Zero Crossings per Channel
         for (size_t i = 0; i < frames_read * channels; i++) {
             uint32_t aes3_subframe = audio_buf[i];
+            uint8_t preamble = aes3_subframe & 0x0F;
+
+            // Validate strict Left/Right channel alignment
+            if ((i % 2) == 0) {
+                if (preamble != 0x0B && preamble != 0x09) channel_swap_errors++;
+            } else {
+                if (preamble != 0x0C) channel_swap_errors++;
+            }
 
             // Extract 24-bit Audio Sample (Bits [27:4])
             int32_t pcm_24bit = (aes3_subframe >> 4) & 0x00FFFFFF;
@@ -358,15 +376,27 @@ int main(int argc, char **argv) {
             }
 
             double normalized = (double)pcm_24bit / 8388607.0; // -1.0 to +1.0
-            sum_sq_samples += normalized * normalized;
-            total_sample_count++;
 
-            // Track zero crossings on Left channel (even indices) for freq estimation
             if ((i % 2) == 0) {
-                if ((prev_pcm < 0 && pcm_24bit >= 0) || (prev_pcm >= 0 && pcm_24bit < 0)) {
-                    zero_crossings++;
+                // Left Channel
+                sum_sq_l += normalized * normalized;
+                total_samples_l++;
+                if (pcm_24bit < min_l) min_l = pcm_24bit;
+                if (pcm_24bit > max_l) max_l = pcm_24bit;
+                if ((prev_pcm_l < 0 && pcm_24bit >= 0) || (prev_pcm_l >= 0 && pcm_24bit < 0)) {
+                    zero_crossings_l++;
                 }
-                prev_pcm = pcm_24bit;
+                prev_pcm_l = pcm_24bit;
+            } else {
+                // Right Channel
+                sum_sq_r += normalized * normalized;
+                total_samples_r++;
+                if (pcm_24bit < min_r) min_r = pcm_24bit;
+                if (pcm_24bit > max_r) max_r = pcm_24bit;
+                if ((prev_pcm_r < 0 && pcm_24bit >= 0) || (prev_pcm_r >= 0 && pcm_24bit < 0)) {
+                    zero_crossings_r++;
+                }
+                prev_pcm_r = pcm_24bit;
             }
         }
 
@@ -383,28 +413,40 @@ int main(int argc, char **argv) {
 
     printf("\n");
 
-    // 6. Calculate Audio Statistics
-    double rms = sqrt(sum_sq_samples / (total_sample_count > 0 ? total_sample_count : 1));
-    double dbfs = 20.0 * log10(rms > 1e-6 ? rms : 1e-6);
+    // 6. Calculate Audio Statistics per Channel
     double elapsed_sec = (double)total_frames_read / sample_rate;
-    double estimated_freq = (elapsed_sec > 0.0) ? (zero_crossings / 2.0) / elapsed_sec : 0.0;
+
+    double rms_l = sqrt(sum_sq_l / (total_samples_l > 0 ? total_samples_l : 1));
+    double dbfs_l = 20.0 * log10(rms_l > 1e-6 ? rms_l : 1e-6);
+    double freq_l = (elapsed_sec > 0.0) ? (zero_crossings_l / 2.0) / elapsed_sec : 0.0;
+
+    double rms_r = sqrt(sum_sq_r / (total_samples_r > 0 ? total_samples_r : 1));
+    double dbfs_r = 20.0 * log10(rms_r > 1e-6 ? rms_r : 1e-6);
+    double freq_r = (elapsed_sec > 0.0) ? (zero_crossings_r / 2.0) / elapsed_sec : 0.0;
 
     printf("=================================================================\n");
     printf(" Audio Capture Finished: %llu frames (%.2f sec)\n",
            (unsigned long long)total_frames_read, elapsed_sec);
-    printf(" Captured Audio RMS Energy : %.4f (%.2f dBFS)\n", rms, dbfs);
-    printf(" Estimated Audio Frequency : %.1f Hz\n", estimated_freq);
+    printf(" [Left Channel  (0x0B/0x09)] RMS: %.4f (%6.2f dBFS) | Freq: %6.1f Hz | Range: [%d, %d]\n",
+           rms_l, dbfs_l, freq_l, min_l, max_l);
+    printf(" [Right Channel (0x0C)]      RMS: %.4f (%6.2f dBFS) | Freq: %6.1f Hz | Range: [%d, %d]\n",
+           rms_r, dbfs_r, freq_r, min_r, max_r);
+    printf(" Left/Right Channel Sync   : %s (%llu swap errors)\n",
+           (channel_swap_errors == 0) ? "PERFECT [L=0xB/0x9, R=0xC]" : "MISALIGNED [FAIL]",
+           (unsigned long long)channel_swap_errors);
 
     int test_pass = 0;
-    if (total_frames_read >= (total_frames_target * 95 / 100) && rms > 0.05) {
-        printf(" AES3 Signal Status        : ACTIVE (Signal Energy Verified)\n");
-        printf(" Frequency Check           : %s (%.1f Hz)\n",
-               (fabs(estimated_freq - 1000.0) < 150.0) ? "1kHz Sine Detected [PASS]" :
-               (fabs(estimated_freq - 440.0) < 50.0)   ? "440Hz Tone Detected [PASS]" :
-               "Non-standard Tone / Sawtooth [PASS]", estimated_freq);
+    if (total_frames_read >= (total_frames_target * 95 / 100) && (rms_l > 0.05 || rms_r > 0.05) && channel_swap_errors == 0) {
+        printf(" AES3 Signal Status        : ACTIVE (Energy & Framing Verified)\n");
+        printf(" Channel Distinction Check : %s\n",
+               (min_l < -1000000 && min_r >= 0) ? "CONFIRMED (Left=Sine bipolar, Right=Sawtooth unipolar) [PASS]" :
+               (fabs(rms_l - rms_r) > 0.05)     ? "CONFIRMED (Distinct L/R RMS Levels) [PASS]" :
+               "Stereo Pattern Active [PASS]");
         test_pass = 1;
     } else {
-        printf(" AES3 Signal Status        : %s\n", (rms <= 0.05) ? "LOW ENERGY / SILENCE [FAIL]" : "TRUNCATED CAPTURE [FAIL]");
+        printf(" AES3 Signal Status        : %s\n",
+               (channel_swap_errors > 0) ? "CHANNEL SWAP MISALIGNMENT [FAIL]" :
+               (rms_l <= 0.05 && rms_r <= 0.05) ? "LOW ENERGY / SILENCE [FAIL]" : "TRUNCATED CAPTURE [FAIL]");
     }
 
     printf(" Verdict                   : %s\n", test_pass ? "🎉 [PASS]" : "❌ [FAIL]");

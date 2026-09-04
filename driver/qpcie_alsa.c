@@ -135,13 +135,14 @@ static const struct snd_pcm_ops qpcie_alsa_pcm_ops = {
 static int qpcie_alsa_pattern_info(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_info *uinfo)
 {
     static const char * const texts[] = {
-        "1kHz Sine Wave",
-        "Sawtooth Wave",
-        "440Hz Tone",
+        "L-Sine / R-Saw (Split)",
+        "1kHz Sine (Stereo)",
+        "Sawtooth (Stereo)",
+        "440Hz Tone (Stereo)",
         "Mute / Silence",
         NULL
     };
-    return snd_ctl_enum_info(uinfo, 1, 4, texts);
+    return snd_ctl_enum_info(uinfo, 1, 5, texts);
 }
 
 static int qpcie_alsa_pattern_get(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
@@ -164,7 +165,7 @@ static int qpcie_alsa_pattern_put(struct snd_kcontrol *kcontrol, struct snd_ctl_
     struct qpcie_dev *qdev = ach->qdev;
     u32 pattern_id = ucontrol->value.enumerated.item[0];
 
-    if (pattern_id > 3) return -EINVAL;
+    if (pattern_id > 4) return -EINVAL;
     ach->pattern_id = pattern_id;
 
     if (qdev && qdev->bar1_mmio) {

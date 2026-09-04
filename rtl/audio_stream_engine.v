@@ -64,8 +64,17 @@ module audio_stream_engine #(
     reg [5:0]  fifo_wr_ptr;
     reg [5:0]  fifo_rd_ptr;
     reg [6:0]  fifo_count;
+    reg        stream_synced;
 
-    wire fifo_push = s_axis_audio_tvalid && s_axis_audio_tready;
+    wire is_left_subframe  = (s_axis_audio_tdata[3:0] == 4'hB) || (s_axis_audio_tdata[3:0] == 4'h9);
+    wire is_right_subframe = (s_axis_audio_tdata[3:0] == 4'hC);
+
+    // Initial sync locks strictly to Left Channel / Block Start (4'hB).
+    // Once synced: even FIFO index MUST receive Left channel, odd index MUST receive Right channel.
+    wire can_push = stream_synced ? (fifo_wr_ptr[0] ? is_right_subframe : is_left_subframe)
+                                  : (s_axis_audio_tdata[3:0] == 4'hB);
+
+    wire fifo_push = s_axis_audio_tvalid && s_axis_audio_tready && can_push;
     wire fifo_pop4 = (state == IDLE) && audio_start && (fifo_count >= 7'd4);
 
     assign s_axis_audio_tready = audio_start && (fifo_count <= 7'd58);
@@ -80,6 +89,7 @@ module audio_stream_engine #(
             fifo_wr_ptr         <= 6'd0;
             fifo_rd_ptr         <= 6'd0;
             fifo_count          <= 7'd0;
+            stream_synced       <= 1'b0;
             c2h_req_valid       <= 1'b0;
             c2h_req_addr        <= 64'd0;
             c2h_req_dw_len      <= 11'd0;
@@ -96,6 +106,7 @@ module audio_stream_engine #(
                 fifo_wr_ptr      <= 6'd0;
                 fifo_rd_ptr      <= 6'd0;
                 fifo_count       <= 7'd0;
+                stream_synced    <= 1'b0;
                 c2h_req_valid    <= 1'b0;
                 audio_busy       <= 1'b0;
                 audio_block_done <= 1'b0;
@@ -103,7 +114,8 @@ module audio_stream_engine #(
                 // FIFO Push
                 if (fifo_push) begin
                     fifo_mem[fifo_wr_ptr] <= s_axis_audio_tdata;
-                    fifo_wr_ptr <= fifo_wr_ptr + 1'b1;
+                    fifo_wr_ptr           <= fifo_wr_ptr + 1'b1;
+                    stream_synced         <= 1'b1;
 
                     // Latch Audio PTS on AES3 Block Start Preamble (4'hB)
                     if (s_axis_audio_tdata[3:0] == 4'hB) begin
