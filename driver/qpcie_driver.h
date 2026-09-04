@@ -239,6 +239,7 @@ struct qpcie_dev {
     dma_addr_t c2h_ring_dma;
     u32 c2h_tail;
     spinlock_t ring_lock;
+    atomic_t streaming_count;
 
     /* Subsystem Devices */
     struct v4l2_device v4l2_dev;

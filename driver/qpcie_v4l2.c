@@ -929,14 +929,15 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
         }
     }
 
+    atomic_inc(&qdev->streaming_count);
     dev_info(&qdev->pdev->dev,
-             "NV12M STREAMON (Ch%u %s): %u buffers, ring tail=%u, mode=%ux%u %s (pacer=0x%08x)\n",
+             "NV12M STREAMON (Ch%u %s): %u buffers, ring tail=%u, mode=%ux%u %s (pacer=0x%08x, active_streams=%d)\n",
              vch->channel_id,
              (vch->buf_type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) ? "Output" : "Capture",
              count, qdev->h2c_tail, vch->width, vch->height,
              vch->pacer_enable ? "60 FPS paced" :
                                  "uncapped DMA benchmark",
-             pacer_ctrl);
+             pacer_ctrl, atomic_read(&qdev->streaming_count));
     return 0;
 }
 
@@ -954,6 +955,17 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
         qpcie_tpg_pace_stop(qdev);
         iowrite32(0x00, tpg + 0x00);
     }
+
+    qpcie_return_all_buffers(vch, VB2_BUF_STATE_ERROR);
+
+    /* Only reset hardware if ALL active video channels have finished streaming */
+    if (atomic_dec_return(&qdev->streaming_count) > 0) {
+        dev_info(&qdev->pdev->dev,
+                 "NV12M STREAMOFF (Ch%u): stream stopped, remaining active streams: %d\n",
+                 vch->channel_id, atomic_read(&qdev->streaming_count));
+        return;
+    }
+
     iowrite32(0, qdev->bar0_mmio + REG_PACER_CTRL);
     /* Stop fetching descriptors. Queued descriptors are cancelled below;
      * only already-buffered PCIe writes must drain before mappings return. */
@@ -1014,7 +1026,6 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
                  "NV12M STREAMOFF: drained=%u head=%u tail=%u video_errors=%u\n",
                  drained, head, head, errors);
     }
-    qpcie_return_all_buffers(vch, VB2_BUF_STATE_ERROR);
 }
 
 static const struct vb2_ops qpcie_vb2_ops = {
@@ -1113,6 +1124,7 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
 
     dev_info(&qdev->pdev->dev, "[DEBUG STEP 2.1] Registering top-level v4l2_device...\n");
     spin_lock_init(&qdev->ring_lock);
+    atomic_set(&qdev->streaming_count, 0);
     snprintf(qdev->v4l2_dev.name, sizeof(qdev->v4l2_dev.name), "qpcie-v4l2");
     ret = v4l2_device_register(&qdev->pdev->dev, &qdev->v4l2_dev);
     if (ret) {
