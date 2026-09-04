@@ -287,7 +287,7 @@ static ssize_t aud_pattern_show(struct device *dev, struct device_attribute *att
     u32 ctrl_val = 0;
 
     if (qdev && qdev->bar1_mmio) {
-        ctrl_val = ioread32(qdev->bar1_mmio + 0x0100 + 0x00);
+        ctrl_val = ioread32(qdev->bar1_mmio + BAR1_OFFSET_AUDIO_GEN + 0x00);
     }
 
     u32 pattern_id = (ctrl_val >> 1) & 0x07;
@@ -312,9 +312,9 @@ static ssize_t aud_pattern_store(struct device *dev, struct device_attribute *at
     if (kstrtou32(buf, 0, &pattern_id)) return -EINVAL;
 
     if (qdev && qdev->bar1_mmio) {
-        u32 ctrl_val = ioread32(qdev->bar1_mmio + 0x0100 + 0x00);
+        u32 ctrl_val = ioread32(qdev->bar1_mmio + BAR1_OFFSET_AUDIO_GEN + 0x00);
         ctrl_val = (ctrl_val & ~0x0E) | ((pattern_id & 0x07) << 1) | 0x01; // Keep enabled
-        iowrite32(ctrl_val, qdev->bar1_mmio + 0x0100 + 0x00);
+        iowrite32(ctrl_val, qdev->bar1_mmio + BAR1_OFFSET_AUDIO_GEN + 0x00);
         dev_info(dev, "Updated Audio Pattern ID to %u\n", pattern_id);
     }
 
@@ -329,7 +329,7 @@ static ssize_t aud_volume_show(struct device *dev, struct device_attribute *attr
     u32 volume = 200;
 
     if (qdev && qdev->bar1_mmio) {
-        volume = ioread32(qdev->bar1_mmio + 0x0100 + 0x08);
+        volume = ioread32(qdev->bar1_mmio + BAR1_OFFSET_AUDIO_GEN + 0x08);
     }
 
     return sysfs_emit(buf, "%u\n", volume);
@@ -344,7 +344,7 @@ static ssize_t aud_volume_store(struct device *dev, struct device_attribute *att
     if (kstrtou32(buf, 0, &volume)) return -EINVAL;
 
     if (qdev && qdev->bar1_mmio) {
-        iowrite32(volume, qdev->bar1_mmio + 0x0100 + 0x08);
+        iowrite32(volume, qdev->bar1_mmio + BAR1_OFFSET_AUDIO_GEN + 0x08);
         dev_info(dev, "Updated Audio Volume Gain to %u\n", volume);
     }
 
@@ -359,7 +359,7 @@ static ssize_t aud_sample_cnt_show(struct device *dev, struct device_attribute *
     u32 sample_cnt = 0;
 
     if (qdev && qdev->bar1_mmio) {
-        sample_cnt = ioread32(qdev->bar1_mmio + 0x0100 + 0x10);
+        sample_cnt = ioread32(qdev->bar1_mmio + BAR1_OFFSET_AUDIO_GEN + 0x10);
     }
 
     return sysfs_emit(buf, "%u\n", sample_cnt);

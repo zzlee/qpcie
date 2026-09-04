@@ -542,6 +542,11 @@ module custom_pcie_dma_top #(
     wire [63:0] pt_y_wr_data, pt_uv_wr_data;
     wire [10:0] cur_y_page_idx, cur_uv_page_idx;
 
+    // Audio DMA Configuration Wires
+    wire [63:0] reg_audio_dma_addr;
+    wire [31:0] reg_audio_dma_cfg;
+    wire [31:0] reg_audio_dma_ptr;
+
     // 3. BAR0 AXI4-Lite Register Space
     axil_reg_space u_axil_reg_space (
         .clk(clk),
@@ -615,7 +620,10 @@ module custom_pcie_dma_top #(
         .pt_uv_wr_addr(pt_uv_wr_addr),
         .pt_uv_wr_data(pt_uv_wr_data),
         .cur_y_page_idx(cur_y_page_idx),
-        .cur_uv_page_idx(cur_uv_page_idx)
+        .cur_uv_page_idx(cur_uv_page_idx),
+        .reg_audio_dma_addr(reg_audio_dma_addr),
+        .reg_audio_dma_cfg(reg_audio_dma_cfg),
+        .reg_audio_dma_ptr(reg_audio_dma_ptr)
     );
 
     // 3.1 Hardware Performance Monitor Instance
@@ -1445,45 +1453,53 @@ module custom_pcie_dma_top #(
     assign m_axis_video_tlast[0] = 1'b0;
     assign m_axis_video_tuser[0] = 1'b0;
 
-    // 9. Multi-Channel AES3 Audio Stream Engines (Parameterized Generator)
+    // 9. Multi-Channel AES3 Audio Stream Engines
+    audio_stream_engine #(
+        .AUDIO_DATA_WIDTH(AUDIO_DATA_WIDTH),
+        .PCIE_DATA_WIDTH(PCIE_DATA_WIDTH)
+    ) u_audio_stream_engine_ch0 (
+        .clk(clk),
+        .rst_n(dma_rst_n),
+        .audio_start(reg_dma_ctrl[2]),
+        .host_buffer_addr(reg_audio_dma_addr),
+        .buffer_size_bytes({16'd0, reg_audio_dma_cfg[15:0]}),
+        .period_size_bytes({16'd0, reg_audio_dma_cfg[31:16]}),
+        .cur_write_ptr(reg_audio_dma_ptr),
+        .global_timestamp(global_timestamp),
+        .s_axis_audio_tdata(s_axis_audio_tdata[31:0]),
+        .s_axis_audio_tvalid(s_axis_audio_tvalid[0]),
+        .s_axis_audio_tlast(s_axis_audio_tlast[0]),
+        .s_axis_audio_tready(s_axis_audio_tready[0]),
+        .c2h_req_valid(a_c2h_req_valid[0]),
+        .c2h_req_addr(a_c2h_req_addr[63:0]),
+        .c2h_req_dw_len(a_c2h_req_dw_len[10:0]),
+        .c2h_req_data(a_c2h_req_data[PCIE_DATA_WIDTH-1:0]),
+        .c2h_req_last(a_c2h_req_last[0]),
+        .c2h_req_ack(a_c2h_req_ack[0]),
+        .audio_busy(a_busy[0]),
+        .audio_block_done(a_done[0]),
+        .audio_pts(a_pts[0])
+    );
+
+    assign m_axis_audio_tdata[AUDIO_DATA_WIDTH-1:0] = {AUDIO_DATA_WIDTH{1'b0}};
+    assign m_axis_audio_tvalid[0] = 1'b0;
+    assign m_axis_audio_tlast[0]  = 1'b0;
+
     genvar a_idx;
     generate
-        for (a_idx = 0; a_idx < NUM_A_CH; a_idx = a_idx + 1) begin : gen_audio_ch
-            wire a_start;
-            assign a_start = (a_idx == 0) ? reg_dma_ctrl[2] : 1'b0;
-
-            audio_stream_engine #(
-                .AUDIO_DATA_WIDTH(AUDIO_DATA_WIDTH),
-                .PCIE_DATA_WIDTH(PCIE_DATA_WIDTH)
-            ) u_audio_stream_engine (
-                .clk(clk),
-                .rst_n(dma_rst_n),
-                .audio_start(a_start),
-                .host_buffer_addr(h2c_plane0_src),
-                .sample_block_size(16'd32),
-                .is_c2h(c2h_desc_valid),
-                .global_timestamp(global_timestamp),
-                .s_axis_audio_tdata(s_axis_audio_tdata[(a_idx*AUDIO_DATA_WIDTH) +: AUDIO_DATA_WIDTH]),
-                .s_axis_audio_tvalid(s_axis_audio_tvalid[a_idx]),
-                .s_axis_audio_tlast(s_axis_audio_tlast[a_idx]),
-                .s_axis_audio_tready(s_axis_audio_tready[a_idx]),
-                .m_axis_audio_tdata(m_axis_audio_tdata[(a_idx*AUDIO_DATA_WIDTH) +: AUDIO_DATA_WIDTH]),
-                .m_axis_audio_tvalid(m_axis_audio_tvalid[a_idx]),
-                .m_axis_audio_tlast(m_axis_audio_tlast[a_idx]),
-                .m_axis_audio_tready(m_axis_audio_tready[a_idx]),
-                .c2h_req_valid(a_c2h_req_valid[a_idx]),
-                .c2h_req_addr(a_c2h_req_addr[(a_idx*64) +: 64]),
-                .c2h_req_dw_len(a_c2h_req_dw_len[(a_idx*11) +: 11]),
-                .c2h_req_data(a_c2h_req_data[(a_idx*PCIE_DATA_WIDTH) +: PCIE_DATA_WIDTH]),
-                .c2h_req_last(a_c2h_req_last[a_idx]),
-                .c2h_req_ack(a_c2h_req_ack[a_idx]),
-                .h2c_fifo_wvalid(h2c_fifo_wvalid),
-                .h2c_fifo_wdata(h2c_fifo_wdata),
-                .h2c_fifo_wlast(h2c_fifo_wlast),
-                .audio_busy(a_busy[a_idx]),
-                .audio_block_done(a_done[a_idx]),
-                .audio_pts(a_pts[a_idx])
-            );
+        for (a_idx = 1; a_idx < NUM_A_CH; a_idx = a_idx + 1) begin : gen_audio_ch_unused
+            assign s_axis_audio_tready[a_idx] = 1'b1;
+            assign a_c2h_req_valid[a_idx]     = 1'b0;
+            assign a_c2h_req_addr[(a_idx*64)+:64] = 64'd0;
+            assign a_c2h_req_dw_len[(a_idx*11)+:11] = 11'd0;
+            assign a_c2h_req_data[(a_idx*PCIE_DATA_WIDTH)+:PCIE_DATA_WIDTH] = {PCIE_DATA_WIDTH{1'b0}};
+            assign a_c2h_req_last[a_idx]      = 1'b0;
+            assign m_axis_audio_tdata[(a_idx*AUDIO_DATA_WIDTH)+:AUDIO_DATA_WIDTH] = {AUDIO_DATA_WIDTH{1'b0}};
+            assign m_axis_audio_tvalid[a_idx] = 1'b0;
+            assign m_axis_audio_tlast[a_idx]  = 1'b0;
+            assign a_busy[a_idx]              = 1'b0;
+            assign a_done[a_idx]              = 1'b0;
+            assign a_pts[a_idx]               = 64'd0;
         end
     endgenerate
 
@@ -1502,9 +1518,10 @@ module custom_pcie_dma_top #(
         .reg_irq_status_w1c(reg_irq_status_w1c),
         .reg_irq_status(reg_irq_status),
         .h2c_done(sg_h2c_done_irq),
-        .c2h_done(v_done[0] | v_done[1] | v_done[2] | v_done[3] | sg_c2h_done_irq | a_done[0] | a_done[1] | a_done[2] | a_done[3]),
+        .c2h_done(v_done[0] | v_done[1] | v_done[2] | v_done[3] | sg_c2h_done_irq | a_done[0]),
         .v_done_ch(v_done_ch),
         .h2c_done_ch(h2c_done_ch),
+        .a_done_irq(a_done[0]),
         .irq_req_valid(irq_req_valid),
         .irq_req_code(irq_req_code),
         .irq_req_ack(irq_req_ack),

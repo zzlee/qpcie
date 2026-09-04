@@ -20,6 +20,7 @@ module interrupt_ctrl (
     input  wire        c2h_done,
     input  wire [3:0]  v_done_ch,
     input  wire [3:1]  h2c_done_ch,
+    input  wire        a_done_irq,
 
     // Interface to RQ TX Encoder (MSI Interrupt Msg TLP)
     output reg         irq_req_valid,
@@ -67,6 +68,7 @@ module interrupt_ctrl (
             if (h2c_done_ch[1]) reg_irq_status[8] <= 1'b1;
             if (h2c_done_ch[2]) reg_irq_status[9] <= 1'b1;
             if (h2c_done_ch[3]) reg_irq_status[10] <= 1'b1;
+            if (a_done_irq) reg_irq_status[11] <= 1'b1;
 
             // Completion accounting (saturating at 255).
             if (h2c_done && !h2c_send && (h2c_pending != 8'hFF))

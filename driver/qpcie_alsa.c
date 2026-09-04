@@ -54,8 +54,24 @@ static int qpcie_alsa_hw_free(struct snd_pcm_substream *substream)
 static int qpcie_alsa_prepare(struct snd_pcm_substream *substream)
 {
     struct qpcie_alsa_channel *ach = snd_pcm_substream_chip(substream);
+    struct qpcie_dev *qdev = ach->qdev;
+    dma_addr_t dma_addr = substream->runtime->dma_addr;
+    size_t buffer_bytes = snd_pcm_lib_buffer_bytes(substream);
+    size_t period_bytes = snd_pcm_lib_period_bytes(substream);
+
     ach->buffer_pos = 0;
     ach->period_pos = 0;
+
+    if (ach->channel_id == 0) {
+        iowrite32(lower_32_bits(dma_addr), qdev->bar0_mmio + REG_AUDIO_DMA_ADDR_L);
+        iowrite32(upper_32_bits(dma_addr), qdev->bar0_mmio + REG_AUDIO_DMA_ADDR_H);
+        iowrite32(((u32)period_bytes << 16) | ((u32)buffer_bytes & 0xFFFF),
+                  qdev->bar0_mmio + REG_AUDIO_DMA_CFG);
+
+        dev_info(&qdev->pdev->dev,
+                 "[ALSA Ch%d Prepare] DMA=0x%llX, buffer=%zu bytes, period=%zu bytes\n",
+                 ach->channel_id, (u64)dma_addr, buffer_bytes, period_bytes);
+    }
     return 0;
 }
 
@@ -63,13 +79,22 @@ static int qpcie_alsa_trigger(struct snd_pcm_substream *substream, int cmd)
 {
     struct qpcie_alsa_channel *ach = snd_pcm_substream_chip(substream);
     struct qpcie_dev *qdev = ach->qdev;
+    u32 ctrl;
 
     switch (cmd) {
     case SNDRV_PCM_TRIGGER_START:
-        iowrite32(DMA_CTRL_AUDIO_RUN, qdev->bar0_mmio + REG_DMA_CTRL);
+        if (ach->channel_id == 0) {
+            ctrl = ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
+            iowrite32(ctrl | DMA_CTRL_AUDIO_RUN, qdev->bar0_mmio + REG_DMA_CTRL);
+            dev_info(&qdev->pdev->dev, "[ALSA Ch%d] Audio DMA Stream Started\n", ach->channel_id);
+        }
         break;
     case SNDRV_PCM_TRIGGER_STOP:
-        iowrite32(0x00, qdev->bar0_mmio + REG_DMA_CTRL); /* Stop DMA */
+        if (ach->channel_id == 0) {
+            ctrl = ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
+            iowrite32(ctrl & ~DMA_CTRL_AUDIO_RUN, qdev->bar0_mmio + REG_DMA_CTRL);
+            dev_info(&qdev->pdev->dev, "[ALSA Ch%d] Audio DMA Stream Stopped\n", ach->channel_id);
+        }
         break;
     default:
         return -EINVAL;
@@ -80,6 +105,16 @@ static int qpcie_alsa_trigger(struct snd_pcm_substream *substream, int cmd)
 static snd_pcm_uframes_t qpcie_alsa_pointer(struct snd_pcm_substream *substream)
 {
     struct qpcie_alsa_channel *ach = snd_pcm_substream_chip(substream);
+    struct qpcie_dev *qdev = ach->qdev;
+    u32 hw_pos;
+    size_t buf_bytes = snd_pcm_lib_buffer_bytes(substream);
+
+    if (ach->channel_id == 0) {
+        hw_pos = ioread32(qdev->bar0_mmio + REG_AUDIO_DMA_PTR);
+        if (hw_pos >= buf_bytes)
+            hw_pos = 0;
+        ach->buffer_pos = hw_pos;
+    }
     return bytes_to_frames(substream->runtime, ach->buffer_pos);
 }
 
@@ -110,6 +145,13 @@ static int qpcie_alsa_pattern_info(struct snd_kcontrol *kcontrol, struct snd_ctl
 static int qpcie_alsa_pattern_get(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
 {
     struct qpcie_alsa_channel *ach = snd_kcontrol_chip(kcontrol);
+    struct qpcie_dev *qdev = ach->qdev;
+    u32 ctrl_val;
+
+    if (qdev && qdev->bar1_mmio) {
+        ctrl_val = ioread32(qdev->bar1_mmio + BAR1_OFFSET_AUDIO_GEN + 0x00);
+        ach->pattern_id = (ctrl_val >> 1) & 0x07;
+    }
     ucontrol->value.enumerated.item[0] = ach->pattern_id & 0x07;
     return 0;
 }
@@ -117,10 +159,18 @@ static int qpcie_alsa_pattern_get(struct snd_kcontrol *kcontrol, struct snd_ctl_
 static int qpcie_alsa_pattern_put(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
 {
     struct qpcie_alsa_channel *ach = snd_kcontrol_chip(kcontrol);
+    struct qpcie_dev *qdev = ach->qdev;
     u32 pattern_id = ucontrol->value.enumerated.item[0];
 
     if (pattern_id > 3) return -EINVAL;
     ach->pattern_id = pattern_id;
+
+    if (qdev && qdev->bar1_mmio) {
+        u32 ctrl_val = ioread32(qdev->bar1_mmio + BAR1_OFFSET_AUDIO_GEN + 0x00);
+        ctrl_val = (ctrl_val & ~0x0E) | ((pattern_id & 0x07) << 1) | 0x01;
+        iowrite32(ctrl_val, qdev->bar1_mmio + BAR1_OFFSET_AUDIO_GEN + 0x00);
+        dev_info(&qdev->pdev->dev, "ALSA Mixer: Set Audio Pattern ID to %u\n", pattern_id);
+    }
     return 1;
 }
 
@@ -136,6 +186,11 @@ static int qpcie_alsa_volume_info(struct snd_kcontrol *kcontrol, struct snd_ctl_
 static int qpcie_alsa_volume_get(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
 {
     struct qpcie_alsa_channel *ach = snd_kcontrol_chip(kcontrol);
+    struct qpcie_dev *qdev = ach->qdev;
+
+    if (qdev && qdev->bar1_mmio) {
+        ach->volume = ioread32(qdev->bar1_mmio + BAR1_OFFSET_AUDIO_GEN + 0x08);
+    }
     ucontrol->value.integer.value[0] = ach->volume;
     return 0;
 }
@@ -143,10 +198,16 @@ static int qpcie_alsa_volume_get(struct snd_kcontrol *kcontrol, struct snd_ctl_e
 static int qpcie_alsa_volume_put(struct snd_kcontrol *kcontrol, struct snd_ctl_elem_value *ucontrol)
 {
     struct qpcie_alsa_channel *ach = snd_kcontrol_chip(kcontrol);
+    struct qpcie_dev *qdev = ach->qdev;
     u32 volume = ucontrol->value.integer.value[0];
 
     if (volume > 255) volume = 255;
     ach->volume = volume;
+
+    if (qdev && qdev->bar1_mmio) {
+        iowrite32(volume, qdev->bar1_mmio + BAR1_OFFSET_AUDIO_GEN + 0x08);
+        dev_info(&qdev->pdev->dev, "ALSA Mixer: Set Audio Volume %u\n", volume);
+    }
     return 1;
 }
 
@@ -250,15 +311,13 @@ void qpcie_alsa_irq_handler(struct qpcie_dev *qdev)
     for (i = 0; i < NUM_AUDIO_CHANNELS; i++) {
         struct qpcie_alsa_channel *ach = &qdev->alsa_ch[i];
         if (ach->substream && snd_pcm_running(ach->substream)) {
-            struct snd_pcm_runtime *runtime = ach->substream->runtime;
-            unsigned long flags;
-
-            spin_lock_irqsave(&ach->slock, flags);
-            ach->buffer_pos += runtime->period_size * 4;
-            if (ach->buffer_pos >= runtime->buffer_size * 4)
-                ach->buffer_pos = 0;
-            spin_unlock_irqrestore(&ach->slock, flags);
-
+            if (ach->channel_id == 0) {
+                u32 hw_pos = ioread32(qdev->bar0_mmio + REG_AUDIO_DMA_PTR);
+                size_t buf_bytes = snd_pcm_lib_buffer_bytes(ach->substream);
+                if (hw_pos >= buf_bytes)
+                    hw_pos = 0;
+                ach->buffer_pos = hw_pos;
+            }
             snd_pcm_period_elapsed(ach->substream);
         }
     }

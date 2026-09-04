@@ -29,8 +29,12 @@ static irqreturn_t qpcie_irq_handler(int irq, void *data)
         return IRQ_NONE;
 
     /* Pass completion interrupts to V4L2 handler */
-    if (qdev->v4l2_registered)
+    if (qdev->v4l2_registered && (status & (IRQ_STATUS_CHANNEL_MASK | IRQ_STATUS_H2C_GLOBAL | IRQ_STATUS_C2H_GLOBAL)))
         qpcie_v4l2_irq_handler(qdev);
+
+    /* Pass completion interrupts to ALSA handler */
+    if (qdev->alsa_registered && (status & IRQ_STATUS_AUDIO))
+        qpcie_alsa_irq_handler(qdev);
 
     iowrite32(status & IRQ_STATUS_ALL_MASK, qdev->bar0_mmio + REG_IRQ_STATUS);
     return IRQ_HANDLED;
@@ -519,14 +523,24 @@ free_diag_dma:
         goto free_video_ring;
     }
     qdev->v4l2_registered = true;
+
+    ret = qpcie_alsa_init(qdev);
+    if (ret) {
+        dev_err(&pdev->dev, "[ERROR] ALSA initialization failed: %d\n", ret);
+        goto v4l2_remove;
+    }
+    qdev->alsa_registered = true;
     dev_info(&pdev->dev,
-             "Stage-2 V4L2 NV12M capture ready; ALSA is intentionally disabled\n");
+             "Stage-3 V4L2 NV12M + ALSA AES3 Audio capture ready\n");
 
     ret = qpcie_sysfs_init(qdev);
     if (ret)
-        goto v4l2_remove;
+        goto alsa_remove;
     return 0;
 
+alsa_remove:
+    qpcie_alsa_remove(qdev);
+    qdev->alsa_registered = false;
 v4l2_remove:
     qpcie_v4l2_remove(qdev);
     qdev->v4l2_registered = false;
@@ -563,6 +577,10 @@ static void qpcie_remove(struct pci_dev *pdev)
     ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
     iowrite32(0, qdev->bar0_mmio + REG_IRQ_CTRL);
 
+    if (qdev->alsa_registered) {
+        qpcie_alsa_remove(qdev);
+        qdev->alsa_registered = false;
+    }
     if (qdev->v4l2_registered) {
         qpcie_v4l2_remove(qdev);
         qdev->v4l2_registered = false;

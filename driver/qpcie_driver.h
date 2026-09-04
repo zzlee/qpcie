@@ -50,7 +50,7 @@
 
 #define NUM_VIDEO_NODES    7
 #define NUM_VIDEO_CHANNELS 4
-#define NUM_AUDIO_CHANNELS 4
+#define NUM_AUDIO_CHANNELS 1
 #define RING_BUFFER_SIZE   128
 
 /* Per-channel IRQ status bits in REG_IRQ_STATUS (Offset 0x24) */
@@ -58,8 +58,14 @@
 #define IRQ_STATUS_C2H_GLOBAL       BIT(1)
 #define IRQ_STATUS_C2H_CH(ch)       BIT(4 + (ch)) /* Bits 4..7: C2H Ch0..Ch3 */
 #define IRQ_STATUS_H2C_CH(ch)       BIT(7 + (ch)) /* Bits 8..10: H2C Ch1..Ch3 */
+#define IRQ_STATUS_AUDIO            BIT(11)       /* Bit 11: Audio Ch0 Period Done */
 #define IRQ_STATUS_CHANNEL_MASK     0x000007F0    /* Bits 4..10 */
-#define IRQ_STATUS_ALL_MASK         0x000007F3    /* Bits 0..1, 4..10 */
+#define IRQ_STATUS_ALL_MASK         0x00000FF3    /* Bits 0..1, 4..11 */
+
+/* BAR1 Offsets */
+#define BAR1_OFFSET_TPG             0x0000
+#define BAR1_OFFSET_AUDIO_GEN       0x1000
+#define BAR1_OFFSET_EDID            0x2000
 
 /* Private V4L2 control used only for controlled DMA throughput testing. */
 #define V4L2_CID_QPCIE_PACER_ENABLE (V4L2_CID_USER_BASE + 0x1000)
@@ -84,6 +90,10 @@
 #define REG_GIT_COMMIT_HASH  0x34
 #define REG_BUILD_TIMESTAMP  0x38
 #define REG_HARDWARE_CAPS    0x3C
+#define REG_AUDIO_DMA_ADDR_L 0x48    /* Audio Ch0 Host Buffer Phys Addr Low [31:0] */
+#define REG_AUDIO_DMA_ADDR_H 0x4C    /* Audio Ch0 Host Buffer Phys Addr High [63:32] */
+#define REG_AUDIO_DMA_CFG    0x94    /* [15:0]=buf_size_bytes, [31:16]=period_size_bytes */
+#define REG_AUDIO_DMA_PTR    0x98    /* Current hardware write pointer in bytes (RO) */
 #define REG_PACER_CTRL       0x74    /* Video Pacer Bypass Control (0=Bypass, 1=Enable) */
 #define REG_VIDEO_SUB_RESET  0x84    /* Bit0: TPG-only reset, Bit1: NV12 engine reset */
 #define REG_TPG_SOF_COUNT    0x88    /* Free-running TPG start-of-frame counter (RO) */
@@ -224,6 +234,7 @@ struct qpcie_dev {
 
     int irq;
     bool v4l2_registered;
+    bool alsa_registered;
 
     /* Saved MPS state when probe had to raise it for 256-byte MWr. */
     bool mps_modified;

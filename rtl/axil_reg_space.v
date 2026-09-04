@@ -93,7 +93,12 @@ module axil_reg_space (
     output reg  [10:0] pt_uv_wr_addr,
     output reg  [63:0] pt_uv_wr_data,
     input  wire [10:0] cur_y_page_idx,
-    input  wire [10:0] cur_uv_page_idx
+    input  wire [10:0] cur_uv_page_idx,
+
+    // Audio DMA Configuration & Status Ports (BAR0 Offsets 0x48, 0x4C, 0x94, 0x98)
+    output reg  [63:0] reg_audio_dma_addr,
+    output reg  [31:0] reg_audio_dma_cfg,
+    input  wire [31:0] reg_audio_dma_ptr
 );
 
     // BAR0 Register Offset Definitions
@@ -151,6 +156,8 @@ module axil_reg_space (
             reg_c2h_ring_addr  <= 64'd0;
             reg_c2h_ring_size  <= 16'd0;
             reg_c2h_tail_ptr   <= 16'd0;
+            reg_audio_dma_addr <= 64'd0;
+            reg_audio_dma_cfg  <= 32'h1000_0000; // Default: period 4096 (0x1000), buffer 65536
             reg_irq_ctrl       <= 32'd0;
             reg_irq_status_w1c <= 32'd0;
             reg_pacer_ctrl     <= 32'd1; // Default: 1 (Enabled - Internal Clock Pacer Mode)
@@ -195,6 +202,8 @@ module axil_reg_space (
                         reg_c2h_ring_size <= s_axil_wdata[15:0];
                         reg_c2h_tail_ptr  <= s_axil_wdata[31:16];
                     end
+                    8'h48:                reg_audio_dma_addr[31:0]  <= s_axil_wdata;
+                    8'h4C:                reg_audio_dma_addr[63:32] <= s_axil_wdata;
                     ADDR_IRQ_CTRL:        reg_irq_ctrl             <= s_axil_wdata;
                     ADDR_IRQ_STATUS:      reg_irq_status_w1c       <= s_axil_wdata;
                     8'h68:                reg_debug_last_wdata     <= s_axil_wdata;
@@ -203,6 +212,7 @@ module axil_reg_space (
                     8'h78:                reg_slice_height         <= s_axil_wdata; // BAR0 0x78: Sub-Frame Slice Height
                     8'h80:                reg_video_ctrl           <= s_axil_wdata; // BAR0 0x80: Video Pipeline Control
                     8'h84:                reg_video_sub_reset      <= s_axil_wdata; // BAR0 0x84: Sub-Domain Reset Control
+                    8'h94:                reg_audio_dma_cfg         <= s_axil_wdata; // BAR0 0x94: Audio DMA Config (period/buffer)
                     8'hA0: begin
                         reg_perf_enable    <= s_axil_wdata[0];
                         reg_perf_reset_w1c <= s_axil_wdata[1];
@@ -273,6 +283,8 @@ module axil_reg_space (
                     ADDR_HARDWARE_CAPS:   s_axil_rdata <= HARDWARE_CAPS_VAL;
                     8'h40:                s_axil_rdata <= {reg_h2c_tail_ptr, reg_h2c_head_ptr};
                     8'h44:                s_axil_rdata <= {reg_c2h_tail_ptr, reg_c2h_head_ptr};
+                    8'h48:                s_axil_rdata <= reg_audio_dma_addr[31:0];
+                    8'h4C:                s_axil_rdata <= reg_audio_dma_addr[63:32];
 
                     // Hardware AV Sync Timestamp Registers (BAR0 Offsets 0x50..0x64)
                     8'h50:                s_axil_rdata <= reg_global_timestamp[31:0];
@@ -294,6 +306,8 @@ module axil_reg_space (
                     8'h88:                s_axil_rdata <= reg_sof_count;
                     8'h8C:                s_axil_rdata <= reg_eol_count;
                     8'h90:                s_axil_rdata <= reg_beat_count;
+                    8'h94:                s_axil_rdata <= reg_audio_dma_cfg;
+                    8'h98:                s_axil_rdata <= reg_audio_dma_ptr;
 
                     // Hardware Performance Monitor Registers (BAR0 Offsets 0xA0..0xDC)
                     8'hA0:                s_axil_rdata <= {30'd0, reg_perf_reset_w1c, reg_perf_enable};
