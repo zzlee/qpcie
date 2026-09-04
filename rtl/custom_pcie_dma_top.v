@@ -1487,6 +1487,13 @@ module custom_pcie_dma_top #(
         end
     endgenerate
 
+    wire [3:0] v_done_ch = {v_done[3], v_done[2], v_done[1], (v_done[0] | sg_c2h_done_irq)};
+    wire [3:1] h2c_done_ch = {
+        (sg_h2c_done_irq && (sg_loopback_channel == 2'd3)),
+        (sg_h2c_done_irq && (sg_loopback_channel == 2'd2)),
+        (sg_h2c_done_irq && (sg_loopback_channel == 2'd1 || sg_loopback_channel == 2'd0))
+    };
+
     // 10. Interrupt Controller
     interrupt_ctrl u_interrupt_ctrl (
         .clk(clk),
@@ -1496,6 +1503,8 @@ module custom_pcie_dma_top #(
         .reg_irq_status(reg_irq_status),
         .h2c_done(sg_h2c_done_irq),
         .c2h_done(v_done[0] | v_done[1] | v_done[2] | v_done[3] | sg_c2h_done_irq | a_done[0] | a_done[1] | a_done[2] | a_done[3]),
+        .v_done_ch(v_done_ch),
+        .h2c_done_ch(h2c_done_ch),
         .irq_req_valid(irq_req_valid),
         .irq_req_code(irq_req_code),
         .irq_req_ack(irq_req_ack),

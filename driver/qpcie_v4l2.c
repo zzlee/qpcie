@@ -431,7 +431,7 @@ static int qpcie_queue_setup(struct vb2_queue *vq,
     *nplanes = 2;
     sizes[0] = y_size;
     sizes[1] = uv_size;
-    *nbuffers = clamp_t(unsigned int, *nbuffers, 2, RING_BUFFER_SIZE / 2);
+    *nbuffers = clamp_t(unsigned int, *nbuffers, 2, 8);
     return 0;
 }
 
@@ -615,6 +615,16 @@ static int qpcie_publish_buffer(struct qpcie_v4l2_channel *vch,
     int ret;
 
     tail = qdev->h2c_tail;
+    {
+        u32 head = ioread32(qdev->bar0_mmio + 0x40) & 0xffff;
+        u32 next_tail = (tail + 1) % RING_BUFFER_SIZE;
+        if (next_tail == head) {
+            dev_err(&qdev->pdev->dev,
+                    "V4L2 ring full: head=%u tail=%u size=%u; descriptor dropped\n",
+                    head, tail, RING_BUFFER_SIZE);
+            return -EBUSY;
+        }
+    }
     desc = &qdev->h2c_ring_virt[tail];
     memset(desc, 0, sizeof(*desc));
 
@@ -1296,67 +1306,126 @@ void qpcie_v4l2_irq_handler(struct qpcie_dev *qdev)
         slice_height = ioread32(qdev->bar0_mmio + REG_SLICE_HEIGHT);
     }
 
-    /* Bit 0: H2C Output Complete (Video Output Nodes) */
-    if (status & BIT(0)) {
-        for (i = 0; i < NUM_VIDEO_NODES; i++) {
-            struct qpcie_v4l2_channel *vch = &qdev->v4l2_ch[i];
-            struct qpcie_v4l2_buffer *buf;
+    /* --------------------------------------------------------------------
+     * 1. Per-Channel C2H Video Capture Completions (Bits 4..7: Ch0..Ch3)
+     * -------------------------------------------------------------------- */
+    if (status & IRQ_STATUS_CHANNEL_MASK) {
+        for (i = 0; i < NUM_VIDEO_CHANNELS; i++) {
+            if (status & IRQ_STATUS_C2H_CH(i)) {
+                int node_idx = (i == 0) ? 0 : (i * 2);
+                struct qpcie_v4l2_channel *vch = &qdev->v4l2_ch[node_idx];
+                struct qpcie_v4l2_buffer *buf;
 
-            if (vch->buf_type != V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE)
-                continue;
+                spin_lock(&vch->slock);
+                if (!list_empty(&vch->active_buffers)) {
+                    buf = list_first_entry(&vch->active_buffers, struct qpcie_v4l2_buffer, list);
 
-            spin_lock(&vch->slock);
-            if (!list_empty(&vch->active_buffers)) {
-                buf = list_first_entry(&vch->active_buffers, struct qpcie_v4l2_buffer, list);
-                list_del(&buf->list);
-                buf->vb.vb2_buf.timestamp = ktime_get_ns();
-                buf->vb.sequence = vch->sequence++;
-                vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
-            }
-            spin_unlock(&vch->slock);
-        }
-    }
+                    if (slice_height > 0) {
+                        u32 total_slices = (vch->height + slice_height - 1) / slice_height;
+                        struct v4l2_event ev = {
+                            .type = V4L2_EVENT_FRAME_SYNC,
+                            .u.frame_sync.frame_sequence = vch->sequence,
+                        };
 
-    /* Bit 1: C2H Video Capture Complete (Video Capture Nodes) */
-    if (status & BIT(1)) {
-        for (i = 0; i < NUM_VIDEO_NODES; i++) {
-            struct qpcie_v4l2_channel *vch = &qdev->v4l2_ch[i];
-            struct qpcie_v4l2_buffer *buf;
+                        vch->current_slice_idx++;
+                        v4l2_event_queue(&vch->vdev, &ev);
 
-            if (vch->buf_type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)
-                continue;
-
-            spin_lock(&vch->slock);
-            if (!list_empty(&vch->active_buffers)) {
-                buf = list_first_entry(&vch->active_buffers, struct qpcie_v4l2_buffer, list);
-
-                if (slice_height > 0) {
-                    /* Sub-Frame Low-Latency Slice DMA Mode */
-                    u32 total_slices = (vch->height + slice_height - 1) / slice_height;
-                    struct v4l2_event ev = {
-                        .type = V4L2_EVENT_FRAME_SYNC,
-                        .u.frame_sync.frame_sequence = vch->sequence,
-                    };
-
-                    vch->current_slice_idx++;
-                    v4l2_event_queue(&vch->vdev, &ev);
-
-                    if (vch->current_slice_idx >= total_slices) {
-                        vch->current_slice_idx = 0;
+                        if (vch->current_slice_idx >= total_slices) {
+                            vch->current_slice_idx = 0;
+                            list_del(&buf->list);
+                            buf->vb.vb2_buf.timestamp = ktime_get_ns();
+                            buf->vb.sequence = vch->sequence++;
+                            vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
+                        }
+                    } else {
                         list_del(&buf->list);
                         buf->vb.vb2_buf.timestamp = ktime_get_ns();
                         buf->vb.sequence = vch->sequence++;
                         vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
                     }
-                } else {
-                    /* Standard Full-Frame IRQ Mode */
+                }
+                spin_unlock(&vch->slock);
+            }
+        }
+
+        /* Per-Channel H2C Completions (Bits 8..10: Ch1..Ch3) */
+        for (i = 1; i < NUM_VIDEO_CHANNELS; i++) {
+            if (status & IRQ_STATUS_H2C_CH(i)) {
+                int node_idx = (i * 2) - 1;
+                struct qpcie_v4l2_channel *vch = &qdev->v4l2_ch[node_idx];
+                struct qpcie_v4l2_buffer *buf;
+
+                spin_lock(&vch->slock);
+                if (!list_empty(&vch->active_buffers)) {
+                    buf = list_first_entry(&vch->active_buffers, struct qpcie_v4l2_buffer, list);
                     list_del(&buf->list);
                     buf->vb.vb2_buf.timestamp = ktime_get_ns();
                     buf->vb.sequence = vch->sequence++;
                     vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
                 }
+                spin_unlock(&vch->slock);
             }
-            spin_unlock(&vch->slock);
+        }
+    } else {
+        /* Legacy fallback for bitstream without per-channel IRQ bits */
+        if (status & BIT(0)) {
+            for (i = 0; i < NUM_VIDEO_NODES; i++) {
+                struct qpcie_v4l2_channel *vch = &qdev->v4l2_ch[i];
+                struct qpcie_v4l2_buffer *buf;
+
+                if (vch->buf_type != V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE)
+                    continue;
+
+                spin_lock(&vch->slock);
+                if (!list_empty(&vch->active_buffers)) {
+                    buf = list_first_entry(&vch->active_buffers, struct qpcie_v4l2_buffer, list);
+                    list_del(&buf->list);
+                    buf->vb.vb2_buf.timestamp = ktime_get_ns();
+                    buf->vb.sequence = vch->sequence++;
+                    vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
+                }
+                spin_unlock(&vch->slock);
+            }
+        }
+
+        if (status & BIT(1)) {
+            for (i = 0; i < NUM_VIDEO_NODES; i++) {
+                struct qpcie_v4l2_channel *vch = &qdev->v4l2_ch[i];
+                struct qpcie_v4l2_buffer *buf;
+
+                if (vch->buf_type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)
+                    continue;
+
+                spin_lock(&vch->slock);
+                if (!list_empty(&vch->active_buffers)) {
+                    buf = list_first_entry(&vch->active_buffers, struct qpcie_v4l2_buffer, list);
+
+                    if (slice_height > 0) {
+                        u32 total_slices = (vch->height + slice_height - 1) / slice_height;
+                        struct v4l2_event ev = {
+                            .type = V4L2_EVENT_FRAME_SYNC,
+                            .u.frame_sync.frame_sequence = vch->sequence,
+                        };
+
+                        vch->current_slice_idx++;
+                        v4l2_event_queue(&vch->vdev, &ev);
+
+                        if (vch->current_slice_idx >= total_slices) {
+                            vch->current_slice_idx = 0;
+                            list_del(&buf->list);
+                            buf->vb.vb2_buf.timestamp = ktime_get_ns();
+                            buf->vb.sequence = vch->sequence++;
+                            vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
+                        }
+                    } else {
+                        list_del(&buf->list);
+                        buf->vb.vb2_buf.timestamp = ktime_get_ns();
+                        buf->vb.sequence = vch->sequence++;
+                        vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
+                    }
+                }
+                spin_unlock(&vch->slock);
+            }
         }
     }
 }

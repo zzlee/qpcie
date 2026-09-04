@@ -51,7 +51,15 @@
 #define NUM_VIDEO_NODES    7
 #define NUM_VIDEO_CHANNELS 4
 #define NUM_AUDIO_CHANNELS 4
-#define RING_BUFFER_SIZE   16
+#define RING_BUFFER_SIZE   128
+
+/* Per-channel IRQ status bits in REG_IRQ_STATUS (Offset 0x24) */
+#define IRQ_STATUS_H2C_GLOBAL       BIT(0)
+#define IRQ_STATUS_C2H_GLOBAL       BIT(1)
+#define IRQ_STATUS_C2H_CH(ch)       BIT(4 + (ch)) /* Bits 4..7: C2H Ch0..Ch3 */
+#define IRQ_STATUS_H2C_CH(ch)       BIT(7 + (ch)) /* Bits 8..10: H2C Ch1..Ch3 */
+#define IRQ_STATUS_CHANNEL_MASK     0x000007F0    /* Bits 4..10 */
+#define IRQ_STATUS_ALL_MASK         0x000007F3    /* Bits 0..1, 4..10 */
 
 /* Private V4L2 control used only for controlled DMA throughput testing. */
 #define V4L2_CID_QPCIE_PACER_ENABLE (V4L2_CID_USER_BASE + 0x1000)

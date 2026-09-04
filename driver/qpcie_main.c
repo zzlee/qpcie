@@ -25,14 +25,14 @@ static irqreturn_t qpcie_irq_handler(int irq, void *data)
     struct qpcie_dev *qdev = data;
     u32 status = ioread32(qdev->bar0_mmio + REG_IRQ_STATUS);
 
-    if (!(status & 0x3))
+    if (!(status & IRQ_STATUS_ALL_MASK))
         return IRQ_NONE;
 
-    /* Pass completion interrupts (bit 0: H2C, bit 1: C2H) to V4L2 handler */
-    if ((status & 0x3) && qdev->v4l2_registered)
+    /* Pass completion interrupts to V4L2 handler */
+    if (qdev->v4l2_registered)
         qpcie_v4l2_irq_handler(qdev);
 
-    iowrite32(status & 0x3, qdev->bar0_mmio + REG_IRQ_STATUS);
+    iowrite32(status & IRQ_STATUS_ALL_MASK, qdev->bar0_mmio + REG_IRQ_STATUS);
     return IRQ_HANDLED;
 }
 

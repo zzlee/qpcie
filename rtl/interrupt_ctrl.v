@@ -18,6 +18,8 @@ module interrupt_ctrl (
     // Completion triggers from DMA Engines
     input  wire        h2c_done,
     input  wire        c2h_done,
+    input  wire [3:0]  v_done_ch,
+    input  wire [3:1]  h2c_done_ch,
 
     // Interface to RQ TX Encoder (MSI Interrupt Msg TLP)
     output reg         irq_req_valid,
@@ -58,6 +60,13 @@ module interrupt_ctrl (
             reg_irq_status <= reg_irq_status & ~reg_irq_status_w1c;
             if (h2c_done) reg_irq_status[0] <= 1'b1;
             if (c2h_done) reg_irq_status[1] <= 1'b1;
+            if (v_done_ch[0]) reg_irq_status[4] <= 1'b1;
+            if (v_done_ch[1]) reg_irq_status[5] <= 1'b1;
+            if (v_done_ch[2]) reg_irq_status[6] <= 1'b1;
+            if (v_done_ch[3]) reg_irq_status[7] <= 1'b1;
+            if (h2c_done_ch[1]) reg_irq_status[8] <= 1'b1;
+            if (h2c_done_ch[2]) reg_irq_status[9] <= 1'b1;
+            if (h2c_done_ch[3]) reg_irq_status[10] <= 1'b1;
 
             // Completion accounting (saturating at 255).
             if (h2c_done && !h2c_send && (h2c_pending != 8'hFF))

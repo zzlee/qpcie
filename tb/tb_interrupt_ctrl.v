@@ -33,6 +33,8 @@ module tb_interrupt_ctrl;
         .reg_irq_status(reg_irq_status),
         .h2c_done(h2c_done),
         .c2h_done(c2h_done),
+        .v_done_ch(4'd0),
+        .h2c_done_ch(3'd0),
         .irq_req_valid(irq_req_valid),
         .irq_req_code(irq_req_code),
         .irq_req_ack(irq_req_ack),
