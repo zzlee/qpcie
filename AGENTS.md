@@ -19,7 +19,6 @@ This document provides exact instructions for building, flashing, and testing th
 To compile native RTL sources (`a50t_pcie_card_top.v`, `pcie_7x_axi_bridge.v`, `cq_rx_decoder.v`, etc.) into a bitstream:
 
 ```bash
-cd /home/zzlee/qpcie
 ./scripts/build_a50t.sh
 ```
 - Output Bitstream: `./build/qpcie_a50t_proj/qpcie_a50t_card.runs/impl_1/a50t_pcie_card_top.bit`
@@ -30,7 +29,6 @@ cd /home/zzlee/qpcie
 Always use the automated script **`./scripts/flash_a50t.sh`** to flash the SPI Flash memory:
 
 ```bash
-cd /home/zzlee/qpcie
 ./scripts/flash_a50t.sh
 ```
 
@@ -50,18 +48,15 @@ When a task changes FPGA RTL plus host software, split responsibilities as follo
 1. Modify RTL, Linux driver, and user-mode test applications as requested.
 2. Build the A50T bitstream with:
    ```bash
-   cd /home/zzlee/qpcie
    ./scripts/build_a50t.sh
    ```
 3. Compile the driver with:
    ```bash
-   cd /home/zzlee/qpcie/driver
-   make clean && make
+   cd ./driver && make clean && make
    ```
 4. Compile test applications with:
    ```bash
-   cd /home/zzlee/qpcie/test_app
-   make clean && make all
+   cd ./test_app && make clean && make all
    ```
 5. Commit and push the verified source changes.
 
@@ -73,12 +68,11 @@ When a task changes FPGA RTL plus host software, split responsibilities as follo
 
 ---
 
-## 🐧 Driver Build, Load & Verification
+## 🐧 Driver Build, Load & Verification On Real Hardware
 
 ### 1. Compile Driver
 ```bash
-cd /home/zzlee/qpcie/driver
-make clean && make
+cd ./driver && make clean && make
 ```
 
 ### 2. Load Driver & Check Diagnostics
