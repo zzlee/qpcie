@@ -17,10 +17,31 @@
 #include <math.h>
 #include <glob.h>
 #include <sys/ioctl.h>
-#include <sys/mman.h>
+#include <limits.h>
 #include <sound/asound.h>
 
 #include "qpcie_control.h"
+
+static void init_hw_params_any(struct snd_pcm_hw_params *params) {
+    memset(params, 0, sizeof(*params));
+
+    for (int i = 0; i <= SNDRV_PCM_HW_PARAM_LAST_MASK - SNDRV_PCM_HW_PARAM_FIRST_MASK; i++) {
+        memset(&params->masks[i], 0xff, sizeof(params->masks[i]));
+    }
+
+    for (int i = 0; i <= SNDRV_PCM_HW_PARAM_LAST_INTERVAL - SNDRV_PCM_HW_PARAM_FIRST_INTERVAL; i++) {
+        params->intervals[i].min = 0;
+        params->intervals[i].max = UINT_MAX;
+        params->intervals[i].openmin = 0;
+        params->intervals[i].openmax = 0;
+        params->intervals[i].integer = 0;
+        params->intervals[i].empty = 0;
+    }
+
+    params->rmask = ~0U;
+    params->cmask = 0;
+    params->info = ~0U;
+}
 
 #define DEFAULT_CHANNELS    2
 #define DEFAULT_SAMPLE_RATE 48000
@@ -185,15 +206,52 @@ int main(int argc, char **argv) {
 
     // 3. Configure PCM Hardware Parameters (SNDRV_PCM_IOCTL_HW_PARAMS)
     struct snd_pcm_hw_params params;
-    memset(&params, 0, sizeof(params));
+    init_hw_params_any(&params);
+
+    if (ioctl(fd, SNDRV_PCM_IOCTL_HW_REFINE, &params) < 0) {
+        perror("SNDRV_PCM_IOCTL_HW_REFINE initial probe failed");
+        close(fd);
+        return EXIT_FAILURE;
+    }
 
     params.flags = SNDRV_PCM_HW_PARAMS_NORESAMPLE;
-    params.masks[SNDRV_PCM_HW_PARAM_ACCESS - SNDRV_PCM_HW_PARAM_FIRST_MASK].bits[0] = (1 << SNDRV_PCM_ACCESS_RW_INTERLEAVED);
-    params.masks[SNDRV_PCM_HW_PARAM_FORMAT - SNDRV_PCM_HW_PARAM_FIRST_MASK].bits[0] = (1 << SNDRV_PCM_FORMAT_S32_LE);
+
+    // Constrain ACCESS to RW_INTERLEAVED
+    memset(&params.masks[SNDRV_PCM_HW_PARAM_ACCESS - SNDRV_PCM_HW_PARAM_FIRST_MASK], 0, sizeof(struct snd_mask));
+    params.masks[SNDRV_PCM_HW_PARAM_ACCESS - SNDRV_PCM_HW_PARAM_FIRST_MASK].bits[0] = (1U << SNDRV_PCM_ACCESS_RW_INTERLEAVED);
+
+    // Constrain FORMAT to S32_LE
+    memset(&params.masks[SNDRV_PCM_HW_PARAM_FORMAT - SNDRV_PCM_HW_PARAM_FIRST_MASK], 0, sizeof(struct snd_mask));
+    params.masks[SNDRV_PCM_HW_PARAM_FORMAT - SNDRV_PCM_HW_PARAM_FIRST_MASK].bits[0] = (1U << SNDRV_PCM_FORMAT_S32_LE);
+
+    // Constrain SUBFORMAT to STD
+    memset(&params.masks[SNDRV_PCM_HW_PARAM_SUBFORMAT - SNDRV_PCM_HW_PARAM_FIRST_MASK], 0, sizeof(struct snd_mask));
+    params.masks[SNDRV_PCM_HW_PARAM_SUBFORMAT - SNDRV_PCM_HW_PARAM_FIRST_MASK].bits[0] = (1U << SNDRV_PCM_SUBFORMAT_STD);
+
+    // Constrain CHANNELS
     params.intervals[SNDRV_PCM_HW_PARAM_CHANNELS - SNDRV_PCM_HW_PARAM_FIRST_INTERVAL].min = channels;
     params.intervals[SNDRV_PCM_HW_PARAM_CHANNELS - SNDRV_PCM_HW_PARAM_FIRST_INTERVAL].max = channels;
+    params.intervals[SNDRV_PCM_HW_PARAM_CHANNELS - SNDRV_PCM_HW_PARAM_FIRST_INTERVAL].integer = 1;
+
+    // Constrain RATE
     params.intervals[SNDRV_PCM_HW_PARAM_RATE - SNDRV_PCM_HW_PARAM_FIRST_INTERVAL].min = sample_rate;
     params.intervals[SNDRV_PCM_HW_PARAM_RATE - SNDRV_PCM_HW_PARAM_FIRST_INTERVAL].max = sample_rate;
+    params.intervals[SNDRV_PCM_HW_PARAM_RATE - SNDRV_PCM_HW_PARAM_FIRST_INTERVAL].integer = 1;
+
+    // Constrain PERIOD_SIZE (1024 frames = 8192 bytes for 2ch 32-bit)
+    params.intervals[SNDRV_PCM_HW_PARAM_PERIOD_SIZE - SNDRV_PCM_HW_PARAM_FIRST_INTERVAL].min = 1024;
+    params.intervals[SNDRV_PCM_HW_PARAM_PERIOD_SIZE - SNDRV_PCM_HW_PARAM_FIRST_INTERVAL].max = 1024;
+    params.intervals[SNDRV_PCM_HW_PARAM_PERIOD_SIZE - SNDRV_PCM_HW_PARAM_FIRST_INTERVAL].integer = 1;
+
+    // Constrain PERIODS (4 periods = 4096 frames total = 32768 bytes buffer)
+    params.intervals[SNDRV_PCM_HW_PARAM_PERIODS - SNDRV_PCM_HW_PARAM_FIRST_INTERVAL].min = 4;
+    params.intervals[SNDRV_PCM_HW_PARAM_PERIODS - SNDRV_PCM_HW_PARAM_FIRST_INTERVAL].max = 4;
+    params.intervals[SNDRV_PCM_HW_PARAM_PERIODS - SNDRV_PCM_HW_PARAM_FIRST_INTERVAL].integer = 1;
+
+    // Constrain BUFFER_SIZE
+    params.intervals[SNDRV_PCM_HW_PARAM_BUFFER_SIZE - SNDRV_PCM_HW_PARAM_FIRST_INTERVAL].min = 4096;
+    params.intervals[SNDRV_PCM_HW_PARAM_BUFFER_SIZE - SNDRV_PCM_HW_PARAM_FIRST_INTERVAL].max = 4096;
+    params.intervals[SNDRV_PCM_HW_PARAM_BUFFER_SIZE - SNDRV_PCM_HW_PARAM_FIRST_INTERVAL].integer = 1;
 
     if (ioctl(fd, SNDRV_PCM_IOCTL_HW_PARAMS, &params) < 0) {
         perror("SNDRV_PCM_IOCTL_HW_PARAMS failed");
@@ -201,7 +259,7 @@ int main(int argc, char **argv) {
         return EXIT_FAILURE;
     }
 
-    printf("--> ALSA HW Parameters Configured (Format: S32_LE, Channels: %u, Rate: %u Hz)\n",
+    printf("--> ALSA HW Parameters Configured (Format: S32_LE, Channels: %u, Rate: %u Hz, Period: 1024 frames)\n",
            channels, sample_rate);
 
     // 4. Prepare & Start PCM Stream
@@ -241,14 +299,34 @@ int main(int argc, char **argv) {
     printf("--> Capturing %u seconds of AES3 Audio Data...\n", duration_sec);
 
     while (total_frames_read < total_frames_target) {
-        ssize_t ret = read(fd, audio_buf, buf_size);
-        if (ret < 0) {
+        struct snd_xferi xferi;
+        memset(&xferi, 0, sizeof(xferi));
+        xferi.buf = audio_buf;
+        xferi.frames = period_frames;
+
+        ssize_t frames_read = 0;
+        int err = ioctl(fd, SNDRV_PCM_IOCTL_READI_FRAMES, &xferi);
+        if (err < 0) {
             if (errno == EAGAIN || errno == EINTR) continue;
-            perror("PCM read failed");
-            break;
+            if (errno == EPIPE) {
+                // Buffer overrun/underrun recovery
+                ioctl(fd, SNDRV_PCM_IOCTL_PREPARE);
+                ioctl(fd, SNDRV_PCM_IOCTL_START);
+                continue;
+            }
+            // Fallback: try standard read()
+            ssize_t ret = read(fd, audio_buf, buf_size);
+            if (ret < 0) {
+                if (errno == EAGAIN || errno == EINTR) continue;
+                perror("Audio capture read failed");
+                break;
+            }
+            frames_read = ret / frame_bytes;
+        } else {
+            frames_read = (xferi.result > 0) ? xferi.result : (ssize_t)xferi.frames;
         }
 
-        size_t frames_read = ret / frame_bytes;
+        if (frames_read <= 0) continue;
         total_frames_read += frames_read;
 
         // Print first few samples preview
@@ -293,7 +371,7 @@ int main(int argc, char **argv) {
         }
 
         if (out_fp) {
-            fwrite(audio_buf, 1, ret, out_fp);
+            fwrite(audio_buf, 1, frames_read * frame_bytes, out_fp);
         }
 
         printf("  [Progress] Captured %llu / %llu frames (%.1f%%)\r",

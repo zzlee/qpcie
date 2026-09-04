@@ -43,12 +43,14 @@ static int qpcie_alsa_close(struct snd_pcm_substream *substream)
 
 static int qpcie_alsa_hw_params(struct snd_pcm_substream *substream, struct snd_pcm_hw_params *hw_params)
 {
-    return snd_pcm_lib_malloc_pages(substream, params_buffer_bytes(hw_params));
+    /* Managed buffer allocated automatically by ALSA core via snd_pcm_set_managed_buffer_all */
+    return 0;
 }
 
 static int qpcie_alsa_hw_free(struct snd_pcm_substream *substream)
 {
-    return snd_pcm_lib_free_pages(substream);
+    /* Managed buffer freed automatically by ALSA core */
+    return 0;
 }
 
 static int qpcie_alsa_prepare(struct snd_pcm_substream *substream)
