@@ -17,6 +17,7 @@ Xilinx TPG YUV444 → rounded 2×2 chroma downsample → NV12M
 ### 目前實作與驗證
 
 - [A50T NV12M 實作總結與驗證結果](A50T-NV12M-Implementation-and-Results.md)
+- [A50T RGB24 實作交接與 Phase 2 規劃 (Handoff)](Handoff-RGB24-and-Phase2-Roadmap.md)
 - [A50T 實機測試與除錯日誌](A50T-Hardware-Verification-Log.md)
 - [AV Datapath](AV_DATAPATH_WIKI.md)
 - [仿真、timing 與硬體測試](Verification-and-Simulation.md)
