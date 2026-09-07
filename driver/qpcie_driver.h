@@ -168,7 +168,7 @@
 #define DESC_CTRL_CHANNEL_SHIFT     6    /* Bits 7:6: video channel, independent of IRQ enable */
 #define DESC_CTRL_CHANNEL_MASK      GENMASK(7, 6)
 
-#define QPCIE_MAX_PAGE_SLOTS_Y      8    /* Up to 2040 SGL segments (Gigabytes) */
+#define QPCIE_MAX_PAGE_SLOTS_Y      32   /* Up to 8160 SGL segments; supports 4096x2160 RGB24 */
 #define QPCIE_MAX_PAGE_SLOTS_UV     4    /* Up to 1020 SGL segments (Gigabytes) */
 
 /* 128-Bit Variable-Length SGL Entry Structure (16 Bytes Wire Format) */
