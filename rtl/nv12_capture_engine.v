@@ -197,16 +197,16 @@ module nv12_capture_engine #(
     wire [63:0] cur_y_target_addr  = desc_sg_mode ? y_walker_addr  : y_send_addr;
     wire [63:0] cur_uv_target_addr = desc_sg_mode ? uv_walker_addr : uv_send_addr;
 
-    // A 256-byte request starting at offset 0xF80 (5'b11111) within any 4KB page
-    // would cross the 4KB page boundary at 0x1000, causing fatal PCIe MalfTLP!
-    // Clamp to 128 bytes whenever remaining page room is < 256 bytes or segment remaining < 256 bytes.
-    wire y_is_256  = (y_rem_bytes >= 16'd256) && (cur_y_target_addr[11:7] != 5'b11111) && (!desc_sg_mode || (y_walker_bytes_left >= 256));
+    // A 256-byte request must start below offset 0xF00 to remain within one
+    // 4KiB PCIe boundary. The walker may span pages; this packetizer enforces
+    // the request-level limit.
+    wire y_is_256  = (y_rem_bytes >= 16'd256) && (cur_y_target_addr[11:8] != 4'hF) && (!desc_sg_mode || (y_walker_bytes_left >= 256));
     wire [10:0] y_next_dw_len = y_is_256 ? 11'd64 : 11'd32;
     wire [4:0]  y_next_beats  = y_is_256 ? 5'd16  : 5'd8;
     wire [15:0] y_next_bytes  = y_is_256 ? 16'd256: 16'd128;
     wire y_ready_to_send = (!desc_sg_mode || (y_seg_valid && y_walker_bytes_left > 0)) && (y_fifo_count >= y_next_beats);
 
-    wire uv_is_256 = (uv_rem_bytes >= 16'd256) && (cur_uv_target_addr[11:7] != 5'b11111) && (!desc_sg_mode || (uv_walker_bytes_left >= 256));
+    wire uv_is_256 = (uv_rem_bytes >= 16'd256) && (cur_uv_target_addr[11:8] != 4'hF) && (!desc_sg_mode || (uv_walker_bytes_left >= 256));
     wire [10:0] uv_next_dw_len = uv_is_256 ? 11'd64 : 11'd32;
     wire [4:0]  uv_next_beats  = uv_is_256 ? 5'd16  : 5'd8;
     wire [15:0] uv_next_bytes  = uv_is_256 ? 16'd256: 16'd128;

@@ -563,11 +563,11 @@ static void qpcie_buf_cleanup(struct vb2_buffer *vb)
 /*
  * Build a 4KiB-slot host SGL table for one NV12 plane.
  *
- * Every SGL entry is capped at the next 4KiB boundary of its IOVA so the
- * hardware page-table walker never crosses a page boundary inside a single
- * entry.  A slot holds at most 255 data entries; entry index 255 is reserved
- * for the chain pointer to the next slot.  The last data entry of the plane
- * carries SGL_FLAG_LAST_SEG.
+ * Each DMA-mapped scatterlist segment is represented by one SGL entry.  The
+ * C2H packetizer splits PCIe writes at 4KiB IOVA boundaries, so splitting a
+ * contiguous mapping here would only inflate the table.  A slot holds at most
+ * 255 data entries; entry index 255 is reserved for the chain pointer to the
+ * next slot.  The last data entry of the plane carries SGL_FLAG_LAST_SEG.
  *
  * Returns 0 on success (with the data-entry and chain counts filled in) or a
  * negative error when the plane cannot fit within @max_slots; on error the
@@ -587,7 +587,6 @@ static int qpcie_build_variable_sgl(struct device *dev, struct scatterlist *sgl,
     unsigned int cur_entry = 0;
     unsigned int data_entries = 0;
     unsigned int chain_count = 0;
-    u64 remaining;
 
     *data_entries_out = 0;
     *chain_count_out = 0;
@@ -598,40 +597,28 @@ static int qpcie_build_variable_sgl(struct device *dev, struct scatterlist *sgl,
         u64 chunk_addr = sg_dma_address(sg);
         u64 chunk_len = sg_dma_len(sg);
 
-        remaining = chunk_len;
-        while (remaining > 0) {
-            u64 bytes_to_4k;
-            u32 entry_len;
-
-            if (cur_entry == 255) {
-                /* Slot full: link to the next slot via entry index 255. */
-                if (cur_slot + 1 >= max_slots) {
-                    dev_err(dev,
-                            "SGL table overflow: plane needs more than %u entries (%u data, %u chains)\n",
-                            max_slots * 255, data_entries, chain_count);
-                    return -ENOSPC;
-                }
-                slot_ptr[255].phys_addr = (u64)(slots_dma + (cur_slot + 1) * 4096);
-                slot_ptr[255].len_bytes = 0;
-                slot_ptr[255].flags     = SGL_FLAG_CHAIN_PTR;
-                chain_count++;
-                cur_slot++;
-                slot_ptr = (struct qpcie_sgl_entry *)((u8 *)slots_virt + cur_slot * 4096);
-                cur_entry = 0;
+        if (cur_entry == 255) {
+            /* Slot full: link to the next slot via entry index 255. */
+            if (cur_slot + 1 >= max_slots) {
+                dev_err(dev,
+                        "SGL table overflow: plane needs more than %u entries (%u data, %u chains)\n",
+                        max_slots * 255, data_entries, chain_count);
+                return -ENOSPC;
             }
-
-            /* Never let a single entry cross a 4KiB IOVA boundary. */
-            bytes_to_4k = 4096 - (chunk_addr & 0xFFF);
-            entry_len = (remaining < bytes_to_4k) ? (u32)remaining : (u32)bytes_to_4k;
-
-            slot_ptr[cur_entry].phys_addr = chunk_addr;
-            slot_ptr[cur_entry].len_bytes = entry_len;
-            slot_ptr[cur_entry].flags     = 0;
-            cur_entry++;
-            data_entries++;
-            chunk_addr += entry_len;
-            remaining  -= entry_len;
+            slot_ptr[255].phys_addr = (u64)(slots_dma + (cur_slot + 1) * 4096);
+            slot_ptr[255].len_bytes = 0;
+            slot_ptr[255].flags     = SGL_FLAG_CHAIN_PTR;
+            chain_count++;
+            cur_slot++;
+            slot_ptr = (struct qpcie_sgl_entry *)((u8 *)slots_virt + cur_slot * 4096);
+            cur_entry = 0;
         }
+
+        slot_ptr[cur_entry].phys_addr = chunk_addr;
+        slot_ptr[cur_entry].len_bytes = chunk_len;
+        slot_ptr[cur_entry].flags     = 0;
+        cur_entry++;
+        data_entries++;
     }
 
     if (data_entries == 0) {
