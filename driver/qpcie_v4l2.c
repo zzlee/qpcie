@@ -46,10 +46,15 @@ static int qpcie_vidioc_querycap(struct file *file, void *priv, struct v4l2_capa
 
 static int qpcie_vidioc_enum_fmt_vid_cap_mplane(struct file *file, void *priv, struct v4l2_fmtdesc *f)
 {
-    if (f->index != 0)
-        return -EINVAL;
-    f->pixelformat = V4L2_PIX_FMT_NV12M;
-    return 0;
+    if (f->index == 0) {
+        f->pixelformat = V4L2_PIX_FMT_NV12M;
+        return 0;
+    }
+    if (f->index == 1) {
+        f->pixelformat = V4L2_PIX_FMT_RGB24;
+        return 0;
+    }
+    return -EINVAL;
 }
 
 struct qpcie_video_mode {
@@ -86,19 +91,37 @@ static const struct qpcie_video_mode *qpcie_find_video_mode(u32 width,
 }
 
 static void qpcie_fill_pix_format(struct v4l2_pix_format_mplane *pix,
-                                  const struct qpcie_video_mode *mode)
+                                  const struct qpcie_video_mode *mode,
+                                  u32 pixelformat, u32 req_stride)
 {
+    u32 stride;
+
     memset(pix, 0, sizeof(*pix));
     pix->width = mode->width;
     pix->height = mode->height;
-    pix->pixelformat = V4L2_PIX_FMT_NV12M;
     pix->field = V4L2_FIELD_NONE;
-    pix->colorspace = V4L2_COLORSPACE_REC709;
-    pix->num_planes = 2;
-    pix->plane_fmt[0].bytesperline = mode->width;
-    pix->plane_fmt[0].sizeimage = mode->width * mode->height;
-    pix->plane_fmt[1].bytesperline = mode->width;
-    pix->plane_fmt[1].sizeimage = mode->width * (mode->height / 2);
+    pix->colorspace = V4L2_COLORSPACE_SRGB;
+
+    if (pixelformat == V4L2_PIX_FMT_RGB24) {
+        stride = req_stride ? req_stride : ALIGN(mode->width * 3, 128);
+        if (stride < mode->width * 3)
+            stride = ALIGN(mode->width * 3, 128);
+        pix->pixelformat = V4L2_PIX_FMT_RGB24;
+        pix->num_planes = 1;
+        pix->plane_fmt[0].bytesperline = stride;
+        pix->plane_fmt[0].sizeimage = stride * mode->height;
+    } else {
+        stride = req_stride ? req_stride : ALIGN(mode->width, 128);
+        if (stride < mode->width)
+            stride = ALIGN(mode->width, 128);
+        pix->pixelformat = V4L2_PIX_FMT_NV12M;
+        pix->colorspace = V4L2_COLORSPACE_REC709;
+        pix->num_planes = 2;
+        pix->plane_fmt[0].bytesperline = stride;
+        pix->plane_fmt[0].sizeimage = stride * mode->height;
+        pix->plane_fmt[1].bytesperline = stride;
+        pix->plane_fmt[1].sizeimage = stride * (mode->height / 2);
+    }
 }
 
 static u32 qpcie_tpg_pattern_id(int menu_value)
@@ -134,10 +157,12 @@ static int qpcie_program_tpg(struct qpcie_v4l2_channel *vch, u32 pattern_id,
         usleep_range(1000, 2000);
     }
 
+    u32 tpg_fmt = (vch->pixelformat == V4L2_PIX_FMT_RGB24) ? 0 : 1; /* 0=RGB, 1=YUV444 */
+
     iowrite32(vch->height, tpg + 0x10);
     iowrite32(vch->width, tpg + 0x18);
     iowrite32(pattern_id, tpg + 0x20);
-    iowrite32(1, tpg + 0x40);    /* XVIDC_CSF_YCRCB_444 */
+    iowrite32(tpg_fmt, tpg + 0x40);    /* XVIDC_CSF_RGB (0) or XVIDC_CSF_YCRCB_444 (1) */
     /* Hold TPG idle until STREAMON */
     iowrite32(0x00, tpg + 0x00);
 
@@ -147,13 +172,14 @@ static int qpcie_program_tpg(struct qpcie_v4l2_channel *vch, u32 pattern_id,
     rb_format = ioread32(tpg + 0x40);
 
     dev_info(&qdev->pdev->dev,
-             "TPG%u configured: %ux%u YUV444 pattern=%u format=%u\n",
-             vch->channel_id, rb_width, rb_height, rb_pattern, rb_format);
+             "TPG%u configured: %ux%u %s pattern=%u format=%u\n",
+             vch->channel_id, rb_width, rb_height,
+             (tpg_fmt == 0) ? "RGB" : "YUV444", rb_pattern, rb_format);
     if (rb_width != vch->width || rb_height != vch->height ||
-        rb_pattern != pattern_id || rb_format != 1) {
+        rb_pattern != pattern_id || rb_format != tpg_fmt) {
         dev_err(&qdev->pdev->dev,
-                "TPG%u BAR1 configuration readback mismatch\n",
-                vch->channel_id);
+                "TPG%u BAR1 configuration readback mismatch (expected fmt=%u got %u)\n",
+                vch->channel_id, tpg_fmt, rb_format);
         return -EIO;
     }
     return 0;
@@ -227,7 +253,7 @@ static int qpcie_vidioc_g_fmt_vid_cap_mplane(struct file *file, void *priv,
     struct qpcie_v4l2_channel *vch = video_drvdata(file);
     struct qpcie_video_mode mode = { vch->width, vch->height };
 
-    qpcie_fill_pix_format(&f->fmt.pix_mp, &mode);
+    qpcie_fill_pix_format(&f->fmt.pix_mp, &mode, vch->pixelformat, vch->stride);
     return 0;
 }
 
@@ -235,10 +261,15 @@ static int qpcie_vidioc_try_fmt_vid_cap_mplane(struct file *file, void *priv,
                                                 struct v4l2_format *f)
 {
     const struct qpcie_video_mode *mode;
+    u32 pixelformat = f->fmt.pix_mp.pixelformat;
+    u32 req_stride = f->fmt.pix_mp.plane_fmt[0].bytesperline;
+
+    if (pixelformat != V4L2_PIX_FMT_RGB24)
+        pixelformat = V4L2_PIX_FMT_NV12M;
 
     mode = qpcie_find_video_mode(f->fmt.pix_mp.width,
                                  f->fmt.pix_mp.height);
-    qpcie_fill_pix_format(&f->fmt.pix_mp, mode);
+    qpcie_fill_pix_format(&f->fmt.pix_mp, mode, pixelformat, req_stride);
     return 0;
 }
 
@@ -250,21 +281,32 @@ static int qpcie_vidioc_s_fmt_vid_cap_mplane(struct file *file, void *priv,
     struct v4l2_ctrl *pattern_ctrl;
     u32 pattern_id;
     u32 old_width, old_height, old_stride, old_pixelformat;
+    u32 pixelformat = f->fmt.pix_mp.pixelformat;
+    u32 req_stride = f->fmt.pix_mp.plane_fmt[0].bytesperline;
     int ret;
+
+    if (vb2_is_busy(&vch->queue))
+        return -EBUSY;
+
+    if (pixelformat != V4L2_PIX_FMT_RGB24)
+        pixelformat = V4L2_PIX_FMT_NV12M;
 
     mode = qpcie_find_video_mode(f->fmt.pix_mp.width,
                                  f->fmt.pix_mp.height);
-    if (vb2_is_busy(&vch->queue))
-        return -EBUSY;
 
     old_width = vch->width;
     old_height = vch->height;
     old_stride = vch->stride;
     old_pixelformat = vch->pixelformat;
+
     vch->width = mode->width;
     vch->height = mode->height;
-    vch->pixelformat = V4L2_PIX_FMT_NV12M;
-    vch->stride = mode->width;
+    vch->pixelformat = pixelformat;
+    if (pixelformat == V4L2_PIX_FMT_RGB24) {
+        vch->stride = req_stride >= mode->width * 3 ? req_stride : ALIGN(mode->width * 3, 128);
+    } else {
+        vch->stride = req_stride >= mode->width ? req_stride : ALIGN(mode->width, 128);
+    }
 
     pattern_ctrl = v4l2_ctrl_find(&vch->ctrl_handler,
                                   V4L2_CID_TEST_PATTERN);
@@ -280,7 +322,7 @@ static int qpcie_vidioc_s_fmt_vid_cap_mplane(struct file *file, void *priv,
         }
     }
 
-    qpcie_fill_pix_format(&f->fmt.pix_mp, mode);
+    qpcie_fill_pix_format(&f->fmt.pix_mp, mode, vch->pixelformat, vch->stride);
     return 0;
 }
 
@@ -419,18 +461,24 @@ static int qpcie_queue_setup(struct vb2_queue *vq,
                             unsigned int sizes[], struct device *alloc_devs[])
 {
     struct qpcie_v4l2_channel *vch = vb2_get_drv_priv(vq);
+    unsigned int exp_planes = (vch->pixelformat == V4L2_PIX_FMT_RGB24) ? 1 : 2;
     unsigned int y_size = vch->stride * vch->height;
-    unsigned int uv_size = vch->stride * (vch->height / 2);
+    unsigned int uv_size = (vch->pixelformat == V4L2_PIX_FMT_RGB24) ? 0 : (vch->stride * (vch->height / 2));
 
     if (*nplanes) {
-        if (*nplanes != 2 || sizes[0] < y_size || sizes[1] < uv_size)
+        if (*nplanes != exp_planes)
+            return -EINVAL;
+        if (sizes[0] < y_size)
+            return -EINVAL;
+        if (exp_planes == 2 && sizes[1] < uv_size)
             return -EINVAL;
         return 0;
     }
 
-    *nplanes = 2;
+    *nplanes = exp_planes;
     sizes[0] = y_size;
-    sizes[1] = uv_size;
+    if (exp_planes == 2)
+        sizes[1] = uv_size;
     *nbuffers = clamp_t(unsigned int, *nbuffers, 2, 8);
     return 0;
 }
@@ -628,24 +676,26 @@ static int qpcie_publish_buffer(struct qpcie_v4l2_channel *vch,
     desc = &qdev->h2c_ring_virt[tail];
     memset(desc, 0, sizeof(*desc));
 
-    desc->line_width      = vch->width;
+    bool is_rgb = (vch->pixelformat == V4L2_PIX_FMT_RGB24);
+
+    desc->line_width      = is_rgb ? (vch->width * 3) : vch->width;
     desc->line_count      = vch->height;
-    desc->src_stride      = vch->width;
+    desc->src_stride      = is_rgb ? (vch->width * 3) : vch->width;
     desc->dst_stride      = vch->stride;
-    desc->plane12_width   = vch->width;
-    desc->plane12_count   = vch->height / 2;
-    desc->format          = 0x2; /* NV12M */
-    desc->plane_count     = 2;
+    desc->plane12_width   = is_rgb ? 0 : vch->width;
+    desc->plane12_count   = is_rgb ? 0 : (vch->height / 2);
+    desc->format          = is_rgb ? 0x1 : 0x2; /* 0x1: RGB/Raw, 0x2: NV12M */
+    desc->plane_count     = is_rgb ? 1 : 2;
 
     sgt0 = vb2_dma_sg_plane_desc(vb, 0);
-    sgt1 = vb2_dma_sg_plane_desc(vb, 1);
-    if (WARN_ON(!sgt0 || !sgt1))
+    sgt1 = is_rgb ? NULL : vb2_dma_sg_plane_desc(vb, 1);
+    if (WARN_ON(!sgt0 || (!is_rgb && !sgt1)))
         return -EINVAL;
 
     plane0_dma = sg_dma_address(sgt0->sgl);
-    plane1_dma = sg_dma_address(sgt1->sgl);
+    plane1_dma = is_rgb ? 0 : sg_dma_address(sgt1->sgl);
 
-    host_sgl = force_sgl_fetch || sgt0->nents > 1 || sgt1->nents > 1;
+    host_sgl = force_sgl_fetch || sgt0->nents > 1 || (!is_rgb && sgt1->nents > 1);
     if (host_sgl) {
         ret = qpcie_build_variable_sgl(&qdev->pdev->dev, sgt0->sgl, sgt0->nents,
                                        (struct qpcie_sgl_entry *)buf->y_slots_virt,
@@ -653,31 +703,33 @@ static int qpcie_publish_buffer(struct qpcie_v4l2_channel *vch,
                                        &y_entries, &y_chains);
         if (ret) {
             dev_err(&qdev->pdev->dev,
-                    "SGL ch%u %s buf%u: Y plane table build failed (%d); buffer rejected\n",
-                    vch->channel_id, dir, vb->index, ret);
+                    "SGL ch%u %s buf%u: %s plane table build failed (%d); buffer rejected\n",
+                    vch->channel_id, dir, vb->index, is_rgb ? "RGB" : "Y", ret);
             return ret;
         }
-        ret = qpcie_build_variable_sgl(&qdev->pdev->dev, sgt1->sgl, sgt1->nents,
-                                       (struct qpcie_sgl_entry *)buf->uv_slots_virt,
-                                       buf->uv_slots_dma, QPCIE_MAX_PAGE_SLOTS_UV,
-                                       &uv_entries, &uv_chains);
-        if (ret) {
-            dev_err(&qdev->pdev->dev,
-                    "SGL ch%u %s buf%u: UV plane table build failed (%d); buffer rejected\n",
-                    vch->channel_id, dir, vb->index, ret);
-            return ret;
+        if (!is_rgb) {
+            ret = qpcie_build_variable_sgl(&qdev->pdev->dev, sgt1->sgl, sgt1->nents,
+                                           (struct qpcie_sgl_entry *)buf->uv_slots_virt,
+                                           buf->uv_slots_dma, QPCIE_MAX_PAGE_SLOTS_UV,
+                                           &uv_entries, &uv_chains);
+            if (ret) {
+                dev_err(&qdev->pdev->dev,
+                        "SGL ch%u %s buf%u: UV plane table build failed (%d); buffer rejected\n",
+                        vch->channel_id, dir, vb->index, ret);
+                return ret;
+            }
         }
 
         if (vch->buf_type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
             control = 0x09 | (vch->channel_id << DESC_CTRL_CHANNEL_SHIFT) |
                       DESC_CTRL_SG_FETCH_MODE;
             desc->plane0_src_addr = buf->y_slots_dma;
-            desc->plane1_src_addr = buf->uv_slots_dma;
+            desc->plane1_src_addr = is_rgb ? 0 : buf->uv_slots_dma;
         } else {
             control = 0x0B | (vch->channel_id << DESC_CTRL_CHANNEL_SHIFT) |
                       DESC_CTRL_SG_FETCH_MODE;
             desc->plane0_dst_addr = buf->y_slots_dma;
-            desc->plane1_dst_addr = buf->uv_slots_dma;
+            desc->plane1_dst_addr = is_rgb ? 0 : buf->uv_slots_dma;
         }
         desc->control = control;
 
@@ -689,41 +741,46 @@ static int qpcie_publish_buffer(struct qpcie_v4l2_channel *vch,
             unsigned int i;
 
             dev_info(&qdev->pdev->dev,
-                     "SGL ch%u %s buf%u: host SGL fetch enabled (force=%d) Y nents=%u/%u entries=%u chains=%u slot=%pad | UV nents=%u/%u entries=%u chains=%u slot=%pad ctrl=0x%02x\n",
+                     "SGL ch%u %s buf%u: host SGL fetch enabled (force=%d) %s nents=%u/%u entries=%u chains=%u slot=%pad | UV nents=%u/%u entries=%u chains=%u slot=%pad ctrl=0x%02x\n",
                      vch->channel_id, dir, vb->index, force_sgl_fetch,
+                     is_rgb ? "RGB" : "Y",
                      sgt0->nents, sgt0->orig_nents, y_entries, y_chains,
                      &buf->y_slots_dma,
-                     sgt1->nents, sgt1->orig_nents, uv_entries, uv_chains,
+                     is_rgb ? 0 : sgt1->nents, is_rgb ? 0 : sgt1->orig_nents, uv_entries, uv_chains,
                      &buf->uv_slots_dma, control);
             for (i = 0; i < y_log_nents; i++)
                 dev_info(&qdev->pdev->dev,
-                         "  Y[%u] addr=0x%016llx len=%u flags=0x%x\n",
+                         "  %s[%u] addr=0x%016llx len=%u flags=0x%x\n",
+                         is_rgb ? "RGB" : "Y",
                          i, y_entries_p[i].phys_addr,
                          y_entries_p[i].len_bytes, y_entries_p[i].flags);
-            for (i = 0; i < uv_log_nents; i++)
-                dev_info(&qdev->pdev->dev,
-                         " UV[%u] addr=0x%016llx len=%u flags=0x%x\n",
-                         i, uv_entries_p[i].phys_addr,
-                         uv_entries_p[i].len_bytes, uv_entries_p[i].flags);
+            if (!is_rgb) {
+                for (i = 0; i < uv_log_nents; i++)
+                    dev_info(&qdev->pdev->dev,
+                             " UV[%u] addr=0x%016llx len=%u flags=0x%x\n",
+                             i, uv_entries_p[i].phys_addr,
+                             uv_entries_p[i].len_bytes, uv_entries_p[i].flags);
+            }
             buf->sgl_logged = true;
         }
     } else {
         if (vch->buf_type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
             control = 0x09 | (vch->channel_id << DESC_CTRL_CHANNEL_SHIFT);
             desc->plane0_src_addr = plane0_dma;
-            desc->plane1_src_addr = plane1_dma;
+            desc->plane1_src_addr = is_rgb ? 0 : plane1_dma;
         } else {
             control = 0x0B | (vch->channel_id << DESC_CTRL_CHANNEL_SHIFT);
             desc->plane0_dst_addr = plane0_dma;
-            desc->plane1_dst_addr = plane1_dma;
+            desc->plane1_dst_addr = is_rgb ? 0 : plane1_dma;
         }
         desc->control = control;
 
         if (!buf->sgl_logged) {
             dev_info(&qdev->pdev->dev,
-                     "DMA ch%u %s buf%u: direct DMA (Y nents=%u IOVA=%pad, UV nents=%u IOVA=%pad); host SGL fetch disabled\n",
+                     "DMA ch%u %s buf%u: direct DMA (%s nents=%u IOVA=%pad, UV nents=%u IOVA=%pad); host SGL fetch disabled\n",
                      vch->channel_id, dir, vb->index,
-                     sgt0->nents, &plane0_dma, sgt1->nents, &plane1_dma);
+                     is_rgb ? "RGB" : "Y",
+                     sgt0->nents, &plane0_dma, is_rgb ? 0 : sgt1->nents, &plane1_dma);
             buf->sgl_logged = true;
         }
     }
