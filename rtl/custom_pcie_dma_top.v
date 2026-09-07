@@ -310,7 +310,8 @@ module custom_pcie_dma_top #(
     wire        nv12_ch2_desc_ready;
     wire        nv12_ch3_desc_ready;
     wire        sg_c2h_desc_select = (c2h_format == 4'd0);
-    wire        nv12_desc_select   = (c2h_format == 4'd2) && (c2h_plane_count == 4'd2) && (c2h_desc_ctrl[7:6] == 2'd0);
+    wire        nv12_desc_select   = ((c2h_format == 4'd2 && c2h_plane_count == 4'd2) ||
+                                      (c2h_format == 4'd1 && c2h_plane_count == 4'd1)) && (c2h_desc_ctrl[7:6] == 2'd0);
     wire        nv12_ch1_desc_sel  = (c2h_format == 4'd2) && (c2h_plane_count == 4'd2) && (c2h_desc_ctrl[7:6] == 2'd1);
     wire        nv12_ch2_desc_sel  = (c2h_format == 4'd2) && (c2h_plane_count == 4'd2) && (c2h_desc_ctrl[7:6] == 2'd2);
     wire        nv12_ch3_desc_sel  = (c2h_format == 4'd2) && (c2h_plane_count == 4'd2) && (c2h_desc_ctrl[7:6] == 2'd3);
@@ -998,11 +999,12 @@ module custom_pcie_dma_top #(
 
     // ---- Signal declarations (before any use) ----------------------------
     reg         hs_send_q;
-    reg [240:0] hs_bus_q;
+    reg [244:0] hs_bus_q;
     wire        hs_src_rcv, hs_dest_req;
-    wire [240:0] hs_dest_bus;
+    wire [244:0] hs_dest_bus;
     reg          hs_dest_ack;
     reg          eng_desc_valid;
+    reg [3:0]    eng_format;
     reg          eng_desc_sg_mode;
     reg [63:0]   eng_y_addr, eng_uv_addr, eng_ts;
     reg [15:0]   eng_width, eng_height, eng_stride;
@@ -1022,23 +1024,24 @@ module custom_pcie_dma_top #(
     wire pcie_frame_done;
 
     wire        tel_dest_req;
-    wire [95:0] tel_dest_out;
+    wire [95:0]  tel_dest_out;
     wire        tel_dest_ack_unused;
-    reg [31:0] v_err_sync_q = 32'd0;
-    reg [63:0] v_pts_sync_q = 64'd0;
+    reg [31:0]  v_err_sync_q = 32'd0;
+    reg [63:0]  v_pts_sync_q = 64'd0;
 
     // ---- Descriptor crossing: 125 MHz fetch -> 150 MHz engine ------------
-    // Bus layout: {desc_ctrl[4]|desc_ctrl[5], timestamp[63:0], stride[15:0], height[15:0], width[15:0],
+    // Bus layout: {format[3:0], desc_ctrl[4]|desc_ctrl[5], timestamp[63:0], stride[15:0], height[15:0], width[15:0],
     //              uv_addr[63:0], y_addr[63:0]}
     always @(posedge clk or negedge dma_rst_n) begin
         if (!dma_rst_n) begin
             hs_send_q <= 1'b0;
-            hs_bus_q  <= 241'd0;
+            hs_bus_q  <= 245'd0;
         end else if (reg_video_ctrl[0]) begin
             hs_send_q <= 1'b0;
-            hs_bus_q  <= 241'd0;
+            hs_bus_q  <= 245'd0;
         end else if (!hs_send_q && !hs_src_rcv && c2h_desc_valid && nv12_desc_select) begin
-            hs_bus_q  <= {(c2h_desc_ctrl[4] | c2h_desc_ctrl[5]),
+            hs_bus_q  <= {c2h_format,
+                          (c2h_desc_ctrl[4] | c2h_desc_ctrl[5]),
                           global_timestamp, c2h_dst_stride,
                           c2h_line_count, c2h_line_width,
                           c2h_plane1_dst, c2h_plane0_dst};
@@ -1054,7 +1057,7 @@ module custom_pcie_dma_top #(
                               !hs_send_q && !hs_src_rcv && !v_busy_sync[1];
 
     xpm_cdc_handshake #(
-        .WIDTH(241),
+        .WIDTH(245),
         .DEST_EXT_HSK(1)
     ) u_desc_cdc (
         .src_clk    (clk),
@@ -1076,6 +1079,7 @@ module custom_pcie_dma_top #(
         if (!video_rst_n) begin
             dest_state       <= DEST_IDLE;
             eng_desc_valid   <= 1'b0;
+            eng_format       <= 4'd2;
             eng_desc_sg_mode <= 1'b0;
             hs_dest_ack      <= 1'b0;
             eng_y_addr       <= 64'd0;
@@ -1096,6 +1100,7 @@ module custom_pcie_dma_top #(
                         eng_stride       <= hs_dest_bus[175:160];
                         eng_ts           <= hs_dest_bus[239:176];
                         eng_desc_sg_mode <= hs_dest_bus[240];
+                        eng_format       <= hs_dest_bus[244:241];
                         eng_desc_valid   <= 1'b1;
                         dest_state       <= DEST_WAIT_ENG;
                     end
@@ -1202,13 +1207,13 @@ module custom_pcie_dma_top #(
     wire        v_sgl_y_full;
     wire        v_sgl_y_pop_ready;
     xpm_fifo_async #(
-        .FIFO_MEMORY_TYPE("distributed"),
-        .FIFO_WRITE_DEPTH(64),
+        .FIFO_MEMORY_TYPE("block"),
+        .FIFO_WRITE_DEPTH(512),
         .WRITE_DATA_WIDTH(128),
         .READ_DATA_WIDTH(128),
         .READ_MODE("fwft"),
         .FIFO_READ_LATENCY(0),
-        .PROG_FULL_THRESH(48),
+        .PROG_FULL_THRESH(480),
         .USE_ADV_FEATURES("0002")
     ) u_sgl_y_cdc (
         .rst(!rst_n || !video_rst_n),
@@ -1236,13 +1241,13 @@ module custom_pcie_dma_top #(
     wire        v_sgl_uv_full;
     wire        v_sgl_uv_pop_ready;
     xpm_fifo_async #(
-        .FIFO_MEMORY_TYPE("distributed"),
-        .FIFO_WRITE_DEPTH(64),
+        .FIFO_MEMORY_TYPE("block"),
+        .FIFO_WRITE_DEPTH(512),
         .WRITE_DATA_WIDTH(128),
         .READ_DATA_WIDTH(128),
         .READ_MODE("fwft"),
         .FIFO_READ_LATENCY(0),
-        .PROG_FULL_THRESH(48),
+        .PROG_FULL_THRESH(480),
         .USE_ADV_FEATURES("0002")
     ) u_sgl_uv_cdc (
         .rst(!rst_n || !video_rst_n),
@@ -1266,7 +1271,7 @@ module custom_pcie_dma_top #(
 
     // ---- The Channel 0 capture engine itself -----------------------------
     nv12_capture_engine #(
-        .MAX_WIDTH(3840),
+        .MAX_WIDTH(4096),
         .PCIE_DATA_WIDTH(PCIE_DATA_WIDTH),
         .FIFO_DEPTH(32),
         .MWR_PAYLOAD_BYTES(256)
@@ -1275,6 +1280,7 @@ module custom_pcie_dma_top #(
         .rst_n(video_rst_n),
         .desc_valid(eng_desc_valid),
         .desc_ready(nv12_desc_ready_v),
+        .desc_format(eng_format),
         .desc_sg_mode(eng_desc_sg_mode),
         .plane_y_addr(eng_y_addr),
         .plane_uv_addr(eng_uv_addr),
@@ -1329,7 +1335,7 @@ module custom_pcie_dma_top #(
 
     wire [129:0] ch1_fifo_dout;
     wire        ch1_fifo_empty, ch1_tready;
-    xpm_fifo_async #(.FIFO_MEMORY_TYPE("distributed"), .FIFO_WRITE_DEPTH(64), .WRITE_DATA_WIDTH(130), .READ_DATA_WIDTH(130), .READ_MODE("fwft"), .FIFO_READ_LATENCY(0), .USE_ADV_FEATURES("0000"))
+    xpm_fifo_async #(.FIFO_MEMORY_TYPE("block"), .FIFO_WRITE_DEPTH(512), .WRITE_DATA_WIDTH(130), .READ_DATA_WIDTH(130), .READ_MODE("fwft"), .FIFO_READ_LATENCY(0), .USE_ADV_FEATURES("0000"))
     u_ch1_loopback_cdc (.rst(!rst_n || !video_rst_n), .wr_clk(clk), .wr_en(lb_tvalid && lb_tready && sg_loopback_enable && (sg_loopback_channel == 2'd1 || sg_loopback_channel == 2'd0)), .din({lb_tuser, lb_tlast, lb_tdata}), .full(ch1_loopback_full), .rd_clk(video_clk), .rd_en(!ch1_fifo_empty && ch1_tready), .dout(ch1_fifo_dout), .empty(ch1_fifo_empty), .sleep(1'b0), .injectsbiterr(1'b0), .injectdbiterr(1'b0), .sbiterr(), .dbiterr(), .wr_rst_busy(), .rd_rst_busy());
     wire [127:0] ch1_tdata = ch1_fifo_dout[127:0]; wire ch1_tlast = ch1_fifo_dout[128]; wire ch1_tuser = ch1_fifo_dout[129]; wire ch1_tvalid = !ch1_fifo_empty;
 
@@ -1367,8 +1373,8 @@ module custom_pcie_dma_top #(
     wire eng1_req_valid, eng1_req_ready, eng1_req_ack; wire [63:0] eng1_req_addr; wire [10:0] eng1_req_dw_len; wire [PCIE_DATA_WIDTH-1:0] eng1_req_data; wire eng1_frame_done;
     assign ch1_sgl_y_rd_en = !ch1_sgl_y_empty && ch1_sgl_y_pop_ready && v_busy[1];
     assign ch1_sgl_uv_rd_en = !ch1_sgl_uv_empty && ch1_sgl_uv_pop_ready && v_busy[1];
-    nv12_capture_engine #(.MAX_WIDTH(3840), .PCIE_DATA_WIDTH(PCIE_DATA_WIDTH), .FIFO_DEPTH(32), .MWR_PAYLOAD_BYTES(256), .RAW_INPUT(1))
-    u_nv12_capture_engine_ch1 (.clk(video_clk), .rst_n(video_rst_n), .desc_valid(eng1_desc_valid), .desc_ready(nv12_ch1_desc_ready_v), .desc_sg_mode(eng1_desc_sg_mode), .plane_y_addr(eng1_y_addr), .plane_uv_addr(eng1_uv_addr), .frame_width(eng1_width), .frame_height(eng1_height), .frame_stride(eng1_stride),
+    nv12_capture_engine #(.MAX_WIDTH(4096), .PCIE_DATA_WIDTH(PCIE_DATA_WIDTH), .FIFO_DEPTH(32), .MWR_PAYLOAD_BYTES(256), .RAW_INPUT(1))
+    u_nv12_capture_engine_ch1 (.clk(video_clk), .rst_n(video_rst_n), .desc_valid(eng1_desc_valid), .desc_ready(nv12_ch1_desc_ready_v), .desc_format(4'd2), .desc_sg_mode(eng1_desc_sg_mode), .plane_y_addr(eng1_y_addr), .plane_uv_addr(eng1_uv_addr), .frame_width(eng1_width), .frame_height(eng1_height), .frame_stride(eng1_stride),
         .sgl_y_wr_en(ch1_sgl_y_rd_en), .sgl_y_wr_addr(ch1_sgl_y_dout[63:0]), .sgl_y_wr_len(ch1_sgl_y_dout[95:64]), .sgl_y_wr_flags(ch1_sgl_y_dout[127:96]),
         .sgl_uv_wr_en(ch1_sgl_uv_rd_en), .sgl_uv_wr_addr(ch1_sgl_uv_dout[63:0]), .sgl_uv_wr_len(ch1_sgl_uv_dout[95:64]), .sgl_uv_wr_flags(ch1_sgl_uv_dout[127:96]),
         .cur_y_sgl_count(), .cur_uv_sgl_count(), .sgl_y_pop_ready(ch1_sgl_y_pop_ready), .sgl_uv_pop_ready(ch1_sgl_uv_pop_ready), .pacer_enable(1'b0), .frame_interval_clks(32'd2500000), .global_timestamp(eng1_ts), .s_axis_tdata(ch1_tdata), .s_axis_tvalid(ch1_tvalid), .s_axis_tlast(ch1_tlast), .s_axis_tuser(ch1_tuser), .s_axis_tready(ch1_tready),
@@ -1387,7 +1393,7 @@ module custom_pcie_dma_top #(
 
     wire [129:0] ch2_fifo_dout;
     wire        ch2_fifo_empty, ch2_tready;
-    xpm_fifo_async #(.FIFO_MEMORY_TYPE("distributed"), .FIFO_WRITE_DEPTH(64), .WRITE_DATA_WIDTH(130), .READ_DATA_WIDTH(130), .READ_MODE("fwft"), .FIFO_READ_LATENCY(0), .USE_ADV_FEATURES("0000"))
+    xpm_fifo_async #(.FIFO_MEMORY_TYPE("block"), .FIFO_WRITE_DEPTH(512), .WRITE_DATA_WIDTH(130), .READ_DATA_WIDTH(130), .READ_MODE("fwft"), .FIFO_READ_LATENCY(0), .USE_ADV_FEATURES("0000"))
     u_ch2_loopback_cdc (.rst(!rst_n || !video_rst_n), .wr_clk(clk), .wr_en(lb_tvalid && lb_tready && sg_loopback_enable && (sg_loopback_channel == 2'd2)), .din({lb_tuser, lb_tlast, lb_tdata}), .full(ch2_loopback_full), .rd_clk(video_clk), .rd_en(!ch2_fifo_empty && ch2_tready), .dout(ch2_fifo_dout), .empty(ch2_fifo_empty), .sleep(1'b0), .injectsbiterr(1'b0), .injectdbiterr(1'b0), .sbiterr(), .dbiterr(), .wr_rst_busy(), .rd_rst_busy());
     wire [127:0] ch2_tdata = ch2_fifo_dout[127:0]; wire ch2_tlast = ch2_fifo_dout[128]; wire ch2_tuser = ch2_fifo_dout[129]; wire ch2_tvalid = !ch2_fifo_empty;
 
@@ -1423,8 +1429,8 @@ module custom_pcie_dma_top #(
         endcase
     end
     wire eng2_req_valid, eng2_req_ready, eng2_req_ack; wire [63:0] eng2_req_addr; wire [10:0] eng2_req_dw_len; wire [PCIE_DATA_WIDTH-1:0] eng2_req_data; wire eng2_frame_done;
-    nv12_capture_engine #(.MAX_WIDTH(3840), .PCIE_DATA_WIDTH(PCIE_DATA_WIDTH), .FIFO_DEPTH(32), .MWR_PAYLOAD_BYTES(256), .RAW_INPUT(1))
-    u_nv12_capture_engine_ch2 (.clk(video_clk), .rst_n(video_rst_n), .desc_valid(eng2_desc_valid), .desc_ready(nv12_ch2_desc_ready_v), .desc_sg_mode(eng2_desc_sg_mode), .plane_y_addr(eng2_y_addr), .plane_uv_addr(eng2_uv_addr), .frame_width(eng2_width), .frame_height(eng2_height), .frame_stride(eng2_stride),
+    nv12_capture_engine #(.MAX_WIDTH(4096), .PCIE_DATA_WIDTH(PCIE_DATA_WIDTH), .FIFO_DEPTH(32), .MWR_PAYLOAD_BYTES(256), .RAW_INPUT(1))
+    u_nv12_capture_engine_ch2 (.clk(video_clk), .rst_n(video_rst_n), .desc_valid(eng2_desc_valid), .desc_ready(nv12_ch2_desc_ready_v), .desc_format(4'd2), .desc_sg_mode(eng2_desc_sg_mode), .plane_y_addr(eng2_y_addr), .plane_uv_addr(eng2_uv_addr), .frame_width(eng2_width), .frame_height(eng2_height), .frame_stride(eng2_stride),
         .sgl_y_wr_en(!ch2_sgl_y_empty && ch2_sgl_y_pop_ready), .sgl_y_wr_addr(ch2_sgl_y_dout[63:0]), .sgl_y_wr_len(ch2_sgl_y_dout[95:64]), .sgl_y_wr_flags(ch2_sgl_y_dout[127:96]),
         .sgl_uv_wr_en(!ch2_sgl_uv_empty && ch2_sgl_uv_pop_ready), .sgl_uv_wr_addr(ch2_sgl_uv_dout[63:0]), .sgl_uv_wr_len(ch2_sgl_uv_dout[95:64]), .sgl_uv_wr_flags(ch2_sgl_uv_dout[127:96]),
         .cur_y_sgl_count(), .cur_uv_sgl_count(), .sgl_y_pop_ready(ch2_sgl_y_pop_ready), .sgl_uv_pop_ready(ch2_sgl_uv_pop_ready), .pacer_enable(1'b0), .frame_interval_clks(32'd2500000), .global_timestamp(eng2_ts), .s_axis_tdata(ch2_tdata), .s_axis_tvalid(ch2_tvalid), .s_axis_tlast(ch2_tlast), .s_axis_tuser(ch2_tuser), .s_axis_tready(ch2_tready),
@@ -1443,7 +1449,7 @@ module custom_pcie_dma_top #(
 
     wire [129:0] ch3_fifo_dout;
     wire        ch3_fifo_empty, ch3_tready;
-    xpm_fifo_async #(.FIFO_MEMORY_TYPE("distributed"), .FIFO_WRITE_DEPTH(64), .WRITE_DATA_WIDTH(130), .READ_DATA_WIDTH(130), .READ_MODE("fwft"), .FIFO_READ_LATENCY(0), .USE_ADV_FEATURES("0000"))
+    xpm_fifo_async #(.FIFO_MEMORY_TYPE("block"), .FIFO_WRITE_DEPTH(512), .WRITE_DATA_WIDTH(130), .READ_DATA_WIDTH(130), .READ_MODE("fwft"), .FIFO_READ_LATENCY(0), .USE_ADV_FEATURES("0000"))
     u_ch3_loopback_cdc (.rst(!rst_n || !video_rst_n), .wr_clk(clk), .wr_en(lb_tvalid && lb_tready && sg_loopback_enable && (sg_loopback_channel == 2'd3)), .din({lb_tuser, lb_tlast, lb_tdata}), .full(ch3_loopback_full), .rd_clk(video_clk), .rd_en(!ch3_fifo_empty && ch3_tready), .dout(ch3_fifo_dout), .empty(ch3_fifo_empty), .sleep(1'b0), .injectsbiterr(1'b0), .injectdbiterr(1'b0), .sbiterr(), .dbiterr(), .wr_rst_busy(), .rd_rst_busy());
     wire [127:0] ch3_tdata = ch3_fifo_dout[127:0]; wire ch3_tlast = ch3_fifo_dout[128]; wire ch3_tuser = ch3_fifo_dout[129]; wire ch3_tvalid = !ch3_fifo_empty;
 
@@ -1479,8 +1485,8 @@ module custom_pcie_dma_top #(
         endcase
     end
     wire eng3_req_valid, eng3_req_ready, eng3_req_ack; wire [63:0] eng3_req_addr; wire [10:0] eng3_req_dw_len; wire [PCIE_DATA_WIDTH-1:0] eng3_req_data; wire eng3_frame_done;
-    nv12_capture_engine #(.MAX_WIDTH(3840), .PCIE_DATA_WIDTH(PCIE_DATA_WIDTH), .FIFO_DEPTH(32), .MWR_PAYLOAD_BYTES(256), .RAW_INPUT(1))
-    u_nv12_capture_engine_ch3 (.clk(video_clk), .rst_n(video_rst_n), .desc_valid(eng3_desc_valid), .desc_ready(nv12_ch3_desc_ready_v), .desc_sg_mode(eng3_desc_sg_mode), .plane_y_addr(eng3_y_addr), .plane_uv_addr(eng3_uv_addr), .frame_width(eng3_width), .frame_height(eng3_height), .frame_stride(eng3_stride),
+    nv12_capture_engine #(.MAX_WIDTH(4096), .PCIE_DATA_WIDTH(PCIE_DATA_WIDTH), .FIFO_DEPTH(32), .MWR_PAYLOAD_BYTES(256), .RAW_INPUT(1))
+    u_nv12_capture_engine_ch3 (.clk(video_clk), .rst_n(video_rst_n), .desc_valid(eng3_desc_valid), .desc_ready(nv12_ch3_desc_ready_v), .desc_format(4'd2), .desc_sg_mode(eng3_desc_sg_mode), .plane_y_addr(eng3_y_addr), .plane_uv_addr(eng3_uv_addr), .frame_width(eng3_width), .frame_height(eng3_height), .frame_stride(eng3_stride),
         .sgl_y_wr_en(!ch3_sgl_y_empty && ch3_sgl_y_pop_ready), .sgl_y_wr_addr(ch3_sgl_y_dout[63:0]), .sgl_y_wr_len(ch3_sgl_y_dout[95:64]), .sgl_y_wr_flags(ch3_sgl_y_dout[127:96]),
         .sgl_uv_wr_en(!ch3_sgl_uv_empty && ch3_sgl_uv_pop_ready), .sgl_uv_wr_addr(ch3_sgl_uv_dout[63:0]), .sgl_uv_wr_len(ch3_sgl_uv_dout[95:64]), .sgl_uv_wr_flags(ch3_sgl_uv_dout[127:96]),
         .cur_y_sgl_count(), .cur_uv_sgl_count(), .sgl_y_pop_ready(ch3_sgl_y_pop_ready), .sgl_uv_pop_ready(ch3_sgl_uv_pop_ready), .pacer_enable(1'b0), .frame_interval_clks(32'd2500000), .global_timestamp(eng3_ts), .s_axis_tdata(ch3_tdata), .s_axis_tvalid(ch3_tvalid), .s_axis_tlast(ch3_tlast), .s_axis_tuser(ch3_tuser), .s_axis_tready(ch3_tready),

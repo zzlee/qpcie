@@ -64,6 +64,7 @@ driver/Module.markers
 test_app/*.o
 test_app/qpcie_sanity_check
 test_app/v4l2_test_app
+test_app/v4l2_rgb24_test_app
 test_app/alsa_test_app
 test_app/alsa_loopback_test_app
 test_app/dmabuf_p2p_test_app

@@ -9,7 +9,7 @@
 `timescale 1ns / 1ps
 
 module nv12_capture_engine #(
-    parameter integer MAX_WIDTH = 3840,
+    parameter integer MAX_WIDTH = 4096,
     parameter integer PCIE_DATA_WIDTH = 128,
     parameter integer FIFO_DEPTH = 128,
     parameter integer MWR_PAYLOAD_BYTES = 128,
@@ -20,6 +20,7 @@ module nv12_capture_engine #(
 
     input  wire                         desc_valid,
     output reg                          desc_ready,
+    input  wire [3:0]                   desc_format,
     input  wire                         desc_sg_mode,
     input  wire [63:0]                  plane_y_addr,
     input  wire [63:0]                  plane_uv_addr,
@@ -73,6 +74,9 @@ module nv12_capture_engine #(
     localparam integer BURST_BEATS = MWR_PAYLOAD_BYTES / DATA_BYTES;
     localparam [10:0] MWR_DWORDS = MWR_PAYLOAD_BYTES / 4;
 
+    reg [3:0]  format_q;
+    wire       is_rgb_mode = (format_q == 4'd1);
+
     reg [15:0] width_q, height_q, stride_q;
     reg [15:0] line_idx, beat_col;
     reg [63:0] y_send_addr, uv_send_addr;
@@ -85,6 +89,23 @@ module nv12_capture_engine #(
     reg frontend_done;
     reg pacing;
     reg [31:0] frame_clk_count;
+
+    // Packed RGB24 96-bit (4-PPC) to 128-bit PCIe FIFO Gearbox
+    wire [23:0] rgb_pix0 = s_axis_tdata[23:0];
+    wire [23:0] rgb_pix1 = s_axis_tdata[55:32];
+    wire [23:0] rgb_pix2 = s_axis_tdata[87:64];
+    wire [23:0] rgb_pix3 = s_axis_tdata[119:96];
+    wire [95:0] rgb_beat_96 = {rgb_pix3, rgb_pix2, rgb_pix1, rgb_pix0};
+
+    reg [95:0] rgb_hold_0;
+    reg [63:0] rgb_hold_1;
+    reg [31:0] rgb_hold_2;
+    reg [15:0] rgb_in_line_bytes;
+
+    wire rgb_push_en = is_rgb_mode && pixel_accept && (beat_col[1:0] != 2'b00);
+    wire [127:0] rgb_push_data = (beat_col[1:0] == 2'b01) ? {rgb_beat_96[31:0], rgb_hold_0} :
+                                 (beat_col[1:0] == 2'b10) ? {rgb_beat_96[63:0], rgb_hold_1} :
+                                                            {rgb_beat_96[95:0], rgb_hold_2};
 
     // Odd-row chroma processing is one cycle behind AXI input so the block-RAM
     // read from the matching even row can remain synchronous.
@@ -189,7 +210,7 @@ module nv12_capture_engine #(
     wire [10:0] uv_next_dw_len = uv_is_256 ? 11'd64 : 11'd32;
     wire [4:0]  uv_next_beats  = uv_is_256 ? 5'd16  : 5'd8;
     wire [15:0] uv_next_bytes  = uv_is_256 ? 16'd256: 16'd128;
-    wire uv_ready_to_send = (!desc_sg_mode || (uv_seg_valid && uv_walker_bytes_left > 0)) && (uv_fifo_count >= uv_next_beats);
+    wire uv_ready_to_send = !is_rgb_mode && (!desc_sg_mode || (uv_seg_valid && uv_walker_bytes_left > 0)) && (uv_fifo_count >= uv_next_beats);
 
     function [31:0] pack_y4;
         input [127:0] d;
@@ -232,9 +253,9 @@ module nv12_capture_engine #(
         end
     endfunction
 
-    wire fifo_space_available =
-        (y_fifo_count <= FIFO_DEPTH-2) &&
-        (uv_fifo_count <= FIFO_DEPTH-2);
+    wire fifo_space_available = is_rgb_mode ?
+        (y_fifo_count <= FIFO_DEPTH - 4) :
+        ((y_fifo_count <= FIFO_DEPTH - 2) && (uv_fifo_count <= FIFO_DEPTH - 2));
     assign s_axis_tready = video_busy && capture_enable && fifo_space_available;
 
     wire input_transfer = s_axis_tvalid && s_axis_tready;
@@ -242,10 +263,13 @@ module nv12_capture_engine #(
     wire raw_y_push = input_transfer && (raw_byte_count < raw_y_bytes);
     wire raw_uv_push = input_transfer && (raw_byte_count >= raw_y_bytes);
     wire y_fifo_push = RAW_INPUT ? raw_y_push :
+        is_rgb_mode ? rgb_push_en :
         (pixel_accept && (beat_col[1:0] == 2'b11));
     wire [127:0] y_fifo_push_data = RAW_INPUT ? s_axis_tdata :
+        is_rgb_mode ? rgb_push_data :
         {pack_y4(s_axis_tdata), y_pack[95:0]};
     wire uv_fifo_push = RAW_INPUT ? raw_uv_push :
+        is_rgb_mode ? 1'b0 :
         (odd_valid && (odd_col[1:0] == 2'b11));
     wire [127:0] uv_fifo_push_data = RAW_INPUT ? s_axis_tdata :
         {pack_nv12_uv4(odd_data, chroma_even_q), uv_pack[95:0]};
@@ -301,6 +325,7 @@ module nv12_capture_engine #(
     // One-input-beat-per-clock conversion frontend.
     always @(posedge clk) begin
         if (!rst_n) begin
+            format_q <= 4'd2;
             width_q <= 0;
             height_q <= 0;
             stride_q <= 0;
@@ -318,10 +343,15 @@ module nv12_capture_engine #(
             raw_byte_count <= 0;
             raw_y_bytes <= 0;
             raw_total_bytes <= 0;
+            rgb_hold_0 <= 0;
+            rgb_hold_1 <= 0;
+            rgb_hold_2 <= 0;
+            rgb_in_line_bytes <= 0;
             frame_pts <= 0;
             protocol_error_count <= 0;
         end else begin
             if (descriptor_accept) begin
+                format_q <= desc_format;
                 width_q <= frame_width;
                 height_q <= frame_height;
                 stride_q <= frame_stride;
@@ -338,7 +368,12 @@ module nv12_capture_engine #(
                 raw_y_bytes <= {16'd0, frame_width} * frame_height;
                 raw_total_bytes <= ({16'd0, frame_width} * frame_height) +
                                    ({16'd0, frame_width} * (frame_height >> 1));
-                if (frame_width > MAX_WIDTH || frame_width[6:0] != 0 ||
+                rgb_hold_0 <= 0;
+                rgb_hold_1 <= 0;
+                rgb_hold_2 <= 0;
+                rgb_in_line_bytes <= 0;
+                if ((desc_format == 4'd1 ? (frame_width > MAX_WIDTH * 3) : (frame_width > MAX_WIDTH)) ||
+                    frame_width[6:0] != 0 ||
                     frame_height[0] || frame_stride < frame_width ||
                     (MWR_PAYLOAD_BYTES != 128 && MWR_PAYLOAD_BYTES != 256) ||
                     PCIE_DATA_WIDTH != 128)
@@ -383,21 +418,38 @@ module nv12_capture_engine #(
                         protocol_error_count <= protocol_error_count + 1'b1;
                     end
 
-                    if (beat_col[1:0] == 2'b11)
-                        y_pack <= 0;
-                    else
-                        y_pack[(beat_col[1:0]*32) +: 32] <= pack_y4(s_axis_tdata);
+                    if (is_rgb_mode) begin
+                        if (beat_col[1:0] == 2'b00)
+                            rgb_hold_0 <= rgb_beat_96;
+                        else if (beat_col[1:0] == 2'b01)
+                            rgb_hold_1 <= rgb_beat_96[95:32];
+                        else if (beat_col[1:0] == 2'b10)
+                            rgb_hold_2 <= rgb_beat_96[95:64];
 
-                    if (s_axis_tlast !=
-                        (beat_col == ((width_q >> 2) - 1'b1)))
-                        protocol_error_count <= protocol_error_count + 1'b1;
+                        if (s_axis_tlast != (rgb_in_line_bytes + 16'd12 >= width_q))
+                            protocol_error_count <= protocol_error_count + 1'b1;
+
+                        if (s_axis_tlast)
+                            rgb_in_line_bytes <= 16'd0;
+                        else
+                            rgb_in_line_bytes <= rgb_in_line_bytes + 16'd12;
+                    end else begin
+                        if (beat_col[1:0] == 2'b11)
+                            y_pack <= 0;
+                        else
+                            y_pack[(beat_col[1:0]*32) +: 32] <= pack_y4(s_axis_tdata);
+
+                        if (s_axis_tlast !=
+                            (beat_col == ((width_q >> 2) - 1'b1)))
+                            protocol_error_count <= protocol_error_count + 1'b1;
+                    end
 
                     if (s_axis_tlast) begin
                         beat_col <= 0;
                         line_idx <= line_idx + 1'b1;
                         if (line_idx + 1'b1 >= height_q) begin
                             capture_enable <= 0;
-                            if (!line_idx[0])
+                            if (is_rgb_mode || !line_idx[0])
                                 frontend_done <= 1;
                         end
                     end else begin
@@ -448,7 +500,7 @@ module nv12_capture_engine #(
             y_send_offset <= 0;
             uv_send_offset <= 0;
             y_rem_bytes <= frame_width;
-            uv_rem_bytes <= frame_width;
+            uv_rem_bytes <= (desc_format == 4'd1) ? 16'd0 : frame_width;
             y_send_line <= 0;
             uv_send_line <= 0;
         end else begin
@@ -472,7 +524,7 @@ module nv12_capture_engine #(
                     payload_beats_to_load <= y_next_beats;
                     active_req_bytes      <= y_next_bytes;
                     c2h_req_valid         <= 1'b1;
-                    prefer_uv             <= 1'b1;
+                    prefer_uv             <= is_rgb_mode ? 1'b0 : 1'b1;
                 end
             end
 
@@ -540,7 +592,7 @@ module nv12_capture_engine #(
                 pacing <= 0;
                 frame_clk_count <= 0;
             end else if (video_busy && !pacing && frontend_done &&
-                         y_fifo_count == 0 && uv_fifo_count == 0 &&
+                         y_fifo_count == 0 && (is_rgb_mode || uv_fifo_count == 0) &&
                          !c2h_req_valid) begin
                 video_frame_done <= 1;
                 if (pacer_enable && frame_interval_clks != 0 &&

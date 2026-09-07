@@ -66,7 +66,7 @@ create_ip -name v_tpg -vendor xilinx.com -library ip -version 8.2 -module_name v
 set_property -dict [list \
   CONFIG.SAMPLES_PER_CLOCK {4} \
   CONFIG.MAX_DATA_WIDTH {8} \
-  CONFIG.MAX_COLS {3840} \
+  CONFIG.MAX_COLS {4096} \
   CONFIG.MAX_ROWS {2160} \
 ] [get_ips v_tpg_0]
 

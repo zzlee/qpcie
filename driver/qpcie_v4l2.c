@@ -65,6 +65,7 @@ struct qpcie_video_mode {
 static const struct qpcie_video_mode qpcie_video_modes[] = {
     { 1920, 1080 },
     { 3840, 2160 },
+    { 4096, 2160 },
 };
 
 static const struct qpcie_video_mode *qpcie_find_video_mode(u32 width,
@@ -373,7 +374,7 @@ static int qpcie_vidioc_s_parm(struct file *file, void *priv, struct v4l2_stream
 
 static int qpcie_vidioc_enum_framesizes(struct file *file, void *priv, struct v4l2_frmsizeenum *fsize)
 {
-    if (fsize->pixel_format != V4L2_PIX_FMT_NV12M)
+    if (fsize->pixel_format != V4L2_PIX_FMT_NV12M && fsize->pixel_format != V4L2_PIX_FMT_RGB24)
         return -EINVAL;
 
     if (fsize->index >= ARRAY_SIZE(qpcie_video_modes))
@@ -391,13 +392,14 @@ static const struct v4l2_fract supported_frameintervals[] = {
 
 static int qpcie_vidioc_enum_frameintervals(struct file *file, void *priv, struct v4l2_frmivalenum *fival)
 {
-    if (fival->pixel_format != V4L2_PIX_FMT_NV12M)
+    if (fival->pixel_format != V4L2_PIX_FMT_NV12M && fival->pixel_format != V4L2_PIX_FMT_RGB24)
         return -EINVAL;
 
     if (fival->index >= ARRAY_SIZE(supported_frameintervals))
         return -EINVAL;
     if ((fival->width != 1920 || fival->height != 1080) &&
-        (fival->width != 3840 || fival->height != 2160))
+        (fival->width != 3840 || fival->height != 2160) &&
+        (fival->width != 4096 || fival->height != 2160))
         return -EINVAL;
 
     fival->type = V4L2_FRMIVAL_TYPE_DISCRETE;
