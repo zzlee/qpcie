@@ -98,7 +98,7 @@ static void usage(const char *prog)
             "  -n <bufs>    MMAP buffer count 2..8 (default: %u)\n"
             "  -p <pattern> TPG pattern: 0, 1, 2, 9 (color bars), or 10 (zone plate)\n"
             "  -b           Run uncapped DMA benchmark\n"
-            "  -S           Freeze TPG motion and require every frame to match frame 0\n"
+            "  -S           Use a static ramp and require every frame to match frame 0\n"
             "  -o <file>    Dump raw RGB24 frames to file\n"
             "  -P           Probe supported formats and exit\n"
             "  -H           Show this help\n",
@@ -234,6 +234,15 @@ int main(int argc, char **argv)
            fmt.fmt.pix_mp.width, fmt.fmt.pix_mp.height,
            fmt.fmt.pix_mp.plane_fmt[0].sizeimage,
            fmt.fmt.pix_mp.plane_fmt[0].bytesperline);
+
+    /* Color Bars retain a dynamic phase in this 4-PPC v_tpg configuration.
+     * Static verification therefore uses a deterministic ramp, exercising the
+     * same RGB24 capture path without treating intended pattern motion as DMA
+     * corruption. */
+    if (static_verify && pattern != 1 && pattern != 2) {
+        printf("[INFO] Static verification uses TPG Horizontal Ramp (pattern 1)\n");
+        pattern = 1;
+    }
 
     /* The V4L2 menu has compact values while the TPG uses Xilinx IDs. */
     pattern = tpg_pattern_menu_value(pattern);
