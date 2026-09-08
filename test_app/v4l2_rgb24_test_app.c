@@ -81,6 +81,8 @@ static int tpg_pattern_menu_value(int pattern)
     case 0: return 0;  /* Pass-through maps to Color Bars in the driver. */
     case 1: return 1;  /* Horizontal Ramp */
     case 2: return 2;  /* Vertical Ramp */
+    case 7: return 5;  /* Xilinx Solid Black */
+    case 8: return 6;  /* Xilinx Solid White */
     case 9: return 3;  /* Xilinx Color Bars */
     case 10: return 4; /* Xilinx Zone Plate */
     default: return -1;
@@ -96,9 +98,9 @@ static void usage(const char *prog)
             "  -h <height>  Frame height: 1080 or 2160 (default: %u)\n"
             "  -f <frames>  Frame count (default: %u, benchmark: %u)\n"
             "  -n <bufs>    MMAP buffer count 2..8 (default: %u)\n"
-            "  -p <pattern> TPG pattern: 0, 1, 2, 9 (color bars), or 10 (zone plate)\n"
+            "  -p <pattern> TPG pattern: 0, 1, 2, 7 (black), 8 (white), 9 (bars), or 10 (zone)\n"
             "  -b           Run uncapped DMA benchmark\n"
-            "  -S           Use a static ramp and require every frame to match frame 0\n"
+            "  -S           Use static Solid White and require every frame to match frame 0\n"
             "  -o <file>    Dump raw RGB24 frames to file\n"
             "  -P           Probe supported formats and exit\n"
             "  -H           Show this help\n",
@@ -119,6 +121,7 @@ int main(int argc, char **argv)
     int pattern = 9;
     int benchmark_mode = 0;
     int static_verify = 0;
+    int static_expected_fill = -1;
     int probe_only = 0;
     int fd = -1;
     int rc = EXIT_FAILURE;
@@ -235,19 +238,19 @@ int main(int argc, char **argv)
            fmt.fmt.pix_mp.plane_fmt[0].sizeimage,
            fmt.fmt.pix_mp.plane_fmt[0].bytesperline);
 
-    /* Color Bars retain a dynamic phase in this 4-PPC v_tpg configuration.
-     * Static verification therefore uses a deterministic ramp, exercising the
-     * same RGB24 capture path without treating intended pattern motion as DMA
-     * corruption. */
-    if (static_verify && pattern != 1 && pattern != 2) {
-        printf("[INFO] Static verification uses TPG Horizontal Ramp (pattern 1)\n");
-        pattern = 1;
+    /* Color Bars and ramps retain a frame phase in this v_tpg configuration.
+     * A solid background gives a known byte value for an end-to-end test. */
+    if (static_verify && pattern != 7 && pattern != 8) {
+        printf("[INFO] Static verification uses TPG Solid White (pattern 8)\n");
+        pattern = 8;
     }
+    if (static_verify)
+        static_expected_fill = pattern == 8 ? 0xff : 0x00;
 
     /* The V4L2 menu has compact values while the TPG uses Xilinx IDs. */
     pattern = tpg_pattern_menu_value(pattern);
     if (pattern < 0) {
-        fprintf(stderr, "[ERROR] Unsupported TPG pattern; use 0, 1, 2, 9, or 10\n");
+        fprintf(stderr, "[ERROR] Unsupported TPG pattern; use 0, 1, 2, 7, 8, 9, or 10\n");
         goto out;
     }
 
@@ -409,6 +412,18 @@ int main(int argc, char **argv)
 
                 if (static_verify) {
                     if (!have_reference_hash) {
+                        const uint8_t *p = buffers[buf.index].plane[0].addr;
+                        size_t byte;
+
+                        for (byte = 0; byte < buffers[buf.index].plane[0].length; byte++) {
+                            if (p[byte] != static_expected_fill) {
+                                fprintf(stderr,
+                                        "[FAIL] static source mismatch at frame 0 byte %zu: got=0x%02X expected=0x%02X\n",
+                                        byte, p[byte], static_expected_fill);
+                                rc = EXIT_FAILURE;
+                                goto streamoff;
+                            }
+                        }
                         reference_hash = hash;
                         have_reference_hash = 1;
                     } else if (hash != reference_hash) {

@@ -133,6 +133,10 @@ static u32 qpcie_tpg_pattern_id(int menu_value)
         return 9;  /* Color Bars */
     if (menu_value == 4)
         return 10; /* Zone Plate */
+    if (menu_value == 5)
+        return 7;  /* Solid Black */
+    if (menu_value == 6)
+        return 8;  /* Solid White */
     return menu_value;
 }
 
@@ -1133,6 +1137,8 @@ static const char * const qpcie_tpg_pattern_strings[] = {
     "Vertical Ramp",
     "Color Bars",
     "Zone Plate",
+    "Solid Black",
+    "Solid White",
     NULL
 };
 
@@ -1317,7 +1323,7 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
         if (i == 0) {
             v4l2_ctrl_new_std_menu_items(&vch->ctrl_handler, &qpcie_ctrl_ops,
                                          V4L2_CID_TEST_PATTERN,
-                                         4, BIT(0), 3, qpcie_tpg_pattern_strings);
+                                         6, BIT(0), 3, qpcie_tpg_pattern_strings);
             v4l2_ctrl_new_custom(&vch->ctrl_handler,
                                  &qpcie_tpg_motion_ctrl_config, NULL);
             v4l2_ctrl_new_custom(&vch->ctrl_handler,
