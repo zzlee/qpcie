@@ -81,8 +81,10 @@
 #define BAR1_OFFSET_AUDIO_GEN       0x1000
 #define BAR1_OFFSET_EDID            0x2000
 
-/* Private V4L2 control used only for controlled DMA throughput testing. */
-#define V4L2_CID_QPCIE_PACER_ENABLE (V4L2_CID_USER_BASE + 0x1000)
+/* Private V4L2 controls for QPCIe TPG capture diagnostics. */
+#define V4L2_CID_QPCIE_PACER_ENABLE     (V4L2_CID_USER_BASE + 0x1000)
+#define V4L2_CID_QPCIE_TPG_MOTION_SPEED (V4L2_CID_USER_BASE + 0x1001)
+#define V4L2_CID_QPCIE_FRAME_DROP_COUNT (V4L2_CID_USER_BASE + 0x1002)
 
 /* BAR0 DMA Register Offsets */
 #define REG_DMA_CTRL         0x00
@@ -129,7 +131,7 @@
 #define REG_TPG_EOL_COUNT    0x8C    /* Free-running line-end (TLAST) counter (RO) */
 #define REG_TPG_BEAT_COUNT   0x90    /* Free-running valid-beat counter (RO) */
 #define REG_SLICE_HEIGHT     0x78    /* Sub-Frame Slice Height in Lines (0=Full Frame IRQ, >0=Slice IRQ) */
-#define REG_VIDEO_ERRORS     0x7C    /* AXI-video framing/configuration error count */
+#define REG_VIDEO_ERRORS     0x7C    /* Ch0 capture engine frame-drop count */
 #define REG_VIDEO_CTRL       0x80    /* Bit 0: reset TPG and video CDC FIFO */
 
 /* Hardware Performance Monitor Registers (BAR0 Offsets 0xA0..0xDC) */
@@ -299,6 +301,7 @@ struct qpcie_dev {
     /* Subsystem Devices */
     struct v4l2_device v4l2_dev;
     struct qpcie_v4l2_channel v4l2_ch[NUM_VIDEO_NODES];
+    unsigned int v4l2_node_count;
     struct qpcie_alsa_channel alsa_ch[NUM_AUDIO_CHANNELS];
 
     struct snd_card *card;

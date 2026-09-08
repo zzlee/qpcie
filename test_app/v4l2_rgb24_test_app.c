@@ -29,6 +29,8 @@
 #define MAX_ERROR_FRAMES        10U
 
 #define V4L2_CID_QPCIE_PACER_ENABLE (V4L2_CID_USER_BASE + 0x1000)
+#define V4L2_CID_QPCIE_TPG_MOTION_SPEED (V4L2_CID_USER_BASE + 0x1001)
+#define V4L2_CID_QPCIE_FRAME_DROP_COUNT (V4L2_CID_USER_BASE + 0x1002)
 
 struct plane_map {
     void *addr;
@@ -84,6 +86,7 @@ static void usage(const char *prog)
             "  -n <bufs>    MMAP buffer count 2..8 (default: %u)\n"
             "  -p <pattern> TPG pattern 0..17 (default: 9 - color bars)\n"
             "  -b           Run uncapped DMA benchmark\n"
+            "  -S           Freeze TPG motion and require every frame to match frame 0\n"
             "  -o <file>    Dump raw RGB24 frames to file\n"
             "  -P           Probe supported formats and exit\n"
             "  -H           Show this help\n",
@@ -103,6 +106,7 @@ int main(int argc, char **argv)
     int frames_set = 0;
     int pattern = 9;
     int benchmark_mode = 0;
+    int static_verify = 0;
     int probe_only = 0;
     int fd = -1;
     int rc = EXIT_FAILURE;
@@ -117,13 +121,17 @@ int main(int argc, char **argv)
     uint32_t captured = 0;
     uint32_t seq_errors = 0;
     uint32_t expected_sequence = 0;
+    uint32_t frame_drop_start = 0;
+    uint32_t frame_drop_end = 0;
+    uint64_t reference_hash = 0;
+    int have_reference_hash = 0;
     int sequence_violation = 0;
     double start_ms = 0.0, end_ms = 0.0;
     double bench_start_ms = 0.0;
     uint32_t bench_frames = 0;
     uint32_t i;
 
-    while ((opt = getopt(argc, argv, "d:w:h:f:n:p:bo:PH")) != -1) {
+    while ((opt = getopt(argc, argv, "d:w:h:f:n:p:bSo:PH")) != -1) {
         switch (opt) {
         case 'd': device = optarg; break;
         case 'w': width = strtoul(optarg, NULL, 0); break;
@@ -132,6 +140,7 @@ int main(int argc, char **argv)
         case 'n': num_buffers = strtoul(optarg, NULL, 0); break;
         case 'p': pattern = strtol(optarg, NULL, 0); break;
         case 'b': benchmark_mode = 1; break;
+        case 'S': static_verify = 1; break;
         case 'o': output_name = optarg; break;
         case 'P': probe_only = 1; break;
         case 'H': usage(argv[0]); return EXIT_SUCCESS;
@@ -158,11 +167,12 @@ int main(int argc, char **argv)
            " Device: %s, Resolution: %ux%u, Stride: %u Bytes\n"
            " Format: V4L2_PIX_FMT_RGB24 (Packed 24-bit RGB, 1 Plane)\n"
            " Frames: %u, Frame Size: %" PRIu64 " Bytes (%.2f MiB)\n"
-           " Mode: %s\n"
+           " Mode: %s%s\n"
            "=================================================================\n",
            device, width, height, stride, frame_target,
            frame_bytes, (double)frame_bytes / (1024.0 * 1024.0),
-           benchmark_mode ? "Uncapped DMA Benchmark" : "Hardware Paced (60 FPS)");
+           benchmark_mode ? "Uncapped DMA Benchmark" : "Hardware Paced (60 FPS)",
+           static_verify ? ", Static-frame integrity verification" : "");
 
     fd = open(device, O_RDWR | O_NONBLOCK);
     if (fd < 0) {
@@ -222,6 +232,24 @@ int main(int argc, char **argv)
     } else {
         printf("[PASS] Video TPG Pattern set to %d\n", pattern);
     }
+
+    if (static_verify) {
+        memset(&ctrl, 0, sizeof(ctrl));
+        ctrl.id = V4L2_CID_QPCIE_TPG_MOTION_SPEED;
+        ctrl.value = 0;
+        if (xioctl(fd, VIDIOC_S_CTRL, &ctrl) < 0) {
+            perror("VIDIOC_S_CTRL motion speed");
+            goto out;
+        }
+    }
+
+    memset(&ctrl, 0, sizeof(ctrl));
+    ctrl.id = V4L2_CID_QPCIE_FRAME_DROP_COUNT;
+    if (xioctl(fd, VIDIOC_G_CTRL, &ctrl) < 0) {
+        perror("VIDIOC_G_CTRL frame drop count");
+        goto out;
+    }
+    frame_drop_start = ctrl.value;
 
     /* Pacer control */
     memset(&ctrl, 0, sizeof(ctrl));
@@ -347,13 +375,30 @@ int main(int argc, char **argv)
             }
             expected_sequence = buf.sequence + 1;
 
-            if (captured < 5 || (captured % 30 == 0)) {
+            if (static_verify || captured < 5 || (captured % 30 == 0)) {
                 uint64_t hash = fnv1a64((const uint8_t *)buffers[buf.index].plane[0].addr,
                                         buffers[buf.index].plane[0].length);
-                const uint8_t *p = (const uint8_t *)buffers[buf.index].plane[0].addr;
-                printf("[Frame %4u] seq=%u, bytes=%u, R0=0x%02X G0=0x%02X B0=0x%02X, hash=0x%016" PRIx64 "\n",
-                       captured, buf.sequence, planes[0].bytesused,
-                       p[0], p[1], p[2], hash);
+
+                if (static_verify) {
+                    if (!have_reference_hash) {
+                        reference_hash = hash;
+                        have_reference_hash = 1;
+                    } else if (hash != reference_hash) {
+                        fprintf(stderr,
+                                "[FAIL] static-frame mismatch at frame %u: got=0x%016" PRIx64 " expected=0x%016" PRIx64 "\n",
+                                captured, hash, reference_hash);
+                        sequence_violation = 1;
+                        rc = EXIT_FAILURE;
+                        goto streamoff;
+                    }
+                }
+
+                if (captured < 5 || (captured % 30 == 0)) {
+                    const uint8_t *p = (const uint8_t *)buffers[buf.index].plane[0].addr;
+                    printf("[Frame %4u] seq=%u, bytes=%u, R0=0x%02X G0=0x%02X B0=0x%02X, hash=0x%016" PRIx64 "\n",
+                           captured, buf.sequence, planes[0].bytesused,
+                           p[0], p[1], p[2], hash);
+                }
             }
 
             if (output) {
@@ -371,6 +416,10 @@ int main(int argc, char **argv)
             goto streamoff;
         }
     }
+
+    if (static_verify)
+        printf("[PASS] Static-frame integrity: %u frame hashes match 0x%016" PRIx64 "\n",
+               captured, reference_hash);
 
     end_ms = monotonic_ms();
     rc = EXIT_SUCCESS;
@@ -406,6 +455,22 @@ streamoff:
                    "   Throughput     : %.2f MiB/s (%.2f Gbps)\n"
                    "=================================================================\n",
                    bench_frames, b_fps, b_mib_s, b_mib_s * 8.0 / 1024.0);
+        }
+    }
+
+    memset(&ctrl, 0, sizeof(ctrl));
+    ctrl.id = V4L2_CID_QPCIE_FRAME_DROP_COUNT;
+    if (xioctl(fd, VIDIOC_G_CTRL, &ctrl) < 0) {
+        perror("VIDIOC_G_CTRL frame drop count");
+        rc = EXIT_FAILURE;
+    } else {
+        frame_drop_end = ctrl.value;
+        printf(" Hardware Frame Drops : %u -> %u (delta=%u)\n",
+               frame_drop_start, frame_drop_end,
+               frame_drop_end - frame_drop_start);
+        if (frame_drop_end != frame_drop_start) {
+            fprintf(stderr, "[FAIL] hardware frame-drop counter increased\n");
+            rc = EXIT_FAILURE;
         }
     }
 

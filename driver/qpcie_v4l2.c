@@ -1123,12 +1123,35 @@ static int qpcie_s_ctrl(struct v4l2_ctrl *ctrl)
         if (vb2_is_streaming(&vch->queue))
             return -EBUSY;
         return qpcie_program_tpg(vch, qpcie_tpg_pattern_id(ctrl->val), true);
+    case V4L2_CID_QPCIE_TPG_MOTION_SPEED:
+        if (vb2_is_streaming(&vch->queue))
+            return -EBUSY;
+        if (!qdev || !qdev->bar1_mmio)
+            return -ENODEV;
+        iowrite32(ctrl->val, qdev->bar1_mmio + (vch->channel_id * 0x100) + 0x38);
+        return 0;
     }
+    return 0;
+}
+
+static int qpcie_g_volatile_ctrl(struct v4l2_ctrl *ctrl)
+{
+    struct qpcie_v4l2_channel *vch =
+        container_of(ctrl->handler, struct qpcie_v4l2_channel, ctrl_handler);
+    struct qpcie_dev *qdev = vch->qdev;
+
+    if (ctrl->id != V4L2_CID_QPCIE_FRAME_DROP_COUNT)
+        return 0;
+    if (!qdev || !qdev->bar0_mmio)
+        return -ENODEV;
+
+    ctrl->val = ioread32(qdev->bar0_mmio + REG_VIDEO_ERRORS) & INT_MAX;
     return 0;
 }
 
 static const struct v4l2_ctrl_ops qpcie_ctrl_ops = {
     .s_ctrl = qpcie_s_ctrl,
+    .g_volatile_ctrl = qpcie_g_volatile_ctrl,
 };
 
 static const struct v4l2_ctrl_config qpcie_pacer_ctrl_config = {
@@ -1142,10 +1165,34 @@ static const struct v4l2_ctrl_config qpcie_pacer_ctrl_config = {
     .def  = 1,
 };
 
+static const struct v4l2_ctrl_config qpcie_tpg_motion_ctrl_config = {
+    .ops  = &qpcie_ctrl_ops,
+    .id   = V4L2_CID_QPCIE_TPG_MOTION_SPEED,
+    .name = "QPCIe TPG Motion Speed",
+    .type = V4L2_CTRL_TYPE_INTEGER,
+    .min  = 0,
+    .max  = 255,
+    .step = 1,
+    .def  = 1,
+};
+
+static const struct v4l2_ctrl_config qpcie_frame_drop_ctrl_config = {
+    .ops   = &qpcie_ctrl_ops,
+    .id    = V4L2_CID_QPCIE_FRAME_DROP_COUNT,
+    .name  = "QPCIe TPG Frame Drop Count",
+    .type  = V4L2_CTRL_TYPE_INTEGER,
+    .min   = 0,
+    .max   = INT_MAX,
+    .step  = 1,
+    .def   = 0,
+    .flags = V4L2_CTRL_FLAG_READ_ONLY | V4L2_CTRL_FLAG_VOLATILE,
+};
+
 int qpcie_v4l2_init(struct qpcie_dev *qdev)
 {
     u32 hw_caps;
     unsigned int hw_video_ch;
+    unsigned int node_count;
     int i, ret;
 
     /* The capture engines emit 256-byte MWr payloads. A host that has not
@@ -1169,15 +1216,17 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
 
     hw_caps = ioread32(qdev->bar0_mmio + REG_HARDWARE_CAPS);
     hw_video_ch = (hw_caps >> 8) & 0xff;
-    if (hw_video_ch < NUM_VIDEO_CHANNELS) {
+    if (hw_video_ch == 0) {
         dev_err(&qdev->pdev->dev,
-                "[V4L2] FPGA reports only %u video channels (caps=0x%08x), need %u for TPG + 3 loopback channels\n",
-                hw_video_ch, hw_caps, NUM_VIDEO_CHANNELS);
+                "[V4L2] FPGA reports no video channels (caps=0x%08x)\n",
+                hw_caps);
         return -EOPNOTSUPP;
     }
+    node_count = 1 + (2 * min(hw_video_ch - 1,
+                              (unsigned int)(NUM_VIDEO_CHANNELS - 1)));
     dev_info(&qdev->pdev->dev,
-             "[V4L2] FPGA capability check passed: %u video channels (caps=0x%08x)\n",
-             hw_video_ch, hw_caps);
+             "[V4L2] FPGA capability check passed: %u video channels, registering %u node(s) (caps=0x%08x)\n",
+             hw_video_ch, node_count, hw_caps);
 
     dev_info(&qdev->pdev->dev, "[DEBUG STEP 2.1] Registering top-level v4l2_device...\n");
     spin_lock_init(&qdev->ring_lock);
@@ -1189,12 +1238,12 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
         return ret;
     }
 
-    /* Bring up all 7 V4L2 nodes:
+    /* Bring up the V4L2 nodes advertised by hardware:
      * - /dev/video0: Channel 0 TPG Hardware Video Capture
      * - /dev/video1/2: Channel 1 Loopback Output/Capture
      * - /dev/video3/4: Channel 2 Loopback Output/Capture
      * - /dev/video5/6: Channel 3 Loopback Output/Capture */
-    for (i = 0; i < NUM_VIDEO_NODES; i++) {
+    for (i = 0; i < node_count; i++) {
         struct qpcie_v4l2_channel *vch = &qdev->v4l2_ch[i];
         struct video_device *vdev = &vch->vdev;
 
@@ -1236,11 +1285,15 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
 
         /* Initialize V4L2 Control Handler */
         dev_info(&qdev->pdev->dev, "[DEBUG STEP 2.3] Node %d: Initializing Control Handler...\n", i);
-        v4l2_ctrl_handler_init(&vch->ctrl_handler, 2);
+        v4l2_ctrl_handler_init(&vch->ctrl_handler, i == 0 ? 4 : 1);
         if (i == 0) {
             v4l2_ctrl_new_std_menu_items(&vch->ctrl_handler, &qpcie_ctrl_ops,
                                          V4L2_CID_TEST_PATTERN,
                                          4, BIT(0), 3, qpcie_tpg_pattern_strings);
+            v4l2_ctrl_new_custom(&vch->ctrl_handler,
+                                 &qpcie_tpg_motion_ctrl_config, NULL);
+            v4l2_ctrl_new_custom(&vch->ctrl_handler,
+                                 &qpcie_frame_drop_ctrl_config, NULL);
         }
         v4l2_ctrl_new_custom(&vch->ctrl_handler,
                              &qpcie_pacer_ctrl_config, NULL);
@@ -1332,13 +1385,18 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
                  i, vdev->num, (vch->buf_type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) ? "Loopback Output" : "Capture");
     }
 
+    qdev->v4l2_node_count = node_count;
     qdev->v4l2_registered = true;
-    dev_info(&qdev->pdev->dev,
-             "[V4L2] 7 nodes initialized: /dev/video0 (TPG0), video1/2 (Ch1 LB), video3/4 (Ch2 LB), video5/6 (Ch3 LB)\n");
+    if (node_count == 1)
+        dev_info(&qdev->pdev->dev,
+                 "[V4L2] single-path node initialized: /dev/video0 (TPG0 RGB24 capture)\n");
+    else
+        dev_info(&qdev->pdev->dev,
+                 "[V4L2] 7 nodes initialized: /dev/video0 (TPG0), video1/2 (Ch1 LB), video3/4 (Ch2 LB), video5/6 (Ch3 LB)\n");
     return 0;
 
 unreg_v4l2:
-    for (i = 0; i < NUM_VIDEO_NODES; i++) {
+    for (i = 0; i < node_count; i++) {
         struct qpcie_v4l2_channel *vch = &qdev->v4l2_ch[i];
         if (video_is_registered(&vch->vdev))
             video_unregister_device(&vch->vdev);
@@ -1355,7 +1413,7 @@ void qpcie_v4l2_remove(struct qpcie_dev *qdev)
         return;
 
     qdev->v4l2_registered = false;
-    for (i = 0; i < NUM_VIDEO_NODES; i++) {
+    for (i = 0; i < qdev->v4l2_node_count; i++) {
         struct qpcie_v4l2_channel *vch = &qdev->v4l2_ch[i];
         if (video_is_registered(&vch->vdev))
             video_unregister_device(&vch->vdev);
