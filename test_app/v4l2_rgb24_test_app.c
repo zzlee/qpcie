@@ -26,6 +26,7 @@
 #define DEFAULT_FRAMES          120U
 #define DEFAULT_BENCHMARK_FRAMES 600U
 #define BENCHMARK_WARMUP_FRAMES 8U
+#define MAX_ERROR_FRAMES        10U
 
 #define V4L2_CID_QPCIE_PACER_ENABLE (V4L2_CID_USER_BASE + 0x1000)
 
@@ -114,6 +115,9 @@ int main(int argc, char **argv)
     struct v4l2_requestbuffers req;
     struct v4l2_control ctrl;
     uint32_t captured = 0;
+    uint32_t seq_errors = 0;
+    uint32_t expected_sequence = 0;
+    int sequence_violation = 0;
     double start_ms = 0.0, end_ms = 0.0;
     double bench_start_ms = 0.0;
     uint32_t bench_frames = 0;
@@ -320,28 +324,52 @@ int main(int argc, char **argv)
             bench_frames = 0;
         }
 
-        if (captured < 5 || (captured % 30 == 0)) {
-            uint64_t hash = fnv1a64((const uint8_t *)buffers[buf.index].plane[0].addr,
-                                    buffers[buf.index].plane[0].length);
-            const uint8_t *p = (const uint8_t *)buffers[buf.index].plane[0].addr;
-            printf("[Frame %4u] seq=%u, bytes=%u, R0=0x%02X G0=0x%02X B0=0x%02X, hash=0x%016" PRIx64 "\n",
-                   captured, buf.sequence, planes[0].bytesused,
-                   p[0], p[1], p[2], hash);
-        }
+        if (buf.flags & V4L2_BUF_FLAG_ERROR) {
+            /* Publish was rejected / buffer returned in error state.  Never
+             * count these as captured frames: with error-buffer recycling
+             * they would inflate the measured FPS to CPU speed. */
+            seq_errors++;
+            if (seq_errors <= 5 || (seq_errors % 100) == 0)
+                fprintf(stderr,
+                        "[WARN] frame %u: ERROR-state buffer (index=%u seq=%u): hardware ring pathology\n",
+                        captured, buf.index, buf.sequence);
+            if (seq_errors >= MAX_ERROR_FRAMES) {
+                fprintf(stderr, "[FAIL] too many ERROR-state frames (%u); aborting\n", seq_errors);
+                rc = EXIT_FAILURE;
+                goto streamoff;
+            }
+        } else {
+            if (buf.sequence != expected_sequence) {
+                fprintf(stderr,
+                        "[FAIL] sequence jump at frame %u: got=%u expected=%u\n",
+                        captured, buf.sequence, expected_sequence);
+                sequence_violation = 1;
+            }
+            expected_sequence = buf.sequence + 1;
 
-        if (output) {
-            fwrite(buffers[buf.index].plane[0].addr, 1,
-                   buffers[buf.index].plane[0].length, output);
+            if (captured < 5 || (captured % 30 == 0)) {
+                uint64_t hash = fnv1a64((const uint8_t *)buffers[buf.index].plane[0].addr,
+                                        buffers[buf.index].plane[0].length);
+                const uint8_t *p = (const uint8_t *)buffers[buf.index].plane[0].addr;
+                printf("[Frame %4u] seq=%u, bytes=%u, R0=0x%02X G0=0x%02X B0=0x%02X, hash=0x%016" PRIx64 "\n",
+                       captured, buf.sequence, planes[0].bytesused,
+                       p[0], p[1], p[2], hash);
+            }
+
+            if (output) {
+                fwrite(buffers[buf.index].plane[0].addr, 1,
+                       buffers[buf.index].plane[0].length, output);
+            }
+
+            captured++;
+            if (benchmark_mode && captured > BENCHMARK_WARMUP_FRAMES)
+                bench_frames++;
         }
 
         if (xioctl(fd, VIDIOC_QBUF, &buf) < 0) {
             perror("VIDIOC_QBUF requeue");
             goto streamoff;
         }
-
-        captured++;
-        if (benchmark_mode && captured > BENCHMARK_WARMUP_FRAMES)
-            bench_frames++;
     }
 
     end_ms = monotonic_ms();
@@ -379,6 +407,13 @@ streamoff:
                    "=================================================================\n",
                    bench_frames, b_fps, b_mib_s, b_mib_s * 8.0 / 1024.0);
         }
+    }
+
+    if (sequence_violation || seq_errors) {
+        fprintf(stderr,
+                "[FAIL] streaming integrity: %u sequence violation(s), %u ERROR-state frame(s)\n",
+                sequence_violation, seq_errors);
+        rc = EXIT_FAILURE;
     }
 
 out:

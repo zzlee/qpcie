@@ -287,6 +287,15 @@ struct qpcie_dev {
     spinlock_t ring_lock;
     atomic_t streaming_count;
 
+    /* Software in-flight counters for the shared descriptor ring.  The
+     * ring-full check must use these (invariant: published >= completed),
+     * never a hardware head pointer readback, because the FPGA fetch-ahead
+     * can run the head pointer all the way up to the tail and falsely
+     * trigger a "full" condition at the wrap boundary. */
+    u32 ring_published;
+    u32 ring_completed;
+    u32 ring_rejects;
+
     /* Subsystem Devices */
     struct v4l2_device v4l2_dev;
     struct qpcie_v4l2_channel v4l2_ch[NUM_VIDEO_NODES];

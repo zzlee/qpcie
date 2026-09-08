@@ -653,12 +653,14 @@ static int qpcie_publish_buffer(struct qpcie_v4l2_channel *vch,
 
     tail = qdev->h2c_tail;
     {
-        u32 head = ioread32(qdev->bar0_mmio + 0x40) & 0xffff;
-        u32 next_tail = (tail + 1) % RING_BUFFER_SIZE;
-        if (next_tail == head) {
-            dev_err(&qdev->pdev->dev,
-                    "V4L2 ring full: head=%u tail=%u size=%u; descriptor dropped\n",
-                    head, tail, RING_BUFFER_SIZE);
+        u32 in_flight = qdev->ring_published - qdev->ring_completed;
+
+        if (in_flight >= RING_BUFFER_SIZE - 1) {
+            qdev->ring_rejects++;
+            if (qdev->ring_rejects <= 4 || (qdev->ring_rejects % 1000) == 0)
+                dev_err(&qdev->pdev->dev,
+                        "V4L2 ring busy: in-flight=%u tail=%u size=%u rejects=%u; descriptor dropped\n",
+                        in_flight, tail, RING_BUFFER_SIZE, qdev->ring_rejects);
             return -EBUSY;
         }
     }
@@ -788,6 +790,7 @@ static int qpcie_publish_buffer(struct qpcie_v4l2_channel *vch,
     iowrite32((qdev->h2c_tail << 16) | RING_BUFFER_SIZE,
               qdev->bar0_mmio + REG_H2C_RING_CFG);
     ioread32(qdev->bar0_mmio + REG_H2C_RING_CFG);
+    qdev->ring_published++;
 
     return 0;
 }
@@ -1058,6 +1061,14 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
     iowrite32(0, qdev->bar0_mmio + REG_PERF_CTRL);
     ioread32(qdev->bar0_mmio + REG_PERF_CTRL);
     synchronize_irq(qdev->irq);
+
+    /* Re-anchor software in-flight counters after every pending completion
+     * IRQ has been processed (complete after synchronize_irq to avoid a
+     * late IRQ incrementing ring_completed past a zeroed ring_published). */
+    qdev->ring_published = 0;
+    qdev->ring_completed = 0;
+    qdev->ring_rejects = 0;
+
     {
         u32 errors = ioread32(qdev->bar0_mmio + REG_VIDEO_ERRORS);
 
@@ -1391,12 +1402,14 @@ void qpcie_v4l2_irq_handler(struct qpcie_dev *qdev)
                         if (vch->current_slice_idx >= total_slices) {
                             vch->current_slice_idx = 0;
                             list_del(&buf->list);
+                            qdev->ring_completed++;
                             buf->vb.vb2_buf.timestamp = ktime_get_ns();
                             buf->vb.sequence = vch->sequence++;
                             vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
                         }
                     } else {
                         list_del(&buf->list);
+                        qdev->ring_completed++;
                         buf->vb.vb2_buf.timestamp = ktime_get_ns();
                         buf->vb.sequence = vch->sequence++;
                         vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
@@ -1417,6 +1430,7 @@ void qpcie_v4l2_irq_handler(struct qpcie_dev *qdev)
                 if (!list_empty(&vch->active_buffers)) {
                     buf = list_first_entry(&vch->active_buffers, struct qpcie_v4l2_buffer, list);
                     list_del(&buf->list);
+                    qdev->ring_completed++;
                     buf->vb.vb2_buf.timestamp = ktime_get_ns();
                     buf->vb.sequence = vch->sequence++;
                     vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
@@ -1438,6 +1452,7 @@ void qpcie_v4l2_irq_handler(struct qpcie_dev *qdev)
                 if (!list_empty(&vch->active_buffers)) {
                     buf = list_first_entry(&vch->active_buffers, struct qpcie_v4l2_buffer, list);
                     list_del(&buf->list);
+                    qdev->ring_completed++;
                     buf->vb.vb2_buf.timestamp = ktime_get_ns();
                     buf->vb.sequence = vch->sequence++;
                     vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
@@ -1471,12 +1486,14 @@ void qpcie_v4l2_irq_handler(struct qpcie_dev *qdev)
                         if (vch->current_slice_idx >= total_slices) {
                             vch->current_slice_idx = 0;
                             list_del(&buf->list);
+                            qdev->ring_completed++;
                             buf->vb.vb2_buf.timestamp = ktime_get_ns();
                             buf->vb.sequence = vch->sequence++;
                             vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
                         }
                     } else {
                         list_del(&buf->list);
+                        qdev->ring_completed++;
                         buf->vb.vb2_buf.timestamp = ktime_get_ns();
                         buf->vb.sequence = vch->sequence++;
                         vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
