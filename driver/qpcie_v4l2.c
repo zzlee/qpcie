@@ -186,6 +186,27 @@ static int qpcie_program_tpg(struct qpcie_v4l2_channel *vch, u32 pattern_id,
     return 0;
 }
 
+static int qpcie_program_tpg_motion(struct qpcie_v4l2_channel *vch, u32 speed)
+{
+    struct qpcie_dev *qdev = vch->qdev;
+    void __iomem *tpg;
+    u32 expected_enable;
+
+    if (!qdev || !qdev->bar1_mmio)
+        return -ENODEV;
+
+    tpg = qdev->bar1_mmio + (vch->channel_id * 0x100);
+    expected_enable = speed ? 1 : 0;
+    if (speed)
+        iowrite32(speed, tpg + 0x38);
+    /* motionSpeed=0 alone does not stop v_tpg Color Bars animation. */
+    iowrite32(expected_enable, tpg + 0xd8);
+    if ((ioread32(tpg + 0xd8) & BIT(0)) != expected_enable)
+        return -EIO;
+
+    return 0;
+}
+
 /* ------------------------------------------------------------------
  * Linux Driver Pacer: Re-arms AP_START at high-precision 60.000 Hz
  * using Real-Time FIFO scheduling and absolute high-resolution timers.
@@ -927,10 +948,13 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
      * Channels 1 and 2 are dedicated hardware loopback and user streaming. */
     if (vch->channel_id == 0) {
         struct v4l2_ctrl *pattern_ctrl;
+        struct v4l2_ctrl *motion_ctrl;
         u32 pattern_id;
 
         pattern_ctrl = v4l2_ctrl_find(&vch->ctrl_handler,
                                       V4L2_CID_TEST_PATTERN);
+        motion_ctrl = v4l2_ctrl_find(&vch->ctrl_handler,
+                                     V4L2_CID_QPCIE_TPG_MOTION_SPEED);
         pattern_id = qpcie_tpg_pattern_id(pattern_ctrl ? pattern_ctrl->val : 3);
 
         iowrite32(1, qdev->bar0_mmio + REG_VIDEO_SUB_RESET);
@@ -943,6 +967,13 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
         if (qpcie_program_tpg(vch, pattern_id, false)) {
             qpcie_return_all_buffers(vch, VB2_BUF_STATE_QUEUED);
             return -EIO;
+        }
+        /* REG_VIDEO_SUB_RESET resets v_tpg controls, so restore the user
+         * selected motion state after the TPG configuration is reapplied. */
+        ret = qpcie_program_tpg_motion(vch, motion_ctrl ? motion_ctrl->val : 1);
+        if (ret) {
+            qpcie_return_all_buffers(vch, VB2_BUF_STATE_QUEUED);
+            return ret;
         }
     }
 
@@ -1126,16 +1157,7 @@ static int qpcie_s_ctrl(struct v4l2_ctrl *ctrl)
     case V4L2_CID_QPCIE_TPG_MOTION_SPEED:
         if (vb2_is_streaming(&vch->queue))
             return -EBUSY;
-        if (!qdev || !qdev->bar1_mmio)
-            return -ENODEV;
-        if (ctrl->val == 0) {
-            /* v_tpg motionSpeed=0 does not stop its moving background. */
-            iowrite32(0, qdev->bar1_mmio + (vch->channel_id * 0x100) + 0xd8);
-        } else {
-            iowrite32(ctrl->val, qdev->bar1_mmio + (vch->channel_id * 0x100) + 0x38);
-            iowrite32(1, qdev->bar1_mmio + (vch->channel_id * 0x100) + 0xd8);
-        }
-        return 0;
+        return qpcie_program_tpg_motion(vch, ctrl->val);
     }
     return 0;
 }
