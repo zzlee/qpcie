@@ -75,6 +75,18 @@ static uint64_t fnv1a64(const uint8_t *data, size_t length)
     return hash;
 }
 
+static int tpg_pattern_menu_value(int pattern)
+{
+    switch (pattern) {
+    case 0: return 0;  /* Pass-through maps to Color Bars in the driver. */
+    case 1: return 1;  /* Horizontal Ramp */
+    case 2: return 2;  /* Vertical Ramp */
+    case 9: return 3;  /* Xilinx Color Bars */
+    case 10: return 4; /* Xilinx Zone Plate */
+    default: return -1;
+    }
+}
+
 static void usage(const char *prog)
 {
     fprintf(stderr,
@@ -84,7 +96,7 @@ static void usage(const char *prog)
             "  -h <height>  Frame height: 1080 or 2160 (default: %u)\n"
             "  -f <frames>  Frame count (default: %u, benchmark: %u)\n"
             "  -n <bufs>    MMAP buffer count 2..8 (default: %u)\n"
-            "  -p <pattern> TPG pattern 0..17 (default: 9 - color bars)\n"
+            "  -p <pattern> TPG pattern: 0, 1, 2, 9 (color bars), or 10 (zone plate)\n"
             "  -b           Run uncapped DMA benchmark\n"
             "  -S           Freeze TPG motion and require every frame to match frame 0\n"
             "  -o <file>    Dump raw RGB24 frames to file\n"
@@ -223,6 +235,13 @@ int main(int argc, char **argv)
            fmt.fmt.pix_mp.plane_fmt[0].sizeimage,
            fmt.fmt.pix_mp.plane_fmt[0].bytesperline);
 
+    /* The V4L2 menu has compact values while the TPG uses Xilinx IDs. */
+    pattern = tpg_pattern_menu_value(pattern);
+    if (pattern < 0) {
+        fprintf(stderr, "[ERROR] Unsupported TPG pattern; use 0, 1, 2, 9, or 10\n");
+        goto out;
+    }
+
     /* Set TPG pattern */
     memset(&ctrl, 0, sizeof(ctrl));
     ctrl.id = V4L2_CID_TEST_PATTERN;
@@ -230,7 +249,7 @@ int main(int argc, char **argv)
     if (xioctl(fd, VIDIOC_S_CTRL, &ctrl) < 0) {
         perror("VIDIOC_S_CTRL pattern");
     } else {
-        printf("[PASS] Video TPG Pattern set to %d\n", pattern);
+        printf("[PASS] Video TPG pattern configured\n");
     }
 
     if (static_verify) {

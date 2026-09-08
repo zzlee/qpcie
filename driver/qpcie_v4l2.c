@@ -1128,7 +1128,13 @@ static int qpcie_s_ctrl(struct v4l2_ctrl *ctrl)
             return -EBUSY;
         if (!qdev || !qdev->bar1_mmio)
             return -ENODEV;
-        iowrite32(ctrl->val, qdev->bar1_mmio + (vch->channel_id * 0x100) + 0x38);
+        if (ctrl->val == 0) {
+            /* v_tpg motionSpeed=0 does not stop its moving background. */
+            iowrite32(0, qdev->bar1_mmio + (vch->channel_id * 0x100) + 0xd8);
+        } else {
+            iowrite32(ctrl->val, qdev->bar1_mmio + (vch->channel_id * 0x100) + 0x38);
+            iowrite32(1, qdev->bar1_mmio + (vch->channel_id * 0x100) + 0xd8);
+        }
         return 0;
     }
     return 0;
@@ -1168,7 +1174,7 @@ static const struct v4l2_ctrl_config qpcie_pacer_ctrl_config = {
 static const struct v4l2_ctrl_config qpcie_tpg_motion_ctrl_config = {
     .ops  = &qpcie_ctrl_ops,
     .id   = V4L2_CID_QPCIE_TPG_MOTION_SPEED,
-    .name = "QPCIe TPG Motion Speed",
+    .name = "QPCIe TPG Motion Speed (0=Static)",
     .type = V4L2_CTRL_TYPE_INTEGER,
     .min  = 0,
     .max  = 255,
