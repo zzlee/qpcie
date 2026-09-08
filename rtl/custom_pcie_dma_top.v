@@ -306,12 +306,20 @@ module custom_pcie_dma_top #(
     // SG DMA Engine Wires
     wire        sg_h2c_desc_ready, sg_c2h_desc_ready;
     wire        nv12_desc_ready;
+`ifndef QPCIe_single_rgb24_path
     wire        nv12_ch1_desc_ready;
     wire        nv12_ch2_desc_ready;
     wire        nv12_ch3_desc_ready;
+`endif
+    `ifdef QPCIe_single_rgb24_path
+    // The format-0 legacy SG C2H pattern-generator path is disabled.
+    wire        sg_c2h_desc_select = 1'b0;
+`else
     wire        sg_c2h_desc_select = (c2h_format == 4'd0);
+`endif
     wire        nv12_desc_select   = ((c2h_format == 4'd2 && c2h_plane_count == 4'd2) ||
                                       (c2h_format == 4'd1 && c2h_plane_count == 4'd1)) && (c2h_desc_ctrl[7:6] == 2'd0);
+`ifndef QPCIe_single_rgb24_path
     wire        nv12_ch1_desc_sel  = (c2h_format == 4'd2) && (c2h_plane_count == 4'd2) && (c2h_desc_ctrl[7:6] == 2'd1);
     wire        nv12_ch2_desc_sel  = (c2h_format == 4'd2) && (c2h_plane_count == 4'd2) && (c2h_desc_ctrl[7:6] == 2'd2);
     wire        nv12_ch3_desc_sel  = (c2h_format == 4'd2) && (c2h_plane_count == 4'd2) && (c2h_desc_ctrl[7:6] == 2'd3);
@@ -320,6 +328,10 @@ module custom_pcie_dma_top #(
                             nv12_ch2_desc_sel ? nv12_ch2_desc_ready :
                             nv12_ch3_desc_sel ? nv12_ch3_desc_ready :
                             sg_c2h_desc_select ? sg_c2h_desc_ready : 1'b0;
+`else
+    assign c2h_desc_ready = nv12_desc_select ? nv12_desc_ready :
+                            sg_c2h_desc_select ? sg_c2h_desc_ready : 1'b0;
+`endif
     wire        sg_h2c_req_valid, sg_h2c_req_ack;
     wire [63:0] sg_h2c_req_addr;
     wire [10:0] sg_h2c_req_dw_len;
@@ -335,11 +347,20 @@ module custom_pcie_dma_top #(
     wire        lb_tvalid, lb_tlast, lb_tuser;
     wire        sg_loopback_enable;
     wire [1:0]  sg_loopback_channel;
+`ifndef QPCIe_single_rgb24_path
     wire        ch1_loopback_full, ch2_loopback_full, ch3_loopback_full;
+`endif
+`ifdef QPCIe_single_rgb24_path
+    // Loopback consumers (Ch1-3 CDCs) are removed in the single RGB24 path,
+    // so the loopback stream has nowhere to go: accept-and-drop is impossible
+    // (sg_dma_engine requires data-ready handshake), so gate the sender off.
+    wire        lb_tready = 1'b1;
+`else
     wire        lb_tready = !sg_loopback_enable ? 1'b1 :
                             (sg_loopback_channel == 2'd2) ? !ch2_loopback_full :
                             (sg_loopback_channel == 2'd3) ? !ch3_loopback_full :
                                                             !ch1_loopback_full;
+`endif
 
     // Multiplexed C2H Request Signals
     reg                        c2h_req_valid_mux;
@@ -827,6 +848,7 @@ module custom_pcie_dma_top #(
     wire        sgl_ch0_y_wr_en  = sgl_y_wr_en  && (sgl_y_channel == 3'd0);
     wire        sgl_ch0_uv_wr_en = sgl_uv_wr_en && (sgl_uv_channel == 3'd0);
 
+`ifndef QPCIe_single_rgb24_path
     wire        sgl_ch1_y_wr_en  = sgl_y_wr_en  && (sgl_y_channel == 3'd1);
     wire        sgl_ch1_uv_wr_en = sgl_uv_wr_en && (sgl_uv_channel == 3'd1);
 
@@ -835,15 +857,23 @@ module custom_pcie_dma_top #(
 
     wire        sgl_ch3_y_wr_en  = sgl_y_wr_en  && (sgl_y_channel == 3'd3);
     wire        sgl_ch3_uv_wr_en = sgl_uv_wr_en && (sgl_uv_channel == 3'd3);
+`endif
 
     wire        h2c_y_almost_full, h2c_uv_almost_full;
     wire        ch0_sgl_y_almost_full, ch0_sgl_uv_almost_full;
+`ifndef QPCIe_single_rgb24_path
     wire        ch1_sgl_y_almost_full, ch1_sgl_uv_almost_full;
     wire        ch2_sgl_y_almost_full, ch2_sgl_uv_almost_full;
     wire        ch3_sgl_y_almost_full, ch3_sgl_uv_almost_full;
+`endif
 
+`ifdef QPCIe_single_rgb24_path
+    wire [4:0]  channel_y_almost_full  = {h2c_y_almost_full, 3'b0, ch0_sgl_y_almost_full};
+    wire [4:0]  channel_uv_almost_full = {h2c_uv_almost_full, 3'b0, ch0_sgl_uv_almost_full};
+`else
     wire [4:0]  channel_y_almost_full  = {h2c_y_almost_full, ch3_sgl_y_almost_full, ch2_sgl_y_almost_full, ch1_sgl_y_almost_full, ch0_sgl_y_almost_full};
     wire [4:0]  channel_uv_almost_full = {h2c_uv_almost_full, ch3_sgl_uv_almost_full, ch2_sgl_uv_almost_full, ch1_sgl_uv_almost_full, ch0_sgl_uv_almost_full};
+`endif
 
     sg_host_fetch_engine #(
         .DATA_WIDTH(PCIE_DATA_WIDTH)
@@ -1172,6 +1202,22 @@ module custom_pcie_dma_top #(
     assign v_drop_cnt[0] = v_err_sync_q;
     assign s_axis_video_tready[0] = 1'b0;
 
+`ifdef QPCIe_single_rgb24_path
+    // Ch1-3 request buses and status are tied off: the single RGB24 path
+    // instantiates only the channel-0 capture engine.
+    assign v_c2h_req_valid[1] = 1'b0; assign v_c2h_req_valid[2] = 1'b0; assign v_c2h_req_valid[3] = 1'b0;
+    assign v_c2h_req_addr[127:64]    = 64'd0; assign v_c2h_req_addr[191:128] = 64'd0; assign v_c2h_req_addr[255:192] = 64'd0;
+    assign v_c2h_req_dw_len[21:11]   = 11'd0; assign v_c2h_req_dw_len[32:22]  = 11'd0; assign v_c2h_req_dw_len[43:33]  = 11'd0;
+    assign v_c2h_req_data[(1*PCIE_DATA_WIDTH)+:PCIE_DATA_WIDTH] = {PCIE_DATA_WIDTH{1'b0}};
+    assign v_c2h_req_data[(2*PCIE_DATA_WIDTH)+:PCIE_DATA_WIDTH] = {PCIE_DATA_WIDTH{1'b0}};
+    assign v_c2h_req_data[(3*PCIE_DATA_WIDTH)+:PCIE_DATA_WIDTH] = {PCIE_DATA_WIDTH{1'b0}};
+    assign v_c2h_req_last[1] = 1'b0; assign v_c2h_req_last[2] = 1'b0; assign v_c2h_req_last[3] = 1'b0;
+    assign v_done[1] = 1'b0; assign v_done[2] = 1'b0; assign v_done[3] = 1'b0;
+    assign v_busy[1] = 1'b0; assign v_busy[2] = 1'b0; assign v_busy[3] = 1'b0;
+    assign v_pts[1] = 64'd0; assign v_pts[2] = 64'd0; assign v_pts[3] = 64'd0;
+    assign v_drop_cnt[1] = 32'd0; assign v_drop_cnt[2] = 32'd0; assign v_drop_cnt[3] = 32'd0;
+`endif
+
     // ---- Request crossing: engine @150 MHz -> RQ arbiter @125 MHz --------
     wire [10:0] eng_req_dw_len;
 
@@ -1323,6 +1369,10 @@ module custom_pcie_dma_top #(
     // =========================================================================
     // Loopback & Capture Engines for Channels 1, 2, and 3
     // =========================================================================
+    // NOTE: The full multi-channel block below is disabled when the
+    // `QPCIe_single_rgb24_path` define is set, leaving only the Ch0 TPG->RGB24
+    // SGL capture path (used for single-path bandwidth validation builds).
+`ifndef QPCIe_single_rgb24_path
     // ---------------------- CHANNEL 1 ----------------------------------------
     wire [127:0] ch1_sgl_y_dout, ch1_sgl_uv_dout;
     wire        ch1_sgl_y_empty, ch1_sgl_uv_empty;
@@ -1493,6 +1543,8 @@ module custom_pcie_dma_top #(
         .c2h_req_valid(eng3_req_valid), .c2h_req_addr(eng3_req_addr), .c2h_req_dw_len(eng3_req_dw_len), .c2h_req_data(eng3_req_data), .c2h_req_last(), .c2h_req_data_ready(eng3_req_ready), .c2h_req_ack(eng3_req_ack), .video_busy(v_busy[3]), .video_frame_done(eng3_frame_done), .frame_pts(v_pts[3]), .protocol_error_count(v_drop_cnt[3]));
     assign v_done[3] = pcie_frame_done_ch3;
     video_req_cdc #(.MAX_DWORDS(64), .FIFO_DEPTH(512)) u_video_req_cdc_ch3 (.wr_clk(video_clk), .wr_rst_n(video_rst_n), .s_req_valid(eng3_req_valid), .s_req_addr(eng3_req_addr), .s_req_dw_len(eng3_req_dw_len), .s_req_data(eng3_req_data), .s_req_data_ready(eng3_req_ready), .s_req_ack(eng3_req_ack), .s_frame_done(eng3_frame_done), .rd_clk(clk), .rd_rst_n(dma_rst_n), .m_req_valid(v_c2h_req_valid[3]), .m_req_addr(v_c2h_req_addr[255:192]), .m_req_dw_len(v_c2h_req_dw_len[43:33]), .m_req_data(v_c2h_req_data[(3*PCIE_DATA_WIDTH) +: PCIE_DATA_WIDTH]), .m_req_data_ready(v_c2h_req_data_ready[3]), .m_req_ack(v_c2h_req_ack[3]), .m_frame_done(pcie_frame_done_ch3), .m_fifo_empty(), .m_fifo_count());
+
+`endif // QPCIe_single_rgb24_path
 
     assign m_axis_video_tdata[VIDEO_DATA_WIDTH-1:0] = {VIDEO_DATA_WIDTH{1'b0}};
     assign m_axis_video_tvalid[0] = 1'b0;

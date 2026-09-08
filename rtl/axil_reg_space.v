@@ -174,7 +174,12 @@ module axil_reg_space (
     localparam [31:0] VERSION_ID_VAL      = 32'h0201_0001; // v2.1.0 (Variant 1)
     localparam [31:0] GIT_COMMIT_HASH_VAL = `GIT_COMMIT_HASH_DEF;
     localparam [31:0] BUILD_TIMESTAMP_VAL = `BUILD_TIMESTAMP_DEF;
+`ifdef QPCIe_single_rgb24_path
+    // Single-path build: 4 Audio, 1 Video (RGB24 TPG only), Caps: 2D+AES3+DualBAR+Stream
+    localparam [31:0] HARDWARE_CAPS_VAL   = 32'h0001_040F;
+`else
     localparam [31:0] HARDWARE_CAPS_VAL   = 32'h0004_040F; // 4 Audio, 4 Video, Caps: 2D+AES3+DualBAR+Stream
+`endif
 
     // Write Logic
     always @(posedge clk or negedge rst_n) begin

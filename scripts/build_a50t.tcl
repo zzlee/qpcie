@@ -30,7 +30,16 @@ puts "   (GIT AUTO-INJECT) Commit Hash: 0x$git_raw, Build Date: $date_raw"
 
 add_files [glob ./rtl/*.v]
 set_property top a50t_pcie_card_top [current_fileset]
-set_property verilog_define [list GIT_COMMIT_HASH_DEF=$git_commit_hex BUILD_TIMESTAMP_DEF=$build_date_hex] [current_fileset]
+
+# Optional single-path RGB24 build (bandwidth-verification / timing-closure debug):
+# set env QPCIe_single_rgb24_path=1 to synthesize only the Ch0 TPG->RGB24
+# SGL capture path (Ch1-3 loopback engines and legacy format-0 SG C2H disabled).
+set verilog_defs [list GIT_COMMIT_HASH_DEF=$git_commit_hex BUILD_TIMESTAMP_DEF=$build_date_hex]
+if {[info exists env(QPCIe_single_rgb24_path)] && $env(QPCIe_single_rgb24_path) == "1"} {
+    lappend verilog_defs QPCIe_single_rgb24_path
+    puts "   (SINGLE-PATH BUILD) QPCIe_single_rgb24_path defined - Ch0 TPG->RGB24 only"
+}
+set_property verilog_define $verilog_defs [current_fileset]
 
 # 2. Add Constraints
 add_files -fileset constrs_1 ./constraints/a50t_pcie_pinout.xdc

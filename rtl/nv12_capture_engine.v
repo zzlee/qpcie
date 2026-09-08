@@ -102,6 +102,9 @@ module nv12_capture_engine #(
     reg [31:0] rgb_hold_2;
     reg [15:0] rgb_in_line_bytes;
 
+    wire input_transfer = s_axis_tvalid && s_axis_tready;
+    wire pixel_accept   = input_transfer && (sof_seen || s_axis_tuser);
+
     wire rgb_push_en = is_rgb_mode && pixel_accept && (beat_col[1:0] != 2'b00);
     wire [127:0] rgb_push_data = (beat_col[1:0] == 2'b01) ? {rgb_beat_96[31:0], rgb_hold_0} :
                                  (beat_col[1:0] == 2'b10) ? {rgb_beat_96[63:0], rgb_hold_1} :
@@ -129,6 +132,8 @@ module nv12_capture_engine #(
 
     reg request_is_uv;
     reg prefer_uv;
+    reg pending_req_valid;
+    reg pending_req_is_uv;
     reg [4:0] payload_beats_to_load;
     reg [15:0] active_req_bytes;
     reg [15:0] y_rem_bytes;
@@ -258,8 +263,6 @@ module nv12_capture_engine #(
         ((y_fifo_count <= FIFO_DEPTH - 2) && (uv_fifo_count <= FIFO_DEPTH - 2));
     assign s_axis_tready = video_busy && capture_enable && fifo_space_available;
 
-    wire input_transfer = s_axis_tvalid && s_axis_tready;
-    wire pixel_accept = input_transfer && (sof_seen || s_axis_tuser);
     wire raw_y_push = input_transfer && (raw_byte_count < raw_y_bytes);
     wire raw_uv_push = input_transfer && (raw_byte_count >= raw_y_bytes);
     wire y_fifo_push = RAW_INPUT ? raw_y_push :
@@ -471,6 +474,8 @@ module nv12_capture_engine #(
             c2h_req_last <= 1;
             request_is_uv <= 0;
             prefer_uv <= 0;
+            pending_req_valid <= 0;
+            pending_req_is_uv <= 0;
             payload_beats_to_load <= 0;
             active_req_bytes <= 0;
             y_send_addr <= 0;
@@ -491,6 +496,8 @@ module nv12_capture_engine #(
             c2h_req_last <= 1;
             request_is_uv <= 0;
             prefer_uv <= 0;
+            pending_req_valid <= 0;
+            pending_req_is_uv <= 0;
             payload_beats_to_load <= 0;
             active_req_bytes <= 0;
             y_send_addr <= plane_y_addr;
@@ -505,26 +512,23 @@ module nv12_capture_engine #(
             uv_send_line <= 0;
         end else begin
             if (!c2h_req_valid) begin
-                if (uv_ready_to_send && (prefer_uv || !y_ready_to_send)) begin
-                    request_is_uv         <= 1'b1;
-                    c2h_req_addr          <= cur_uv_target_addr;
-                    c2h_req_dw_len        <= uv_next_dw_len;
-                    c2h_req_data          <= uv_fifo[uv_rd_ptr];
+                if (pending_req_valid) begin
+                    request_is_uv         <= pending_req_is_uv;
+                    c2h_req_addr          <= pending_req_is_uv ? cur_uv_target_addr : cur_y_target_addr;
+                    c2h_req_dw_len        <= pending_req_is_uv ? uv_next_dw_len : y_next_dw_len;
+                    c2h_req_data          <= pending_req_is_uv ? uv_fifo[uv_rd_ptr] : y_fifo[y_rd_ptr];
                     c2h_req_last          <= 1'b1;
-                    payload_beats_to_load <= uv_next_beats;
-                    active_req_bytes      <= uv_next_bytes;
+                    payload_beats_to_load <= pending_req_is_uv ? uv_next_beats : y_next_beats;
+                    active_req_bytes      <= pending_req_is_uv ? uv_next_bytes : y_next_bytes;
                     c2h_req_valid         <= 1'b1;
-                    prefer_uv             <= 1'b0;
+                    prefer_uv             <= pending_req_is_uv ? 1'b0 : (is_rgb_mode ? 1'b0 : 1'b1);
+                    pending_req_valid     <= 1'b0;
+                end else if (uv_ready_to_send && (prefer_uv || !y_ready_to_send)) begin
+                    pending_req_valid <= 1'b1;
+                    pending_req_is_uv <= 1'b1;
                 end else if (y_ready_to_send) begin
-                    request_is_uv         <= 1'b0;
-                    c2h_req_addr          <= cur_y_target_addr;
-                    c2h_req_dw_len        <= y_next_dw_len;
-                    c2h_req_data          <= y_fifo[y_rd_ptr];
-                    c2h_req_last          <= 1'b1;
-                    payload_beats_to_load <= y_next_beats;
-                    active_req_bytes      <= y_next_bytes;
-                    c2h_req_valid         <= 1'b1;
-                    prefer_uv             <= is_rgb_mode ? 1'b0 : 1'b1;
+                    pending_req_valid <= 1'b1;
+                    pending_req_is_uv <= 1'b0;
                 end
             end
 

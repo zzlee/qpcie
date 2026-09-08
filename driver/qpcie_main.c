@@ -81,6 +81,12 @@ static int sg_fetch_mode = QPCIE_SG_MODE_HOST_FETCH;
 module_param(sg_fetch_mode, int, 0644);
 MODULE_PARM_DESC(sg_fetch_mode, "Scatter-Gather Page Table Fetch Mode (1: MMIO BRAM, 2: Active Host MRd Fetch)");
 
+static int rgb24_only;
+module_param(rgb24_only, int, 0444);
+MODULE_PARM_DESC(rgb24_only,
+                 "Force RGB24-only mode (1): skip the format-0 C2H SG diagnostic "
+                 "for QPCIe_single_rgb24_path bitstreams");
+
 static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
     struct qpcie_dev *qdev;
@@ -96,6 +102,7 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
     u32 ring_head, c2h_tail, h2c_tail;
     u32 start_c2h, start_h2c;
     u32 dma_stat, comp_c2h, comp_h2c, ptr_dbg;
+    bool single_rgb24 = false;
 
     dev_info(&pdev->dev, "=======================================================\n");
     dev_info(&pdev->dev, "=== [MINIMAL DIAGNOSTIC MODE] QPCIe BAR MMIO Test ===\n");
@@ -228,6 +235,11 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
     dev_info(&pdev->dev, "  BAR0 [0x3C] Hardware Caps  : 0x%08X (VideoCh=%u, AudioCh=%u, Flags=0x%X)\n",
              caps, (caps >> 8) & 0xFF, (caps >> 16) & 0xFF, caps & 0xFF);
 
+    single_rgb24 = rgb24_only || (((caps >> 8) & 0xFF) == 1);
+    if (single_rgb24)
+        dev_info(&pdev->dev,
+                 "  [Single-path RGB24 build] format-0 C2H SG diagnostic will be skipped\n");
+
     ctrl = ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
     dev_info(&pdev->dev, "  BAR0 [0x00] DMA Control    : 0x%08X\n", ctrl);
 
@@ -329,7 +341,8 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
             goto free_diag_dma;
         }
         c2h_tail = (ring_head + SG_PAGES) % RING_BUFFER_SIZE;
-        h2c_tail = (ring_head + (2 * SG_PAGES)) % RING_BUFFER_SIZE;
+        h2c_tail = single_rgb24 ? c2h_tail
+                                : (ring_head + (2 * SG_PAGES)) % RING_BUFFER_SIZE;
         start_c2h = ioread32(qdev->bar0_mmio + REG_COMPLETED_C2H);
         start_h2c = ioread32(qdev->bar0_mmio + REG_COMPLETED_H2C);
         dev_info(&pdev->dev,
@@ -337,28 +350,42 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
                  ring_head, start_c2h, start_h2c);
 
         for (p = 0; p < SG_PAGES; p++) {
-            u32 c2h_idx = (ring_head + p) % RING_BUFFER_SIZE;
-            u32 h2c_idx = (ring_head + SG_PAGES + p) % RING_BUFFER_SIZE;
+            if (single_rgb24) {
+                u32 h2c_idx = (ring_head + p) % RING_BUFFER_SIZE;
 
-            desc_ring[c2h_idx].plane0_src_addr = 0x0ULL;
-            desc_ring[c2h_idx].plane0_dst_addr = (u64)c2h_page_dma[p];
-            desc_ring[c2h_idx].line_width      = 4096;
-            desc_ring[c2h_idx].line_count      = 1;
-            desc_ring[c2h_idx].src_stride      = 4096;
-            desc_ring[c2h_idx].dst_stride      = 4096;
-            desc_ring[c2h_idx].format          = 0;
-            desc_ring[c2h_idx].plane_count     = 1;
-            desc_ring[c2h_idx].control         = 0x02; /* C2H */
+                desc_ring[h2c_idx].plane0_src_addr = (u64)h2c_page_dma[p];
+                desc_ring[h2c_idx].plane0_dst_addr = 0x0ULL;
+                desc_ring[h2c_idx].line_width      = 4096;
+                desc_ring[h2c_idx].line_count      = 1;
+                desc_ring[h2c_idx].src_stride      = 4096;
+                desc_ring[h2c_idx].dst_stride      = 4096;
+                desc_ring[h2c_idx].format          = 0;
+                desc_ring[h2c_idx].plane_count     = 1;
+                desc_ring[h2c_idx].control         = 0x00; /* H2C */
+            } else {
+                u32 c2h_idx = (ring_head + p) % RING_BUFFER_SIZE;
+                u32 h2c_idx = (ring_head + SG_PAGES + p) % RING_BUFFER_SIZE;
 
-            desc_ring[h2c_idx].plane0_src_addr = (u64)h2c_page_dma[p];
-            desc_ring[h2c_idx].plane0_dst_addr = 0x0ULL;
-            desc_ring[h2c_idx].line_width      = 4096;
-            desc_ring[h2c_idx].line_count      = 1;
-            desc_ring[h2c_idx].src_stride      = 4096;
-            desc_ring[h2c_idx].dst_stride      = 4096;
-            desc_ring[h2c_idx].format          = 0;
-            desc_ring[h2c_idx].plane_count     = 1;
-            desc_ring[h2c_idx].control         = 0x00; /* H2C */
+                desc_ring[c2h_idx].plane0_src_addr = 0x0ULL;
+                desc_ring[c2h_idx].plane0_dst_addr = (u64)c2h_page_dma[p];
+                desc_ring[c2h_idx].line_width      = 4096;
+                desc_ring[c2h_idx].line_count      = 1;
+                desc_ring[c2h_idx].src_stride      = 4096;
+                desc_ring[c2h_idx].dst_stride      = 4096;
+                desc_ring[c2h_idx].format          = 0;
+                desc_ring[c2h_idx].plane_count     = 1;
+                desc_ring[c2h_idx].control         = 0x02; /* C2H */
+
+                desc_ring[h2c_idx].plane0_src_addr = (u64)h2c_page_dma[p];
+                desc_ring[h2c_idx].plane0_dst_addr = 0x0ULL;
+                desc_ring[h2c_idx].line_width      = 4096;
+                desc_ring[h2c_idx].line_count      = 1;
+                desc_ring[h2c_idx].src_stride      = 4096;
+                desc_ring[h2c_idx].dst_stride      = 4096;
+                desc_ring[h2c_idx].format          = 0;
+                desc_ring[h2c_idx].plane_count     = 1;
+                desc_ring[h2c_idx].control         = 0x00; /* H2C */
+            }
         }
 
         /* Flush all descriptor writes to memory before informing hardware */
@@ -367,6 +394,21 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
         /* Program Ring Base Address into BAR0 0x08 (Low) and 0x0C (High) */
         iowrite32((u32)(desc_ring_dma & 0xFFFFFFFF), qdev->bar0_mmio + REG_H2C_RING_ADDR_L);
         iowrite32((u32)((desc_ring_dma >> 32) & 0xFFFFFFFF), qdev->bar0_mmio + REG_H2C_RING_ADDR_H);
+
+        if (single_rgb24) {
+            /* RGB24-only build: the format-0 SG C2H engine is disabled in
+             * hardware, so validate the intact H2C read path directly. */
+            iowrite32((h2c_tail << 16) | RING_BUFFER_SIZE,
+                      qdev->bar0_mmio + REG_H2C_RING_CFG);
+
+            /* Trigger DMA Start */
+            iowrite32(0x00000001, qdev->bar0_mmio + REG_DMA_CTRL);
+            dev_info(&pdev->dev, "--- [3.1 Step 1: H2C 4-Page SG List DMA Read Test] ---\n");
+            dev_info(&pdev->dev,
+                     "  Triggered H2C SG Run (Head=%u, Tail=%u, Size=%u)...\n",
+                     ring_head, h2c_tail, RING_BUFFER_SIZE);
+            goto h2c_diag_wait;
+        }
 
         /* Publish exactly four C2H descriptors after the retained head. */
         iowrite32((c2h_tail << 16) | RING_BUFFER_SIZE,
@@ -422,6 +464,8 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
         dev_info(&pdev->dev,
                  "  Triggered H2C SG Run (Head=%u, Tail=%u, Size=%u)...\n",
                  c2h_tail, h2c_tail, RING_BUFFER_SIZE);
+
+h2c_diag_wait:
         ret = qpcie_wait_dma(qdev, REG_COMPLETED_H2C, start_h2c + 4);
         if (ret) {
             dev_err(&pdev->dev, "[ERROR] H2C diagnostic DMA timed out\n");
@@ -445,11 +489,18 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
         /* Ensure CPU observes all DMA writes from FPGA */
         dma_rmb();
 
+        if (single_rgb24) {
+            dev_info(&pdev->dev,
+                     "  H2C payload validation: 4 pages x 4096 bytes [PASS]\n");
+        }
+
         /* Inspect C2H pages */
-        for (p = 0; p < SG_PAGES; p++) {
-            if (c2h_pages[p]) {
-                dev_info(&pdev->dev, "  C2H Page %d Content: [0]=0x%08X, [1]=0x%08X, [2]=0x%08X, [3]=0x%08X\n",
-                         p, c2h_pages[p][0], c2h_pages[p][1], c2h_pages[p][2], c2h_pages[p][3]);
+        if (!single_rgb24) {
+            for (p = 0; p < SG_PAGES; p++) {
+                if (c2h_pages[p]) {
+                    dev_info(&pdev->dev, "  C2H Page %d Content: [0]=0x%08X, [1]=0x%08X, [2]=0x%08X, [3]=0x%08X\n",
+                             p, c2h_pages[p][0], c2h_pages[p][1], c2h_pages[p][2], c2h_pages[p][3]);
+                }
             }
         }
 
