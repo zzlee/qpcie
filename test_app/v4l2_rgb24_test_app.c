@@ -32,6 +32,23 @@
 #define V4L2_CID_QPCIE_TPG_MOTION_SPEED (V4L2_CID_USER_BASE + 0x1001)
 #define V4L2_CID_QPCIE_FRAME_DROP_COUNT (V4L2_CID_USER_BASE + 0x1002)
 
+struct marker_expectation {
+    const char *name;
+    uint32_t x;
+    uint32_t y;
+    uint8_t r;
+    uint8_t g;
+    uint8_t b;
+};
+
+static const struct marker_expectation tpg_markers[] = {
+    { "top-left",     0,    0,    0xff, 0x00, 0x00 },
+    { "top-right",    4092, 0,    0x00, 0xff, 0x00 },
+    { "bottom-left",  0,    2156, 0x00, 0x00, 0xff },
+    { "bottom-right", 4092, 2156, 0xff, 0xff, 0x00 },
+    { "center",       2046, 1078, 0xff, 0x00, 0xff },
+};
+
 struct plane_map {
     void *addr;
     size_t length;
@@ -89,6 +106,30 @@ static int tpg_pattern_menu_value(int pattern)
     }
 }
 
+static int verify_tpg_markers(const uint8_t *frame, uint32_t stride,
+                              uint32_t width, uint32_t height,
+                              uint32_t frame_number)
+{
+    size_t i;
+
+    for (i = 0; i < sizeof(tpg_markers) / sizeof(tpg_markers[0]); i++) {
+        const struct marker_expectation *marker = &tpg_markers[i];
+        const uint8_t *pixel;
+
+        if (marker->x >= width || marker->y >= height)
+            continue;
+        pixel = frame + ((size_t)marker->y * stride) + ((size_t)marker->x * 3);
+        if (pixel[0] != marker->r || pixel[1] != marker->g || pixel[2] != marker->b) {
+            fprintf(stderr,
+                    "[FAIL] marker %s missing at frame %u (%u,%u): got=%02X%02X%02X expected=%02X%02X%02X\n",
+                    marker->name, frame_number, marker->x, marker->y,
+                    pixel[0], pixel[1], pixel[2], marker->r, marker->g, marker->b);
+            return -1;
+        }
+    }
+    return 0;
+}
+
 static void usage(const char *prog)
 {
     fprintf(stderr,
@@ -101,6 +142,7 @@ static void usage(const char *prog)
             "  -p <pattern> TPG pattern: 0, 1, 2, 7 (black), 8 (white), 9 (bars), or 10 (zone)\n"
             "  -b           Run uncapped DMA benchmark\n"
             "  -S           Use static Solid White and require every frame to match frame 0\n"
+            "  -M           Verify fixed TPG marker blocks (requires marker bitstream)\n"
             "  -o <file>    Dump raw RGB24 frames to file\n"
             "  -P           Probe supported formats and exit\n"
             "  -H           Show this help\n",
@@ -121,6 +163,7 @@ int main(int argc, char **argv)
     int pattern = 9;
     int benchmark_mode = 0;
     int static_verify = 0;
+    int marker_verify = 0;
     int static_expected_fill = -1;
     int probe_only = 0;
     int fd = -1;
@@ -146,7 +189,7 @@ int main(int argc, char **argv)
     uint32_t bench_frames = 0;
     uint32_t i;
 
-    while ((opt = getopt(argc, argv, "d:w:h:f:n:p:bSo:PH")) != -1) {
+    while ((opt = getopt(argc, argv, "d:w:h:f:n:p:bSMo:PH")) != -1) {
         switch (opt) {
         case 'd': device = optarg; break;
         case 'w': width = strtoul(optarg, NULL, 0); break;
@@ -156,6 +199,7 @@ int main(int argc, char **argv)
         case 'p': pattern = strtol(optarg, NULL, 0); break;
         case 'b': benchmark_mode = 1; break;
         case 'S': static_verify = 1; break;
+        case 'M': marker_verify = 1; break;
         case 'o': output_name = optarg; break;
         case 'P': probe_only = 1; break;
         case 'H': usage(argv[0]); return EXIT_SUCCESS;
@@ -165,6 +209,11 @@ int main(int argc, char **argv)
 
     if (benchmark_mode && !frames_set)
         frame_target = DEFAULT_BENCHMARK_FRAMES;
+
+    if (static_verify && marker_verify) {
+        fprintf(stderr, "[ERROR] -S and -M cannot be combined\n");
+        return EXIT_FAILURE;
+    }
 
     if (!((width == 1920 && height == 1080) ||
           (width == 3840 && height == 2160) ||
@@ -182,12 +231,13 @@ int main(int argc, char **argv)
            " Device: %s, Resolution: %ux%u, Stride: %u Bytes\n"
            " Format: V4L2_PIX_FMT_RGB24 (Packed 24-bit RGB, 1 Plane)\n"
            " Frames: %u, Frame Size: %" PRIu64 " Bytes (%.2f MiB)\n"
-           " Mode: %s%s\n"
+           " Mode: %s%s%s\n"
            "=================================================================\n",
            device, width, height, stride, frame_target,
            frame_bytes, (double)frame_bytes / (1024.0 * 1024.0),
            benchmark_mode ? "Uncapped DMA Benchmark" : "Hardware Paced (60 FPS)",
-           static_verify ? ", Static-frame integrity verification" : "");
+           static_verify ? ", Static-frame integrity verification" : "",
+           marker_verify ? ", Marker verification" : "");
 
     fd = open(device, O_RDWR | O_NONBLOCK);
     if (fd < 0) {
@@ -406,6 +456,13 @@ int main(int argc, char **argv)
             }
             expected_sequence = buf.sequence + 1;
 
+            if (marker_verify &&
+                verify_tpg_markers(buffers[buf.index].plane[0].addr, stride,
+                                   width, height, captured)) {
+                rc = EXIT_FAILURE;
+                goto streamoff;
+            }
+
             if (static_verify || captured < 5 || (captured % 30 == 0)) {
                 uint64_t hash = fnv1a64((const uint8_t *)buffers[buf.index].plane[0].addr,
                                         buffers[buf.index].plane[0].length);
@@ -463,6 +520,8 @@ int main(int argc, char **argv)
     if (static_verify)
         printf("[PASS] Static-frame integrity: %u frame hashes match 0x%016" PRIx64 "\n",
                captured, reference_hash);
+    if (marker_verify)
+        printf("[PASS] TPG marker integrity: %u frames verified\n", captured);
 
     end_ms = monotonic_ms();
     rc = EXIT_SUCCESS;

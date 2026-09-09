@@ -431,6 +431,35 @@ module a50t_pcie_card_top #(
         8'hFF, tpg_axis_tdata[47:24],
         8'hFF, tpg_axis_tdata[23:0]
     };
+    wire [127:0] tpg_capture_tdata;
+    wire         tpg_capture_tvalid, tpg_capture_tlast, tpg_capture_tuser;
+    wire         tpg_capture_tready;
+
+`ifdef QPCIe_tpg_markers
+    tpg_marker_overlay #(
+        .FRAME_WIDTH(4096),
+        .FRAME_HEIGHT(2160)
+    ) u_tpg_marker_overlay (
+        .clk(video_clk_150),
+        .rst_n(video_engine_rst_n),
+        .s_axis_tdata(tpg_padded_tdata),
+        .s_axis_tvalid(tpg_axis_tvalid),
+        .s_axis_tlast(tpg_axis_tlast),
+        .s_axis_tuser(tpg_axis_tuser),
+        .s_axis_tready(tpg_axis_tready),
+        .m_axis_tdata(tpg_capture_tdata),
+        .m_axis_tvalid(tpg_capture_tvalid),
+        .m_axis_tlast(tpg_capture_tlast),
+        .m_axis_tuser(tpg_capture_tuser),
+        .m_axis_tready(tpg_capture_tready)
+    );
+`else
+    assign tpg_capture_tdata  = tpg_padded_tdata;
+    assign tpg_capture_tvalid = tpg_axis_tvalid;
+    assign tpg_capture_tlast  = tpg_axis_tlast;
+    assign tpg_capture_tuser  = tpg_axis_tuser;
+    assign tpg_axis_tready    = tpg_capture_tready;
+`endif
 
     // The NV12 capture engine now lives in the 150 MHz video domain and
     // consumes the TPG stream directly (same clock). Its C2H requests cross
@@ -753,11 +782,11 @@ module a50t_pcie_card_top #(
 
         .video_clk(video_clk_150),
         .video_rst_n(video_engine_rst_n),
-        .video_ch0_tdata(tpg_padded_tdata),
-        .video_ch0_tvalid(tpg_axis_tvalid),
-        .video_ch0_tlast(tpg_axis_tlast),
-        .video_ch0_tuser(tpg_axis_tuser),
-        .video_ch0_tready(tpg_axis_tready),
+        .video_ch0_tdata(tpg_capture_tdata),
+        .video_ch0_tvalid(tpg_capture_tvalid),
+        .video_ch0_tlast(tpg_capture_tlast),
+        .video_ch0_tuser(tpg_capture_tuser),
+        .video_ch0_tready(tpg_capture_tready),
 
         .m_axis_video_tdata(m_video_tdata),
         .m_axis_video_tvalid(m_video_tvalid),

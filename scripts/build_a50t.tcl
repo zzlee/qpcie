@@ -39,6 +39,10 @@ if {[info exists env(QPCIe_single_rgb24_path)] && $env(QPCIe_single_rgb24_path) 
     lappend verilog_defs QPCIe_single_rgb24_path
     puts "   (SINGLE-PATH BUILD) QPCIe_single_rgb24_path defined - Ch0 TPG->RGB24 only"
 }
+if {[info exists env(QPCIe_tpg_markers)] && $env(QPCIe_tpg_markers) == "1"} {
+    lappend verilog_defs QPCIe_tpg_markers
+    puts "   (MARKER BUILD) QPCIe_tpg_markers defined - Ch0 fixed RGB24 test markers enabled"
+}
 set_property verilog_define $verilog_defs [current_fileset]
 
 # 2. Add Constraints
