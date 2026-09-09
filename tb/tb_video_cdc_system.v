@@ -594,11 +594,11 @@ module tb_video_cdc_system;
     // Debug heartbeat
     initial forever begin
         #250;
-        $display("[%0t] DBG vreq: st=%0d empty=%b done=%0d started=%0d mreqv=%b full=%b | eng_reqv=%b eng_ack=%b busy=%b descv=%b capen=%b row=%0d req_addr=%h y_plane=%h y_send=%h uv_send=%h",
+        $display("[%0t] DBG vreq: st=%0d empty=%b completed=%0d started=%0d mreqv=%b full=%b | eng_reqv=%b eng_ack=%b busy=%b descv=%b capen=%b row=%0d req_addr=%h y_plane=%h y_send=%h uv_send=%h",
                  $time,
                  u_dma_top.u_video_req_cdc.rd_state,
                  u_dma_top.u_video_req_cdc.fifo_empty,
-                 u_dma_top.u_video_req_cdc.rd_done_seen,
+                  u_dma_top.u_video_req_cdc.rd_completed,
                  u_dma_top.u_video_req_cdc.rd_started,
                  u_dma_top.u_video_req_cdc.m_req_valid,
                  u_dma_top.u_video_req_cdc.fifo_full,

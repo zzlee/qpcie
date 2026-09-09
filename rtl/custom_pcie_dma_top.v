@@ -151,14 +151,15 @@ module custom_pcie_dma_top #(
 
     // ------------------------------------------------------------------
     // Free-running stream counters (video domain, gray-coded):
-    //   sof_count   - TUSER pulses (frame starts)
-    //   eol_count   - TLAST pulses (line ends)
-    //   beat_count  - valid data beats
+    //   sof_count   - accepted TUSER pulses (frame starts)
+    //   eol_count   - accepted TLAST pulses (line ends)
+    //   beat_count  - accepted data beats
     // Crossed to the PCI domain for BAR0 readout; comparing the three
     // rates characterizes exactly how the TPG drives the stream.
     // ------------------------------------------------------------------
-    wire       sof_pulse  = video_ch0_tvalid && video_ch0_tuser;
-    wire       eol_pulse  = video_ch0_tvalid && video_ch0_tlast;
+    wire       video_transfer = video_ch0_tvalid && video_ch0_tready;
+    wire       sof_pulse  = video_transfer && video_ch0_tuser;
+    wire       eol_pulse  = video_transfer && video_ch0_tlast;
 
     function [31:0] gray_to_bin;
         input [31:0] g;
@@ -200,7 +201,7 @@ module custom_pcie_dma_top #(
                 eol_bin_v   <= eol_bin_next;
                 eol_gray_v  <= (eol_bin_next >> 1) ^ eol_bin_next;
             end
-            if (video_ch0_tvalid) begin
+            if (video_transfer) begin
                 beat_bin_v  <= beat_bin_next;
                 beat_gray_v <= (beat_bin_next >> 1) ^ beat_bin_next;
             end

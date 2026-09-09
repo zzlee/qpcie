@@ -130,6 +130,20 @@ static int verify_tpg_markers(const uint8_t *frame, uint32_t stride,
     return 0;
 }
 
+static int read_tpg_frame_number(const uint8_t *frame, uint32_t stride,
+                                 uint32_t width, uint16_t *frame_number)
+{
+    const uint8_t *pixel;
+
+    if (width <= 8)
+        return -1;
+    pixel = frame + ((size_t)0 * stride) + ((size_t)8 * 3);
+    if (pixel[0] != 0xa5)
+        return -1;
+    *frame_number = (uint16_t)pixel[1] | ((uint16_t)pixel[2] << 8);
+    return 0;
+}
+
 static void usage(const char *prog)
 {
     fprintf(stderr,
@@ -143,6 +157,7 @@ static void usage(const char *prog)
             "  -b           Run uncapped DMA benchmark\n"
             "  -S           Use static Solid White and require every frame to match frame 0\n"
             "  -M           Verify fixed TPG marker blocks (requires marker bitstream)\n"
+            "  -W           Log TPG frame-number watermark; continue on bad frames\n"
             "  -o <file>    Dump raw RGB24 frames to file\n"
             "  -P           Probe supported formats and exit\n"
             "  -H           Show this help\n",
@@ -164,6 +179,7 @@ int main(int argc, char **argv)
     int benchmark_mode = 0;
     int static_verify = 0;
     int marker_verify = 0;
+    int watermark_verify = 0;
     int static_expected_fill = -1;
     int probe_only = 0;
     int fd = -1;
@@ -184,12 +200,14 @@ int main(int argc, char **argv)
     uint64_t reference_hash = 0;
     int have_reference_hash = 0;
     int sequence_violation = 0;
+    int have_watermark = 0;
+    uint16_t expected_watermark = 0;
     double start_ms = 0.0, end_ms = 0.0;
     double bench_start_ms = 0.0;
     uint32_t bench_frames = 0;
     uint32_t i;
 
-    while ((opt = getopt(argc, argv, "d:w:h:f:n:p:bSMo:PH")) != -1) {
+    while ((opt = getopt(argc, argv, "d:w:h:f:n:p:bSMWo:PH")) != -1) {
         switch (opt) {
         case 'd': device = optarg; break;
         case 'w': width = strtoul(optarg, NULL, 0); break;
@@ -200,6 +218,7 @@ int main(int argc, char **argv)
         case 'b': benchmark_mode = 1; break;
         case 'S': static_verify = 1; break;
         case 'M': marker_verify = 1; break;
+        case 'W': watermark_verify = 1; break;
         case 'o': output_name = optarg; break;
         case 'P': probe_only = 1; break;
         case 'H': usage(argv[0]); return EXIT_SUCCESS;
@@ -210,8 +229,8 @@ int main(int argc, char **argv)
     if (benchmark_mode && !frames_set)
         frame_target = DEFAULT_BENCHMARK_FRAMES;
 
-    if (static_verify && marker_verify) {
-        fprintf(stderr, "[ERROR] -S and -M cannot be combined\n");
+    if (static_verify && (marker_verify || watermark_verify)) {
+        fprintf(stderr, "[ERROR] -S cannot be combined with -M or -W\n");
         return EXIT_FAILURE;
     }
 
@@ -231,13 +250,14 @@ int main(int argc, char **argv)
            " Device: %s, Resolution: %ux%u, Stride: %u Bytes\n"
            " Format: V4L2_PIX_FMT_RGB24 (Packed 24-bit RGB, 1 Plane)\n"
            " Frames: %u, Frame Size: %" PRIu64 " Bytes (%.2f MiB)\n"
-           " Mode: %s%s%s\n"
+            " Mode: %s%s%s%s\n"
            "=================================================================\n",
            device, width, height, stride, frame_target,
            frame_bytes, (double)frame_bytes / (1024.0 * 1024.0),
-           benchmark_mode ? "Uncapped DMA Benchmark" : "Hardware Paced (60 FPS)",
-           static_verify ? ", Static-frame integrity verification" : "",
-           marker_verify ? ", Marker verification" : "");
+            benchmark_mode ? "Uncapped DMA Benchmark" : "Hardware Paced (60 FPS)",
+            static_verify ? ", Static-frame integrity verification" : "",
+            marker_verify ? ", Marker verification" : "",
+            watermark_verify ? ", Frame watermark logging" : "");
 
     fd = open(device, O_RDWR | O_NONBLOCK);
     if (fd < 0) {
@@ -456,6 +476,28 @@ int main(int argc, char **argv)
             }
             expected_sequence = buf.sequence + 1;
 
+            if (watermark_verify) {
+                uint16_t watermark;
+
+                if (read_tpg_frame_number(buffers[buf.index].plane[0].addr,
+                                          stride, width, &watermark)) {
+                    fprintf(stderr, "[WARN] watermark missing at host frame %u\n", captured);
+                    sequence_violation = 1;
+                } else {
+                    if (have_watermark && watermark != expected_watermark) {
+                        fprintf(stderr,
+                                "[WARN] watermark discontinuity at host frame %u: got=%u expected=%u\n",
+                                captured, watermark, expected_watermark);
+                        sequence_violation = 1;
+                    }
+                    if (captured < 5 || (captured % 30) == 0 ||
+                        (!have_watermark || watermark != expected_watermark))
+                        printf("[Watermark] host=%u tpg=%u\n", captured, watermark);
+                    expected_watermark = watermark + 1;
+                    have_watermark = 1;
+                }
+            }
+
             if (marker_verify &&
                 verify_tpg_markers(buffers[buf.index].plane[0].addr, stride,
                                    width, height, captured)) {
@@ -522,6 +564,8 @@ int main(int argc, char **argv)
                captured, reference_hash);
     if (marker_verify)
         printf("[PASS] TPG marker integrity: %u frames verified\n", captured);
+    if (watermark_verify && !sequence_violation)
+        printf("[PASS] TPG frame watermark: %u frames continuous\n", captured);
 
     end_ms = monotonic_ms();
     rc = EXIT_SUCCESS;

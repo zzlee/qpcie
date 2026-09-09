@@ -18,6 +18,7 @@ module tpg_marker_overlay #(
 );
     reg [12:0] x_pos;
     reg [11:0] y_pos;
+    reg [15:0] frame_number;
     wire [12:0] pixel_x = s_axis_tuser ? 13'd0 : x_pos;
     wire [11:0] pixel_y = s_axis_tuser ? 12'd0 : y_pos;
     wire         transfer = s_axis_tvalid && m_axis_tready;
@@ -29,6 +30,9 @@ module tpg_marker_overlay #(
         begin
             if (x < 13'd4 && y < 12'd4)
                 marker_pixel = 24'h0000FF; // Top-left: red in host RGB24
+            else if (x >= 13'd8 && x < 13'd9 && y == 12'd0)
+                // Host RGB24 reads this stream-endian value as A5, low, high.
+                marker_pixel = {frame_number[15:8], frame_number[7:0], 8'hA5};
             else if (x >= FRAME_WIDTH - 4 && y < 12'd4)
                 marker_pixel = 24'h00FF00; // Top-right: green
             else if (x < 13'd4 && y >= FRAME_HEIGHT - 4)
@@ -61,6 +65,7 @@ module tpg_marker_overlay #(
         if (!rst_n) begin
             x_pos <= 13'd0;
             y_pos <= 12'd0;
+            frame_number <= 16'd0;
         end else if (transfer) begin
             if (s_axis_tlast) begin
                 x_pos <= 13'd0;
@@ -71,6 +76,7 @@ module tpg_marker_overlay #(
             end else if (s_axis_tuser) begin
                 x_pos <= 13'd4;
                 y_pos <= 12'd0;
+                frame_number <= frame_number + 1'b1;
             end else begin
                 x_pos <= x_pos + 13'd4;
             end
