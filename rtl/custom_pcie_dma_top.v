@@ -1053,6 +1053,7 @@ module custom_pcie_dma_top #(
 
     (* ASYNC_REG = "TRUE" *) reg [1:0] v_busy_sync = 2'b00;
     wire pcie_frame_done;
+    reg ch0_owner_busy;
 
     wire        tel_dest_req;
     wire [95:0]  tel_dest_out;
@@ -1070,7 +1071,8 @@ module custom_pcie_dma_top #(
         end else if (reg_video_ctrl[0]) begin
             hs_send_q <= 1'b0;
             hs_bus_q  <= 245'd0;
-        end else if (!hs_send_q && !hs_src_rcv && c2h_desc_valid && nv12_desc_select) begin
+        end else if (!hs_send_q && !hs_src_rcv && !ch0_owner_busy &&
+                     c2h_desc_valid && nv12_desc_select) begin
             hs_bus_q  <= {c2h_format,
                           (c2h_desc_ctrl[4] | c2h_desc_ctrl[5]),
                           global_timestamp, c2h_dst_stride,
@@ -1082,10 +1084,21 @@ module custom_pcie_dma_top #(
         end
     end
 
-    // One descriptor owns the channel-0 walkers until its frame completes.
-    // Accepting the next descriptor earlier would mix its SGL into this frame.
+    // Keep the descriptor owner until the PCIe-side EOF retires. eng_busy drops
+    // once the video-domain FIFO drains into the CDC, before the final MWr is
+    // transmitted; accepting another descriptor then can mix frame addresses.
+    always @(posedge clk or negedge dma_rst_n) begin
+        if (!dma_rst_n)
+            ch0_owner_busy <= 1'b0;
+        else if (pcie_frame_done)
+            ch0_owner_busy <= 1'b0;
+        else if (c2h_desc_valid && nv12_desc_select && !hs_send_q &&
+                 !hs_src_rcv && !ch0_owner_busy)
+            ch0_owner_busy <= 1'b1;
+    end
+
     assign nv12_desc_ready = c2h_desc_valid && nv12_desc_select &&
-                              !hs_send_q && !hs_src_rcv && !v_busy_sync[1];
+                               !hs_send_q && !hs_src_rcv && !ch0_owner_busy;
 
     xpm_cdc_handshake #(
         .WIDTH(245),
