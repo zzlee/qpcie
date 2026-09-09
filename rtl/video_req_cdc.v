@@ -10,7 +10,8 @@
 //
 //              Determinism rules:
 //                * Writer ensures FIFO room for a packet before accepting it,
-//                  and pulses pkt_pushed_toggle only after the last word is pushed.
+//                  and advances a Gray-coded completion counter only after
+//                  the last word is pushed.
 //                * Reader starts replaying packet N only after seeing completion N,
 //                  guaranteeing full residency with zero mid-TLP stalls.
 // ============================================================================
@@ -116,8 +117,13 @@ module video_req_cdc #(
 
     wire wr_room_ok = !fifo_wr_rst_busy && !fifo_prog_full && !fifo_full;
 
-    // Writer -> reader "packet fully pushed" toggle.
-    reg pkt_pushed_toggle = 1'b0;
+    // A one-bit toggle loses events when complete packets are produced faster
+    // than the reader clock can sample it. Carry the packet completion count
+    // as Gray code instead; the FIFO bounds the outstanding count well below
+    // this 16-bit counter's wrap distance.
+    reg [15:0] pkt_pushed_bin = 16'd0;
+    wire [15:0] pkt_pushed_gray =
+        (pkt_pushed_bin >> 1) ^ pkt_pushed_bin;
 
     always @(posedge wr_clk or negedge cdc_rst_n) begin
         if (!cdc_rst_n) begin
@@ -128,7 +134,7 @@ module video_req_cdc #(
             s_req_data_ready  <= 1'b0;
             s_req_ack         <= 1'b0;
             eof_pending       <= 1'b0;
-            pkt_pushed_toggle <= 1'b0;
+            pkt_pushed_bin    <= 16'd0;
         end else if (fifo_wr_rst_busy) begin
             wr_state          <= WR_IDLE;
             wr_beats_left     <= 11'd0;
@@ -137,7 +143,7 @@ module video_req_cdc #(
             s_req_data_ready  <= 1'b0;
             s_req_ack         <= 1'b0;
             eof_pending       <= 1'b0;
-            pkt_pushed_toggle <= 1'b0;
+            pkt_pushed_bin    <= 16'd0;
         end else begin
             s_req_ack <= 1'b0;
             if (s_frame_done)
@@ -147,7 +153,7 @@ module video_req_cdc #(
                 WR_IDLE: begin
                     if ((eof_pending || s_frame_done) && !fifo_full) begin
                         eof_pending       <= 1'b0;
-                        pkt_pushed_toggle <= ~pkt_pushed_toggle;
+                        pkt_pushed_bin    <= pkt_pushed_bin + 1'b1;
                     end else if (s_req_valid && wr_room_ok && !fifo_full) begin
                         s_req_addr_reg   <= s_req_addr;
                         s_req_dw_len_reg <= (s_req_dw_len != 0) ? s_req_dw_len : 11'd64;
@@ -171,7 +177,7 @@ module video_req_cdc #(
                         if (wr_beats_left == 11'd1) begin
                             s_req_ack         <= 1'b1;
                             s_req_data_ready  <= 1'b0;
-                            pkt_pushed_toggle <= ~pkt_pushed_toggle;
+                            pkt_pushed_bin    <= pkt_pushed_bin + 1'b1;
                             wr_state          <= WR_DRAIN;
                         end
                     end
@@ -204,25 +210,39 @@ module video_req_cdc #(
     localparam RD_IDLE   = 1'b0,
                RD_STREAM = 1'b1;
     reg        rd_state;
-    reg [15:0] rd_done_seen;     // completions observed in read domain
     reg [15:0] rd_started;       // packets started
 
-    (* ASYNC_REG = "TRUE" *) reg [1:0] pkt_pushed_sync = 2'b00;
+    (* ASYNC_REG = "TRUE" *) reg [15:0] pkt_pushed_gray_sync1 = 16'd0;
+    (* ASYNC_REG = "TRUE" *) reg [15:0] pkt_pushed_gray_sync2 = 16'd0;
     always @(posedge rd_clk or negedge cdc_rst_n) begin
-        if (!cdc_rst_n || fifo_rd_rst_busy)
-            pkt_pushed_sync <= 2'b00;
-        else
-            pkt_pushed_sync <= {pkt_pushed_sync[0], pkt_pushed_toggle};
+        if (!cdc_rst_n || fifo_rd_rst_busy) begin
+            pkt_pushed_gray_sync1 <= 16'd0;
+            pkt_pushed_gray_sync2 <= 16'd0;
+        end else begin
+            pkt_pushed_gray_sync1 <= pkt_pushed_gray;
+            pkt_pushed_gray_sync2 <= pkt_pushed_gray_sync1;
+        end
     end
-    wire pkt_pushed_pulse = pkt_pushed_sync[0] ^ pkt_pushed_sync[1];
+
+    function [15:0] gray_to_bin;
+        input [15:0] gray;
+        integer i;
+        begin
+            gray_to_bin[15] = gray[15];
+            for (i = 14; i >= 0; i = i - 1)
+                gray_to_bin[i] = gray_to_bin[i + 1] ^ gray[i];
+        end
+    endfunction
+
+    wire [15:0] rd_completed = gray_to_bin(pkt_pushed_gray_sync2);
 
     assign m_req_data = fifo_dout;
 
     wire fifo_pop_hdr = !fifo_rd_rst_busy && (rd_state == RD_IDLE) &&
-                        !fifo_empty && (rd_done_seen != rd_started);
+                        !fifo_empty && (rd_completed != rd_started);
     wire fifo_pop_next_hdr = !fifo_rd_rst_busy && (rd_state == RD_STREAM) &&
-                             m_req_ack && !fifo_empty &&
-                             (rd_done_seen != (rd_started + (pkt_pushed_pulse ? 1'b1 : 1'b0)));
+                        m_req_ack && !fifo_empty &&
+                        (rd_completed != rd_started);
     wire fifo_pop_data = !fifo_rd_rst_busy && (rd_state == RD_STREAM) &&
                          m_req_data_ready && !m_req_ack;
     wire fifo_head_is_eof = fifo_dout[127];
@@ -232,7 +252,6 @@ module video_req_cdc #(
     always @(posedge rd_clk or negedge cdc_rst_n) begin
         if (!cdc_rst_n) begin
             rd_state     <= RD_IDLE;
-            rd_done_seen <= 16'd0;
             rd_started   <= 16'd0;
             m_req_valid  <= 1'b0;
             m_req_addr   <= 64'd0;
@@ -240,7 +259,6 @@ module video_req_cdc #(
             m_frame_done <= 1'b0;
         end else if (fifo_rd_rst_busy) begin
             rd_state     <= RD_IDLE;
-            rd_done_seen <= 16'd0;
             rd_started   <= 16'd0;
             m_req_valid  <= 1'b0;
             m_req_addr   <= 64'd0;
@@ -248,12 +266,9 @@ module video_req_cdc #(
             m_frame_done <= 1'b0;
         end else begin
             m_frame_done <= 1'b0;
-            if (pkt_pushed_pulse)
-                rd_done_seen <= rd_done_seen + 1'b1;
-
             case (rd_state)
                 RD_IDLE: begin
-                    if (!fifo_empty && (rd_done_seen != rd_started)) begin
+                    if (!fifo_empty && (rd_completed != rd_started)) begin
                         rd_started   <= rd_started + 1'b1;
                         if (fifo_head_is_eof) begin
                             m_req_valid  <= 1'b0;
@@ -271,7 +286,7 @@ module video_req_cdc #(
                 RD_STREAM: begin
                     m_req_valid <= 1'b1;
                     if (m_req_ack) begin
-                        if (!fifo_empty && (rd_done_seen != (rd_started + (pkt_pushed_pulse ? 1'b1 : 1'b0)))) begin
+                        if (!fifo_empty && (rd_completed != rd_started)) begin
                             rd_started   <= rd_started + 1'b1;
                             if (fifo_head_is_eof) begin
                                 m_req_valid  <= 1'b0;
