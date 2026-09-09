@@ -28,13 +28,13 @@ module tpg_marker_overlay #(
         input [23:0] pixel;
         begin
             if (x < 13'd4 && y < 12'd4)
-                marker_pixel = 24'hFF0000; // Top-left: red
+                marker_pixel = 24'h0000FF; // Top-left: red in host RGB24
             else if (x >= FRAME_WIDTH - 4 && y < 12'd4)
                 marker_pixel = 24'h00FF00; // Top-right: green
             else if (x < 13'd4 && y >= FRAME_HEIGHT - 4)
-                marker_pixel = 24'h0000FF; // Bottom-left: blue
+                marker_pixel = 24'hFF0000; // Bottom-left: blue in host RGB24
             else if (x >= FRAME_WIDTH - 4 && y >= FRAME_HEIGHT - 4)
-                marker_pixel = 24'hFFFF00; // Bottom-right: yellow
+                marker_pixel = 24'h00FFFF; // Bottom-right: yellow in host RGB24
             else if (x >= (FRAME_WIDTH / 2) - 2 && x < (FRAME_WIDTH / 2) + 2 &&
                      y >= (FRAME_HEIGHT / 2) - 2 && y < (FRAME_HEIGHT / 2) + 2)
                 marker_pixel = 24'hFF00FF; // Center: magenta

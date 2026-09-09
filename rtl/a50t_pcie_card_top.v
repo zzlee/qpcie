@@ -425,11 +425,14 @@ module a50t_pcie_card_top #(
     wire [NUM_VIDEO_CH-1:0]                    m_video_tuser;
     wire [NUM_VIDEO_CH-1:0]                    m_video_tready;
 
+    // v_tpg emits each pixel as {R,G,B}. PCIe payload dwords are little-endian,
+    // so present {B,G,R} to the capture packer to expose V4L2 RGB24 bytes as
+    // R,G,B in host memory.
     wire [127:0] tpg_padded_tdata = {
-        8'hFF, tpg_axis_tdata[95:72],
-        8'hFF, tpg_axis_tdata[71:48],
-        8'hFF, tpg_axis_tdata[47:24],
-        8'hFF, tpg_axis_tdata[23:0]
+        8'hFF, tpg_axis_tdata[79:72], tpg_axis_tdata[87:80], tpg_axis_tdata[95:88],
+        8'hFF, tpg_axis_tdata[55:48], tpg_axis_tdata[63:56], tpg_axis_tdata[71:64],
+        8'hFF, tpg_axis_tdata[31:24], tpg_axis_tdata[39:32], tpg_axis_tdata[47:40],
+        8'hFF, tpg_axis_tdata[7:0],   tpg_axis_tdata[15:8],  tpg_axis_tdata[23:16]
     };
     wire [127:0] tpg_capture_tdata;
     wire         tpg_capture_tvalid, tpg_capture_tlast, tpg_capture_tuser;
