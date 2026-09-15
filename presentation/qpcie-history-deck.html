@@ -135,14 +135,14 @@
 
   <!-- ============ S1 TITLE ============ -->
   <section class="slide active" data-note="
-    <small>⌛ 約 30～40 秒 · 開場</small>
-    大家午安，我是黃——這個月把一張 Artix-7 A50T 的 FPGA 卡，從一張空板子帶到能『實機跑 4K60 NV12M 視訊串流』。今天用三個角度回顧這 30 天：做了什麼、遇到什麼坑、現在到哪。
-    當然，這不是一個人瞎忙——RTL、Linux 驅動、測試程式三條線同步走，全程 209 次 commit。
-    先講結論：到 9/9 為止，PCIe enumeration、SG DMA、1080p60 與 4K60 的 NV12M 實機都已經『真機通過』。接著我會展示這 30 天的真實足跡。"
+    <small>⌛ 約 30～40 秒 · 開場定框架</small>
+    大家午安。今天這場不是來報告卡片進度，是來展示這張卡片是怎麼被『人 + AI coding agent』一起推出來的。
+    主角是一張 Artix-7 A50T 的 FPGA 卡，這個月從一張空板子，做到能『實機跑 4K60 NV12M 視訊串流』。全程 209 次 commit，RTL、Linux 驅動、測試程式三條線同步走。
+    先講結論：到 9/9 為止，PCIe enumeration、SG DMA、1080p60 與 4K60 的 NV12M 實機都已經『真機通過』。但今天的重點不是規格，是工作方式——哪些是 agent 做的、哪些非人不可。"
   >
     <div class="kicker">PROJECT HISTORY · 30 DAYS</div>
     <h1>QPCIe 開發歷程<br>從空板子到 NV12M 4K60 實機</h1>
-    <p class="lead">2026-08-11 ~ 09-09 · Artix-7 A50T · 209 commits 的真實足跡</p>
+    <p class="lead">2026-08-11 ~ 09-09 · Artix-7 A50T · 209 commits 的真實足跡 · 人 + AI agent 協作實錄</p>
     <div style="margin-top:26px;display:flex;gap:12px;flex-wrap:wrap" class="muted">
       <span>▸ 軟硬體一條龍：RTL + Kernel Driver + Test App</span>
       <span>▸ PCIe Gen2 x4</span>
@@ -221,6 +221,59 @@
     </div>
   </section>
 
+  <!-- ============ S5 COLLAB LOOP ============ -->
+  <section class="slide" data-note="
+    <small>⌛ 約 40 秒 · 人機分工，解除戒心</small>
+    這頁是整場的關鍵，直接回答大家心裡的問題：那 agent 到底做什麼，人還剩什麼？
+    左邊是 agent 的工作，全部寫在 AGENTS.md 交接規範裡：改 RTL、改 driver、改測試程式，跑 build script 生 bitstream，編 driver 跟測試，最後 commit push。髒活累活、重複性高的，它全包。
+    右邊是人的工作：燒錄 flash、上機重載 driver、跑實機測試、把結果跟 log 丟回去給 agent 進入下一個除錯迴圈。注意——agent 碰不到板子，板子永遠在人手上。
+    所以結論：架構決策、硬體驗證的最終判斷，永遠是人。agent 是把迴圈轉得更快的那隻手，不是取代你的那個人。"
+  >
+    <div class="kicker">HUMAN × AGENT</div>
+    <h1 style="font-size:30px">人機協作迴圈</h1>
+    <p class="muted" style="font-size:14px;margin-top:6px">改 RTL → 建 bitstream → 燒錄上機 → 跑實機測試 → 回報 log → 下一輪（分工寫在 <code>AGENTS.md</code>）</p>
+    <div class="grid g2" style="margin-top:24px">
+      <div class="card">
+        <h3>🤖 Agent 做什麼</h3>
+        <ul>
+          <li>改 RTL / driver / test app</li>
+          <li>跑 <code>build_a50t.sh</code> 生 bitstream</li>
+          <li>編 driver 與測試程式</li>
+          <li>讀 log、交叉查文件、提修正</li>
+          <li>commit + push</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>🙋 人做什麼</h3>
+        <ul>
+          <li>燒錄 SPI flash（板子在人手上）</li>
+          <li>上機重載 driver、跑實機測試</li>
+          <li>回報結果與 log，啟動下一輪</li>
+          <li>架構決策與最終 sign-off</li>
+        </ul>
+      </div>
+    </div>
+    <p style="margin-top:26px;font-size:15px" class="ok-c">agent 碰不到板子，人永遠在迴圈裡 ✓</p>
+  </section>
+
+  <!-- ============ S6 CASE FILE ============ -->
+  <section class="slide" data-note="
+    <small>⌛ 約 50 秒 · 辦案實錄，有過程才有說服力</small>
+    講一個具體的辦案過程。症狀：128-bit TLP 資料全面錯位，抓了很久。
+    agent 的做法不是通靈，是交叉比對：把 pg054 這份 Xilinx 官方文件的位元組順序定義，跟我們的 RTL 介面假設逐一對照，定位出兩邊不一致。這種『文件對程式碼』的苦工，正是 agent 最擅長的——人讀 datasheet 讀到眼花，它不會累。
+    過程：八月二十一日當天 47 個 commit，就是多輪修正的證據。每一輪先過 testbench，關鍵幾輪再上機驗，最後用實機 SG DMA 與 capture 通過結案。
+    誠實附註也要講：agent 的每次輸出都只是候選答案，testbench 跟實機是兩道門，沒有證據就不結案。這個紀律，才是人機協作能信任的原因。"
+  >
+    <div class="kicker">CASE FILE · 08-21</div>
+    <h1 style="font-size:30px">辦案實錄：pg054 byte order</h1>
+    <div style="margin-top:24px">
+      <div class="pit"><div class="ic">🔍</div><div><h4>症狀</h4><p>128-bit TLP 資料全面錯位，原因不明。</p></div></div>
+      <div class="pit"><div class="ic">📑</div><div><h4>agent 的辦案手法</h4><p>交叉比對 <code>pg054</code> 官方文件的位元組順序定義 ↔ RTL 介面假設，定位出兩邊不一致——『文件對程式碼』的苦工，agent 不會累。</p></div></div>
+      <div class="pit"><div class="ic">🔁</div><div><h4>過程：47 個 commits 的迴圈</h4><p>08-21 當天多輪修正：每輪先過 testbench，關鍵輪上機驗，最後以實機 SG DMA + capture 通過結案。</p></div></div>
+      <div class="pit"><div class="ic">⚖️</div><div><h4>紀律：兩道門</h4><p>agent 的輸出只是『候選答案』——testbench 與實機是兩道門，沒證據不結案。這才是可信任的原因。</p></div></div>
+    </div>
+  </section>
+
   <!-- ============ S5 PITFALLS ============ -->
   <section class="slide" data-note="
     <small>⌛ 約 50 秒 · 講坑</small>
@@ -271,11 +324,12 @@
     最後是下一步。
     短期 Phase 2 聚焦三件事：把 Host SGL fetch（linked-page）獨立驗證；處理 SMMU 跟 retained-head fault；然後把 USERPTR / DMABUF / GPU P2P 做 bring-up，這塊會用到前面講的 cache coherency。
     這些其實都已經寫成交接文件了，wiki 下的 Handoff-RGB24-and-Phase2-Roadmap 跟 A50T-NV12M-Implementation-and-Results 兩份，是目前的權威來源，後續接手的人也可以直接從這追。
-    我的總結：30 天，從一張空板子，到實機 4K60 NV12M 串流通過。謝謝大家，歡迎提問。"
+    我的總結：30 天，從一張空板子，到實機 4K60 NV12M 串流通過。
+    最後給大家一個下週一就能用的起點：右邊綠框。testbench 骨架、register map 對照、boilerplate、文件交接——這些重複性高、驗證成本低的，先丟給 agent 試水溫。timing closure 跟架構決策，先留在人手上。謝謝大家，歡迎提問。"
   >
     <div class="kicker">NEXT STEP</div>
     <h1 style="font-size:30px">下一步 · Phase 2</h1>
-    <div class="grid g2" style="margin-top:30px">
+    <div class="grid g3" style="margin-top:30px">
       <div class="card">
         <h3>Phase 2 焦點</h3>
         <ul>
@@ -293,8 +347,43 @@
           <li><code>wiki/A50T-Hardware-Verification-Log.md</code></li>
         </ul>
       </div>
+      <div class="card" style="border-color:var(--green)">
+        <h3 style="color:var(--green)">🚀 下週一就可以試</h3>
+        <ul>
+          <li>適合先丟：testbench 骨架、register map 對照、boilerplate、文件交接</li>
+          <li>先不要：timing closure、架構決策、最終 sign-off</li>
+        </ul>
+      </div>
     </div>
     <p style="margin-top:36px;font-size:16px" class="ok-c">30 天 · 從空板子到 4K60 NV12M 實機通過 ✓</p>
+  </section>
+
+  <!-- ============ META: Q&A BEHIND THIS DECK ============ -->
+  <section class="slide" data-note="
+    <small>⌛ 約 40 秒 · 現場示範：agent 的另一種功能</small>
+    這頁是今天的彩蛋，也是現場示範。大家剛剛看到的協作迴圈、辦案實錄這幾頁，原本並不在簡報裡。
+    事情是這樣：我先做好第一版之後，直接問 agent 一個問題——『觀眾是硬體跟韌體工程師、很少碰 Linux，這版報告打得動他們嗎？』
+    agent 的回答很誠實：機率不高。理由有三：agent 在簡報裡隱形、火力放在觀眾無感的 Linux 層、缺人機分工的故事。然後我們一起改出了你們現在看到的版本。
+    所以 agent 的功能不只寫 code——它還能當 reviewer 跟教練，幫你站在觀眾角度挑毛病。但前提不變：問題是人問的，最後的判斷也是人做的。這頁本身，就是證據。"
+  >
+    <div class="kicker">META · 幕後花絮</div>
+    <h1 style="font-size:30px">這份簡報，也是人機協作改出來的</h1>
+    <div class="grid g2" style="margin-top:26px">
+      <div class="card">
+        <h3>🙋 我問 agent 的原問題</h3>
+        <p class="muted" style="font-size:14px">「簡報的受眾是硬體及韌體工程師，可能有少數人接觸過 Linux，這次主要是想讓他們有機會接觸 AI coding agent，你覺得這樣的報告有機會打動他們嘛？」</p>
+      </div>
+      <div class="card" style="border-color:var(--yellow)">
+        <h3 style="color:var(--yellow)">🤖 agent 的誠實回答</h3>
+        <ul>
+          <li>「機率不高」——agent 在簡報裡幾乎隱形</li>
+          <li>火力放在觀眾無感的 Linux 層</li>
+          <li>缺『人機分工』的故事</li>
+          <li>然後一起改出了你現在看到的版本</li>
+        </ul>
+      </div>
+    </div>
+    <p style="margin-top:26px;font-size:15px" class="warn-c">agent 不只寫 code，還能當 reviewer 與教練 —— 前提：問題是人問的，判斷是人做的 ✓</p>
   </section>
 
   <!-- ============ S8 CLOSING ============ -->
@@ -306,7 +395,7 @@
     <div style="text-align:center">
       <div class="kicker" style="justify-content:center">THANK YOU</div>
       <h1>QPCIe · 30 天回顧</h1>
-      <p class="lead" style="margin-top:14px">RTL · Kernel Driver · Test App 一條龍<br>從空白到 4K60 NV12M 實機</p>
+      <p class="lead" style="margin-top:14px">RTL · Kernel Driver · Test App 一條龍<br>從空白到 4K60 NV12M 實機 · 人寫架構與驗證，agent 寫骨架與雜活</p>
       <div style="margin-top:36px;font-size:13px;color:var(--muted)">資料來源：git history + agent-vault + wiki · 2026-08-11 ~ 09-09</div>
     </div>
   </section>
