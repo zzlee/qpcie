@@ -12,7 +12,7 @@
 > **實機最終結果**：1080p60 uncapped 600/600、270.09 FPS、801.18 MiB/s；
 > 4K60 uncapped 600/600、67.53 FPS、801.30 MiB/s；back-to-back 完全再現、
 > data errors 0。4K60 餘裕從 0.22% → **12.6%**。詳細紀錄見
-> [wiki/A50T-NV12M-Implementation-and-Results.md §7.5](wiki/A50T-NV12M-Implementation-and-Results.md)。
+> [A50T-NV12M-Implementation-and-Results.md §7.5](A50T-NV12M-Implementation-and-Results.md)。
 > 以下原文保留作除錯過程存檔。
 
 > 產生時間：2026-08-25　｜　撰寫者：ox-alpha session（交接給下一位 coding agent）

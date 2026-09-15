@@ -24,6 +24,7 @@ work_sim/
 *.prm
 *.bit
 *.bin
+*.mcs
 *.dcp
 *.rpt
 webtalk*
