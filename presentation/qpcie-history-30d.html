@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>QPCIe 開發歷程回顧 — 全程 30 天 (2026-08-11 ~ 09-09)</title>
+<style>
+  :root {
+    --bg:#0b0f14; --panel:#131a24; --panel2:#0f1620; --line:#22303f; --line2:#2c3b4d;
+    --fg:#e8eef5; --muted:#8fa1b3; --muted2:#b6c3d0;
+    --blue:#4cc2ff; --green:#7ee2b8; --yellow:#ffd479; --red:#ff6b6b; --purple:#c792ea;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:var(--bg);color:var(--fg);font-family:"Noto Sans TC","Microsoft JhengHei","PingFang TC",sans-serif;line-height:1.7;padding:64px 40px 120px}
+  .deck{max-width:1180px;margin:0 auto}
+
+  /* ---------- hero ---------- */
+  .hero{text-align:center;padding:40px 0 52px}
+  .kicker{color:var(--green);letter-spacing:6px;font-size:13px;font-weight:700;margin-bottom:20px}
+  h1{font-size:40px;letter-spacing:1px;margin-bottom:20px}
+  .hero .sub{color:var(--muted);font-size:18px}
+  .hero .sub b{color:var(--blue)}
+  .tags{margin-top:30px;display:flex;justify-content:center;gap:14px;flex-wrap:wrap}
+  .tag{border:1px solid var(--line);border-radius:999px;padding:8px 18px;font-size:13px;color:var(--muted)}
+
+  /* ---------- stats band ---------- */
+  .stats{display:grid;grid-template-columns:repeat(5,1fr);gap:16px;margin:52px 0 80px}
+  .stat{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:24px 20px;text-align:center}
+  .stat .n{font-size:32px;font-weight:800;color:var(--blue);line-height:1.1}
+  .stat .n small{font-size:14px;font-weight:500;color:var(--muted)}
+  .stat .l{color:var(--muted);font-size:13px;margin-top:8px}
+
+  /* ---------- section ---------- */
+  .section{margin-bottom:84px}
+  .sec-head{display:flex;align-items:baseline;gap:16px;margin-bottom:30px}
+  .sec-head h2{font-size:26px;color:var(--blue)}
+  .sec-head .en{color:var(--muted);font-size:12px;letter-spacing:3px}
+  .sec-head .rule{flex:1;height:1px;background:var(--line);align-self:center}
+
+  /* ---------- chart ---------- */
+  .chart-card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:28px 28px 22px}
+  .chart-title{font-size:15px;font-weight:700;margin-bottom:6px}
+  .chart-sub{color:var(--muted);font-size:13px;margin-bottom:26px}
+  .daily{display:flex;align-items:flex-end;gap:6px;height:240px}
+  .dcol{flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;height:100%;position:relative}
+  .dcol .cnt{font-size:11px;color:var(--muted);margin-bottom:4px}
+  .dcol .bar{width:70%;min-height:3px;border-radius:3px 3px 0 0}
+  .dcol .bar.b{background:linear-gradient(180deg,var(--blue),#2a6f9e)}
+  .dcol .bar.hot{background:linear-gradient(180deg,var(--red),#8f2d2d)}
+  .dcol .bar.gap{background:var(--line);opacity:.35}
+  .dcol .lbl{color:var(--muted);font-size:10px;margin-top:8px;transform:rotate(0)}
+  .dcol .lbl.wk{color:var(--green);font-weight:700}
+  .weeks{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-top:34px}
+  .wk-box{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:16px;text-align:center}
+  .wk-box .w{color:var(--muted);font-size:12px}
+  .wk-box .n{font-size:26px;font-weight:800;color:var(--green)}
+  .wk-box .d{color:var(--muted);font-size:11px;margin-top:2px}
+
+  /* ---------- timeline ---------- */
+  .timeline{position:relative;padding-left:30px}
+  .timeline::before{content:"";position:absolute;left: diam:0;top:8px;bottom:8px;width:2px;background:var(--line)}
+  .tl{position:relative;margin-bottom:40px}
+  .tl::before{content:"";position:absolute;left:-30px;top:6px;width:13px;height:13px;border-radius:50%;background:var(--bg);border:3px solid var(--blue)}
+  .tl .date{color:var(--blue);font-weight:700;font-size:13px;letter-spacing:1px}
+  .tl .date .cnt{color:var(--muted);font-weight:400;margin-left:8px;font-size:12px}
+  .tl h3{font-size:17px;margin:4px 0 6px}
+  .tl .desc{color:var(--muted);font-size:14px}
+  code{background:var(--panel2);border:1px solid var(--line);padding:1px 6px;border-radius:4px;font-size:12.5px;color:var(--green);font-family:"JetBrains Mono",Consolas,monospace}
+
+  /* ---------- pitfalls ---------- */
+  .pit{display:flex;gap:18px;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:24px 26px;margin-bottom:16px}
+  .pit .ic{font-size:24px;flex:0 0 auto}
+  .pit h4{font-size:15px;margin-bottom:6px}
+  .pit h4 .sev{font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;margin-left:8px;vertical-align:2px}
+  .sev.high{color:var(--red);border:1px solid var(--red)}
+  .sev.mid{color:var(--yellow);border:1px solid var(--yellow)}
+  .sev.low{color:var(--blue);border:1px solid var(--blue)}
+  .pit p{color:var(--muted);font-size:14px}
+
+  /* ---------- status table ---------- */
+  table{width:100%;border-collapse:collapse;font-size:14px;background:var(--panel);border:1px solid var(--line);border-radius:14px;overflow:hidden}
+  th{text-align:left;color:var(--muted);font-weight:400;font-size:12.5px;border-bottom:1px solid var(--line);padding:12px 20px}
+  td{border-bottom:1px solid var(--line);padding:12px 20px;color:var(--muted)}
+  tr:last-child td{border-bottom:none}
+  .st{font-weight:600}
+  .ok{color:var(--green)} .wait{color:var(--yellow)} .todo{color:var(--muted)}
+
+  /* ---------- next ---------- */
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:24px 26px}
+  .card h3{font-size:15px;margin-bottom:12px;color:var(--blue)}
+  .card ul{list-style:none}
+  .card li{padding-left:20px;position:relative;color:var(--muted);font-size:14px;margin-bottom:9px}
+  .card li::before{content:"▸";position:absolute;left:0;color:var(--blue)}
+
+  .foot{color:var(--muted);font-size:12px;text-align:center;border-top:1px solid var(--line);padding-top:36px}
+</style>
+</head>
+<body>
+<div class="deck">
+
+  <!-- HERO -->
+  <div class="hero">
+    <div class="kicker">PROJECT HISTORY · 30 DAYS</div>
+    <h1>QPCIe 開發歷程回顧<br>全程 30 天：從 PCIe 骨架到 NV12M 實機</h1>
+    <p class="sub">2026-08-11 ~ 09-09 · Artix-7 A50T · 共 <b>209 commits</b></p>
+    <div class="tags">
+      <span class="tag">RTL + Kernel Driver + Test App 一條龍</span>
+      <span class="tag">PCIe Gen2 x4</span>
+      <span class="tag">V4L2 / ALSA</span>
+      <span class="tag">Vivado 2023.2</span>
+      <span class="tag">SG DMA / NV12M 4K60</span>
+    </div>
+  </div>
+
+  <!-- STATS -->
+  <div class="stats">
+    <div class="stat"><div class="n">30<small> 天</small></div><div class="l">開發期間</div></div>
+    <div class="stat"><div class="n">209<small> 次</small></div><div class="l">Git commits</div></div>
+    <div class="stat"><div class="n">8<small> 週五</small></div><div class="l">最高單日 08-21 (47)</div></div>
+    <div class="stat"><div class="n">~7<small> 次/日</small></div><div class="l">日均 commit（有產出日）</div></div>
+    <div class="stat"><div class="n">6<small> 天</small></div><div class="l">無 commit 空白日</div></div>
+  </div>
+
+  <!-- 1. DAILY COMMITS -->
+  <div class="section">
+    <div class="sec-head"><h2>每日 Commit 量與頻率</h2><span class="en">DAILY PACE</span><span class="rule"></span></div>
+    <div class="chart-card">
+      <div class="chart-title">每日 commits · 08-11 ~ 09-09</div>
+      <div class="chart-sub">柱高 = 當日 commit 數；<span style="color:var(--red)">紅色</span>為單日 ≥15 的高峰日，<span style="color:var(--muted);opacity:.8">淡柱</span>為無產出的空白日。08-21（47 筆，SG list DMA 大修正）為全程最高點。</div>
+      <div class="daily" id="daily"></div>
+      <div class="weeks" id="weeks"></div>
+    </div>
+    <p class="chart-sub" style="margin-top:14px">頻率觀察：前半段（W1–W2）節奏綿密、幾乎天天產出；08-21 引爆單日 47 筆高峰後，W3–W4 轉為「脈衝式」——集中 2~3 天大量修正、接著數天空白，符合硬體 bring-up 的「衝刺 + 等待實機回報」節奏。</p>
+  </div>
+
+  <!-- 2. TIMELINE -->
+  <div class="section">
+    <div class="sec-head"><h2>里程碑時間軸</h2><span class="en">MILESTONES</span><span class="rule"></span></div>
+    <div class="timeline">
+      <div class="tl">
+        <div class="date">08-11 · W1 起點</div>
+        <h3>Initial Commit —— 雙 BAR 架構定案</h3>
+        <div class="desc">PCIe DMA 控制器立骨架：<code>cq_rx_decoder</code>、<code>cc_tx_encoder</code>、<code>rq_tx_encoder</code>、<code>rc_rx_decoder</code>、<code>desc_fetch_engine</code>、<code>h2c/c2h_dma_engine</code>、<code>interrupt_ctrl</code>、<code>tag_manager</code>。首日模組 TB 全數通過。</div>
+      </div>
+      <div class="tl">
+        <div class="date">08-12 · 軟體層起步</div>
+        <h3>V4L2 driver + ALSA AES3</h3>
+        <div class="desc">V4L2 multi-planar、MMAP/USERPTR/DMABUF/EXPBUF、version registers、Vivado TCL build 流程、C2H stream request priority arbiter。</div>
+      </div>
+      <div class="tl">
+        <div class="date">08-13 · 音訊通道</div>
+        <h3>ALSA Audio Streaming + axi_crossbar</h3>
+        <div class="desc">ALSA 串流整合、Xilinx <code>axi_crossbar</code> 導入。</div>
+      </div>
+      <div class="tl">
+        <div class="date">08-21 · W2 高峰（47 commits）</div>
+        <h3>SG List DMA + 128-bit TLP 修正</h3>
+        <div class="desc">SG descriptor list DMA、4KB DMA 驗證、<span style="color:var(--yellow)">128-bit TLP + PCIe bridge 修正</span>。第二週 commit 密度最高的一天。</div>
+      </div>
+      <div class="tl">
+        <div class="date">08-24 · NV12M 引擎</div>
+        <h3>NV12 Capture Engine + MSI + 150MHz</h3>
+        <div class="desc">NV12 capture engine、V4L2 control-plane、MSI 中斷、150MHz video clock domain、4K60 模式、NV12M 驗證結果。</div>
+      </div>
+      <div class="tl">
+        <div class="date">08-25 · 跨時脈收尾</div>
+        <h3>NV12 引擎移入 150MHz + CDC + handoff</h3>
+        <div class="desc">NV12 engine 搬進 150MHz video clock domain、VB2 queue 加深、CDC、<code>Handoff-RGB24-and-Phase2-Roadmap</code> 交接文件。</div>
+      </div>
+      <div class="tl">
+        <div class="date">08-26 ~ 09-09 · W3–W4 除錯與收斂</div>
+        <h3>實機驗證矩陣補強 + SMMU/cache 處理</h3>
+        <div class="desc">A50T 硬體驗證日誌：pg054 byte order、4-DW MWr、CplD Tag/Requester ID、ARM64 cache ordering、retained-head SMMU fault。wiki 驗證矩陣（NV12M 1080p60/4K60 實機通過）。</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 3. PITFALLS -->
+  <div class="section">
+    <div class="sec-head"><h2>踩過的坑</h2><span class="en">PITFALLS</span><span class="rule"></span></div>
+    <div class="pit"><div class="ic">🔴</div><div><h4>pg054 byte order <span class="sev high">高</span></h4><p>7-Series PCIe IP（pg054）的 byte order 與自訂介面不一致，造成 128-bit TLP 資料錯位；08-21 統一修正。</p></div></div>
+    <div class="pit"><div class="ic">🔴</div><div><h4>4-DW MWr（64-bit 位址）<span class="sev high">高</span></h4><p>64-bit 主機（如 Jetson）用 <code>iowrite32</code> 產生 4-DW MWr TLP：<b>beat0 是 64-bit 位址、beat1 才是 payload</b>。需在 CQ 側 buffering beat0、把 payload 打包進 <code>cq_tdata[127:96]</code>。</p></div></div>
+    <div class="pit"><div class="ic">🟡</div><div><h4>CplD Tag / Requester ID <span class="sev mid">中</span></h4><p>Completion 回覆的 tag 需依 desc-fetch / H2C/C2H FIFO 正確路由，128-bit TLP 對齊隨 SG descriptor 長度調整。</p></div></div>
+    <div class="pit"><div class="ic">🟡</div><div><h4>128-bit TLP 資料對齊</h4><p>128-bit 資料路徑的 DW 對齊與 TLP 長度處理需配合 SG descriptor；PCIe bridge 跨越修正。</p></div></div>
+    <div class="pit"><div class="ic">🟢</div><div><h4>ARM64 cache ordering / SMMU</h4><p>後續（USERPTR/DMABUF）需處理 cache coherency；retained-head SMMU fault 待 Phase2 獨立驗證。</p></div></div>
+  </div>
+
+  <!-- 4. STATUS -->
+  <div class="section">
+    <div class="sec-head"><h2>目前狀態 · 驗證矩陣</h2><span class="en">VERIFICATION</span><span class="rule"></span></div>
+    <table>
+      <tr><th>項目</th><th>狀態</th><th>備註</th></tr>
+      <tr><td>PCIe enumeration</td><td class="st ok">實機通過 ✓</td><td>0x12AB:0xE380</td></tr>
+      <tr><td>SG List DMA</td><td class="st ok">仿真+實機 ✓</td><td>4-page / 16-tag H2C loopback</td></tr>
+      <tr><td>1080p60 NV12M capture</td><td class="st ok">實機通過 ✓</td><td>paced capture</td></tr>
+      <tr><td>128-byte MWr</td><td class="st ok">實機通過 ✓</td><td>C2H</td></tr>
+      <tr><td>150MHz TPG + CDC</td><td class="st ok">實機通過 ✓</td><td>NV12 engine @ video clock</td></tr>
+      <tr><td>V4L2 1080p60 / 4K60</td><td class="st ok">實機通過 ✓</td><td>NV12M 結果</td></tr>
+      <tr><td>V4L2 MMAP</td><td class="st ok">實機通過 ✓</td><td>DMA-contiguous planes</td></tr>
+      <tr><td>Host SGL fetch (linked-page)</td><td class="st wait">待獨立驗證</td><td>Phase2</td></tr>
+      <tr><td>USERPTR/DMABUF/EXPBUF/GPU P2P</td><td class="st todo">未列入實機範圍</td><td>Phase2 roadmap</td></tr>
+    </table>
+  </div>
+
+  <!-- 5. NEXT -->
+  <div class="section">
+    <div class="sec-head"><h2>下一步</h2><span class="en">NEXT</span><span class="rule"></span></div>
+    <div class="grid2">
+      <div class="card">
+        <h3>Phase 2 焦點</h3>
+        <ul>
+          <li>Host SGL fetch（linked-page）獨立驗證</li>
+          <li>SMMU / retained-head fault 處理</li>
+          <li>USERPTR / DMABUF / GPU P2P bring-up</li>
+          <li>ALSA 音訊實機</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>里程碑文件</h3>
+        <ul>
+          <li><code>wiki/A50T-NV12M-Implementation-and-Results.md</code></li>
+          <li><code>wiki/Handoff-RGB24-and-Phase2-Roadmap.md</code></li>
+          <li><code>wiki/A50T-Hardware-Verification-Log.md</code></li>
+          <li><code>wiki/Home.md</code></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <div class="foot">QPCIe · 30 天回顧 v1 · 資料來源：git history + agent-vault + wiki · 簡報檔待樣式確認</div>
+</div>
+
+<script>
+// 每日 commit（08-11 ~ 09-09，30 天，含空白日）
+const daily = [
+  ["08-11",4],["08-12",10],["08-13",8],["08-14",9],["08-15",0],["08-16",0],["08-17",0],
+  ["08-18",0],["08-19",4],["08-20",6],["08-21",47],["08-22",0],["08-23",0],["08-24",12],
+  ["08-25",6],["08-26",9],["08-27",13],["08-28",17],["08-29",2],["08-30",0],["08-31",3],
+  ["09-01",12],["09-02",7],["09-03",9],["09-04",12],["09-05",0],["09-06",0],["09-07",5],
+  ["09-08",7],["09-09",7]
+];
+const max = Math.max(...daily.map(d=>d[1]));
+const hot = d => d[1] >= 15;
+const weekLbl = d => ["08-11","08-18","08-25","09-01","09-08"].includes(d[0]);
+
+const dailyEl = document.getElementById('daily');
+dailyEl.innerHTML = daily.map(d => {
+  const h = d[1] === 0 ? 3 : Math.max(6, (d[1]/max)*190);
+  const cls = d[1]===0 ? "bar gap" : hot(d) ? "bar hot" : "bar b";
+  return `<div class="dcol">
+    ${d[1]>0?`<div class="cnt">${d[1]}</div>`:''}
+    <div class="${cls}" style="height:${h}px"></div>
+    <div class="lbl${weekLbl(d)?' wk':''}">${d[0].slice(3)}</div>
+  </div>`;
+}).join('');
+
+// 週聚合
+const weeks = [
+  ["W1","08-11~17",31],["W2","08-18~24",69],["W3","08-25~31",50],["W4","09-01~07",45],["W5","09-08~09",14]
+];
+document.getElementById('weeks').innerHTML = weeks.map(w =>
+  `<div class="wk-box"><div class="w">${w[0]}</div><div class="n">${w[2]}</div><div class="d">${w[1]}</div></div>`
+).join('');
+</script>
+</body>
+</html>
