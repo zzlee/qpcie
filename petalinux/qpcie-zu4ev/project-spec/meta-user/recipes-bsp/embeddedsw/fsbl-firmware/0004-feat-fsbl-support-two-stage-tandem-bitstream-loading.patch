@@ -1,0 +1,183 @@
+diff --git a/lib/sw_apps/zynqmp_fsbl/src/xfsbl_bs.c b/lib/sw_apps/zynqmp_fsbl/src/xfsbl_bs.c
+index 9098cd8c8f..b92ad60c31 100644
+--- a/lib/sw_apps/zynqmp_fsbl/src/xfsbl_bs.c
++++ b/lib/sw_apps/zynqmp_fsbl/src/xfsbl_bs.c
+@@ -135,6 +135,31 @@ END:
+ 	return Status;
+ }
+ 
++/*****************************************************************************/
++/** This function prepares PCAP interface for Tandem Stage 2 bitstream download
++ *  without asserting PROG_B to keep Stage 1 PCIe link active and running.
++ *
++ * @param	None
++ *
++ * @return	XFSBL_SUCCESS
++ *
++ *****************************************************************************/
++u32 XFsbl_PcapPrepareStage2(void) {
++	u32 RegVal;
++
++	/* Take PCAP out of Reset without asserting PROG_B */
++	RegVal = XFsbl_In32(CSU_PCAP_RESET);
++	RegVal &= (~CSU_PCAP_RESET_RESET_MASK);
++	XFsbl_Out32(CSU_PCAP_RESET, RegVal);
++
++	/* Select PCAP mode and change PCAP to write mode */
++	RegVal = CSU_PCAP_CTRL_PCAP_PR_MASK;
++	XFsbl_Out32(CSU_PCAP_CTRL, RegVal);
++	XFsbl_Out32(CSU_PCAP_RDWR, 0x0);
++
++	return XFSBL_SUCCESS;
++}
++
+ /*****************************************************************************/
+ /** This function waits for PCAP transfer to complete
+  *
+diff --git a/lib/sw_apps/zynqmp_fsbl/src/xfsbl_bs.h b/lib/sw_apps/zynqmp_fsbl/src/xfsbl_bs.h
+index 2102863985..9d52d1af44 100644
+--- a/lib/sw_apps/zynqmp_fsbl/src/xfsbl_bs.h
++++ b/lib/sw_apps/zynqmp_fsbl/src/xfsbl_bs.h
+@@ -70,6 +70,7 @@ u32 XFsbl_BitstreamLoad(XFsblPs * FsblInstancePtr,
+ 				u32 PartitionNum, PTRSIZE LoadAddress);
+ u32 XFsbl_ChunkedBSTxfer(XFsblPs *FsblInstancePtr, u32 PartitionNum);
+ u32 XFsbl_PcapInit(void);
++u32 XFsbl_PcapPrepareStage2(void);
+ u32 XFsbl_PLWaitForDone(void);
+ u32 XFsbl_WriteToPcap(u32 WrSize, u8 *WrAddr);
+ u32 XFsbl_PLCheckForDone(void);
+diff --git a/lib/sw_apps/zynqmp_fsbl/src/xfsbl_partition_load.c b/lib/sw_apps/zynqmp_fsbl/src/xfsbl_partition_load.c
+index 56fba8bd8d..871d2da43e 100644
+--- a/lib/sw_apps/zynqmp_fsbl/src/xfsbl_partition_load.c
++++ b/lib/sw_apps/zynqmp_fsbl/src/xfsbl_partition_load.c
+@@ -87,6 +87,19 @@
+ #define XFSBL_FIRMWARE_STATE_UNKNOWN	0U
+ #define XFSBL_FIRMWARE_STATE_SECURE	1U
+ #define XFSBL_FIRMWARE_STATE_NONSECURE	2U
++static u32 s_PlPartitionIndex = 0U;
++
++static u32 XFsbl_GetTotalPlPartitions(const XFsblPs *FsblInstancePtr)
++{
++	u32 Count = 0U;
++	u32 Idx;
++	for (Idx = 0U; Idx < FsblInstancePtr->ImageHeader.ImageHeaderTable.NoOfPartitions; Idx++) {
++		if (XFsbl_GetDestinationDevice(&FsblInstancePtr->ImageHeader.PartitionHeader[Idx]) == XIH_PH_ATTRB_DEST_DEVICE_PL) {
++			Count++;
++		}
++	}
++	return Count;
++}
+ #endif
+ #ifdef XFSBL_TPM
+ #define XFSBL_EL2_VAL		(4U)
+@@ -1318,7 +1331,18 @@ static u32 XFsbl_PartitionValidation(XFsblPs * FsblInstancePtr,
+ 		 * FSBL initialization
+ 		 */
+ #ifndef XFSBL_PL_CLEAR
+-		Status = XFsbl_PcapInit();
++		u32 TotalPlPartitions = XFsbl_GetTotalPlPartitions(FsblInstancePtr);
++		if ((TotalPlPartitions > 1U) && (s_PlPartitionIndex > 0U)) {
++			XFsbl_Printf(DEBUG_GENERAL,
++				"XFSBL: Preparing PCAP for Tandem Stage 2 Bitstream (no PROG_B)...\r\n");
++			Status = XFsbl_PcapPrepareStage2();
++		} else {
++			if (TotalPlPartitions > 1U) {
++				XFsbl_Printf(DEBUG_GENERAL,
++					"XFSBL: Initializing PCAP for Tandem Stage 1 (PCIe Core)...\r\n");
++			}
++			Status = XFsbl_PcapInit();
++		}
+ 		if (Status != XFSBL_SUCCESS) {
+ 			goto END;
+ 		}
+@@ -1624,41 +1648,61 @@ static u32 XFsbl_PartitionValidation(XFsblPs * FsblInstancePtr,
+ 
+ #ifdef XFSBL_BS
+ 	if (DestinationDevice == XIH_PH_ATTRB_DEST_DEVICE_PL) {
+-		Status = XFsbl_PLWaitForDone();
+-		if (Status != XFSBL_SUCCESS) {
+-			goto END;
+-		}
++		u32 TotalPlPartitions = XFsbl_GetTotalPlPartitions(FsblInstancePtr);
+ 
+-		/**
+-		 * PL is powered-up before its configuration, but will be in isolation.
+-		 * Now since PL configuration is done, just remove the isolation
+-		 */
+-		psu_ps_pl_isolation_removal_data();
++		if ((TotalPlPartitions > 1U) && (s_PlPartitionIndex == 0U)) {
++			/*
++			 * Tandem Stage 1: PCIe logic is programmed.
++			 * PL_DONE remains LOW until Stage 2 completes.
++			 * Keep PCAP active and advance PL partition count.
++			 */
++			XFsbl_Printf(DEBUG_GENERAL,
++				"XFSBL: Tandem Stage 1 (PCIe Core) loaded successfully! (PCIe Link Active)\r\n");
++			s_PlPartitionIndex++;
++			Status = XFSBL_SUCCESS;
++		} else {
++			Status = XFsbl_PLWaitForDone();
++			if (Status != XFSBL_SUCCESS) {
++				goto END;
++			}
+ 
+-		/* Reset PL, if configured for */
+-		(void)psu_ps_pl_reset_config_data();
++			/**
++			 * PL is powered-up before its configuration, but will be in isolation.
++			 * Now since PL configuration is done, just remove the isolation
++			 */
++			psu_ps_pl_isolation_removal_data();
++
++			/* Reset PL, if configured for */
++			(void)psu_ps_pl_reset_config_data();
+ 
+-		/* Update PMU_GLOBAL_GEN_STORE Register */
++			/* Update PMU_GLOBAL_GEN_STORE Register */
+ #ifdef XFSBL_SECURE
+-		if ((IsAuthenticationEnabled == TRUE) || (IsEncryptionEnabled == TRUE))
+-		{
+-			XFsbl_SetBSSecureState(XFSBL_FIRMWARE_STATE_SECURE);
+-		} else
++			if ((IsAuthenticationEnabled == TRUE) || (IsEncryptionEnabled == TRUE))
++			{
++				XFsbl_SetBSSecureState(XFSBL_FIRMWARE_STATE_SECURE);
++			} else
+ #endif
+-		{
+-			XFsbl_SetBSSecureState(XFSBL_FIRMWARE_STATE_NONSECURE);
+-		}
++			{
++				XFsbl_SetBSSecureState(XFSBL_FIRMWARE_STATE_NONSECURE);
++			}
+ 
+-		/**
+-		 * Fsbl hook after bit stream download
+-		 */
+-		Status = XFsbl_HookAfterBSDownload();
+-		if (Status != XFSBL_SUCCESS)
+-		{
+-			Status = XFSBL_ERROR_HOOK_AFTER_BITSTREAM_DOWNLOAD;
+-			XFsbl_Printf(DEBUG_GENERAL,
+-			 "XFSBL_ERROR_HOOK_AFTER_BITSTREAM_DOWNLOAD\r\n");
+-			goto END;
++			/**
++			 * Fsbl hook after bit stream download
++			 */
++			Status = XFsbl_HookAfterBSDownload();
++			if (Status != XFSBL_SUCCESS)
++			{
++				Status = XFSBL_ERROR_HOOK_AFTER_BITSTREAM_DOWNLOAD;
++				XFsbl_Printf(DEBUG_GENERAL,
++				 "XFSBL_ERROR_HOOK_AFTER_BITSTREAM_DOWNLOAD\r\n");
++				goto END;
++			}
++
++			if (TotalPlPartitions > 1U) {
++				XFsbl_Printf(DEBUG_GENERAL,
++					"XFSBL: Tandem Stage 2 loaded successfully! (Full PL Operational)\r\n");
++			}
++			s_PlPartitionIndex++;
+ 		}
+ 	}
+ #endif

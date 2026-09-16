@@ -5,6 +5,7 @@ XSA_DIR?=$(abspath ../../build/sc7f0.xsa)
 DATE_LOG=time.build
 
 TANDEM1_BIT?=$(abspath ../../build/qpcie_zu4ev_proj/qpcie_zu4ev_card.runs/impl_1/zu4ev_pcie_card_top_tandem1.bit)
+TANDEM2_BIT?=$(abspath ../../build/qpcie_zu4ev_proj/qpcie_zu4ev_card.runs/impl_1/zu4ev_pcie_card_top_tandem2.bit)
 
 .NOTPARALLEL: all
 all: linux bootimage
@@ -22,30 +23,29 @@ linux:
 
 bootimage:
 	${AT} mkdir -p images/linux
-	${AT} if [ -f "$(TANDEM1_BIT)" ]; then \
-		echo "Using ZU4EV Tandem Stage 1 bitstream: $(TANDEM1_BIT)"; \
+	${AT} if [ -f "$(TANDEM1_BIT)" ] && [ -f "$(TANDEM2_BIT)" ]; then \
+		echo "Packaging Two-Stage Tandem PCIe Boot Image (Stage 1 + Stage 2)..."; \
+		cp "$(TANDEM1_BIT)" images/linux/zu4ev_pcie_card_top_tandem1.bit; \
+		cp "$(TANDEM2_BIT)" images/linux/zu4ev_pcie_card_top_tandem2.bit; \
+		printf '// Two-Stage Tandem PCIe BIF\nthe_ROM_image:\n{\n\t[fsbl_config] a53_x64\n\t[bootloader, destination_cpu=a53-0] images/linux/zynqmp_fsbl.elf\n\t[pmufw_image] images/linux/pmufw.elf\n\t[destination_device=pl] images/linux/zu4ev_pcie_card_top_tandem1.bit\n\t[destination_device=pl] images/linux/zu4ev_pcie_card_top_tandem2.bit\n\t[destination_cpu=a53-0, exception_level=el-3, trustzone] images/linux/bl31.elf\n\t[destination_cpu=a53-0, exception_level=el-2] images/linux/u-boot.elf\n}\n' > images/linux/bootgen_tandem.bif; \
+		petalinux-package --boot --bif images/linux/bootgen_tandem.bif --force; \
+	elif [ -f "$(TANDEM1_BIT)" ]; then \
+		echo "Using Single Tandem Stage 1 bitstream: $(TANDEM1_BIT)"; \
 		cp "$(TANDEM1_BIT)" images/linux/system.bit; \
-	elif [ -f project-spec/hw-description/*.bit ]; then \
-		echo "Using hardware description bitstream"; \
-		cp project-spec/hw-description/*.bit images/linux/system.bit; \
+		petalinux-package --boot --force \
+			--fsbl images/linux/zynqmp_fsbl.elf \
+			--pmufw images/linux/pmufw.elf \
+			--fpga images/linux/system.bit \
+			--atf images/linux/bl31.elf \
+			--u-boot images/linux/u-boot.elf; \
 	else \
-		bitstream=$$(find build/tmp/deploy/images -type f -name '*.bit' 2>/dev/null | sort | head -n 1); \
-		if [ -n "$$bitstream" ]; then \
-			echo "Using deployed bitstream: $$bitstream"; \
-			cp "$$bitstream" images/linux/system.bit; \
-		fi; \
+		echo "Using default deployed bitstream..."; \
+		petalinux-package --boot --force \
+			--fsbl images/linux/zynqmp_fsbl.elf \
+			--pmufw images/linux/pmufw.elf \
+			--atf images/linux/bl31.elf \
+			--u-boot images/linux/u-boot.elf; \
 	fi
-	${AT} if [ -f images/linux/system.bit ]; then \
-		FPGA_OPT="--fpga images/linux/system.bit"; \
-	else \
-		FPGA_OPT=""; \
-	fi; \
-	petalinux-package --boot --force \
-		--fsbl images/linux/zynqmp_fsbl.elf \
-		--pmufw images/linux/pmufw.elf \
-		$$FPGA_OPT \
-		--atf images/linux/bl31.elf \
-		--u-boot images/linux/u-boot.elf
 	${AT} ls -lh images/linux/BOOT.BIN
 
 device-tree:

@@ -5,4 +5,6 @@ FILESEXTRAPATHS:prepend := "${THISDIR}/${PN}:"
 EMBEDDEDSW_SRCURI += "file://0001-Fixed-vproc-ip-issues.patch \
             file://0002-feat-fsbl-add-Si5341-clock-generator-configuration.patch \
             file://0003-fix-correct-pointer-arithmetic-in-io_read_reg_u32.patch \
+            file://0004-feat-fsbl-support-two-stage-tandem-bitstream-loading.patch \
             "
+
