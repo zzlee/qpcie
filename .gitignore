@@ -6,6 +6,7 @@
 # 1. Vivado / Xilinx Tools Build Artifacts & Temporary Files
 # ------------------------------------------------------------------------------
 build/
+hd_visual/
 tmp_proj/
 tmp_ip/
 .Xil/
