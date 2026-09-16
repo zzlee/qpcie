@@ -21,7 +21,7 @@
   /* ---------- deck ---------- */
   .deck{position:relative;height:100vh;width:100%}
   .slide{
-    position:absolute;inset:0;padding:7vh 8vw 12vh;
+    position:absolute;inset:0;padding:5vh 5vw 12vh;
     display:flex;flex-direction:column;justify-content:center;overflow-y:auto;
     opacity:0;visibility:hidden;transform:translateX(60px);
     transition:opacity .4s,transform .4s,visibility 0s linear .4s;
@@ -52,7 +52,7 @@
   code{background:var(--panel2);border:1px solid var(--line);padding:1px 6px;border-radius:4px;font-size:14px;color:var(--green)}
 
   /* ---------- daily chart ---------- */
-  .bars{display:flex;align-items:flex-end;gap:2px;height:200px;padding:8px 0 0}
+  .bars{display:flex;align-items:flex-end;gap:2px;height:230px;padding:8px 0 0}
   .bars .b{flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;position:relative;min-width:0}
   .bars .b .fill{width:70%;min-height:2px;border-radius:3px 3px 0 0;background:linear-gradient(180deg,var(--blue),#2a6f9e)}
   .bars .b.gap .fill{background:var(--line);opacity:.35}
@@ -95,7 +95,9 @@
     position:absolute;left:0;right:0;bottom:0;height:60px;
     display:flex;align-items:center;justify-content:space-between;
     padding:0 26px;z-index:5;background:linear-gradient(transparent,rgba(11,15,20,.7));
+    opacity:0;pointer-events:none;transition:opacity .35s;
   }
+  body.ui-show .bottom{opacity:1;pointer-events:auto}
   .bottom .pageno{color:var(--muted);font-size:14px;letter-spacing:1px}
   .bottom .pageno b{color:var(--blue);font-size:18px}
   .bottom .pageno button{
@@ -129,7 +131,8 @@
   .notes p small{display:block;color:var(--muted);margin-bottom:10px}
 
   /* ---------- nav arrows ---------- */
-  .nav{position:absolute;right:18px;top:50%;transform:translateY(-50%);display:flex;flex-direction:column;gap:10px;z-index:5}
+  .nav{position:absolute;right:18px;top:50%;transform:translateY(-50%);display:flex;flex-direction:column;gap:10px;z-index:5;opacity:0;pointer-events:none;transition:opacity .35s}
+  body.ui-show .nav{opacity:1;pointer-events:auto}
   .nav button{width:38px;height:38px;border-radius:50%;background:var(--panel);border:1px solid var(--line);color:var(--fg);cursor:pointer;font-size:18px;transition:background .2s}
   .nav button:hover{background:var(--line2)}
 
@@ -434,14 +437,14 @@
   <!-- ============ REGMAP ============ -->
   <section class="slide" data-note="
     <small>⌛ 約 45 秒 · register map，韌體人最關心的一頁</small>
-    這頁是 BAR0 的 register map，韌體同事可以直接抄走。
+    這頁是 BAR0 的 register map 快照，幫助理解這次實驗的位址分配（正式產品以 RTL 為準）。
     前半是標準 DMA 控制：0x00 控制、0x04 狀態，0x08 到 0x1C 是 H2C 跟 C2H 的 ring 位址與配置，0x20、0x24 是中斷控制跟狀態——注意 status 是 W1C，寫 1 清除。
     0x28、0x2C 是完成計數器，除錯時第一個看的就是這兩個有沒有動。
     0x30 起是身分證區：版本號、git hash、build 時間戳、硬體能力，driver probe 時會讀出來印在 dmesg，實機對版本就靠它。
     後面是本專案特色的：0x68、0x6C 就是前面講的除錯擷取，0x74 pacer 控制、0x78 slice height，音訊四通道的位址放在 0x100 起。完整定義都在 axil_reg_space.v，不到四百行。"
   >
     <div class="kicker">REGISTER MAP · BAR0</div>
-    <h1 style="font-size:34px">Register Map（韌體可直接抄）</h1>
+    <h1 style="font-size:34px">Register Map</h1>
     <div class="card" style="margin-top:20px;padding:0;overflow:hidden">
       <table>
         <tr><th>Offset</th><th>名稱</th><th>說明</th></tr>
@@ -495,12 +498,11 @@
     最後是下一步。
     短期 Phase 2 聚焦三件事：把 Host SGL fetch（linked-page）獨立驗證；處理 SMMU 跟 retained-head fault；然後把 USERPTR / DMABUF / GPU P2P 做 bring-up，這塊會用到前面講的 cache coherency。
     這些其實都已經寫成交接文件了，wiki 下的 Handoff-RGB24-and-Phase2-Roadmap 跟 A50T-NV12M-Implementation-and-Results 兩份，是目前的權威來源，後續接手的人也可以直接從這追。
-    我的總結：30 天，從一張空板子，到實機 4K60 NV12M 串流通過。
-    最後給大家一個下週一就能用的起點：右邊綠框。testbench 骨架、register map 對照、boilerplate、文件交接——這些重複性高、驗證成本低的，先丟給 agent 試水溫。timing closure 跟架構決策，先留在人手上。謝謝大家，歡迎提問。"
+    我的總結：30 天，從一張空板子，到實機 4K60 NV12M 串流通過。謝謝大家，歡迎提問。"
   >
     <div class="kicker">NEXT STEP</div>
     <h1 style="font-size:34px">下一步 · Phase 2</h1>
-    <div class="grid g3" style="margin-top:30px">
+    <div class="grid g2" style="margin-top:30px">
       <div class="card">
         <h3>Phase 2 焦點</h3>
         <ul>
@@ -518,43 +520,8 @@
           <li><code>wiki/A50T-Hardware-Verification-Log.md</code></li>
         </ul>
       </div>
-      <div class="card" style="border-color:var(--green)">
-        <h3 style="color:var(--green)">🚀 下週一就可以試</h3>
-        <ul>
-          <li>適合先丟：testbench 骨架、register map 對照、boilerplate、文件交接</li>
-          <li>先不要：timing closure、架構決策、最終 sign-off</li>
-        </ul>
-      </div>
     </div>
     <p style="margin-top:36px;font-size:18px" class="ok-c">30 天 · 從空板子到 4K60 NV12M 實機通過 ✓</p>
-  </section>
-
-  <!-- ============ META: Q&A BEHIND THIS DECK ============ -->
-  <section class="slide" data-note="
-    <small>⌛ 約 40 秒 · 現場示範：agent 的另一種功能</small>
-    這頁是今天的彩蛋，也是現場示範。大家剛剛看到的協作迴圈、辦案實錄這幾頁，原本並不在簡報裡。
-    事情是這樣：我先做好第一版之後，直接問 agent 一個問題——『觀眾是硬體跟韌體工程師、很少碰 Linux，這版報告打得動他們嗎？』
-    agent 的回答很誠實：機率不高。理由有三：agent 在簡報裡隱形、火力放在觀眾無感的 Linux 層、缺人機分工的故事。然後我們一起改出了你們現在看到的版本。
-    所以 agent 的功能不只寫 code——它還能當 reviewer 跟教練，幫你站在觀眾角度挑毛病。但前提不變：問題是人問的，最後的判斷也是人做的。這頁本身，就是證據。"
-  >
-    <div class="kicker">META · 幕後花絮</div>
-    <h1 style="font-size:34px">這份簡報，也是人機協作改出來的</h1>
-    <div class="grid g2" style="margin-top:26px">
-      <div class="card">
-        <h3>🙋 我問 agent 的原問題</h3>
-        <p class="muted" style="font-size:16px">「簡報的受眾是硬體及韌體工程師，可能有少數人接觸過 Linux，這次主要是想讓他們有機會接觸 AI coding agent，你覺得這樣的報告有機會打動他們嘛？」</p>
-      </div>
-      <div class="card" style="border-color:var(--yellow)">
-        <h3 style="color:var(--yellow)">🤖 agent 的誠實回答</h3>
-        <ul>
-          <li>「機率不高」——agent 在簡報裡幾乎隱形</li>
-          <li>火力放在觀眾無感的 Linux 層</li>
-          <li>缺『人機分工』的故事</li>
-          <li>然後一起改出了你現在看到的版本</li>
-        </ul>
-      </div>
-    </div>
-    <p style="margin-top:26px;font-size:17px" class="warn-c">agent 不只寫 code，還能當 reviewer 與教練 —— 前提：問題是人問的，判斷是人做的 ✓</p>
   </section>
 
   <!-- ============ S8 CLOSING ============ -->
@@ -602,7 +569,7 @@ const daily = [
 const maxN = Math.max(...daily.map(d=>d[1]));
 const dailyEl = document.getElementById('daily');
 dailyEl.innerHTML = daily.map(d => {
-  const h = d[1] === 0 ? 4 : Math.max(6, (d[1]/maxN)*170);
+  const h = d[1] === 0 ? 4 : Math.max(6, (d[1]/maxN)*200);
   const hot = d[1] >= 12;
   const cls = d[1]===0 ? "b gap" : hot ? "b hot" : "b";
   return `<div class="${cls}">
@@ -691,6 +658,16 @@ function toggleFull(){
   if(!document.fullscreenElement){ document.documentElement.requestFullscreen?.(); }
   else { document.exitFullscreen?.(); }
 }
+/* ---------- auto-hide UI: show on activity, hide after idle ---------- */
+let uiTimer = null;
+function wakeUI(){
+  document.body.classList.add('ui-show');
+  clearTimeout(uiTimer);
+  uiTimer = setTimeout(()=>document.body.classList.remove('ui-show'), 2500);
+}
+['mousemove','touchstart','click'].forEach(ev=>document.addEventListener(ev, wakeUI, {passive:true}));
+document.addEventListener('keydown', wakeUI);
+wakeUI();
 
 go(0);
 </script>
