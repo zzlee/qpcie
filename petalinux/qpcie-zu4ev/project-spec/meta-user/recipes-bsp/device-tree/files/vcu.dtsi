@@ -1,0 +1,15 @@
+&amba_pl {
+	// overclocking
+	vcu_refclk: vcu_refclk {
+		#clock-cells = <0>;
+		clock-frequency = <33333333>;
+		// clock-frequency = <38000000>;
+		// clock-frequency = <50000000>;
+		compatible = "fixed-clock";
+	};
+};
+
+&vcu_0 {
+	clock-names = "pll_ref" , "aclk" , "vcu_core_enc" , "vcu_mcu_enc" , "vcu_core_dec" , "vcu_mcu_dec";
+	clocks = <&vcu_refclk>, <&zynqmp_clk 71>, <&vcu_0 0>, <&vcu_0 1>, <&vcu_0 2>, <&vcu_0 3>;
+};

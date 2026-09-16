@@ -1,0 +1,25 @@
+#include "common.dtsi"
+
+////////////////////////////////////////////////////////////////////////////
+// Recovery's only NIC (gem0) is physically Production eth1.
+// Map it to alias ethernet1 so U-Boot fdt_fixup_ethernet injects
+// eth1addr from the shared U-Boot environment, keeping the MAC identical
+// to Production eth1. (ethernet0 would inject ethaddr, which belongs to
+// the Production Dante Ultra port.)
+
+/ {
+	aliases {
+		/delete-property/ ethernet0;
+		ethernet1 = &gem0;
+	};
+};
+
+////////////////////////////////////////////////////////////////////////////
+// system peripherals
+
+////////////////////////////////////////////////////////////////////////////
+// qcap modules
+
+#include "vcu.dtsi"
+
+#include "sc6f0-mcu.dtsi"

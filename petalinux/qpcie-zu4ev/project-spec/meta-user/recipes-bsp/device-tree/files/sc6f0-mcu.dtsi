@@ -1,0 +1,7 @@
+// SC-6F0 MCU on I2C1 (ff030000), slave address 0x32
+&i2c1 {
+	sc6f0@32 {
+		compatible = "sc,sc6f0-mcu";
+		reg = <0x32>;
+	};
+};

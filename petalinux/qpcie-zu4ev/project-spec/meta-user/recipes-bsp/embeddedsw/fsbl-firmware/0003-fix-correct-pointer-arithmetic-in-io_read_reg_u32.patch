@@ -1,0 +1,36 @@
+From db00726455c213eb01102f5b9a5960edee7d35d8 Mon Sep 17 00:00:00 2001
+From: Build <build@example.com>
+Date: Mon, 13 Apr 2026 13:21:19 +0800
+Subject: [PATCH 3/3] fix: correct pointer arithmetic in io_read_reg_u32
+
+Adjusted the pointer cast in io_read_reg_u32 to ensure the offset is added to the base address before casting to a u32 pointer, preventing incorrect address calculation. Also updated the version string in XFsbl_HookAfterBSDownload.
+---
+ lib/sw_apps/zynqmp_fsbl/src/xfsbl_hooks.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/lib/sw_apps/zynqmp_fsbl/src/xfsbl_hooks.c b/lib/sw_apps/zynqmp_fsbl/src/xfsbl_hooks.c
+index cd96e180f5..9f6c621798 100644
+--- a/lib/sw_apps/zynqmp_fsbl/src/xfsbl_hooks.c
++++ b/lib/sw_apps/zynqmp_fsbl/src/xfsbl_hooks.c
+@@ -53,7 +53,7 @@
+ /************************** Variable Definitions *****************************/
+ 
+ static u32 io_read_reg_u32(uintptr_t reg, int off) {
+-	return *((u32*)reg + off);
++	return *((u32*)(reg + off));
+ }
+ 
+ static s32 si5341_write(XIicPs *IicInstance, u16 register_address, u8 data)
+@@ -137,8 +137,8 @@ u32 XFsbl_HookAfterBSDownload(void )
+ 	u32 UStatus;
+ 	int i;
+ 
++	XFsbl_Printf(DEBUG_PRINT_ALWAYS, "SC6F0 2026/04/13.2\n\r");
+ 	ShowZzLabEnvVer();
+-	XFsbl_Printf(DEBUG_PRINT_ALWAYS, "SC6F0 2026/04/10\n\r");
+ 
+ 	I2c1CfgPtr = XIicPs_LookupConfig(XPAR_XIICPS_0_DEVICE_ID);
+ 	if (I2c1CfgPtr == NULL) {
+-- 
+2.34.1
+

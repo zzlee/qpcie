@@ -1,0 +1,24 @@
+From d98bfce1b14efebe1be72dab71ddb0d8887e0cc7 Mon Sep 17 00:00:00 2001
+From: Bill <bill@yuan.com.tw>
+Date: Tue, 9 Dec 2025 13:21:02 +0800
+Subject: [PATCH] Fixed vproc issues
+
+---
+ XilinxProcessorIPLib/drivers/vprocss/data/vprocss.tcl | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/XilinxProcessorIPLib/drivers/vprocss/data/vprocss.tcl b/XilinxProcessorIPLib/drivers/vprocss/data/vprocss.tcl
+index 5538157ccd..78867871d8 100644
+--- a/XilinxProcessorIPLib/drivers/vprocss/data/vprocss.tcl
++++ b/XilinxProcessorIPLib/drivers/vprocss/data/vprocss.tcl
+@@ -242,6 +242,10 @@ proc hier_ip_define_config_file {drv_handle file_name drv_string args} {
+         puts $config_file "*   - Excluded sub-core base address is set to 0"
+         puts $config_file "*/\n"
+ 
++        if {! [info exists ss_ip_list]} {
++            dict lappend ss_ip_list "_" "_"
++        }
++
+         foreach sub_core [lsort [array names sub_core_inst]] {
+             if {[IsSubcoreInSubsystem $sub_core $periph_g $ss_ip_list]} {
+                 set max_instances $sub_core_inst($sub_core)
