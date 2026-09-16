@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>QPCIe 開發歷程回顧 — 簡報入口</title>
+<style>
+  :root{--bg:#0b0f14;--panel:#131a24;--line:#22303f;--fg:#e8eef5;--muted:#8fa1b3;--blue:#4cc2ff;--green:#7ee2b8}
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:var(--bg);color:var(--fg);font-family:"Noto Sans TC","Microsoft JhengHei","PingFang TC",sans-serif;line-height:1.7;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:40px 20px}
+  .wrap{max-width:640px;width:100%;text-align:center}
+  .kicker{color:var(--green);letter-spacing:6px;font-size:13px;margin-bottom:18px}
+  h1{font-size:34px;margin-bottom:12px}
+  .lead{color:var(--muted);font-size:15px;margin-bottom:36px}
+  a.card{display:block;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:26px 28px;margin-bottom:16px;text-decoration:none;color:var(--fg);transition:border-color .2s,transform .2s;text-align:left}
+  a.card:hover{border-color:var(--blue);transform:translateY(-2px)}
+  a.card h2{font-size:19px;margin-bottom:6px}
+  a.card h2 .tag{font-size:11px;font-weight:600;color:var(--green);border:1px solid var(--green);border-radius:999px;padding:2px 10px;margin-left:8px;vertical-align:2px}
+  a.card p{color:var(--muted);font-size:14px}
+  .foot{margin-top:30px;color:var(--muted);font-size:12px}
+  .foot a{color:var(--blue)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="kicker">QPCIE · PROJECT HISTORY</div>
+  <h1>QPCIe 開發歷程回顧</h1>
+  <p class="lead">Artix-7 A50T · 2026-08-11 ~ 09-09 · 30 天 / 209 commits</p>
+  <a class="card" href="presentation/qpcie-history-deck.html">
+    <h2>▶ 投影片版<span class="tag">簡報用</span></h2>
+    <p>11 頁 PowerPoint 風格：方向鍵切頁、每頁講稿（N 鍵）、人機協作迴圈、辦案實錄、幕後花絮</p>
+  </a>
+  <a class="card" href="presentation/qpcie-history-30d.html">
+    <h2>▶ 長頁回顧版<span class="tag">閱讀用</span></h2>
+    <p>單頁捲動：真實每日 commit 圖、里程碑時間軸、驗證矩陣、Phase 2 路標</p>
+  </a>
+  <div class="foot">原始碼：<a href="https://github.com/zzlee/qpcie">github.com/zzlee/qpcie</a></div>
+</div>
+</body>
+</html>
