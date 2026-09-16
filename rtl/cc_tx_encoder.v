@@ -91,19 +91,19 @@ module cc_tx_encoder #(
                     if (req_bar_sel_q ? bar1_axil_rvalid : bar0_axil_rvalid) begin
                         rdata_captured <= req_bar_sel_q ? bar1_axil_rdata : bar0_axil_rdata;
 
-                        // Build 256-bit CC TLP Frame
+                        // Build CC TLP Frame per PG213 Table 52 (UltraScale+)
                         m_axis_cc_tdata         <= {DATA_WIDTH{1'b0}};
-                        m_axis_cc_tdata[6:0]    <= req_lower_addr_q;  // Lower Address
-                        m_axis_cc_tdata[11:9]   <= 3'b000;            // Error Code (Successful Completion)
+                        m_axis_cc_tdata[6:0]    <= req_lower_addr_q;  // Lower Address [6:0]
+                        m_axis_cc_tdata[11:9]   <= 3'b000;            // Error Code (000: Successful Completion)
                         m_axis_cc_tdata[28:16]  <= 13'd4;             // Byte Count (4 Bytes = 1 DW)
                         m_axis_cc_tdata[42:32]  <= 11'd1;             // Dword Count (1 DW)
-                        m_axis_cc_tdata[46:44]  <= 3'b000;            // Completion Status: Successful
-                        m_axis_cc_tdata[58:51]  <= req_tag_q;         // Tag
-                        m_axis_cc_tdata[79:64]  <= req_id_q;          // Requester ID
-                        // Zero requests dynamic completer BDF insertion by the
-                        // 7-series bridge; UltraScale targets may replace this.
-                        m_axis_cc_tdata[95:80]  <= 16'h0000;
-                        m_axis_cc_tdata[127:96] <= req_bar_sel_q ? bar1_axil_rdata : bar0_axil_rdata; // CplD Data
+                        m_axis_cc_tdata[45:43]  <= 3'b000;            // Completion Status: Successful (PG213 Table 52)
+                        m_axis_cc_tdata[63:48]  <= req_id_q;          // Requester ID (PG213 Table 52: [63:48])
+                        m_axis_cc_tdata[71:64]  <= req_tag_q;         // Tag (PG213 Table 52: [71:64])
+                        m_axis_cc_tdata[79:72]  <= 8'd0;              // Target Function / Completer ID
+                        m_axis_cc_tdata[80]     <= 1'b0;              // Completer ID Enable (0 = Core automatically inserts BDF)
+                        m_axis_cc_tdata[95:81]  <= 15'd0;             // TC, Attr, Reserved
+                        m_axis_cc_tdata[127:96] <= req_bar_sel_q ? bar1_axil_rdata : bar0_axil_rdata; // CplD Data DW0
 
                         m_axis_cc_tkeep         <= 8'h0F;             // First 4 DWs valid
                         m_axis_cc_tlast         <= 1'b1;

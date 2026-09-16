@@ -49,14 +49,27 @@ module rq_tx_encoder #(
         (state == SEND_MWR_DATA && m_axis_rq_tvalid && m_axis_rq_tready &&
          c2h_dw_remaining != 0);
 
+    wire [3:0] desc_last_be = (desc_req_dw_len > 11'd1) ? 4'hF : 4'h0;
+    wire [3:0] sg_last_be   = (sg_req_dw_len > 11'd1)   ? 4'hF : 4'h0;
+    wire [3:0] h2c_last_be  = (h2c_req_dw_len > 11'd1)  ? 4'hF : 4'h0;
+    wire [3:0] c2h_last_be  = (c2h_req_dw_len > 11'd1)  ? 4'hF : 4'h0;
+
     function [KEEP_WIDTH-1:0] payload_keep;
         input [10:0] valid_dw;
-        integer byte_idx;
+        integer idx;
         begin
             payload_keep = {KEEP_WIDTH{1'b0}};
-            for (byte_idx = 0; byte_idx < KEEP_WIDTH; byte_idx = byte_idx + 1)
-                if (byte_idx < (valid_dw * 4))
-                    payload_keep[byte_idx] = 1'b1;
+            for (idx = 0; idx < KEEP_WIDTH; idx = idx + 1) begin
+                if (KEEP_WIDTH == DATA_WIDTH / 8) begin
+                    // Byte-based keep (7-Series): 1 bit per byte
+                    if (idx < (valid_dw * 4))
+                        payload_keep[idx] = 1'b1;
+                end else begin
+                    // Dword-based keep (UltraScale+ PG213): 1 bit per Dword
+                    if (idx < valid_dw)
+                        payload_keep[idx] = 1'b1;
+                end
+            end
         end
     endfunction
 
@@ -92,8 +105,8 @@ module rq_tx_encoder #(
                         m_axis_rq_tdata[78:75] <= 4'b0010;
                         m_axis_rq_tdata[95:80] <= REQUESTER_ID;
                         m_axis_rq_tdata[127:120] <= irq_req_code;
-                        m_axis_rq_tuser <= 62'd1;
-                        m_axis_rq_tkeep <= {{(KEEP_WIDTH-4){1'b0}}, 4'hF};
+                        m_axis_rq_tuser <= {54'd0, 4'h0, 4'hF}; // first_be = 4'hF, last_be = 4'h0
+                        m_axis_rq_tkeep <= {KEEP_WIDTH{1'b1}};
                         m_axis_rq_tlast <= 1'b1;
                         m_axis_rq_tvalid <= 1'b1;
                         state <= SEND_IRQ;
@@ -103,8 +116,8 @@ module rq_tx_encoder #(
                         m_axis_rq_tdata[78:75] <= 4'b0000;
                         m_axis_rq_tdata[95:80] <= REQUESTER_ID;
                         m_axis_rq_tdata[103:96] <= desc_req_tag;
-                        m_axis_rq_tuser <= 62'd1;
-                        m_axis_rq_tkeep <= {{(KEEP_WIDTH-4){1'b0}}, 4'hF};
+                        m_axis_rq_tuser <= {54'd0, desc_last_be, 4'hF}; // PG213 Table 55: first_be, last_be
+                        m_axis_rq_tkeep <= {KEEP_WIDTH{1'b1}};
                         m_axis_rq_tlast <= 1'b1;
                         m_axis_rq_tvalid <= 1'b1;
                         state <= SEND_DESC;
@@ -114,8 +127,8 @@ module rq_tx_encoder #(
                         m_axis_rq_tdata[78:75] <= 4'b0000;
                         m_axis_rq_tdata[95:80] <= REQUESTER_ID;
                         m_axis_rq_tdata[103:96] <= sg_req_tag;
-                        m_axis_rq_tuser <= 62'd1;
-                        m_axis_rq_tkeep <= {{(KEEP_WIDTH-4){1'b0}}, 4'hF};
+                        m_axis_rq_tuser <= {54'd0, sg_last_be, 4'hF};
+                        m_axis_rq_tkeep <= {KEEP_WIDTH{1'b1}};
                         m_axis_rq_tlast <= 1'b1;
                         m_axis_rq_tvalid <= 1'b1;
                         state <= SEND_SG;
@@ -125,8 +138,8 @@ module rq_tx_encoder #(
                         m_axis_rq_tdata[78:75] <= 4'b0000;
                         m_axis_rq_tdata[95:80] <= REQUESTER_ID;
                         m_axis_rq_tdata[103:96] <= h2c_req_tag;
-                        m_axis_rq_tuser <= 62'd1;
-                        m_axis_rq_tkeep <= {{(KEEP_WIDTH-4){1'b0}}, 4'hF};
+                        m_axis_rq_tuser <= {54'd0, h2c_last_be, 4'hF};
+                        m_axis_rq_tkeep <= {KEEP_WIDTH{1'b1}};
                         m_axis_rq_tlast <= 1'b1;
                         m_axis_rq_tvalid <= 1'b1;
                         state <= SEND_H2C;
@@ -137,7 +150,7 @@ module rq_tx_encoder #(
                         m_axis_rq_tdata[78:75] <= 4'b0001;
                         m_axis_rq_tdata[95:80] <= REQUESTER_ID;
                         m_axis_rq_tdata[103:96] <= 8'd0;
-                        m_axis_rq_tuser <= 62'd1;
+                        m_axis_rq_tuser <= {54'd0, c2h_last_be, 4'hF};
                         m_axis_rq_tkeep <= {KEEP_WIDTH{1'b1}};
                         m_axis_rq_tlast <= 1'b0;
                         m_axis_rq_tvalid <= 1'b1;

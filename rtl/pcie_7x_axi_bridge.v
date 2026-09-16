@@ -432,8 +432,8 @@ module pcie_7x_axi_bridge #(
     // CC Header Extraction (Matches UltraScale CC Encoder Format from cc_tx_encoder.v)
     wire [6:0]  cc_lower_addr  = s_axis_cc_tdata[6:0];
     wire [9:0]  cc_dword_len   = s_axis_cc_tdata[41:32];
-    wire [7:0]  cc_tag         = s_axis_cc_tdata[58:51];
-    wire [15:0] cc_req_id      = s_axis_cc_tdata[79:64];
+    wire [7:0]  cc_tag         = s_axis_cc_tdata[71:64];
+    wire [15:0] cc_req_id      = s_axis_cc_tdata[63:48];
     wire [15:0] cc_compl_id    = (s_axis_cc_tdata[95:80] != 16'd0) ? s_axis_cc_tdata[95:80] : compl_id;
     wire [31:0] cc_reg_rdata   = s_axis_cc_tdata[127:96];
 

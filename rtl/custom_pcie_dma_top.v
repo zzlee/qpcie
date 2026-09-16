@@ -445,7 +445,8 @@ module custom_pcie_dma_top #(
 
     // 1. CQ RX Decoder
     cq_rx_decoder #(
-        .DATA_WIDTH(PCIE_DATA_WIDTH)
+        .DATA_WIDTH(PCIE_DATA_WIDTH),
+        .KEEP_WIDTH(PCIE_KEEP_WIDTH)
     ) u_cq_rx_decoder (
         .clk(clk),
         .rst_n(rst_n),
@@ -500,7 +501,8 @@ module custom_pcie_dma_top #(
 
     // 2. CC TX Encoder
     cc_tx_encoder #(
-        .DATA_WIDTH(PCIE_DATA_WIDTH)
+        .DATA_WIDTH(PCIE_DATA_WIDTH),
+        .KEEP_WIDTH(PCIE_KEEP_WIDTH)
     ) u_cc_tx_encoder (
         .clk(clk),
         .rst_n(rst_n),
@@ -775,7 +777,8 @@ module custom_pcie_dma_top #(
 
     // 5. RQ TX Encoder
     rq_tx_encoder #(
-        .DATA_WIDTH(PCIE_DATA_WIDTH)
+        .DATA_WIDTH(PCIE_DATA_WIDTH),
+        .KEEP_WIDTH(PCIE_KEEP_WIDTH)
     ) u_rq_tx_encoder (
         .clk(clk),
         .rst_n(dma_rst_n),
@@ -815,7 +818,8 @@ module custom_pcie_dma_top #(
 
     // 6. RC RX Decoder
     rc_rx_decoder #(
-        .DATA_WIDTH(PCIE_DATA_WIDTH)
+        .DATA_WIDTH(PCIE_DATA_WIDTH),
+        .KEEP_WIDTH(PCIE_KEEP_WIDTH)
     ) u_rc_rx_decoder (
         .clk(clk),
         .rst_n(dma_rst_n),
