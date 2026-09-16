@@ -1,9 +1,8 @@
 # XCZU4EV PL PCIe Video Plan
 
-> Status: planning and architecture review only. No ZU4EV application RTL or
-> project build scripts are to be implemented until the hardware pinout, PCIe
-> IP configuration, and a vendor-example Tandem feasibility test pass the
-> decision gates in this document.
+> Status: Phase 0 completed (Hardware evidence verified from YUAN SC7F0 N1 HDMI2 V11 schematic).
+> Phase 1 in progress: generating Vivado 2023.2 official PG213 PIO example design
+> for electrical link bring-up and Tandem feasibility baseline.
 
 ## 1. Objective
 
@@ -31,54 +30,53 @@ Evidence labels used below:
 - **Decision gate**: must be confirmed by schematic, generated Vivado artifacts,
   calculation, simulation, or hardware evidence before implementation proceeds.
 
-## 2. Verified Device Resources
+## 2. Verified Device Resources & Hardware Pinout
 
-PG213 Tables 6, 44, and 127 list the following resources for
-`XCZU4EV-FBVB900`:
+From AMD PG213 Tables 6, 44, and 127 and verified board schematic
+`SC7F0 N1 HDMI2 V11.pdf` (YUAN High-Tech, Jan 23, 2024):
 
-| Resource | Verified value |
-|---|---|
-| Available PCIe hard blocks | `PCIE40E4_X0Y0`, `PCIE40E4_X0Y1` |
-| Tandem/Field Update supported location | `PCIE40E4_X0Y1` |
-| Gen3 x4 GT choice | `GTH_Quad_223` |
-| Maximum target for this project | Gen3 x4 |
+| Resource | Verified value | Evidence |
+|---|---|---|
+| Target FPGA | `xczu4ev-fbvb900-2-e` | Schematic U10, production part |
+| Available PCIe hard blocks | `PCIE40E4_X0Y0`, `PCIE40E4_X0Y1` | PG213 Table 6 |
+| Tandem/Field Update location | `PCIE40E4_X0Y1` | PG213 Table 127 |
+| GT Quad | `GTH_Quad_223` (Bank 223) | Schematic Sheet 11 (U10-7) |
+| Link Target | Gen3 x4 | PCIe Slot connector (Sheet 36) |
+| RefClk Pin | `MGTREFCLK0P_223` (Pin R8) / `MGTREFCLK0N_223` (Pin R7) | Schematic Sheet 11 (U10-7) |
+| RefClk Source | 100 MHz HCSL via SI53102-A3-GMR (U7) | Schematic Sheet 36 (slot clock) |
+| Slot Clock Config | Synchronous slot clock mode enabled | PG213 requirement |
+| PERST# Pin | Pin `K11`, Bank 46 (`IO_L1P_AD11P_46`, 3.3V HD) | Schematic Sheet 11 (SR59 33Ω) |
+| Boot Storage | eMMC (Toshiba `THGBMNG5D1LBAIT`), no SPI flash | Schematic Sheet 10 & 24 |
+| Boot Mode | `0110` (eMMC 1.8V on PS SDIO0 MIO13-22) | Schematic Sheet 10 |
 
-Therefore the planning default is:
+### Physical Lane Mapping & Lane Reversal (Verified)
 
-```text
-PCIe block : PCIE40E4_X0Y1
-GT quad    : GTH_Quad_223
-Link       : Gen3 x4
-```
+Schematic Sheet 11 & Sheet 36 reveal that physical lanes are wired in **reversed** order:
 
-This selection is provisional until the board schematic confirms that the
-four PCIe lanes and reference clock are routed to Bank/Quad 223. If the board
-routes an incompatible GT quad, the PCB routing and Tandem-capable block
-selection become a blocking issue.
+| PCIe Slot Lane | FPGA GT Signal | Ball Pin (P / N) | IP Core Setting |
+|---|---|---|---|
+| **Lane 0 TX** | `MGTHTXP3_223` / `N3` | `R4` / `R3` | GT Channel 3 |
+| **Lane 0 RX** | `MGTHRXP3_223` / `N3` | `P2` / `P1` | GT Channel 3 |
+| **Lane 1 TX** | `MGTHTXP2_223` / `N2` | `T6` / `T5` | GT Channel 2 |
+| **Lane 1 RX** | `MGTHRXP2_223` / `N2` | `T2` / `T1` | GT Channel 2 |
+| **Lane 2 TX** | `MGTHTXP1_223` / `N1` | `V6` / `V5` | GT Channel 1 |
+| **Lane 2 RX** | `MGTHRXP1_223` / `N1` | `U4` / `U3` | GT Channel 1 |
+| **Lane 3 TX** | `MGTHTXP0_223` / `N0` | `W4` / `W3` | GT Channel 0 |
+| **Lane 3 RX** | `MGTHRXP0_223` / `N0` | `W1` / `V1` | GT Channel 0 |
 
-### Signals that must be confirmed from the board schematic
+> **IMPORTANT**: `pcie4_ultrascale_plus` must have **Lane Reversal enabled**
+> (`c_lane_reversal = true` / GUI checkbox checked) to match this PCB layout.
 
-- PCIe RX/TX lane package pins and physical lane order.
-- Lane polarity swaps and whether lane reversal is required.
-- PCIe reference-clock package pins, electrical standard, and frequency.
-- Host-driven `PERST#` package pin and its I/O bank.
-- QSPI type, width, maximum reliable clock, boot-mode pins, and image capacity.
-- Whether the reset pin is in configuration Bank 65.
+### Boot Chain & Tandem Impact
 
-The local recovery reference project confirms the target part but does not
-contain a reusable PL PCIe XDC/pinout; its PS PCIe and QSPI settings therefore
-are not evidence for PL GT lanes, PL refclk, `PERST#`, or Tandem flash timing.
-Those items remain schematic/example-design decision gates.
+1. There is **no SPI/QSPI flash** on the SC7F0 board; the primary non-volatile boot
+   medium is eMMC attached to PS SDIO0.
+2. Therefore, classical FPGA Tandem PROM (direct PL SPI flash loading) cannot be used.
+3. The boot chain must follow:
+   - **Option 1 (PS-assisted autonomous boot)**: ZynqMP BootROM -> PMUFW -> FSBL -> PCAP loading PL bitstream from eMMC.
+   - **Option 2 (Tandem PCIe)**: PS/FSBL loads Stage 1 via PCAP, handsoff configuration to MCAP, and Host PCIe driver loads Stage 2 via MCAP.
 
-Do **not** assume that the PCIe reference clock is 250 MHz. A conventional PCIe
-add-in interface normally supplies a 100 MHz reference clock, while 250 MHz can
-be the generated PCIe `user_clk` for a 128-bit Gen3 x4 datapath. The final value
-must come from the board schematic and generated PG213 example design. For an
-add-in card using the slot clock, Phase 0 must also confirm PG213's synchronous
-clock/SSC requirement and enable the PCIe Slot Clock Configuration property.
-
-`PERST#` is an **input from the Root Port/host** for an Endpoint. The ZU4EV PMU
-must not be described as driving or deasserting the host's `PERST#` signal.
+`PERST#` is an **input from the Root Port/host** for an Endpoint, connected to Pin K11 (Bank 46).
 
 ## 3. Planned PL PCIe Architecture
 
@@ -439,16 +437,19 @@ assumptions.
 
 ### Phase 1 — Vendor PIO electrical and Tandem feasibility baseline
 
-- Generate rather than rewrite the `pcie4_ultrascale_plus` PIO example.
-- Verify Gen1 first, then Gen3 x4 under standard/JTAG configuration.
-- Verify VID/DID and configuration-space capabilities.
-- On production silicon, enable the proposed Tandem mode in the vendor example
-  and prove the actual ZynqMP boot-image/PCAP path.
-- Measure preliminary cold-boot timing through PCIe-ready/LTSSM start.
-
-PG213's integrated-block simulation model does not model Tandem operation, so
-this gate requires generated artifacts and hardware evidence rather than a
-Tandem testbench claim.
+- **Implementation Scripts**:
+  - `scripts/generate_zu4ev_example.tcl`: Generates official PG213 PIO example design.
+  - `constraints/sc7f0_zu4ev_pcie_pins.xdc`: Board pin constraints for SC7F0 N1 HDMI2 V11.
+  - `scripts/build_zu4ev_example.sh`: Runs batch synthesis, implementation, and bitgen.
+  - `scripts/program_sram_zu4ev.sh`: Direct JTAG SRAM bitstream loader.
+- **Build & Timing Verification Results (Vivado 2023.2)**:
+  - Route status: Fully routed, 0 DRC violations.
+  - Timing: **WNS = +0.997 ns, WHS = +0.011 ns, 0 Failing Endpoints**.
+  - Output Bitstream: `./build/zu4ev_example_proj/pcie4_zu4ev_ex/pcie4_zu4ev_ex.runs/impl_1/xilinx_pcie4_uscale_ep.bit` (7.5 MB).
+- **Hardware Validation Handoff**:
+  - Load bitstream via `./scripts/program_sram_zu4ev.sh`.
+  - Verify Gen3 x4 link training and enumeration (`lspci -d 12ab:e380 -vvv`).
+  - Next: on production silicon, evaluate ZynqMP FSBL/PCAP boot-image path.
 
 Exit criterion: repeatable Gen3 x4 link and correct enumeration after JTAG,
 plus a feasible autonomous vendor-PIO Tandem cold boot within the measured
@@ -567,22 +568,20 @@ Proceed with this order:
 5. Defer Tandem PCIe with Field Updates/DFX until there is a confirmed runtime
    update requirement.
 
-## 13. Open Implementation Blockers
+## 13. Open Implementation Blockers & Status
 
-These items do not prevent completion of this planning document, but they block
-implementation approval and any claim of hardware feasibility:
-
-1. Board schematic/package-pin evidence for lane mapping, `GTH_Quad_223`,
-   refclk, SSC, `PERST#`, QSPI wiring and boot-mode straps is not present in
-   this repository.
-2. The Vivado 2023.2 ZU4EV PG213 example design, generated XCI/XDC/Pblocks and
-   its Tandem DRC results have not yet been produced.
-3. The physical device has not been confirmed as production rather than ES
-   silicon.
-4. The ZynqMP BootROM/PMUFW/FSBL/PCAP/Bootgen path for the board's local flash
-   has not been demonstrated with a Tandem image.
+1. **[RESOLVED in Phase 0]** Board schematic/package-pin evidence for lane mapping,
+   `GTH_Quad_223`, refclk, SSC, `PERST#`, and boot-mode straps confirmed via
+   YUAN `SC7F0 N1 HDMI2 V11.pdf`. Board uses `GTH_Quad_223` with reversed physical
+   lanes, 100 MHz slot refclk via SI53102-A3, `PERST#` on Pin K11 (Bank 46), and
+   boots via eMMC (no SPI flash).
+2. **[IN PROGRESS in Phase 1]** The Vivado 2023.2 ZU4EV PG213 example design,
+   generated XCI/XDC/Pblocks and its electrical/Tandem baseline.
+3. The physical device has been confirmed as production (`XCZU4EV-2FBVB900E`) in schematic.
+4. The ZynqMP BootROM/PMUFW/FSBL/PCAP/Bootgen path for eMMC has not been demonstrated
+   with a Tandem image.
 5. Actual host power-good/PERST# timing, stage-1 bit count, PCAP throughput,
-   post-load startup delay and LTSSM-start timing are not measured.
+   post-load startup delay and LTSSM-start timing are to be measured.
 
 If any of these contradict the planning default, stop and revise the block/GT,
 boot mode, or Tandem selection before application RTL work begins.
