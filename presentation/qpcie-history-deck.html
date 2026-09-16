@@ -281,6 +281,24 @@
     </div>
   </section>
 
+  <!-- ============ S6b CASE FILE 2 ============ -->
+  <section class="slide" data-note="
+    <small>⌛ 約 45 秒 · 第二個案例，跟前一頁對比</small>
+    第二個案例跟剛才那個形成對比。場景是頻寬優化：實測 C2H 只有 801 MiB/s，離 Gen2 x4 的目標差一半。問題是損失到底吃在哪——FPGA idle、request 不足、CDC、TLP gap，還是 PCIe backpressure？
+    ILA 在這裡最誘人，對吧？直接看波形。但我們的結論是反直覺的：ILA 不該是第一個除錯工具。理由很務實：ILA 吃 BRAM、抓的 window 短，跑不完 4K60 六百幀的完整統計。
+    所以策略是兩階段：先用 qpcie_perfmon 加 BAR counter 加 driver sysfs，把頻寬損失做量化歸因；只有當 counter 指向 tready stall 這種需要 cycle 級對齊的問題，才上 ILA——連探針清單都開好了。
+    結局：ILA 從來沒被實例化。4K60 餘裕從 0.22% 拉到 12.6%，靠的是 perfmon 指引下的 RTL 修正。這是紀律的勝利：先量測，再定位，再改 RTL；不要拿 ILA 猜問題。"
+  >
+    <div class="kicker">CASE FILE ② · BANDWIDTH</div>
+    <h1 style="font-size:34px">辦案實錄：沒派上用場的 ILA</h1>
+    <div style="margin-top:24px">
+      <div class="pit"><div class="ic">📉</div><div><h4>症狀：C2H 僅 801 MiB/s</h4><p>離 Gen2 x4 目標差一半——損失吃在 idle、request 不足、CDC、TLP gap，還是 backpressure？</p></div></div>
+      <div class="pit"><div class="ic">🚫</div><div><h4>決策：ILA 不是第一個工具</h4><p>ILA 吃 BRAM、window 短，跑不完 4K60 / 600 幀統計。先 <code>qpcie_perfmon</code> + BAR + sysfs 做量化歸因。</p></div></div>
+      <div class="pit"><div class="ic">📋</div><div><h4>備案：探針清單先開好</h4><p>僅當 counter 指向 <code>tready stall</code> 才上 ILA：<code>s_axis_rq_tvalid/ready</code>、<code>fifo_level</code>、<code>tx_state</code>、trigger 條件就緒。</p></div></div>
+      <div class="pit"><div class="ic">🏆</div><div><h4>結局：ILA 從未實例化</h4><p>4K60 餘裕 0.22% → <b class="ok-c">12.6%</b>，靠 perfmon 指引的 RTL 修正。最好的除錯工具，是沒被用上的那個。</p></div></div>
+    </div>
+  </section>
+
   <!-- ============ S5 PITFALLS ============ -->
   <section class="slide" data-note="
     <small>⌛ 約 50 秒 · 講坑</small>
@@ -323,6 +341,152 @@
         <tr><td>USERPTR / DMABUF / GPU P2P</td><td class="st todo">未列入實機範圍</td><td>Phase2 roadmap</td></tr>
       </table>
     </div>
+  </section>
+
+  <!-- ============ ARCH ============ -->
+  <section class="slide" data-note="
+    <small>⌛ 約 50 秒 · 架構總覽，用硬體人熟悉的語言</small>
+    接下來三頁是給在座硬體韌體工程師的：最終產物的架構、register map、driver 模型。
+    先看架構。如果把 BAR0 想成你們 MCU 上的 peripheral register block，整張卡就很好懂：左邊是 Host，PCIe Gen2 x4 進來，先到 Xilinx 的 pcie_7x 硬核，再過我們自研的 bridge——CQ/CC/RQ/RC 四個編解碼加 tag manager，這是全卡最關鍵的一塊。
+    中間是 DMA top：H2C 跟 C2H 雙引擎、SG descriptor fetch。右邊兩條路：視訊路是 TPG 產生畫面，過 marker overlay，進 NV12 引擎轉成 NV12M，再跨 clock domain 進 C2H 上傳；音訊路是 pattern gen 進 audio engine。完成就發 MSI 中斷。
+    兩個 clock domain 要特別記：PCIe 側 125MHz，video 側 150MHz，中間的 video_req_cdc 就是之前 timeout 案的主角。BAR0 放 DMA 暫存器，BAR1 放 user IP、EDID、TPG 控制。"
+  >
+    <div class="kicker">ARCHITECTURE</div>
+    <h1 style="font-size:34px">最終產物架構</h1>
+    <svg viewBox="0 0 920 512" style="width:100%;height:auto;max-height:58vh;margin-top:14px" font-family="Noto Sans TC,Microsoft JhengHei,PingFang TC,sans-serif" role="img" aria-label="QPCIe 最終產物 block diagram">
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#4cc2ff"/>
+        </marker>
+        <marker id="arrY" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#ffd479"/>
+        </marker>
+      </defs>
+      <!-- ===== Host ===== -->
+      <rect x="260" y="6" width="400" height="50" rx="10" fill="#131a24" stroke="#7ee2b8" stroke-width="1.5"/>
+      <text x="460" y="28" text-anchor="middle" fill="#e8eef5" font-size="15" font-weight="700">Host · PCIe Gen2 x4</text>
+      <text x="460" y="47" text-anchor="middle" fill="#8fa1b3" font-size="12">0x12AB : 0xE380</text>
+      <line x1="460" y1="56" x2="460" y2="72" stroke="#4cc2ff" stroke-width="2" marker-end="url(#arr)"/>
+      <!-- ===== 125MHz domain ===== -->
+      <rect x="70" y="76" width="780" height="334" rx="12" fill="none" stroke="#4cc2ff" stroke-width="1.2" stroke-dasharray="7 5" opacity="0.7"/>
+      <text x="82" y="94" fill="#4cc2ff" font-size="12">125 MHz PCIe domain</text>
+      <!-- ===== PCIe IP ===== -->
+      <rect x="310" y="100" width="300" height="44" rx="8" fill="#131a24" stroke="#4cc2ff" stroke-width="1.5"/>
+      <text x="460" y="127" text-anchor="middle" fill="#e8eef5" font-size="14">pcie_7x_0 硬核</text>
+      <line x1="460" y1="144" x2="460" y2="156" stroke="#4cc2ff" stroke-width="2" marker-end="url(#arr)"/>
+      <!-- ===== Bridge ===== -->
+      <rect x="100" y="158" width="720" height="128" rx="10" fill="#0f1620" stroke="#4cc2ff" stroke-width="1.2"/>
+      <text x="460" y="177" text-anchor="middle" fill="#4cc2ff" font-size="14" font-weight="700">自研 PCIe Bridge</text>
+      <rect x="120" y="186" width="160" height="42" rx="6" fill="#131a24" stroke="#2c3b4d" stroke-width="1.2"/>
+      <text x="200" y="212" text-anchor="middle" fill="#e8eef5" font-size="13">CQ RX 解碼</text>
+      <rect x="292" y="186" width="160" height="42" rx="6" fill="#131a24" stroke="#2c3b4d" stroke-width="1.2"/>
+      <text x="372" y="212" text-anchor="middle" fill="#e8eef5" font-size="13">CC TX 編碼</text>
+      <rect x="464" y="186" width="160" height="42" rx="6" fill="#131a24" stroke="#2c3b4d" stroke-width="1.2"/>
+      <text x="544" y="212" text-anchor="middle" fill="#e8eef5" font-size="13">RQ TX 編碼</text>
+      <rect x="636" y="186" width="160" height="42" rx="6" fill="#131a24" stroke="#2c3b4d" stroke-width="1.2"/>
+      <text x="716" y="212" text-anchor="middle" fill="#e8eef5" font-size="13">RC RX 解碼</text>
+      <rect x="330" y="234" width="260" height="38" rx="6" fill="#131a24" stroke="#2c3b4d" stroke-width="1.2"/>
+      <text x="460" y="258" text-anchor="middle" fill="#e8eef5" font-size="13">tag manager</text>
+      <!-- ===== BAR pills ===== -->
+      <rect x="130" y="292" width="320" height="32" rx="16" fill="#131a24" stroke="#2c3b4d" stroke-width="1.2"/>
+      <text x="290" y="313" text-anchor="middle" fill="#e8eef5" font-size="13">BAR0 · DMA 暫存器</text>
+      <rect x="470" y="292" width="320" height="32" rx="16" fill="#131a24" stroke="#2c3b4d" stroke-width="1.2"/>
+      <text x="630" y="313" text-anchor="middle" fill="#e8eef5" font-size="13">BAR1 · user IP / EDID / TPG</text>
+      <!-- ===== DMA top ===== -->
+      <rect x="100" y="330" width="720" height="76" rx="10" fill="#0f1620" stroke="#4cc2ff" stroke-width="1.2"/>
+      <text x="460" y="347" text-anchor="middle" fill="#4cc2ff" font-size="13" font-weight="700">custom_pcie_dma_top</text>
+      <rect x="120" y="354" width="205" height="40" rx="6" fill="#131a24" stroke="#2c3b4d" stroke-width="1.2"/>
+      <text x="222" y="379" text-anchor="middle" fill="#e8eef5" font-size="13">H2C 引擎</text>
+      <rect x="337" y="354" width="236" height="40" rx="6" fill="#131a24" stroke="#2c3b4d" stroke-width="1.2"/>
+      <text x="455" y="379" text-anchor="middle" fill="#e8eef5" font-size="13">SG descriptor fetch</text>
+      <rect x="585" y="354" width="215" height="40" rx="6" fill="#131a24" stroke="#2c3b4d" stroke-width="1.2"/>
+      <text x="692" y="379" text-anchor="middle" fill="#e8eef5" font-size="13">C2H 引擎</text>
+      <!-- ===== MSI (dashed, left side) ===== -->
+      <path d="M100,368 L58,368 L58,31 L260,31" fill="none" stroke="#ffd479" stroke-width="1.6" stroke-dasharray="6 4" marker-end="url(#arrY)"/>
+      <text x="44" y="200" text-anchor="middle" fill="#ffd479" font-size="13" transform="rotate(-90 44 200)">MSI 中斷</text>
+      <!-- ===== 150MHz domain ===== -->
+      <rect x="90" y="416" width="770" height="88" rx="12" fill="none" stroke="#7ee2b8" stroke-width="1.2" stroke-dasharray="7 5" opacity="0.8"/>
+      <text x="100" y="432" fill="#7ee2b8" font-size="12">150 MHz video domain</text>
+      <!-- ===== video lane ===== -->
+      <rect x="104" y="440" width="110" height="50" rx="6" fill="#131a24" stroke="#7ee2b8" stroke-width="1.2"/>
+      <text x="159" y="468" text-anchor="middle" fill="#e8eef5" font-size="13">v_tpg</text>
+      <rect x="222" y="440" width="130" height="50" rx="6" fill="#131a24" stroke="#7ee2b8" stroke-width="1.2"/>
+      <text x="287" y="468" text-anchor="middle" fill="#e8eef5" font-size="12">marker overlay</text>
+      <rect x="360" y="440" width="160" height="50" rx="6" fill="#131a24" stroke="#7ee2b8" stroke-width="1.6"/>
+      <text x="440" y="461" text-anchor="middle" fill="#e8eef5" font-size="13" font-weight="700">NV12 引擎</text>
+      <text x="440" y="479" text-anchor="middle" fill="#7ee2b8" font-size="12">@150 MHz</text>
+      <rect x="528" y="440" width="140" height="50" rx="6" fill="#131a24" stroke="#7ee2b8" stroke-width="1.2"/>
+      <text x="598" y="468" text-anchor="middle" fill="#e8eef5" font-size="12">video_req_cdc</text>
+      <!-- ===== audio lane ===== -->
+      <rect x="676" y="440" width="170" height="50" rx="6" fill="#131a24" stroke="#c792ea" stroke-width="1.2"/>
+      <text x="761" y="461" text-anchor="middle" fill="#e8eef5" font-size="13">audio engine</text>
+      <text x="761" y="479" text-anchor="middle" fill="#8fa1b3" font-size="12">pattern gen</text>
+      <!-- ===== lane arrows ===== -->
+      <line x1="214" y1="465" x2="220" y2="465" stroke="#4cc2ff" stroke-width="2" marker-end="url(#arr)"/>
+      <line x1="352" y1="465" x2="358" y2="465" stroke="#4cc2ff" stroke-width="2" marker-end="url(#arr)"/>
+      <line x1="520" y1="465" x2="526" y2="465" stroke="#4cc2ff" stroke-width="2" marker-end="url(#arr)"/>
+      <line x1="598" y1="440" x2="598" y2="408" stroke="#4cc2ff" stroke-width="2" marker-end="url(#arr)"/>
+      <line x1="761" y1="440" x2="761" y2="408" stroke="#4cc2ff" stroke-width="2" marker-end="url(#arr)"/>
+    </svg>
+    <p class="muted" style="font-size:13px;margin-top:8px">最終產物 block diagram（簡化版，完整定義見 <code>rtl/a50t_pcie_card_top.v</code>）· 黃虛線為 MSI 回報路徑</p>
+  </section>
+
+  <!-- ============ REGMAP ============ -->
+  <section class="slide" data-note="
+    <small>⌛ 約 45 秒 · register map，韌體人最關心的一頁</small>
+    這頁是 BAR0 的 register map，韌體同事可以直接抄走。
+    前半是標準 DMA 控制：0x00 控制、0x04 狀態，0x08 到 0x1C 是 H2C 跟 C2H 的 ring 位址與配置，0x20、0x24 是中斷控制跟狀態——注意 status 是 W1C，寫 1 清除。
+    0x28、0x2C 是完成計數器，除錯時第一個看的就是這兩個有沒有動。
+    0x30 起是身分證區：版本號、git hash、build 時間戳、硬體能力，driver probe 時會讀出來印在 dmesg，實機對版本就靠它。
+    後面是本專案特色的：0x68、0x6C 就是前面講的除錯擷取，0x74 pacer 控制、0x78 slice height，音訊四通道的位址放在 0x100 起。完整定義都在 axil_reg_space.v，不到四百行。"
+  >
+    <div class="kicker">REGISTER MAP · BAR0</div>
+    <h1 style="font-size:34px">Register Map（韌體可直接抄）</h1>
+    <div class="card" style="margin-top:20px;padding:0;overflow:hidden">
+      <table>
+        <tr><th>Offset</th><th>名稱</th><th>說明</th></tr>
+        <tr><td><code>0x00 / 0x04</code></td><td>DMA_CTRL / STATUS</td><td>引擎控制與狀態</td></tr>
+        <tr><td><code>0x08–0x1C</code></td><td>H2C / C2H ring</td><td>64-bit 位址 + tail ptr / size 配置</td></tr>
+        <tr><td><code>0x20 / 0x24</code></td><td>IRQ_CTRL / STATUS</td><td>STATUS 為 W1C（寫 1 清）</td></tr>
+        <tr><td><code>0x28 / 0x2C</code></td><td>COMPLETED_H2C / C2H</td><td>完成計數器，除錯先看它動不動</td></tr>
+        <tr><td><code>0x30–0x3C</code></td><td>VERSION / GIT_HASH / TIMESTAMP / CAPS</td><td>身分證區，probe 時印 dmesg</td></tr>
+        <tr><td><code>0x68 / 0x6C</code></td><td class="hl">DEBUG_LAST_WDATA / WADDR</td><td>寫入擷取（本案示波器）</td></tr>
+        <tr><td><code>0x74 / 0x78 / 0x7C</code></td><td>PACER / SLICE_H / FRAME_DROP</td><td>60fps pacer、slice、掉幀計數</td></tr>
+        <tr><td><code>0x100+</code></td><td>Audio CH0–CH3 addr</td><td>四聲道 DMA 位址</td></tr>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============ DRIVER MODEL ============ -->
+  <section class="slide" data-note="
+    <small>⌛ 約 45 秒 · driver 模型，data vs control 分離</small>
+    最後是 driver 模型，只有一支 ko：custom_pcie_av。probe 流程是標準 PCIe：認 VID/DID、map BAR、跑剛才講的 BAR0 write-readback 自檢（含 0x68 擷取值），然後註冊三個子系統。
+    重點是 data plane 跟 control plane 分離，這是給韌體朋友的關鍵觀念。data plane 走標準 Linux 多媒體框架：視訊是 V4L2 multi-plane NV12M 配 vb2 queue，支援 MMAP、USERPTR、DMABUF 三種拿 buffer 的方式；音訊是 ALSA AES3。應用程式看到的就是標準 /dev/video 跟聲卡，不需要知道底下是 FPGA。
+    control plane 走 sysfs：TPG 圖案、解析度、幀率、EDID、pacer 開關、版本、bandwidth 跟 latency 統計，全部是檔案節點，echo 就能改、cat 就能看。bring-up 時九成時間都在跟這兩個 plane 打交道：data plane 跑不動看 dmesg，行為怪看 sysfs。"
+  >
+    <div class="kicker">DRIVER MODEL · custom_pcie_av.ko</div>
+    <h1 style="font-size:34px">Driver 模型：data / control 分離</h1>
+    <div class="grid g2" style="margin-top:24px">
+      <div class="card">
+        <h3>📦 Data plane（標準框架）</h3>
+        <ul>
+          <li>視訊：V4L2 MPLANE <code>NV12M</code> + <code>vb2</code> queue</li>
+          <li>MMAP / USERPTR / DMABUF 三種 buffer 模式</li>
+          <li>音訊：ALSA AES3 → 標準聲卡節點</li>
+          <li>App 只見 <code>/dev/video*</code>，不知底下是 FPGA</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>🎛️ Control plane（sysfs）</h3>
+        <ul>
+          <li><code>tpg_pattern / resolution / fps</code></li>
+          <li><code>edid</code>、<code>pacer_enable</code>、<code>version</code></li>
+          <li><code>bandwidth / latency / frame_drop_count</code></li>
+          <li>echo 改、cat 看；bring-up 九成時間在這</li>
+        </ul>
+      </div>
+    </div>
+    <p class="muted" style="margin-top:24px;font-size:15px">probe：認 VID/DID → map BAR → BAR0 write-readback 自檢（含 0x68 擷取）→ 註冊 V4L2 + ALSA + sysfs</p>
   </section>
 
   <!-- ============ S7 NEXT ============ -->
