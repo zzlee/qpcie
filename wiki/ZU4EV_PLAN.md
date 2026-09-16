@@ -1,8 +1,7 @@
 # XCZU4EV PL PCIe Video Plan
 
 > Status: Phase 0 completed (Hardware evidence verified from YUAN SC7F0 N1 HDMI2 V11 schematic).
-> Phase 1 in progress: generating Vivado 2023.2 official PG213 PIO example design
-> for electrical link bring-up and Tandem feasibility baseline.
+> Phase 1 in progress: Standard PIO and Tandem PCIe two-stage bitstreams generated and timing closure verified. Ready for hardware link training & Tandem cold-boot evaluation.
 
 ## 1. Objective
 
@@ -438,16 +437,21 @@ assumptions.
 ### Phase 1 — Vendor PIO electrical and Tandem feasibility baseline
 
 - **Implementation Scripts**:
-  - `scripts/generate_zu4ev_example.tcl`: Generates official PG213 PIO example design.
+  - `scripts/generate_zu4ev_example.tcl`: Generates standard PG213 PIO example design.
   - `constraints/sc7f0_zu4ev_pcie_pins.xdc`: Board pin constraints for SC7F0 N1 HDMI2 V11.
-  - `scripts/build_zu4ev_example.sh`: Runs batch synthesis, implementation, and bitgen.
+  - `scripts/build_zu4ev_example.sh`: Batch synthesis, implementation, and standard bitgen.
   - `scripts/program_sram_zu4ev.sh`: Direct JTAG SRAM bitstream loader.
+  - `scripts/generate_zu4ev_tandem_example.tcl`: Generates Tandem PCIe example design with `mcap_enablement = Tandem_PCIe`.
+  - `scripts/build_zu4ev_tandem.sh` / `scripts/build_zu4ev_tandem.tcl`: Batch synthesis, implementation, and two-stage bitgen.
 - **Build & Timing Verification Results (Vivado 2023.2)**:
-  - Route status: Fully routed, 0 DRC violations.
-  - Timing: **WNS = +0.997 ns, WHS = +0.011 ns, 0 Failing Endpoints**.
-  - Output Bitstream: `./build/zu4ev_example_proj/pcie4_zu4ev_ex/pcie4_zu4ev_ex.runs/impl_1/xilinx_pcie4_uscale_ep.bit` (7.5 MB).
+  - Standard PIO: Fully routed, 0 DRC violations, **WNS = +0.997 ns, WHS = +0.011 ns**. Bitstream = 7.5 MB.
+  - **Tandem PCIe Two-Stage Build**:
+    - Route status: Fully routed, 0 DRC violations, 0 failing endpoints.
+    - Timing: **WNS = +0.662 ns, WHS = +0.011 ns, WPWS = 0.000 ns** (Timing constraints 100% met).
+    - **Stage 1 Bitstream**: `./build/zu4ev_tandem_proj/pcie4_tandem_ex/pcie4_tandem_ex.runs/impl_1/xilinx_pcie4_uscale_ep_tandem1.bit` (**1,087,756 bytes / 8,700,832 bits ~ 1.08 MB**).
+    - **Stage 2 Bitstream**: `./build/zu4ev_tandem_proj/pcie4_tandem_ex/pcie4_tandem_ex.runs/impl_1/xilinx_pcie4_uscale_ep_tandem2.bit` (**1,811,265 bytes / 14,488,800 bits ~ 1.81 MB**).
 - **Hardware Validation Handoff**:
-  - Load bitstream via `./scripts/program_sram_zu4ev.sh`.
+  - Load standard bitstream via `./scripts/program_sram_zu4ev.sh` or program Tandem Stage 1 to test PCIe link training.
   - Verify Gen3 x4 link training and enumeration (`lspci -d 12ab:e380 -vvv`).
   - Next: on production silicon, evaluate ZynqMP FSBL/PCAP boot-image path.
 
