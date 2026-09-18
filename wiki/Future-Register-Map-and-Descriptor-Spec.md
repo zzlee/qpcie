@@ -79,3 +79,11 @@ interleaved＝1 個 host buffer→只用 RING0（聲道拆分在 audio engine fa
 1. 單路 1080p60/4K60 回歸通過；
 2. CH0＋CH1 並發 capture 互不擋（今日架構做不到的新驗收）；
 3. 舊位址 map 廢棄，`axil_reg_space.v` 重寫。
+
+## 8. 中斷設計（MSI 單 vector＋pending counter 紀律）
+
+- **拓撲**：MSI 單 vector → `IRQ_TOP` 分源（CH0–3、AUD、ERR、PERF）→ `CH_IRQ` 分事件（bit0 frame_done、bit1 overflow、bit2 desc_error、bit3 fifo_error），全 W1C。ISR 順序：讀分機→清分機→最後清 TOP（反向會丟中斷）。
+- **Pending counter（鐵律，從現行 `interrupt_ctrl.v:40-47` 繼承）**：每個中斷源配獨立 pending 計數器（≥8-bit），completion 只計數不丟棄；在途 MSI（in-flight）期間的新事件累進 counter，待線空再發。禁止「收到即清、發完即忘」的電平語義——150MHz 案（MSI in-flight 丟 completion）即為前車。
+- **仲裁**：多源並發時 error 優先於完成；完成類按固定優先序（H2C＞C2H＞audio＞perf，沿用現行），同級 FIFO。error 永遠 bypass coalescing 且不可屏蔽（可讀不可關）。
+- **Coalescing**：4ch×60fps＝240 中斷/秒為舒適上限；超過時以 frame_done 合併（counter 差值即合併數），error 不合併。`CH_CTRL[8]` 為總開關，預設只開 frame_done＋error。
+- **MSI-X 誠實註記**：現行 `interrupt_ctrl.v` header 號稱 MSI/MSI-X/Legacy 三式，實作僅 MSI Msg TLP——MSI-X 從未實作，非「延後」而是「從無」。本規劃維持單 vector＋TOP dispatch；per-channel vector 待 UltraScale+（`pcie4` IP）重新評估，現階段為其改 IP 不划算。
