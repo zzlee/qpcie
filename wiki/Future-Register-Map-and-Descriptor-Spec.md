@@ -21,10 +21,23 @@
 
 | Range | 區 | 說明 |
 |---|---|---|
-| `0x0000–0x00FF` | GLOBAL | ID/VERSION/CAPS、GLOBAL_RESET、IRQ_TOP(W1C)、64-bit TIMESTAMP |
+| `0x0000–0x00FF` | GLOBAL | 見 §2b |
 | `0x0100–0x04FF` | VIDEO CH0–CH3（stride `0x100`） | 見 §3 |
 | `0x0500–0x08FF` | AUDIO DEV0–DEV3（stride `0x100`，每 device 最多 8 planes） | 見 §4 |
 | `0x0900–0x09FF` | DEBUG（圍籬區，正式版可整區拿掉） | 寫入擷取、loopback、pattern gen、pacer override |
+
+## 2b. GLOBAL block（`0x0000–0x00FF`）
+
+| Offset | 名稱 | 說明 |
+|---|---|---|
+| `0x00` | `ID` | 魔數 `0x12AB_E380`（切換新 map 後的 sanity check） |
+| `0x04` | `VERSION` | Major.Minor.Patch.Variant（新 map 定版即 v3.0.0，見 §0） |
+| `0x08` | `CAPS` | 通道數＋能力位元；`[4]`＝NEW_MAP_PRESENT |
+| `0x0C` | `GIT_HASH` | build 注入低 32 位（沿用今日 `GIT_COMMIT_HASH_DEF` 機制） |
+| `0x10` | `BUILD_TIME` | epoch seconds（driver 轉日期；比 BCD 好算） |
+| `0x14` | `GLOBAL_RESET` | 全域重置（自清） |
+| `0x18` | `IRQ_TOP` | 各源彙總（W1C） |
+| `0x1C/0x20` | `TIMESTAMP_64` | 全域時基 L/H（AV sync 對錶） |
 
 ## 3. VIDEO channel block（`CHn_BASE = 0x0100 + n*0x100`）
 
