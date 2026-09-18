@@ -440,6 +440,8 @@
     這頁是 BAR0 的 register map 快照，幫助理解這次實驗的位址分配（正式產品以 RTL 為準）。
     前半是標準 DMA 控制：0x00 控制、0x04 狀態，0x08 到 0x1C 是 H2C 跟 C2H 的 ring 位址與配置，0x20、0x24 是中斷控制跟狀態——注意 status 是 W1C，寫 1 清除。
     0x28、0x2C 是完成計數器，除錯時第一個看的就是這兩個有沒有動。
+    新增的幾列：0x40 是 head/tail 回讀，設 SG list 前先讀 head 錨定，否則會吃到舊 head 的未初始化 descriptor；0x50 起是 timestamp 跟音視 PTS；0x80、0x84 是 video pipeline 控制跟子域重置。
+    特別注意沒有 per-channel BAR：寫路徑最高只到 0x160，四個 engine 的分派在 dma_top 內部（select＋owner_busy 仲裁＋CDC handshake），driver 只填共用 ring——channel 歸屬軟體看不到也控制不了。
     0x30 起是身分證區：版本號、git hash、build 時間戳、硬體能力，driver probe 時會讀出來印在 dmesg，實機對版本就靠它。
     後面是本專案特色的：0x68、0x6C 就是前面講的除錯擷取，0x74 pacer 控制、0x78 slice height，音訊四通道的位址放在 0x100 起。完整定義都在 axil_reg_space.v，不到四百行。"
   >
@@ -453,9 +455,16 @@
         <tr><td><code>0x20 / 0x24</code></td><td>IRQ_CTRL / STATUS</td><td>STATUS 為 W1C（寫 1 清）</td></tr>
         <tr><td><code>0x28 / 0x2C</code></td><td>COMPLETED_H2C / C2H</td><td>完成計數器，除錯先看它動不動</td></tr>
         <tr><td><code>0x30–0x3C</code></td><td>VERSION / GIT_HASH / TIMESTAMP / CAPS</td><td>身分證區，probe 時印 dmesg</td></tr>
+        <tr><td><code>0x40 / 0x44</code></td><td>H2C / C2H head+tail</td><td>設 SG 前先讀 head 錨定</td></tr>
+        <tr><td><code>0x50–0x64</code></td><td>timestamp / video PTS / audio PTS</td><td>AV sync 用</td></tr>
         <tr><td><code>0x68 / 0x6C</code></td><td class="hl">DEBUG_LAST_WDATA / WADDR</td><td>寫入擷取（本案示波器）</td></tr>
         <tr><td><code>0x74 / 0x78 / 0x7C</code></td><td>PACER / SLICE_H / FRAME_DROP</td><td>60fps pacer、slice、掉幀計數</td></tr>
-        <tr><td><code>0x100+</code></td><td>Audio CH0–CH3 addr</td><td>四聲道 DMA 位址</td></tr>
+        <tr><td><code>0x80 / 0x84</code></td><td class="hl">VIDEO_CTRL / SUB_RESET</td><td class="hl">video pipeline 控制與子域重置</td></tr>
+        <tr><td><code>0x88–0x90</code></td><td>SOF / EOL / BEAT count</td><td>視訊幀級計數器（唯讀）</td></tr>
+        <tr><td><code>0xA0–0xDC</code></td><td>PERF enable + 計數器組</td><td>cycles/TLP/stall/4K split…共 16 格</td></tr>
+        <tr><td><code>0xE0–0xE8</code></td><td>page-table Y·UV</td><td>頁表寫入埠</td></tr>
+        <tr><td><code>0x100–0x138</code></td><td>Audio CH0–CH3 addr+cfg</td><td>四聲道位址與配置</td></tr>
+        <tr><td><code>0x150–0x160</code></td><td>Playback FIFO / loopback</td><td>播放寫入、loopback 控制</td></tr>
       </table>
     </div>
   </section>
