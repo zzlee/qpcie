@@ -40,9 +40,17 @@ module tb_axil_reg_space;
     wire [15:0] reg_c2h_tail_ptr;
     wire [31:0] reg_irq_ctrl;
     wire [31:0] reg_irq_status;
+    wire [31:0] irq_w1c_obs;
     wire [31:0] reg_pacer_ctrl, reg_slice_height, reg_video_ctrl;
     reg  [31:0] completed_h2c_count;
     reg  [31:0] completed_c2h_count;
+    reg  [15:0] h2c_head_stub;
+    reg  [15:0] c2h_head_stub;
+    reg         w1c_pulsed;
+    always @(posedge clk) begin
+        if (irq_w1c_obs === 32'h00000003)
+            w1c_pulsed <= 1'b1;
+    end
 
     // Instantiate uut
     axil_reg_space uut (
@@ -75,6 +83,9 @@ module tb_axil_reg_space;
         .reg_c2h_tail_ptr(reg_c2h_tail_ptr),
         .reg_irq_ctrl(reg_irq_ctrl),
         .reg_irq_status(reg_irq_status),
+        .reg_irq_status_w1c(irq_w1c_obs),
+        .reg_h2c_head_ptr(h2c_head_stub),
+        .reg_c2h_head_ptr(c2h_head_stub),
         .reg_pacer_ctrl(reg_pacer_ctrl),
         .reg_slice_height(reg_slice_height),
         .reg_video_ctrl(reg_video_ctrl),
@@ -142,6 +153,8 @@ module tb_axil_reg_space;
         reg_dma_status = 0;
         completed_h2c_count = 0;
         completed_c2h_count = 0;
+        h2c_head_stub = 0;
+        c2h_head_stub = 0;
 
         #20;
         rst_n = 1;
@@ -180,6 +193,68 @@ module tb_axil_reg_space;
         axil_read(32'h80, read_val);
         if (read_val !== 32'h00000000 || reg_video_ctrl !== 32'h00000000) begin
             $display("FAIL: VIDEO_CTRL clear/readback mismatch");
+            $fatal(1);
+        end
+
+        // ---- P0-1 golden freeze: audio addr alias 0x48/0x4C == 0x100/0x104 ----
+        $display("[%0t] Test 7: Audio addr alias 0x48/0x4C == 0x100/0x104 ...", $time);
+        axil_write(32'h48, 32'hDEADBEEF);
+        axil_write(32'h4C, 32'h00001234);
+        axil_read(32'h100, read_val);
+        if (read_val !== 32'hDEADBEEF) begin
+            $display("FAIL: alias lo 0x48 -> 0x100 mismatch: 0x%h", read_val);
+            $fatal(1);
+        end
+        axil_read(32'h104, read_val);
+        if (read_val !== 32'h00001234) begin
+            $display("FAIL: alias hi 0x4C -> 0x104 mismatch: 0x%h", read_val);
+            $fatal(1);
+        end
+
+        // ---- P0-1 golden freeze: RING_CFG tail packing + 0x40/0x44 {tail,head} ----
+        $display("[%0t] Test 8: RING_CFG tail + PTR {tail,head} packing ...", $time);
+        h2c_head_stub = 16'd7;
+        c2h_head_stub = 16'd9;
+        axil_write(32'h10, 32'h00050080); // H2C tail=5 size=128
+        axil_read(32'h40, read_val);
+        if (read_val !== 32'h00050007) begin
+            $display("FAIL: H2C PTR packing mismatch: 0x%h (expect 0x00050007)", read_val);
+            $fatal(1);
+        end
+        axil_write(32'h1C, 32'h00030080); // C2H tail=3 size=128
+        axil_read(32'h44, read_val);
+        if (read_val !== 32'h00030009) begin
+            $display("FAIL: C2H PTR packing mismatch: 0x%h (expect 0x00030009)", read_val);
+            $fatal(1);
+        end
+
+        // ---- P0-1 golden freeze: IRQ W1C is a single-cycle pulse ----
+        $display("[%0t] Test 9: IRQ W1C pulse (not sticky) ...", $time);
+        w1c_pulsed = 1'b0;
+        axil_write(32'h24, 32'h00000003);
+        #30;
+        if (w1c_pulsed !== 1'b1) begin
+            $display("FAIL: W1C pulse never asserted");
+            $fatal(1);
+        end
+        if (irq_w1c_obs !== 32'h00000000) begin
+            $display("FAIL: W1C mask sticky (expect auto-clear): 0x%h", irq_w1c_obs);
+            $fatal(1);
+        end
+
+        // ---- P0-1 golden freeze: COMPLETED counter mapping ----
+        $display("[%0t] Test 10: COMPLETED counter mapping ...", $time);
+        completed_h2c_count = 32'd41;
+        completed_c2h_count = 32'd17;
+        #10;
+        axil_read(32'h28, read_val);
+        if (read_val !== 32'd41) begin
+            $display("FAIL: COMPLETED_H2C mismatch: 0x%h", read_val);
+            $fatal(1);
+        end
+        axil_read(32'h2C, read_val);
+        if (read_val !== 32'd17) begin
+            $display("FAIL: COMPLETED_C2H mismatch: 0x%h", read_val);
             $fatal(1);
         end
 

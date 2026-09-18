@@ -1,0 +1,40 @@
+# Register Map 重規劃遷移計畫（獨立執行文件）
+
+> 上游設計：`Future-Register-Map-and-Descriptor-Spec.md`（Goal 3）。現況快照：`Control-Layer.md`、`DMA-Core-Layer.md` §1。
+> 原則：**每一步都有可驗證落點**；新舊並存、用 VERSION 跳版切換；regression（19 TB＋實機 1080p60）永遠綠燈。
+> 關鍵前置事實：BAR0 aperture 已是 **1MB**（`build_a50t.tcl:64-65`），空間足夠；要改的只有 bridge/regfile decode 位寬（現 `s_axil_awaddr[8:0]` 9-bit → 拓到 12-bit）。
+
+## Todo List
+
+### Phase 0 — 凍結與量尺（只寫文件和測試，不動 RTL 行為）
+- [x] P0-1：現行暗坑鎖 golden 斷言（`tb_axil_reg_space.v` Test 7–10：alias／{tail,head} packing／W1C 單拍脈衝／COMPLETED 映射；實測全過。附帶發現：W1C 是 auto-clear 脈衝非 sticky）
+- [ ] P0-2：VERSION 跳版規則定稿（major 跳＝breaking，新舊路徑選擇位）
+- [ ] P0-3：CH0 capture 七步自動化測試腳本（幾何→descriptor→`dma_wmb()`→ring base→tail→CTRL→驗 payload），之後每階段重跑
+
+### Phase 1 — 位址空間＋空殼（RTL，不動行為）
+- [ ] P1-1：decode 拓到 12-bit（`axil_reg_space.v:239` case 位寬＋bridge 對應），新 region 地址回 0、寫入忽略
+- [ ] P1-2：19 TB 全過＋實機 1080p60 回歸（證明拓寬沒壓時序、沒動舊 decode）
+
+### Phase 2 — 新 register file 上線（先上一通道）
+- [ ] P2-1：GLOBAL＋VIDEO CH0＋AUDIO DEV0＋DEBUG 四區（其餘通道暫留）
+- [ ] P2-2：mode 位元（預設舊路），TB 同測新舊兩套讀寫互不干擾
+
+### Phase 3 — Thin descriptor＋per-plane 表（核心戰役，預估半數工時）
+- [ ] P3-1：新 fetch 引擎（16B entry、byte-count framing、RING0–1 雙表並行、doorbell/HEAD）
+- [ ] P3-2：CH0 切新路跑單路 1080p60，與舊路 bit-exact 比對（逐 byte）
+
+### Phase 4 — 中斷＋Audio 合規
+- [ ] P4-1：三層中斷＋per-source pending counter＋仲裁；in-flight 灌 burst 斷言語一個不少（150MHz 案重演）
+- [ ] P4-2：POSITION/PERIOD/BUFFER＋`pointer` 回調；xrun 注入走一遍
+
+### Phase 5 — Driver 雙軌＋多通道
+- [ ] P5-1：driver 讀 VERSION 綁新舊路徑；`vch` 綁 channel block；sysfs 拆分
+- [ ] P5-2：CH0＋CH1 並發 capture 互不擋；單路性能不 regress（801 MiB/s 基線）
+
+### Phase 6 — 拆舊版（breaking release）
+- [ ] P6-1：刪舊 map／胖 descriptor／相容 mode；`axil_reg_space.v` 重寫收尾
+- [ ] P6-2：Control-Layer 換新表、deck 架構頁換新圖、spec 狀態改 implemented；全 TB＋實機矩陣重跑
+
+## 節奏
+
+每 Phase 走既有迴圈（AGENTS.md）：agent 改 RTL＋TB → Vivado build → 使用者燒錄實測 → log 回報。P0-1 為第一個實作起點。
