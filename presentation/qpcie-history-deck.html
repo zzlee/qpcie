@@ -492,6 +492,60 @@
     <p class="muted" style="margin-top:24px;font-size:15px">probe：認 VID/DID → map BAR → BAR0 write-readback 自檢（含 0x68 擷取）→ 註冊 V4L2 + ALSA + sysfs</p>
   </section>
 
+  <!-- ============ SG DESC ============ -->
+  <section class="slide" data-note="
+    <small>⌛ 約 50 秒 · descriptor 格式，給韌體配表用</small>
+    這頁講 SG DMA descriptor，就是 driver 跟 FPGA 約定的 64-byte 資料結構，driver 填、FPGA 讀。
+    結構是三個 plane 的 src/dst 位址對：plane0 到 plane2 各一組 64-bit src 配 dst，正好對應 NV12M 的 Y、UV 分離 plane。再來是幾何：line 寬、高、src/dst stride——stride 解決了行距跟寬度不一致的問題，不用 driver 先把影像拷成連續的。
+    尾巴是控制：format、plane 數量，最後 16-bit ctrl 是關鍵中的關鍵：bit1 是方向，0 是 H2C、1 是 C2H；bit4、bit5 任一置起就是 SG 模式，會再去主機抓 SGL；bit6、bit7 是 loopback 通道。
+    流程是標準 ring：head 不等於 tail 就發 MRd 抓 64 bytes，回來按方向 bit 分派，SG 模式等多一道 host SGL fetch，head 加一、到底繞回。SGL 的 segment 是 128-bit：實體位址加長度加 flags，用 chained pointer 串起來，專門對付主機記憶體不連續。
+    完整位元定義在 desc_fetch_engine.v 的 WAIT_CPLD 段，一一對得上。"
+  >
+    <div class="kicker">SG DMA DESCRIPTOR · 64 BYTES</div>
+    <h1 style="font-size:34px">SG DMA Descriptor</h1>
+    <div class="grid g2" style="margin-top:22px;align-items:start">
+      <div class="card" style="padding:0;overflow:hidden">
+        <table>
+          <tr><th>Bits</th><th>欄位</th></tr>
+          <tr><td><code>[63:0] / [127:64]</code></td><td>plane0 src / dst</td></tr>
+          <tr><td><code>[191:128] / [255:192]</code></td><td>plane1 src / dst</td></tr>
+          <tr><td><code>[319:256] / [383:320]</code></td><td>plane2 src / dst</td></tr>
+          <tr><td><code>[399:384] / [415:400]</code></td><td>line_width / line_count</td></tr>
+          <tr><td><code>[431:416] / [447:432]</code></td><td>src_stride / dst_stride</td></tr>
+          <tr><td><code>[463:448] / [479:464]</code></td><td>plane12 w / count</td></tr>
+          <tr><td><code>[483:480] / [487:484]</code></td><td>format / plane_count</td></tr>
+          <tr><td><code class="hl">[503:488]</code></td><td class="hl">desc_ctrl（見右）</td></tr>
+        </table>
+      </div>
+      <div>
+        <div class="card">
+          <h3>desc_ctrl 關鍵位元</h3>
+          <ul>
+            <li><code>bit[1]</code> 方向：0 = H2C，1 = C2H</li>
+            <li><code>bit[5:4]</code> 任一置起 = SG 模式 → 抓 host SGL</li>
+            <li><code>bit[7:6]</code> loopback 通道</li>
+          </ul>
+        </div>
+        <div class="card" style="margin-top:16px">
+          <h3>Fetch 流程（ring）</h3>
+          <ul>
+            <li>head ≠ tail → MRd 抓 64B</li>
+            <li>CplD 回來按方向 bit 分派 H2C / C2H</li>
+            <li>SG 模式等多一道 SGL fetch</li>
+            <li>head+1，到底繞回（ring_size）</li>
+          </ul>
+        </div>
+        <div class="card" style="margin-top:16px">
+          <h3>SGL segment（128-bit）</h3>
+          <ul>
+            <li><code>{phys_addr[63:0], len[31:0], flags[31:0]}</code></li>
+            <li>chained pointer 串接，對付主機不連續記憶體</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <!-- ============ S7 NEXT ============ -->
   <section class="slide" data-note="
     <small>⌛ 約 30 秒 · 收尾與下一步</small>
