@@ -456,11 +456,13 @@
         <tr><td><code>0x28 / 0x2C</code></td><td>COMPLETED_H2C / C2H</td><td>完成計數器，除錯先看它動不動</td></tr>
         <tr><td><code>0x30–0x3C</code></td><td>VERSION / GIT_HASH / TIMESTAMP / CAPS</td><td>身分證區，probe 時印 dmesg</td></tr>
         <tr><td><code>0x40 / 0x44</code></td><td>H2C / C2H head+tail</td><td>設 SG 前先讀 head 錨定</td></tr>
+        <tr><td><code>0x48 / 0x4C</code></td><td>Audio DMA addr（ch0）</td><td>與 0x100 互為 alias（歷史包袱）</td></tr>
         <tr><td><code>0x50–0x64</code></td><td>timestamp / video PTS / audio PTS</td><td>AV sync 用</td></tr>
         <tr><td><code>0x68 / 0x6C</code></td><td class="hl">DEBUG_LAST_WDATA / WADDR</td><td>寫入擷取（本案示波器）</td></tr>
-        <tr><td><code>0x74 / 0x78 / 0x7C</code></td><td>PACER / SLICE_H / FRAME_DROP</td><td>60fps pacer、slice、掉幀計數</td></tr>
+        <tr><td><code>0x70–0x7C</code></td><td>LATENCY / PACER / SLICE_H / FRAME_DROP</td><td>最大延遲、60fps pacer、slice、掉幀計數</td></tr>
         <tr><td><code>0x80 / 0x84</code></td><td class="hl">VIDEO_CTRL / SUB_RESET</td><td class="hl">video pipeline 控制與子域重置</td></tr>
         <tr><td><code>0x88–0x90</code></td><td>SOF / EOL / BEAT count</td><td>視訊幀級計數器（唯讀）</td></tr>
+        <tr><td><code>0x94 / 0x98</code></td><td>Audio CFG / PTR</td><td>週期配置、當前傳輸指標</td></tr>
         <tr><td><code>0xA0–0xDC</code></td><td>PERF enable + 計數器組</td><td>cycles/TLP/stall/4K split…共 16 格</td></tr>
         <tr><td><code>0xE0–0xE8</code></td><td>page-table Y·UV</td><td>頁表寫入埠</td></tr>
         <tr><td><code>0x100–0x138</code></td><td>Audio CH0–CH3 addr+cfg</td><td>四聲道位址與配置</td></tr>
@@ -524,6 +526,7 @@
           <tr><td><code>[463:448] / [479:464]</code></td><td>plane12 w / count</td></tr>
           <tr><td><code>[483:480] / [487:484]</code></td><td>format / plane_count</td></tr>
           <tr><td><code class="hl">[503:488]</code></td><td class="hl">desc_ctrl（見右）</td></tr>
+          <tr><td><code>[511:504]</code></td><td>保留</td></tr>
         </table>
       </div>
       <div>
@@ -533,6 +536,7 @@
             <li><code>bit[1]</code> 方向：0 = H2C，1 = C2H</li>
             <li><code>bit[5:4]</code> 任一置起 = SG 模式 → 抓 host SGL</li>
             <li><code>bit[7:6]</code> loopback 通道</li>
+            <li>其餘位元保留</li>
           </ul>
         </div>
         <div class="card" style="margin-top:16px">
@@ -553,6 +557,7 @@
         </div>
       </div>
     </div>
+    <p class="muted" style="font-size:14px;margin-top:14px">現況：胖格式（幾何全塞每幀）→ 未來 wiki Goal 3：16B <code>{addr, len, flags}</code>＋per-plane RING0–3，framing 改 byte count</p>
   </section>
 
   <!-- ============ S7 NEXT ============ -->
@@ -573,6 +578,7 @@
           <li>SMMU / retained-head fault 處理</li>
           <li>USERPTR / DMABUF / GPU P2P bring-up</li>
           <li>cache coherency（ARM64）</li>
+          <li>BAR＋descriptor 打掉重練（per-channel，見 wiki Goal 3）</li>
         </ul>
       </div>
       <div class="card">

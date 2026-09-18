@@ -126,6 +126,35 @@ The user previously outlined two major Phase 2 goals to be tackled:
   2. Confirm whether the SGL SMMU page translation interacts with line-stride (as discussed earlier: SMMU translates 4KB/64KB pages; stride is a raster line offset within the buffer, orthogonal to page mapping).
   3. Support configurable `bytesperline` in driver `qpcie_v4l2.c` and hardware descriptor registers.
 
+### Goal 3: BAR/Register & Descriptor Redesign (暫存器與描述子重規劃，打掉重練)
+
+> 完整規格見 [`Future-Register-Map-and-Descriptor-Spec.md`](Future-Register-Map-and-Descriptor-Spec.md)。以下為摘要。
+
+> **Status**: design approved, breaking change accepted. 實驗版位址全搬，舊 driver 不相容。
+
+- **Motivation（為何今天的 map 不能留）**:
+  - BAR0 是按開發階段逐步 accretion：Day-1 骨架 (`0x00–0x2C`) → 身分證 (`0x30–0x3C`) → 音訊外掛 (`0x48` 與 `0x100` 雙份 ch0 alias) → AV sync (`0x50–0x64`) → 08-21 debug 劫持 (`0x68/0x6C`) → NV12 期 (`0x70–0x90`) → perfmon 附掛 (`0xA0–0xDC`) → 頁表 (`0xE0–0xE8`)。無 region 概念、讀寫混雜。
+  - 64B 胖 descriptor 身兼 DMA descriptor＋video frame work order（幾何/格式全塞每幀），是「沒有 per-channel register，只好全塞 descriptor」的結果。驗證場景固定幾何，per-frame 可變彈性備而未用。
+  - 無 per-video-channel BAR：4 套 NV12 engine 共用一條 H2C/C2H ring，channel 分派靠 `custom_pcie_dma_top` 內部仲裁 (`nv12_chX_desc_select`＋`chX_owner_busy`)，軟體看不到也控制不了，無隔離保證。
+- **Target Map（region 切分＋per-channel stride）**:
+  - `0x0000–0x00FF` GLOBAL：ID/VERSION/CAPS、GLOBAL_RESET、IRQ_TOP(W1C)、64-bit TIMESTAMP。
+  - `0x0100–0x04FF` VIDEO CH0–CH3（stride `0x100`）：CH_CTRL（enable/方向/capture-output/format/irq_en）、CH_STATUS、WIDTH/HEIGHT/STRIDE0–3、**RING0–RING3（每組 BASE_L/H＋CFG tail doorbell＋HEAD）**、FRAMES/DROPS/PTS、CH_IRQ(W1C)。
+    - Ring 語義由 FORMAT 查表，不寫死在名字裡：NV12M→RING0=Y,RING1=UV；YV12→RING0=Y,RING1=U,RING2=V；RGB24→只用 RING0；未來 4-plane（如 Y/U/V/A）→啟用 RING3，不改 register map。
+    - STRIDE 也按 plane 編號（STRIDE0–3），同理不綁 Y/UV 名稱。
+  - `0x0500–0x08FF` AUDIO DEV0–DEV3（stride `0x100`，每 device 最多 8 planes；此處 channel＝device 內聲道平面，不同於舊 map 的 ch0–ch3 獨立 device，breaking）。
+    - `+0x00` CTRL（enable/方向/format/`channels` 1–8）`+0x04` STATUS（running/xrun W1C）`+0x08` RATE `+0x0C` PERIOD_BYTES `+0x10` BUFFER_BYTES `+0x14` POSITION（RO，byte 精度 hw_ptr＝已傳輸總位元組 mod BUFFER）。
+    - `+0x20–0x9F` RING0–RING7（每組 16B：BASE_L/H＋CFG＋HEAD）。interleaved＝1 個 host buffer→只用 RING0（聲道拆分在 audio engine fabric，DMA 只當 byte pipe）；non-interleaved＝N 個 buffers→RING0–N-1（ALSA per-channel sgt 直行填入）。
+    - `+0xA0` SAMPLE_CNT `+0xA4` PTR `+0xA8` IRQ（W1C：period-done/xrun）。period 中斷節拍由 PERIOD_BYTES 定義（一 period 即一「幀」）；`pointer` 回調＝POSITION÷frame_bytes。
+  - `0x0900–0x09FF` DEBUG（圍起來，正式版可整區拿掉）：寫入擷取、loopback、pattern gen、pacer override。
+  - 範例流程見簡報 SG DESC／DRIVER 頁講稿；CH0 capture 設置代碼（幾何→descriptor→`dma_wmb()`→ring base→tail→CTRL）為驗收依據。
+- **Thin Descriptor（瘦身，16B）**: `{host_addr[63:0], len[31:0], flags[31:0]=保留}`——driver enumerate sgl 直行填入，零計算。方向是 channel 屬性（`CH_CTRL[1]`），FPGA 端隱式（engine stream），故無需 src/dst 雙位址、無需 SOF/EOF（framing 改 byte count：數滿 `FRAME_BYTES` 即一幀，可多幀連排）。方向/幾何搬到 channel block，STREAMON 配一次。ring 仍為 head/tail 模型（tail 即 doorbell，`HEAD==tail` 表 idle）。
+- **Per-plane Tables**: 每通道 RING0–RING3 各一張表（NV12M→RING0=Y,RING1=UV；YV12→+RING2=V；RGB24→只用 RING0；未來 Y/U/V/A→RING3）。Y/UV 並行 walk，各自 byte count（由 WIDTH/HEIGHT/STRIDE0–3＋FORMAT 推導），全到齊即一幀。driver 端 V4L2 multi-planar 本就是 per-plane sgt，一對一填入。
+- **Driver Changes**:
+  1. `vch` 一對一綁 channel block，刪除全域 `qdev->h2c_tail/c2h_tail`（改 per-channel）。
+  2. `buf_queue` 填本通道 ring＋敲本通道 doorbell；timeout 讀本通道 HEAD＋STATUS。
+  3. sysfs 控制面按 channel 拆分（`ch0_*` 前綴或 per-device attr 組）。
+- **Acceptance**: 單路 1080p60/4K60 回歸通過；CH0＋CH1 並發 capture 互不擋（新驗收，今日架構做不到）；舊位址 map 廢棄，`axil_reg_space.v` 重寫。
+
 ---
 
 ## 5. File Inventory & Key References

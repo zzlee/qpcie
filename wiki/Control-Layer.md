@@ -41,10 +41,24 @@
 | `0x70` | `LATENCY_MAX_NS` | R | telemetry peak request latency |
 | `0x74` | `PACER_CTRL` | R/W | bit0：1=60 FPS pacer，0=uncapped benchmark |
 | `0x78` | `SLICE_HEIGHT` | R/W | 0=full-frame IRQ；slice mode 目前未驗證 |
-| `0x7C` | `VIDEO_ERRORS` | R | NV12 AXI-video framing/configuration error counter |
+| `0x7C` | `FRAME_DROP_COUNT` | R | video engine 掉幀計數（`video_stream_engine.v`） |
 | `0x80` | `VIDEO_CTRL` | R/W | bit0：reset TPG 與 video CDC FIFO |
+| `0x84` | `VIDEO_SUB_RESET` | R/W | video 子域重置控制 |
+| `0x88` | `SOF_COUNT` | R | video SOF 計數器 |
+| `0x8C` | `EOL_COUNT` | R | video EOL 計數器 |
+| `0x90` | `BEAT_COUNT` | R | video beat 計數器 |
+| `0x94` | `AUDIO_DMA_CFG` | R/W | audio DMA period/buffer 配置 |
+| `0x98` | `AUDIO_DMA_PTR` | R | audio DMA 當前指標 |
+| `0xA0` | `PERF_CTRL` | R/W | bit0 enable、bit1 reset（W1C 語義） |
+| `0xA4–0xDC` | perfmon 計數器組 | R | cycles/TLP數/payload/stall/gap/128B/256B計數/4K split/max queue/idle成因，共 16 格 |
+| `0xE0–0xE8` | page-table Y·UV | R/W | Y/UV 頁表寫入埠（addr/data/data-hi＋plane選擇） |
+| `0x48/0x4C` | `AUDIO_DMA_ADDR`（ch0） | R/W | 與 `0x100/0x104` 互為 alias（歷史包袱，勿再仿效） |
+| `0x100–0x108` | Audio ch0 addr+cfg | R/W | ch0 64-bit 位址＋配置 |
+| `0x110–0x118` | Audio ch1 addr+cfg | R/W | ch1（以此類推 ch2 `0x120–0x128`、ch3 `0x130–0x138`） |
+| `0x150/154/158` | playback FIFO wr | W（pulse） | ch1–ch3 H2C 播放寫入觸發 |
+| `0x160` | `AUDIO_LOOPBACK_CTRL` | R/W | audio loopback 控制 |
 
-> 歷史文件曾把 `0x68/0x6C/0x7C` 標成 frame-drop/bandwidth；上述表格才是目前 RTL 實際 decode。
+> `0x7C` 在部分歷史文件中曾被標成 `VIDEO_ERRORS`；目前 RTL 實際 decode 為 `reg_frame_drop_count`（`video_stream_engine.v:62`），以此為準。
 
 ## 3. BAR1 map
 
