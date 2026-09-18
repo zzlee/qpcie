@@ -73,7 +73,11 @@ grep -q "Retained DMA state: Head=" /tmp/seven_step_dmesg.log || fail "retained-
 echo "[SEVEN-STEP PASS] step 3"
 
 step 4 "ring base programmed (0x08/0x0C)"
-grep -q "RING=0x" /tmp/seven_step_dmesg.log || fail "ring base dump missing"
+if [ "$RGB24" -eq 1 ]; then
+    grep -q "Triggered H2C SG Run (Head=" /tmp/seven_step_dmesg.log || fail "H2C run trigger missing"
+else
+    grep -q "RING=0x" /tmp/seven_step_dmesg.log || fail "ring base dump missing"
+fi
 echo "[SEVEN-STEP PASS] step 4"
 
 step 5 "tail doorbell + CTRL kick"
