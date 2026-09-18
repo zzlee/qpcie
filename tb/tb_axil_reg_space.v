@@ -258,6 +258,23 @@ module tb_axil_reg_space;
             $fatal(1);
         end
 
+        // ---- P0-2 golden freeze: DMA_CTRL reset == 0 (mode-bit default) ----
+        // NOTE: future dual-map transition will use DMA_CTRL bit3 as NEW_MAP
+        // select. Reset MUST stay 0 so old drivers (bits 0-2 only) always land
+        // on the old map, even on new hardware.
+        $display("[%0t] Test 11: DMA_CTRL reset default + CAPS new-map absent ...", $time);
+        axil_write(32'h00, 32'h00000000);
+        axil_read(32'h00, read_val);
+        if (read_val !== 32'h00000000) begin
+            $display("FAIL: DMA_CTRL not zero after clear: 0x%h", read_val);
+            $fatal(1);
+        end
+        axil_read(32'h3C, read_val);
+        if ((read_val & 32'h00000010) !== 32'h00000000) begin
+            $display("FAIL: CAPS bit4 (NEW_MAP) set before Phase 2: 0x%h", read_val);
+            $fatal(1);
+        end
+
         #30;
         $display("[%0t] SUCCESS: axil_reg_space Version & Control Test Completed!", $time);
         $finish;

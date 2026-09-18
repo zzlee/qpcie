@@ -8,7 +8,7 @@
 
 ### Phase 0 — 凍結與量尺（只寫文件和測試，不動 RTL 行為）
 - [x] P0-1：現行暗坑鎖 golden 斷言（`tb_axil_reg_space.v` Test 7–10：alias／{tail,head} packing／W1C 單拍脈衝／COMPLETED 映射；實測全過。附帶發現：W1C 是 auto-clear 脈衝非 sticky）
-- [ ] P0-2：VERSION 跳版規則定稿（major 跳＝breaking，新舊路徑選擇位）
+- [x] P0-2：VERSION 跳版規則定稿（semver：major＝breaking／新 map 定版 v3.0.0；雙 map 並存，`DMA_CTRL[3]`＝NEW_MAP select 預設舊路；`CAPS[4]`＝NEW_MAP_PRESENT；TB Test 11 鎖 reset 預設＋bit4 缺席；規則寫入 spec §0）
 - [ ] P0-3：CH0 capture 七步自動化測試腳本（幾何→descriptor→`dma_wmb()`→ring base→tail→CTRL→驗 payload），之後每階段重跑
 
 ### Phase 1 — 位址空間＋空殼（RTL，不動行為）

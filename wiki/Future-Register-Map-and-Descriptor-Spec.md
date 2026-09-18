@@ -4,6 +4,13 @@
 > 上游追蹤：`Handoff-RGB24-and-Phase2-Roadmap.md` Goal 3。現況快照見 `Control-Layer.md`（BAR0 實作）與 `DMA-Core-Layer.md` §1（64B 胖 descriptor）。
 > 設計鐵律：**driver 零計算**——enumerate `sg_table` 直行填表，不做幾何、不設幀尾、不分平面。
 
+## 0. 版本與過渡規則（P0-2 定稿）
+
+- **Semver**：`VERSION_ID`＝Major[31:24].Minor[23:16].Patch[15:8].Variant[7:0]（現 `v2.1.0`）。Major 跳＝BAR breaking change；Minor＝向下相容追加；Patch＝不動 map 的 RTL 修復；Variant＝build 配置。driver 以 major 分流（TB Test 11 鎖定相關預設值）。
+- **雙 map 並存**：過渡期新舊 decode 共存，`DMA_CTRL[3]`＝NEW_MAP select（reset 預設 0＝舊路；舊 driver 只寫 bit0–2，新硬體上永遠落在舊 map）。新舊 GLOBAL `0x00` 位址重疊（舊 DMA_CTRL／新 ID）靠此位元多工。
+- **探索順序**：driver 永遠先讀舊 `0x30` VERSION → major≥3 且 `CAPS[4]`（NEW_MAP_PRESENT）置起 → 置 `DMA_CTRL[3]` → 切新 map 後讀新 `0x00` ID 魔數（`0x12AB_E380`）做 sanity check。
+- 新 map 定版即 `v3.0.0`；Phase 6 拆舊路時 major 維持 3（不再跳）。
+
 ## 1. 為何打掉重練
 
 - BAR0 按開發階段 accretion：Day-1 骨架 → 身分證 → 音訊外掛（`0x48` 與 `0x100` 雙份 ch0 alias）→ AV sync → 08-21 debug 劫持（`0x68/0x6C`）→ NV12 期 → perfmon 附掛 → 頁表。無 region 概念、讀寫混雜。
