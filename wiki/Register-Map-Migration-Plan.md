@@ -13,7 +13,7 @@
 
 ### Phase 1 — 位址空間＋空殼（RTL，不動行為）
 - [x] P1-1：decode 拓到 12-bit（`axil_reg_space.v` case 位寬 12-bit；新 region 地址讀取回 0、寫入忽略且不 aliasing 至舊暫存器；TB 增補 Test 12–14 全過）
-- [ ] P1-2：TB 回歸＋Vivado A50T Bitstream 編譯通過（Timing 收斂 worst slack -0.021ns；驅動與 test_app 編譯無誤；待使用者實機 1080p60 回歸驗證）
+- [x] P1-2：TB 回歸＋Vivado A50T Bitstream 編譯通過（Timing 收斂 worst slack -0.021ns）；實機 1080p60 回歸通過（target 實測 ALL PASS，49,766,400B 零錯誤）
 
 ### Phase 2 — 新 register file 上線（先上一通道）
 - [ ] P2-1：GLOBAL＋VIDEO CH0＋AUDIO DEV0＋DEBUG 四區（其餘通道暫留）
