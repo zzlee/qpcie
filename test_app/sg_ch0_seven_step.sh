@@ -76,7 +76,7 @@ step 4 "ring base programmed (0x08/0x0C)"
 if [ "$RGB24" -eq 1 ]; then
     grep -q "Triggered H2C SG Run (Head=" /tmp/seven_step_dmesg.log || fail "H2C run trigger missing"
 else
-    grep -q "RING=0x" /tmp/seven_step_dmesg.log || fail "ring base dump missing"
+    grep -q "Triggered C2H SG Run (Head=" /tmp/seven_step_dmesg.log || fail "C2H run trigger missing"
 fi
 echo "[SEVEN-STEP PASS] step 4"
 
