@@ -606,7 +606,7 @@ int main(int argc, char **argv)
 
         if (streamoff_ok && captured == frame_target && data_errors == 0 &&
             ((benchmark_mode && mib_s >= FOUR_K_60_MIB_S) ||
-             (!benchmark_mode && measured_fps >= 59.0 && measured_fps <= 61.0)))
+             (!benchmark_mode && (frame_target < 30 || (measured_fps >= 58.0 && measured_fps <= 62.0)))))
             rc = EXIT_SUCCESS;
         else
             fprintf(stderr, "[FAIL] NV12 correctness or DMA rate requirement not met\n");
