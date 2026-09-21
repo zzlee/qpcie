@@ -275,6 +275,55 @@ module tb_axil_reg_space;
             $fatal(1);
         end
 
+        // ---- P1-1 validation: 12-bit address decode, new region zero-return & non-aliasing ----
+        $display("[%0t] Test 12: New region offsets return 0 on read ...", $time);
+        axil_read(32'h200, read_val);
+        if (read_val !== 32'h00000000) begin
+            $display("FAIL: Offset 0x200 read returned non-zero: 0x%h", read_val);
+            $fatal(1);
+        end
+        axil_read(32'h500, read_val);
+        if (read_val !== 32'h00000000) begin
+            $display("FAIL: Offset 0x500 read returned non-zero: 0x%h", read_val);
+            $fatal(1);
+        end
+        axil_read(32'h900, read_val);
+        if (read_val !== 32'h00000000) begin
+            $display("FAIL: Offset 0x900 read returned non-zero: 0x%h", read_val);
+            $fatal(1);
+        end
+        axil_read(32'hFFC, read_val);
+        if (read_val !== 32'h00000000) begin
+            $display("FAIL: Offset 0xFFC read returned non-zero: 0x%h", read_val);
+            $fatal(1);
+        end
+
+        $display("[%0t] Test 13: New region writes are ignored and do NOT alias to legacy regs ...", $time);
+        // Set DMA_CTRL (0x000) to known pattern
+        axil_write(32'h000, 32'h00000005);
+        axil_read(32'h000, read_val);
+        if (read_val !== 32'h00000005) begin
+            $display("FAIL: DMA_CTRL write pattern mismatch: 0x%h", read_val);
+            $fatal(1);
+        end
+        // In legacy 9-bit decode, writing 0x200 or 0x400 or 0x800 aliased to 0x000!
+        axil_write(32'h200, 32'hA5A5A5A5);
+        axil_write(32'h400, 32'h5A5A5A5A);
+        axil_write(32'h800, 32'h12345678);
+        axil_read(32'h000, read_val);
+        if (read_val !== 32'h00000005) begin
+            $display("FAIL: Offset 0x200/0x400/0x800 aliased to 0x000! DMA_CTRL corrupted: 0x%h", read_val);
+            $fatal(1);
+        end
+
+        $display("[%0t] Test 14: Debug write address captures 12 bits ...", $time);
+        axil_write(32'h160, 32'h00000003); // Audio loopback ctrl at 0x160
+        axil_read(32'h06C, read_val);      // REG_DEBUG_LAST_WADDR
+        if (read_val !== 32'h00000160) begin
+            $display("FAIL: Debug write address not 0x160 (truncated?): 0x%h", read_val);
+            $fatal(1);
+        end
+
         #30;
         $display("[%0t] SUCCESS: axil_reg_space Version & Control Test Completed!", $time);
         $finish;

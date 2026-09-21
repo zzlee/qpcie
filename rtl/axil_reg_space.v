@@ -130,25 +130,25 @@ module axil_reg_space (
     output reg  [31:0] reg_audio_loopback_ctrl
 );
 
-    // BAR0 Register Offset Definitions
-    localparam ADDR_DMA_CTRL         = 8'h00;
-    localparam ADDR_DMA_STATUS       = 8'h04;
-    localparam ADDR_H2C_RING_ADDR_L  = 8'h08;
-    localparam ADDR_H2C_RING_ADDR_H  = 8'h0C;
-    localparam ADDR_H2C_RING_CFG     = 8'h10;
-    localparam ADDR_C2H_RING_ADDR_L  = 8'h14;
-    localparam ADDR_C2H_RING_ADDR_H  = 8'h18;
-    localparam ADDR_C2H_RING_CFG     = 8'h1C;
-    localparam ADDR_IRQ_CTRL         = 8'h20;
-    localparam ADDR_IRQ_STATUS       = 8'h24;
-    localparam ADDR_COMPLETED_H2C    = 8'h28;
-    localparam ADDR_COMPLETED_C2H    = 8'h2C;
+    // BAR0 Register Offset Definitions (12-bit decode aperture)
+    localparam ADDR_DMA_CTRL         = 12'h000;
+    localparam ADDR_DMA_STATUS       = 12'h004;
+    localparam ADDR_H2C_RING_ADDR_L  = 12'h008;
+    localparam ADDR_H2C_RING_ADDR_H  = 12'h00C;
+    localparam ADDR_H2C_RING_CFG     = 12'h010;
+    localparam ADDR_C2H_RING_ADDR_L  = 12'h014;
+    localparam ADDR_C2H_RING_ADDR_H  = 12'h018;
+    localparam ADDR_C2H_RING_CFG     = 12'h01C;
+    localparam ADDR_IRQ_CTRL         = 12'h020;
+    localparam ADDR_IRQ_STATUS       = 12'h024;
+    localparam ADDR_COMPLETED_H2C    = 12'h028;
+    localparam ADDR_COMPLETED_C2H    = 12'h02C;
 
     // New Version & Capability Registers (Read-Only)
-    localparam ADDR_VERSION_ID       = 8'h30; // Major[31:24], Minor[23:16], Patch[15:8], Variant[7:0]
-    localparam ADDR_GIT_COMMIT_HASH  = 8'h34; // Git Commit Hash (Lower 32-bit)
-    localparam ADDR_BUILD_TIMESTAMP  = 8'h38; // BCD Date YYYYMMDD
-    localparam ADDR_HARDWARE_CAPS    = 8'h3C; // Caps: [23:16]=NumAudioCh, [15:8]=NumVideoCh, [3:0]=Flags
+    localparam ADDR_VERSION_ID       = 12'h030; // Major[31:24], Minor[23:16], Patch[15:8], Variant[7:0]
+    localparam ADDR_GIT_COMMIT_HASH  = 12'h034; // Git Commit Hash (Lower 32-bit)
+    localparam ADDR_BUILD_TIMESTAMP  = 12'h038; // BCD Date YYYYMMDD
+    localparam ADDR_HARDWARE_CAPS    = 12'h03C; // Caps: [23:16]=NumAudioCh, [15:8]=NumVideoCh, [3:0]=Flags
 
     `ifndef GIT_COMMIT_HASH_DEF
         `define GIT_COMMIT_HASH_DEF 32'h01D6_A9C5
@@ -236,7 +236,7 @@ module axil_reg_space (
                 s_axil_wready  <= 1'b1;
                 s_axil_bvalid  <= 1'b1;
 
-                case (s_axil_awaddr[8:0])
+                case (s_axil_awaddr[11:0])
                     ADDR_DMA_CTRL:        reg_dma_ctrl             <= s_axil_wdata;
                     ADDR_H2C_RING_ADDR_L: reg_h2c_ring_addr[31:0]  <= s_axil_wdata;
                     ADDR_H2C_RING_ADDR_H: reg_h2c_ring_addr[63:32] <= s_axil_wdata;
@@ -250,30 +250,30 @@ module axil_reg_space (
                         reg_c2h_ring_size <= s_axil_wdata[15:0];
                         reg_c2h_tail_ptr  <= s_axil_wdata[31:16];
                     end
-                    9'h048:               reg_audio_dma_addr[31:0]  <= s_axil_wdata;
-                    9'h04C:               reg_audio_dma_addr[63:32] <= s_axil_wdata;
+                    12'h048:              reg_audio_dma_addr[31:0]  <= s_axil_wdata;
+                    12'h04C:              reg_audio_dma_addr[63:32] <= s_axil_wdata;
                     ADDR_IRQ_CTRL:        reg_irq_ctrl             <= s_axil_wdata;
                     ADDR_IRQ_STATUS:      reg_irq_status_w1c       <= s_axil_wdata;
-                    9'h068:               reg_debug_last_wdata     <= s_axil_wdata;
-                    9'h06C:               reg_debug_last_waddr     <= {20'd0, s_axil_awaddr[11:0]};
-                    9'h074:               reg_pacer_ctrl           <= s_axil_wdata; // BAR0 0x74: Pacer Control
-                    9'h078:               reg_slice_height         <= s_axil_wdata; // BAR0 0x78: Sub-Frame Slice Height
-                    9'h080:               reg_video_ctrl           <= s_axil_wdata; // BAR0 0x80: Video Pipeline Control
-                    9'h084:               reg_video_sub_reset      <= s_axil_wdata; // BAR0 0x84: Sub-Domain Reset Control
-                    9'h094:               reg_audio_dma_cfg         <= s_axil_wdata; // BAR0 0x94: Audio DMA Config (period/buffer)
-                    9'h0A0: begin
+                    12'h068:              reg_debug_last_wdata     <= s_axil_wdata;
+                    12'h06C:              reg_debug_last_waddr     <= {20'd0, s_axil_awaddr[11:0]};
+                    12'h074:              reg_pacer_ctrl           <= s_axil_wdata; // BAR0 0x74: Pacer Control
+                    12'h078:              reg_slice_height         <= s_axil_wdata; // BAR0 0x78: Sub-Frame Slice Height
+                    12'h080:              reg_video_ctrl           <= s_axil_wdata; // BAR0 0x80: Video Pipeline Control
+                    12'h084:              reg_video_sub_reset      <= s_axil_wdata; // BAR0 0x84: Sub-Domain Reset Control
+                    12'h094:              reg_audio_dma_cfg        <= s_axil_wdata; // BAR0 0x94: Audio DMA Config (period/buffer)
+                    12'h0A0: begin
                         reg_perf_enable    <= s_axil_wdata[0];
                         reg_perf_reset_w1c <= s_axil_wdata[1];
                     end
-                    9'h0E0: begin
+                    12'h0E0: begin
                         pt_y_wr_addr  <= s_axil_wdata[10:0];
                         pt_uv_wr_addr <= s_axil_wdata[10:0];
                     end
-                    9'h0E4: begin
+                    12'h0E4: begin
                         pt_y_wr_data[31:0]  <= s_axil_wdata;
                         pt_uv_wr_data[31:0] <= s_axil_wdata;
                     end
-                    9'h0E8: begin
+                    12'h0E8: begin
                         pt_y_wr_data[63:32]  <= s_axil_wdata;
                         pt_uv_wr_data[63:32] <= s_axil_wdata;
                         if (!s_axil_wdata[31]) begin // Bit 31: 0 = Y Plane, 1 = UV Plane
@@ -286,36 +286,36 @@ module axil_reg_space (
                     end
 
                     // Audio Ch0 DMA Aliases (0x100..0x108)
-                    9'h100: reg_audio_dma_addr[31:0]  <= s_axil_wdata;
-                    9'h104: reg_audio_dma_addr[63:32] <= s_axil_wdata;
-                    9'h108: reg_audio_dma_cfg         <= s_axil_wdata;
+                    12'h100: reg_audio_dma_addr[31:0]  <= s_axil_wdata;
+                    12'h104: reg_audio_dma_addr[63:32] <= s_axil_wdata;
+                    12'h108: reg_audio_dma_cfg         <= s_axil_wdata;
 
                     // Audio Ch1 DMA (0x110..0x118)
-                    9'h110: reg_audio_dma_addr_ch1[31:0]  <= s_axil_wdata;
-                    9'h114: reg_audio_dma_addr_ch1[63:32] <= s_axil_wdata;
-                    9'h118: reg_audio_dma_cfg_ch1         <= s_axil_wdata;
+                    12'h110: reg_audio_dma_addr_ch1[31:0]  <= s_axil_wdata;
+                    12'h114: reg_audio_dma_addr_ch1[63:32] <= s_axil_wdata;
+                    12'h118: reg_audio_dma_cfg_ch1         <= s_axil_wdata;
 
                     // Audio Ch2 DMA (0x120..0x128)
-                    9'h120: reg_audio_dma_addr_ch2[31:0]  <= s_axil_wdata;
-                    9'h124: reg_audio_dma_addr_ch2[63:32] <= s_axil_wdata;
-                    9'h128: reg_audio_dma_cfg_ch2         <= s_axil_wdata;
+                    12'h120: reg_audio_dma_addr_ch2[31:0]  <= s_axil_wdata;
+                    12'h124: reg_audio_dma_addr_ch2[63:32] <= s_axil_wdata;
+                    12'h128: reg_audio_dma_cfg_ch2         <= s_axil_wdata;
 
                     // Audio Ch3 DMA (0x130..0x138)
-                    9'h130: reg_audio_dma_addr_ch3[31:0]  <= s_axil_wdata;
-                    9'h134: reg_audio_dma_addr_ch3[63:32] <= s_axil_wdata;
-                    9'h138: reg_audio_dma_cfg_ch3         <= s_axil_wdata;
+                    12'h130: reg_audio_dma_addr_ch3[31:0]  <= s_axil_wdata;
+                    12'h134: reg_audio_dma_addr_ch3[63:32] <= s_axil_wdata;
+                    12'h138: reg_audio_dma_cfg_ch3         <= s_axil_wdata;
 
                     // Audio Playback H2C Data (0x150, 0x154, 0x158)
-                    9'h150: h2c_fifo_wr_en_ch1 <= 1'b1;
-                    9'h154: h2c_fifo_wr_en_ch2 <= 1'b1;
-                    9'h158: h2c_fifo_wr_en_ch3 <= 1'b1;
+                    12'h150: h2c_fifo_wr_en_ch1 <= 1'b1;
+                    12'h154: h2c_fifo_wr_en_ch2 <= 1'b1;
+                    12'h158: h2c_fifo_wr_en_ch3 <= 1'b1;
 
                     // Audio Loopback Control (0x160)
-                    9'h160: reg_audio_loopback_ctrl <= s_axil_wdata;
-                    default: ; // Ignore writes to read-only registers
+                    12'h160: reg_audio_loopback_ctrl <= s_axil_wdata;
+                    default: ; // Ignore writes to read-only registers or unmapped addresses
                 endcase
                 reg_debug_last_wdata <= s_axil_wdata;
-                reg_debug_last_waddr <= {24'd0, s_axil_awaddr[7:0]};
+                reg_debug_last_waddr <= {20'd0, s_axil_awaddr[11:0]};
             end else begin
                 s_axil_awready <= 1'b0;
                 s_axil_wready  <= 1'b0;
@@ -338,7 +338,7 @@ module axil_reg_space (
                 s_axil_arready <= 1'b1;
                 s_axil_rvalid  <= 1'b1;
 
-                case (s_axil_araddr[8:0])
+                case (s_axil_araddr[11:0])
                     ADDR_DMA_CTRL:        s_axil_rdata <= reg_dma_ctrl;
                     ADDR_DMA_STATUS:      s_axil_rdata <= reg_dma_status;
                     ADDR_H2C_RING_ADDR_L: s_axil_rdata <= reg_h2c_ring_addr[31:0];
@@ -357,84 +357,84 @@ module axil_reg_space (
                     ADDR_GIT_COMMIT_HASH: s_axil_rdata <= GIT_COMMIT_HASH_VAL;
                     ADDR_BUILD_TIMESTAMP: s_axil_rdata <= BUILD_TIMESTAMP_VAL;
                     ADDR_HARDWARE_CAPS:   s_axil_rdata <= HARDWARE_CAPS_VAL;
-                    9'h040:               s_axil_rdata <= {reg_h2c_tail_ptr, reg_h2c_head_ptr};
-                    9'h044:               s_axil_rdata <= {reg_c2h_tail_ptr, reg_c2h_head_ptr};
-                    9'h048:               s_axil_rdata <= reg_audio_dma_addr[31:0];
-                    9'h04C:               s_axil_rdata <= reg_audio_dma_addr[63:32];
+                    12'h040:              s_axil_rdata <= {reg_h2c_tail_ptr, reg_h2c_head_ptr};
+                    12'h044:              s_axil_rdata <= {reg_c2h_tail_ptr, reg_c2h_head_ptr};
+                    12'h048:              s_axil_rdata <= reg_audio_dma_addr[31:0];
+                    12'h04C:              s_axil_rdata <= reg_audio_dma_addr[63:32];
 
                     // Hardware AV Sync Timestamp Registers (BAR0 Offsets 0x50..0x64)
-                    9'h050:               s_axil_rdata <= reg_global_timestamp[31:0];
-                    9'h054:               s_axil_rdata <= reg_global_timestamp[63:32];
-                    9'h058:               s_axil_rdata <= reg_last_video_pts[31:0];
-                    9'h05C:               s_axil_rdata <= reg_last_video_pts[63:32];
-                    9'h060:               s_axil_rdata <= reg_last_audio_pts[31:0];
-                    9'h064:               s_axil_rdata <= reg_last_audio_pts[63:32];
+                    12'h050:              s_axil_rdata <= reg_global_timestamp[31:0];
+                    12'h054:              s_axil_rdata <= reg_global_timestamp[63:32];
+                    12'h058:              s_axil_rdata <= reg_last_video_pts[31:0];
+                    12'h05C:              s_axil_rdata <= reg_last_video_pts[63:32];
+                    12'h060:              s_axil_rdata <= reg_last_audio_pts[31:0];
+                    12'h064:              s_axil_rdata <= reg_last_audio_pts[63:32];
 
                     // Hardware Telemetry & Frame Dropper Registers (BAR0 Offsets 0x68..0x78)
-                    9'h068:               s_axil_rdata <= reg_debug_last_wdata;
-                    9'h06C:               s_axil_rdata <= reg_debug_last_waddr;
-                    9'h070:               s_axil_rdata <= reg_latency_max_ns;
-                    9'h074:               s_axil_rdata <= reg_pacer_ctrl;
-                    9'h078:               s_axil_rdata <= reg_slice_height;
-                    9'h07C:               s_axil_rdata <= reg_frame_drop_count;
-                    9'h080:               s_axil_rdata <= reg_video_ctrl;
-                    9'h084:               s_axil_rdata <= reg_video_sub_reset;
-                    9'h088:               s_axil_rdata <= reg_sof_count;
-                    9'h08C:               s_axil_rdata <= reg_eol_count;
-                    9'h090:               s_axil_rdata <= reg_beat_count;
-                    9'h094:               s_axil_rdata <= reg_audio_dma_cfg;
-                    9'h098:               s_axil_rdata <= reg_audio_dma_ptr;
+                    12'h068:              s_axil_rdata <= reg_debug_last_wdata;
+                    12'h06C:              s_axil_rdata <= reg_debug_last_waddr;
+                    12'h070:              s_axil_rdata <= reg_latency_max_ns;
+                    12'h074:              s_axil_rdata <= reg_pacer_ctrl;
+                    12'h078:              s_axil_rdata <= reg_slice_height;
+                    12'h07C:              s_axil_rdata <= reg_frame_drop_count;
+                    12'h080:              s_axil_rdata <= reg_video_ctrl;
+                    12'h084:              s_axil_rdata <= reg_video_sub_reset;
+                    12'h088:              s_axil_rdata <= reg_sof_count;
+                    12'h08C:              s_axil_rdata <= reg_eol_count;
+                    12'h090:              s_axil_rdata <= reg_beat_count;
+                    12'h094:              s_axil_rdata <= reg_audio_dma_cfg;
+                    12'h098:              s_axil_rdata <= reg_audio_dma_ptr;
 
                     // Hardware Performance Monitor Registers (BAR0 Offsets 0xA0..0xDC)
-                    9'h0A0:               s_axil_rdata <= {30'd0, reg_perf_reset_w1c, reg_perf_enable};
-                    9'h0A4:               s_axil_rdata <= reg_perf_cycles[31:0];
-                    9'h0A8:               s_axil_rdata <= reg_perf_cycles[63:32];
-                    9'h0AC:               s_axil_rdata <= reg_perf_tlp_count;
-                    9'h0B0:               s_axil_rdata <= reg_perf_payload_bytes[31:0];
-                    9'h0B4:               s_axil_rdata <= reg_perf_payload_bytes[63:32];
-                    9'h0B8:               s_axil_rdata <= reg_perf_tx_active_cycles;
-                    9'h0BC:               s_axil_rdata <= reg_perf_tx_idle_cycles;
-                    9'h0C0:               s_axil_rdata <= reg_perf_tready_stall_cycles;
-                    9'h0C4:               s_axil_rdata <= reg_perf_inter_tlp_gap;
-                    9'h0C8:               s_axil_rdata <= reg_perf_tlp_128b_count;
-                    9'h0CC:               s_axil_rdata <= reg_perf_tlp_256b_count;
-                    9'h0D0:               s_axil_rdata <= reg_perf_split_4k_count;
-                    9'h0D4:               s_axil_rdata <= {16'd0, reg_perf_max_queue_depth};
-                    9'h0D8:               s_axil_rdata <= reg_perf_idle_cdc_empty;
-                    9'h0DC:               s_axil_rdata <= reg_perf_idle_no_req;
+                    12'h0A0:              s_axil_rdata <= {30'd0, reg_perf_reset_w1c, reg_perf_enable};
+                    12'h0A4:              s_axil_rdata <= reg_perf_cycles[31:0];
+                    12'h0A8:              s_axil_rdata <= reg_perf_cycles[63:32];
+                    12'h0AC:              s_axil_rdata <= reg_perf_tlp_count;
+                    12'h0B0:              s_axil_rdata <= reg_perf_payload_bytes[31:0];
+                    12'h0B4:              s_axil_rdata <= reg_perf_payload_bytes[63:32];
+                    12'h0B8:              s_axil_rdata <= reg_perf_tx_active_cycles;
+                    12'h0BC:              s_axil_rdata <= reg_perf_tx_idle_cycles;
+                    12'h0C0:              s_axil_rdata <= reg_perf_tready_stall_cycles;
+                    12'h0C4:              s_axil_rdata <= reg_perf_inter_tlp_gap;
+                    12'h0C8:              s_axil_rdata <= reg_perf_tlp_128b_count;
+                    12'h0CC:              s_axil_rdata <= reg_perf_tlp_256b_count;
+                    12'h0D0:              s_axil_rdata <= reg_perf_split_4k_count;
+                    12'h0D4:              s_axil_rdata <= {16'd0, reg_perf_max_queue_depth};
+                    12'h0D8:              s_axil_rdata <= reg_perf_idle_cdc_empty;
+                    12'h0DC:              s_axil_rdata <= reg_perf_idle_no_req;
 
                     // Scatter-Gather Page Table & Status Registers (BAR0 0xE0..0xEC)
-                    9'h0E0:               s_axil_rdata <= {21'd0, pt_y_wr_addr};
-                    9'h0E4:               s_axil_rdata <= pt_y_wr_data[31:0];
-                    9'h0E8:               s_axil_rdata <= pt_y_wr_data[63:32];
-                    9'h0EC:               s_axil_rdata <= {5'd0, cur_uv_page_idx, 5'd0, cur_y_page_idx};
+                    12'h0E0:              s_axil_rdata <= {21'd0, pt_y_wr_addr};
+                    12'h0E4:              s_axil_rdata <= pt_y_wr_data[31:0];
+                    12'h0E8:              s_axil_rdata <= pt_y_wr_data[63:32];
+                    12'h0EC:              s_axil_rdata <= {5'd0, cur_uv_page_idx, 5'd0, cur_y_page_idx};
 
                     // Audio Ch0 aliases (0x100..0x10C)
-                    9'h100:               s_axil_rdata <= reg_audio_dma_addr[31:0];
-                    9'h104:               s_axil_rdata <= reg_audio_dma_addr[63:32];
-                    9'h108:               s_axil_rdata <= reg_audio_dma_cfg;
-                    9'h10C:               s_axil_rdata <= reg_audio_dma_ptr;
+                    12'h100:              s_axil_rdata <= reg_audio_dma_addr[31:0];
+                    12'h104:              s_axil_rdata <= reg_audio_dma_addr[63:32];
+                    12'h108:              s_axil_rdata <= reg_audio_dma_cfg;
+                    12'h10C:              s_axil_rdata <= reg_audio_dma_ptr;
 
                     // Audio Ch1 (0x110..0x11C)
-                    9'h110:               s_axil_rdata <= reg_audio_dma_addr_ch1[31:0];
-                    9'h114:               s_axil_rdata <= reg_audio_dma_addr_ch1[63:32];
-                    9'h118:               s_axil_rdata <= reg_audio_dma_cfg_ch1;
-                    9'h11C:               s_axil_rdata <= reg_audio_dma_ptr_ch1;
+                    12'h110:              s_axil_rdata <= reg_audio_dma_addr_ch1[31:0];
+                    12'h114:              s_axil_rdata <= reg_audio_dma_addr_ch1[63:32];
+                    12'h118:              s_axil_rdata <= reg_audio_dma_cfg_ch1;
+                    12'h11C:              s_axil_rdata <= reg_audio_dma_ptr_ch1;
 
                     // Audio Ch2 (0x120..0x12C)
-                    9'h120:               s_axil_rdata <= reg_audio_dma_addr_ch2[31:0];
-                    9'h124:               s_axil_rdata <= reg_audio_dma_addr_ch2[63:32];
-                    9'h128:               s_axil_rdata <= reg_audio_dma_cfg_ch2;
-                    9'h12C:               s_axil_rdata <= reg_audio_dma_ptr_ch2;
+                    12'h120:              s_axil_rdata <= reg_audio_dma_addr_ch2[31:0];
+                    12'h124:              s_axil_rdata <= reg_audio_dma_addr_ch2[63:32];
+                    12'h128:              s_axil_rdata <= reg_audio_dma_cfg_ch2;
+                    12'h12C:              s_axil_rdata <= reg_audio_dma_ptr_ch2;
 
                     // Audio Ch3 (0x130..0x13C)
-                    9'h130:               s_axil_rdata <= reg_audio_dma_addr_ch3[31:0];
-                    9'h134:               s_axil_rdata <= reg_audio_dma_addr_ch3[63:32];
-                    9'h138:               s_axil_rdata <= reg_audio_dma_cfg_ch3;
-                    9'h13C:               s_axil_rdata <= reg_audio_dma_ptr_ch3;
+                    12'h130:              s_axil_rdata <= reg_audio_dma_addr_ch3[31:0];
+                    12'h134:              s_axil_rdata <= reg_audio_dma_addr_ch3[63:32];
+                    12'h138:              s_axil_rdata <= reg_audio_dma_cfg_ch3;
+                    12'h13C:              s_axil_rdata <= reg_audio_dma_ptr_ch3;
 
                     // Audio H2C FIFO Status (0x15C)
-                    9'h15C:               s_axil_rdata <= {
+                    12'h15C:              s_axil_rdata <= {
                         1'b0,
                         h2c_fifo_empty_ch3, h2c_fifo_empty_ch2, h2c_fifo_empty_ch1, // [30:28]
                         1'b0,
@@ -445,9 +445,9 @@ module axil_reg_space (
                     };
 
                     // Audio Loopback Control (0x160)
-                    9'h160:               s_axil_rdata <= reg_audio_loopback_ctrl;
+                    12'h160:              s_axil_rdata <= reg_audio_loopback_ctrl;
 
-                    default:              s_axil_rdata <= 32'hDEAD_BEEF;
+                    default:              s_axil_rdata <= 32'd0;
                 endcase
             end else begin
                 s_axil_arready <= 1'b0;

@@ -319,6 +319,7 @@ module tb_pcie_7x_axi_bridge;
         m_axis_rx_tlast  <= 1'b0;
 
         @(posedge s_axis_tx_tvalid);
+        #0.1;
         captured_tx_cpld = host_payload_dw(s_axis_tx_tdata[127:96]);
         if (captured_tx_cpld === 32'h01D6_A9C5) begin
             $display("  ✅ [PASS] 3-DW MRd Completion CplD Generated: Read Data=0x%08X", captured_tx_cpld);

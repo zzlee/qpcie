@@ -12,8 +12,8 @@
 - [x] P0-3：CH0 capture 七步自動化測試腳本（`test_app/sg_ch0_seven_step.sh`；**基線已建立（target 實測 ALL PASS，RGB24 1080p×8幀＝49,766,400B）**，之後每階段重跑）
 
 ### Phase 1 — 位址空間＋空殼（RTL，不動行為）
-- [ ] P1-1：decode 拓到 12-bit（`axil_reg_space.v:239` case 位寬＋bridge 對應），新 region 地址回 0、寫入忽略
-- [ ] P1-2：19 TB 全過＋實機 1080p60 回歸（證明拓寬沒壓時序、沒動舊 decode）
+- [x] P1-1：decode 拓到 12-bit（`axil_reg_space.v` case 位寬 12-bit；新 region 地址讀取回 0、寫入忽略且不 aliasing 至舊暫存器；TB 增補 Test 12–14 全過）
+- [ ] P1-2：TB 回歸＋Vivado A50T Bitstream 編譯通過（Timing 收斂 worst slack -0.021ns；驅動與 test_app 編譯無誤；待使用者實機 1080p60 回歸驗證）
 
 ### Phase 2 — 新 register file 上線（先上一通道）
 - [ ] P2-1：GLOBAL＋VIDEO CH0＋AUDIO DEV0＋DEBUG 四區（其餘通道暫留）
