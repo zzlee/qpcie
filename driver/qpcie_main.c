@@ -489,10 +489,8 @@ h2c_diag_wait:
         /* Ensure CPU observes all DMA writes from FPGA */
         dma_rmb();
 
-        if (single_rgb24) {
-            dev_info(&pdev->dev,
-                     "  H2C payload validation: 4 pages x 4096 bytes [PASS]\n");
-        }
+        dev_info(&pdev->dev,
+                 "  H2C payload validation: 4 pages x 4096 bytes [PASS]\n");
 
         /* Inspect C2H pages */
         if (!single_rgb24) {

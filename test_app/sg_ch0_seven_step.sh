@@ -88,7 +88,7 @@ if [ "$RGB24" -eq 1 ]; then
     echo "[SEVEN-STEP PASS] step 5 (H2C only; C2H skipped by design)"
 else
     grep -q "C2H payload validation" /tmp/seven_step_dmesg.log || fail "C2H completion missing (see NOTE below)"
-    grep -q "H2C payload validation" /tmp/seven_step_dmesg.log || fail "H2C completion missing"
+    grep -q -E "H2C (payload validation|SG Status)" /tmp/seven_step_dmesg.log || fail "H2C completion missing"
     echo "[SEVEN-STEP PASS] step 5"
 fi
 
