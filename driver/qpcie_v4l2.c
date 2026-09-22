@@ -676,6 +676,47 @@ static int qpcie_publish_buffer(struct qpcie_v4l2_channel *vch,
     u32 tail;
     int ret;
 
+    if (qdev->use_new_map && vch->channel_id == 0) {
+        struct scatterlist *sg;
+        unsigned int i;
+        u32 thin_tail = qdev->thin_ring_tail;
+        u32 entries_added = 0;
+        bool is_rgb = (vch->pixelformat == V4L2_PIX_FMT_RGB24);
+
+        sgt0 = vb2_dma_sg_plane_desc(vb, 0);
+        if (WARN_ON(!sgt0))
+            return -EINVAL;
+
+        for_each_sg(sgt0->sgl, sg, sgt0->nents, i) {
+            u32 slot = (thin_tail + entries_added) % RING_BUFFER_SIZE;
+            qdev->thin_ring_virt[slot].phys_addr = sg_dma_address(sg);
+            qdev->thin_ring_virt[slot].len_bytes = sg_dma_len(sg);
+            qdev->thin_ring_virt[slot].flags     = 0;
+            entries_added++;
+        }
+
+        spin_lock(&vch->slock);
+        list_add_tail(&buf->list, &vch->active_buffers);
+        spin_unlock(&vch->slock);
+
+        /* Descriptor data must be globally visible before ringing doorbell */
+        dma_wmb();
+        qdev->thin_ring_tail = (thin_tail + entries_added) % RING_BUFFER_SIZE;
+        iowrite32((qdev->thin_ring_tail << 16) | RING_BUFFER_SIZE,
+                  qdev->bar0_mmio + REG_VCH0_RING0_CFG);
+        ioread32(qdev->bar0_mmio + REG_VCH0_RING0_CFG);
+        qdev->ring_published++;
+
+        if (!buf->sgl_logged) {
+            dev_info(&qdev->pdev->dev,
+                     "Thin-SGL ch0 %s buf%u: %u descriptors queued (tail: %u -> %u, size=%u)\n",
+                     is_rgb ? "RGB24" : "NV12M", vb->index, entries_added,
+                     thin_tail, qdev->thin_ring_tail, RING_BUFFER_SIZE);
+            buf->sgl_logged = true;
+        }
+        return 0;
+    }
+
     tail = qdev->h2c_tail;
     {
         u32 in_flight = qdev->ring_published - qdev->ring_completed;
@@ -993,8 +1034,34 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
     /* Reset for one PCIe clock, then count the complete streaming window. */
     iowrite32(0x03, qdev->bar0_mmio + REG_PERF_CTRL);
     ioread32(qdev->bar0_mmio + REG_PERF_CTRL);
-    iowrite32(DMA_CTRL_RUN, qdev->bar0_mmio + REG_DMA_CTRL);
-    ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
+
+    if (qdev->use_new_map && vch->channel_id == 0) {
+        bool is_rgb = (vch->pixelformat == V4L2_PIX_FMT_RGB24);
+        u32 stride0 = is_rgb ? (vch->width * 3) : vch->width;
+        u32 stride1 = is_rgb ? 0 : vch->width;
+        u32 ch0_ctrl = BIT(0) | ((is_rgb ? 1 : 2) << 4) | BIT(8); /* enable=1, format, irq_en=1 */
+
+        /* Program CH0 Geometry */
+        iowrite32(vch->width, qdev->bar0_mmio + REG_VCH0_WIDTH);
+        iowrite32(vch->height, qdev->bar0_mmio + REG_VCH0_HEIGHT);
+        iowrite32(stride0, qdev->bar0_mmio + REG_VCH0_STRIDE0);
+        iowrite32(stride1, qdev->bar0_mmio + REG_VCH0_STRIDE1);
+
+        /* Program RING0 Base Address & CFG */
+        iowrite32(lower_32_bits(qdev->thin_ring_dma),
+                  qdev->bar0_mmio + REG_VCH0_RING0_BASE_L);
+        iowrite32(upper_32_bits(qdev->thin_ring_dma),
+                  qdev->bar0_mmio + REG_VCH0_RING0_BASE_H);
+        qdev->thin_ring_tail = 0;
+        iowrite32(RING_BUFFER_SIZE, qdev->bar0_mmio + REG_VCH0_RING0_CFG);
+
+        /* Enable CH0 */
+        iowrite32(ch0_ctrl, qdev->bar0_mmio + REG_VCH0_CTRL);
+        ioread32(qdev->bar0_mmio + REG_VCH0_CTRL);
+    } else {
+        iowrite32(DMA_CTRL_RUN, qdev->bar0_mmio + REG_DMA_CTRL);
+        ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
+    }
 
     /* Start TPG AFTER DMA is enabled so frame 1 starts cleanly without FIFO backpressure */
     if (vch->channel_id == 0) {
@@ -1003,7 +1070,10 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
             if (ret) {
                 dev_err(&qdev->pdev->dev,
                         "Cannot start TPG pacing kthread: %d\n", ret);
-                iowrite32(0, qdev->bar0_mmio + REG_DMA_CTRL);
+                if (qdev->use_new_map && vch->channel_id == 0)
+                    iowrite32(0, qdev->bar0_mmio + REG_VCH0_CTRL);
+                else
+                    iowrite32(0, qdev->bar0_mmio + REG_DMA_CTRL);
                 qpcie_return_all_buffers(vch, VB2_BUF_STATE_QUEUED);
                 return ret;
             }
@@ -1053,8 +1123,13 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
     iowrite32(0, qdev->bar0_mmio + REG_PACER_CTRL);
     /* Stop fetching descriptors. Queued descriptors are cancelled below;
      * only already-buffered PCIe writes must drain before mappings return. */
-    iowrite32(0, qdev->bar0_mmio + REG_DMA_CTRL);
-    ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
+    if (qdev->use_new_map && vch->channel_id == 0) {
+        iowrite32(0, qdev->bar0_mmio + REG_VCH0_CTRL);
+        ioread32(qdev->bar0_mmio + REG_VCH0_CTRL);
+    } else {
+        iowrite32(0, qdev->bar0_mmio + REG_DMA_CTRL);
+        ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
+    }
     do {
         u32 status = ioread32(qdev->bar0_mmio + REG_DMA_STATUS);
 

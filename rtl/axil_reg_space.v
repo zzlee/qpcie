@@ -366,7 +366,12 @@ module axil_reg_space (
                             case (s_axil_awaddr[7:0])
                                 8'h00: reg_dma_ctrl       <= s_axil_wdata;
                                 8'h14: global_reset_pulse <= s_axil_wdata[0];
-                                8'h18: irq_top_status_w1c <= s_axil_wdata;
+                                8'h18: begin
+                                    irq_top_status_w1c <= s_axil_wdata;
+                                    reg_irq_status_w1c <= s_axil_wdata;
+                                end
+                                8'h20: reg_irq_ctrl       <= s_axil_wdata;
+                                8'h24: reg_irq_status_w1c <= s_axil_wdata;
                                 default: ;
                             endcase
                         end
@@ -412,7 +417,10 @@ module axil_reg_space (
                                     reg_h2c_ring_size               <= s_axil_wdata[15:0];
                                     reg_h2c_tail_ptr                <= s_axil_wdata[31:16];
                                 end
-                                8'h70: vch0_irq_status_w1c          <= s_axil_wdata;
+                                8'h70: begin
+                                    vch0_irq_status_w1c   <= s_axil_wdata;
+                                    reg_irq_status_w1c[4] <= s_axil_wdata[0];
+                                end
                                 default: ;
                             endcase
                         end
@@ -542,7 +550,7 @@ module axil_reg_space (
                                 8'h0C: s_axil_rdata <= GIT_COMMIT_HASH_VAL;
                                 8'h10: s_axil_rdata <= BUILD_TIMESTAMP_VAL;
                                 8'h14: s_axil_rdata <= {31'd0, global_reset_pulse};
-                                8'h18: s_axil_rdata <= irq_top_status_w1c;
+                                8'h18: s_axil_rdata <= reg_irq_status;
                                 8'h1C: s_axil_rdata <= reg_global_timestamp[31:0];
                                 8'h20: s_axil_rdata <= reg_global_timestamp[63:32];
                                 default: s_axil_rdata <= 32'd0;
@@ -600,7 +608,7 @@ module axil_reg_space (
                                 8'h64: s_axil_rdata <= in_vch0_drop_count;
                                 8'h68: s_axil_rdata <= reg_last_video_pts[31:0];
                                 8'h6C: s_axil_rdata <= reg_last_video_pts[63:32];
-                                8'h70: s_axil_rdata <= vch0_irq_status_w1c;
+                                8'h70: s_axil_rdata <= {31'd0, reg_irq_status[4]};
                                 default: s_axil_rdata <= 32'd0;
                             endcase
                         end

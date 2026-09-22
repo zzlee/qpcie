@@ -87,6 +87,11 @@ MODULE_PARM_DESC(rgb24_only,
                  "Force RGB24-only mode (1): skip the format-0 C2H SG diagnostic "
                  "for QPCIe_single_rgb24_path bitstreams");
 
+static int use_new_map;
+module_param(use_new_map, int, 0644);
+MODULE_PARM_DESC(use_new_map,
+                 "Enable Phase 3 new register map and thin descriptor engine (0: legacy, 1: new map)");
+
 static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
     struct qpcie_dev *qdev;
@@ -566,6 +571,46 @@ free_diag_dma:
                  (u64)qdev->h2c_ring_dma, hw_head);
     }
 
+    /* Phase 3: New Register Map & Thin Descriptor Ring Initialization */
+    if (use_new_map) {
+        if (((ver >> 24) >= 3) && (caps & BIT(4))) {
+            qdev->thin_ring_virt = dma_alloc_coherent(&pdev->dev,
+                                    sizeof(*qdev->thin_ring_virt) * RING_BUFFER_SIZE,
+                                    &qdev->thin_ring_dma, GFP_KERNEL);
+            if (!qdev->thin_ring_virt) {
+                dev_err(&pdev->dev, "[ERROR] Cannot allocate thin descriptor ring\n");
+                ret = -ENOMEM;
+                goto free_video_ring;
+            }
+            memset(qdev->thin_ring_virt, 0,
+                   sizeof(*qdev->thin_ring_virt) * RING_BUFFER_SIZE);
+            qdev->thin_ring_tail = 0;
+            qdev->thin_ring_head = 0;
+
+            /* Switch hardware to new register map via DMA_CTRL[3] */
+            ctrl = ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
+            iowrite32(ctrl | BIT(3), qdev->bar0_mmio + REG_DMA_CTRL);
+            readback = ioread32(qdev->bar0_mmio + REG_NEW_GLOBAL_ID);
+            if (readback == 0x12ABE380) {
+                qdev->use_new_map = true;
+                dev_info(&pdev->dev,
+                         "=== [PHASE 3 NEW MAP ACTIVE] Magic ID=0x%08X (Thin Descriptor Ring DMA=0x%llX Size=%u) ===\n",
+                         readback, (u64)qdev->thin_ring_dma, RING_BUFFER_SIZE);
+            } else {
+                dev_err(&pdev->dev,
+                        "[ERROR] New Map Magic ID mismatch: 0x%08X (expected 0x12ABE380)\n",
+                        readback);
+                iowrite32(ctrl & ~BIT(3), qdev->bar0_mmio + REG_DMA_CTRL);
+                qdev->use_new_map = false;
+            }
+        } else {
+            dev_warn(&pdev->dev,
+                     "[NEW MAP WARN] New map requested but hardware does not support it (ver=0x%08X caps=0x%08X)\n",
+                     ver, caps);
+            qdev->use_new_map = false;
+        }
+    }
+
     ret = qpcie_v4l2_init(qdev);
     if (ret) {
         dev_err(&pdev->dev, "[ERROR] V4L2-only initialization failed: %d\n", ret);
@@ -594,6 +639,12 @@ v4l2_remove:
     qpcie_v4l2_remove(qdev);
     qdev->v4l2_registered = false;
 free_video_ring:
+    if (qdev->thin_ring_virt) {
+        dma_free_coherent(&pdev->dev,
+                          sizeof(*qdev->thin_ring_virt) * RING_BUFFER_SIZE,
+                          qdev->thin_ring_virt, qdev->thin_ring_dma);
+        qdev->thin_ring_virt = NULL;
+    }
     dma_free_coherent(&pdev->dev,
                       sizeof(*qdev->h2c_ring_virt) * RING_BUFFER_SIZE,
                       qdev->h2c_ring_virt, qdev->h2c_ring_dma);
@@ -633,6 +684,12 @@ static void qpcie_remove(struct pci_dev *pdev)
     if (qdev->v4l2_registered) {
         qpcie_v4l2_remove(qdev);
         qdev->v4l2_registered = false;
+    }
+    if (qdev->thin_ring_virt) {
+        dma_free_coherent(&pdev->dev,
+                          sizeof(*qdev->thin_ring_virt) * RING_BUFFER_SIZE,
+                          qdev->thin_ring_virt, qdev->thin_ring_dma);
+        qdev->thin_ring_virt = NULL;
     }
     if (qdev->h2c_ring_virt) {
         dma_free_coherent(&pdev->dev,

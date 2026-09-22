@@ -210,7 +210,7 @@ module tb_thin_desc_fetch_engine;
         $display("  Detected frame_launch_req!");
         if (frame_launch_bus[244:241] !== 4'd1 || // format RGB24
             frame_launch_bus[240] !== 1'b1     || // sg_mode = 1
-            frame_launch_bus[143:128] !== 16'd1920 || // width
+            frame_launch_bus[143:128] !== 16'd5760 || // effective width in bytes (5760)
             frame_launch_bus[159:144] !== 16'd1080) begin // height
             $display("FAIL: Test 2 frame_launch_bus parameters mismatch: 0x%h", frame_launch_bus);
             $fatal(1);

@@ -102,16 +102,18 @@ module thin_desc_fetch_engine #(
 
     // Ring occupancy checks
     wire ring0_has_work = (ring0_head != ring0_tail) && (ring0_size != 16'd0);
-    wire ring1_has_work = (ring1_head != ring1_tail) && (ring1_size != 16'd0) && (format == 4'd0);
+    wire ring1_has_work = (ring1_head != ring1_tail) && (ring1_size != 16'd0) && (format != 4'd1);
+    wire ring0_needed   = frame_active ? (frame_bytes_accum_y < frame_bytes_target_y) : 1'b1;
+    wire ring1_needed   = frame_active ? (frame_bytes_accum_uv < frame_bytes_target_uv) : 1'b1;
 
     assign busy = (state != S_IDLE) || frame_active;
 
     // Target frame bytes calculation
-    // RGB24: width * height * 3
+    // RGB24: line_width_bytes * height = stride0 * height (e.g. 5760 * 1080 = 6,220,800 bytes)
     // NV12M: Y = width * height, UV = width * (height / 2)
-    wire [31:0] calc_pixels = frame_width * frame_height;
-    wire [31:0] target_y  = (format == 4'd1) ? (calc_pixels * 32'd3) : calc_pixels;
-    wire [31:0] target_uv = (format == 4'd1) ? 32'd0 : (calc_pixels >> 1);
+    wire [15:0] effective_width = (format == 4'd1) ? ((frame_stride0 > 16'd0) ? frame_stride0 : (frame_width * 16'd3)) : frame_width;
+    wire [31:0] target_y  = effective_width * frame_height;
+    wire [31:0] target_uv = (format == 4'd1) ? 32'd0 : (frame_width * (frame_height >> 1));
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -180,14 +182,14 @@ module thin_desc_fetch_engine #(
                                 global_timestamp,
                                 frame_stride0,
                                 frame_height,
-                                frame_width,
+                                effective_width,
                                 64'd0, // plane1 dummy (walker supplies address)
                                 64'd0  // plane0 dummy (walker supplies address)
                             };
                             frame_launch_req <= 1'b1;
                             frame_active     <= 1'b1;
                             state            <= S_LAUNCH_WAIT;
-                        end else if (ring0_has_work && !sgl_y_almost_full) begin
+                        end else if (ring0_has_work && !sgl_y_almost_full && ring0_needed) begin
                             // Fetch next entry for RING0
                             sel_ring1      <= 1'b0;
                             mrd_req_addr   <= ring0_base_addr + (ring0_head * 16);
@@ -195,7 +197,7 @@ module thin_desc_fetch_engine #(
                             mrd_req_tag    <= THIN_MRD_TAG;
                             mrd_req_valid  <= 1'b1;
                             state          <= S_REQ_MRD;
-                        end else if (ring1_has_work && !sgl_uv_almost_full) begin
+                        end else if (ring1_has_work && !sgl_uv_almost_full && ring1_needed) begin
                             // Fetch next entry for RING1
                             sel_ring1      <= 1'b1;
                             mrd_req_addr   <= ring1_base_addr + (ring1_head * 16);

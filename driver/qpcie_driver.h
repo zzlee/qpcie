@@ -155,6 +155,34 @@
 #define DMA_STATUS_VIDEO_TX_IDLE    BIT(8) /* Channel-0 CDC and requester drained */
 #define DMA_STATUS_DESC_IDLE        BIT(9) /* Descriptor fetch FSM quiescent */
 
+/* Phase 2/3 New Register Map Offsets */
+#define REG_NEW_GLOBAL_ID           0x00
+#define REG_NEW_GLOBAL_VERSION      0x04
+#define REG_NEW_GLOBAL_CAPS         0x08
+#define REG_NEW_GLOBAL_GITHASH      0x0C
+#define REG_NEW_GLOBAL_BUILDTIME    0x10
+#define REG_NEW_GLOBAL_RESET        0x14
+#define REG_NEW_GLOBAL_IRQ_TOP      0x18
+
+/* Video CH0 Block (0x100 - 0x170) */
+#define REG_VCH0_CTRL               0x100
+#define REG_VCH0_STATUS             0x104
+#define REG_VCH0_WIDTH              0x108
+#define REG_VCH0_HEIGHT             0x10C
+#define REG_VCH0_STRIDE0            0x110
+#define REG_VCH0_STRIDE1            0x114
+#define REG_VCH0_RING0_BASE_L       0x120
+#define REG_VCH0_RING0_BASE_H       0x124
+#define REG_VCH0_RING0_CFG          0x128
+#define REG_VCH0_RING0_HEAD         0x12C
+#define REG_VCH0_RING1_BASE_L       0x130
+#define REG_VCH0_RING1_BASE_H       0x134
+#define REG_VCH0_RING1_CFG          0x138
+#define REG_VCH0_RING1_HEAD         0x13C
+#define REG_VCH0_FRAMES             0x160
+#define REG_VCH0_DROPS              0x164
+#define REG_VCH0_IRQ_STATUS         0x170
+
 /* Scatter-Gather Page Table & Status Registers (BAR0 Offsets 0xE0..0xEC) */
 #define REG_SG_PT_CTRL              0xE0 /* Page Table Target Address [10:0] */
 #define REG_SG_PT_DATA_LO           0xE4 /* Physical Address [31:0] */
@@ -288,6 +316,13 @@ struct qpcie_dev {
     u32 c2h_tail;
     spinlock_t ring_lock;
     atomic_t streaming_count;
+
+    /* Phase 3 New Register Map & Thin Descriptor Handles */
+    bool use_new_map;
+    struct qpcie_sgl_entry *thin_ring_virt;
+    dma_addr_t thin_ring_dma;
+    u32 thin_ring_tail;
+    u32 thin_ring_head;
 
     /* Software in-flight counters for the shared descriptor ring.  The
      * ring-full check must use these (invariant: published >= completed),
