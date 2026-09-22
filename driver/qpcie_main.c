@@ -137,10 +137,10 @@ MODULE_PARM_DESC(rgb24_only,
                  "Force RGB24-only mode (1): skip the format-0 C2H SG diagnostic "
                  "for QPCIe_single_rgb24_path bitstreams");
 
-static int use_new_map = -1;
+static int use_new_map = 1;
 module_param(use_new_map, int, 0644);
 MODULE_PARM_DESC(use_new_map,
-                 "Register map selection (-1: auto-detect from version/caps, 0: legacy, 1: new map v3.0)");
+                 "Use new canonical register map and thin descriptor ring (0=legacy, 1=new, -1=auto)");
 
 static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
@@ -276,53 +276,80 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
      * ------------------------------------------------------------------------ */
     dev_info(&pdev->dev, "--- [1. BAR0 Register Read Tests] ---\n");
 
-    ver = ioread32(qdev->bar0_mmio + REG_VERSION_ID);
-    dev_info(&pdev->dev, "  BAR0 [0x30] Version ID     : 0x%08X (Parsed: v%u.%u.%u Variant %u)\n",
+    u32 magic = ioread32(qdev->bar0_mmio + REG_NEW_GLOBAL_ID);
+    if (magic == 0x12ABE380) {
+        ver = ioread32(qdev->bar0_mmio + REG_NEW_GLOBAL_VERSION);
+        git = ioread32(qdev->bar0_mmio + REG_NEW_GLOBAL_GITHASH);
+        date = ioread32(qdev->bar0_mmio + REG_NEW_GLOBAL_BUILDTIME);
+        caps = ioread32(qdev->bar0_mmio + REG_NEW_GLOBAL_CAPS);
+        ctrl = magic;
+        stat = ioread32(qdev->bar0_mmio + REG_NEW_GLOBAL_DMA_STATUS);
+        dev_info(&pdev->dev, "  BAR0 [0x00] Magic Device ID: 0x%08X (Canonical v3.0 Map Active)\n", magic);
+    } else {
+        ver = ioread32(qdev->bar0_mmio + REG_VERSION_ID);
+        git = ioread32(qdev->bar0_mmio + REG_GIT_COMMIT_HASH);
+        date = ioread32(qdev->bar0_mmio + REG_BUILD_TIMESTAMP);
+        caps = ioread32(qdev->bar0_mmio + REG_HARDWARE_CAPS);
+        ctrl = ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
+        stat = ioread32(qdev->bar0_mmio + REG_DMA_STATUS);
+        dev_info(&pdev->dev, "  BAR0 [0x00] DMA Control    : 0x%08X\n", ctrl);
+    }
+
+    dev_info(&pdev->dev, "  BAR0 Version ID     : 0x%08X (Parsed: v%u.%u.%u Variant %u)\n",
              ver, (ver >> 24) & 0xFF, (ver >> 16) & 0xFF, (ver >> 8) & 0xFF, ver & 0xFF);
-
-    git = ioread32(qdev->bar0_mmio + REG_GIT_COMMIT_HASH);
-    dev_info(&pdev->dev, "  BAR0 [0x34] Git Commit Hash: 0x%08X\n", git);
-
-    date = ioread32(qdev->bar0_mmio + REG_BUILD_TIMESTAMP);
-    dev_info(&pdev->dev, "  BAR0 [0x38] Build Timestamp: %08X\n", date);
-
-    caps = ioread32(qdev->bar0_mmio + REG_HARDWARE_CAPS);
-    dev_info(&pdev->dev, "  BAR0 [0x3C] Hardware Caps  : 0x%08X (VideoCh=%u, AudioCh=%u, Flags=0x%X)\n",
+    dev_info(&pdev->dev, "  BAR0 Git Commit Hash: 0x%08X\n", git);
+    dev_info(&pdev->dev, "  BAR0 Build Timestamp: %08X\n", date);
+    dev_info(&pdev->dev, "  BAR0 Hardware Caps  : 0x%08X (VideoCh=%u, AudioCh=%u, Flags=0x%X)\n",
              caps, (caps >> 8) & 0xFF, (caps >> 16) & 0xFF, caps & 0xFF);
+    dev_info(&pdev->dev, "  BAR0 DMA Status     : 0x%08X\n", stat);
 
     single_rgb24 = rgb24_only || (((caps >> 8) & 0xFF) == 1);
     if (single_rgb24)
         dev_info(&pdev->dev,
                  "  [Single-path RGB24 build] format-0 C2H SG diagnostic will be skipped\n");
 
-    ctrl = ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
-    dev_info(&pdev->dev, "  BAR0 [0x00] DMA Control    : 0x%08X\n", ctrl);
-
-    stat = ioread32(qdev->bar0_mmio + REG_DMA_STATUS);
-    dev_info(&pdev->dev, "  BAR0 [0x04] DMA Status     : 0x%08X\n", stat);
-
     /* ------------------------------------------------------------------------
      * 2. BAR0 Write & Read-back Test
      * ------------------------------------------------------------------------ */
     dev_info(&pdev->dev, "--- [2. BAR0 Write & Readback Test] ---\n");
 
-    iowrite32(0x12345678, qdev->bar0_mmio + REG_H2C_RING_ADDR_L); // offset 0x08
-    readback = ioread32(qdev->bar0_mmio + REG_H2C_RING_ADDR_L);
-    dbg_wdata = ioread32(qdev->bar0_mmio + 0x68);
-    dbg_waddr = ioread32(qdev->bar0_mmio + 0x6C);
-    dev_info(&pdev->dev, "  BAR0 [0x08] Write 0x12345678 -> Readback: 0x%08X %s (Hardware Captured: Addr=0x%02X, Data=0x%08X)\n",
-             readback, (readback == 0x12345678) ? "[PASS]" : "[FAIL]", dbg_waddr, dbg_wdata);
+    if (magic == 0x12ABE380 || (ver >> 24) >= 3) {
+        iowrite32(0x12345678, qdev->bar0_mmio + REG_VCH0_RING0_BASE_L); // offset 0x120
+        readback = ioread32(qdev->bar0_mmio + REG_VCH0_RING0_BASE_L);
+        dbg_wdata = ioread32(qdev->bar0_mmio + REG_NEW_DEBUG_LAST_WDATA);
+        dbg_waddr = ioread32(qdev->bar0_mmio + REG_NEW_DEBUG_LAST_WADDR);
+        dev_info(&pdev->dev, "  BAR0 [0x120] Write 0x12345678 -> Readback: 0x%08X %s (Hardware Captured: Addr=0x%03X, Data=0x%08X)\n",
+                 readback, (readback == 0x12345678) ? "[PASS]" : "[FAIL]", dbg_waddr, dbg_wdata);
 
-    iowrite32(0x87654321, qdev->bar0_mmio + REG_C2H_RING_ADDR_L); // offset 0x14
-    readback = ioread32(qdev->bar0_mmio + REG_C2H_RING_ADDR_L);
-    dbg_wdata = ioread32(qdev->bar0_mmio + 0x68);
-    dbg_waddr = ioread32(qdev->bar0_mmio + 0x6C);
-    dev_info(&pdev->dev, "  BAR0 [0x14] Write 0x87654321 -> Readback: 0x%08X %s (Hardware Captured: Addr=0x%02X, Data=0x%08X)\n",
-             readback, (readback == 0x87654321) ? "[PASS]" : "[FAIL]", dbg_waddr, dbg_wdata);
+        iowrite32(0x87654321, qdev->bar0_mmio + REG_VCH0_RING0_BASE_H); // offset 0x124
+        readback = ioread32(qdev->bar0_mmio + REG_VCH0_RING0_BASE_H);
+        dbg_wdata = ioread32(qdev->bar0_mmio + REG_NEW_DEBUG_LAST_WDATA);
+        dbg_waddr = ioread32(qdev->bar0_mmio + REG_NEW_DEBUG_LAST_WADDR);
+        dev_info(&pdev->dev, "  BAR0 [0x124] Write 0x87654321 -> Readback: 0x%08X %s (Hardware Captured: Addr=0x%03X, Data=0x%08X)\n",
+                 readback, (readback == 0x87654321) ? "[PASS]" : "[FAIL]", dbg_waddr, dbg_wdata);
 
-    /* Restore zero values */
-    iowrite32(0x00000000, qdev->bar0_mmio + REG_H2C_RING_ADDR_L);
-    iowrite32(0x00000000, qdev->bar0_mmio + REG_C2H_RING_ADDR_L);
+        /* Restore zero values */
+        iowrite32(0x00000000, qdev->bar0_mmio + REG_VCH0_RING0_BASE_L);
+        iowrite32(0x00000000, qdev->bar0_mmio + REG_VCH0_RING0_BASE_H);
+    } else {
+        iowrite32(0x12345678, qdev->bar0_mmio + REG_H2C_RING_ADDR_L); // offset 0x08
+        readback = ioread32(qdev->bar0_mmio + REG_H2C_RING_ADDR_L);
+        dbg_wdata = ioread32(qdev->bar0_mmio + 0x68);
+        dbg_waddr = ioread32(qdev->bar0_mmio + 0x6C);
+        dev_info(&pdev->dev, "  BAR0 [0x08] Write 0x12345678 -> Readback: 0x%08X %s (Hardware Captured: Addr=0x%02X, Data=0x%08X)\n",
+                 readback, (readback == 0x12345678) ? "[PASS]" : "[FAIL]", dbg_waddr, dbg_wdata);
+
+        iowrite32(0x87654321, qdev->bar0_mmio + REG_C2H_RING_ADDR_L); // offset 0x14
+        readback = ioread32(qdev->bar0_mmio + REG_C2H_RING_ADDR_L);
+        dbg_wdata = ioread32(qdev->bar0_mmio + 0x68);
+        dbg_waddr = ioread32(qdev->bar0_mmio + 0x6C);
+        dev_info(&pdev->dev, "  BAR0 [0x14] Write 0x87654321 -> Readback: 0x%08X %s (Hardware Captured: Addr=0x%02X, Data=0x%08X)\n",
+                 readback, (readback == 0x87654321) ? "[PASS]" : "[FAIL]", dbg_waddr, dbg_wdata);
+
+        /* Restore zero values */
+        iowrite32(0x00000000, qdev->bar0_mmio + REG_H2C_RING_ADDR_L);
+        iowrite32(0x00000000, qdev->bar0_mmio + REG_C2H_RING_ADDR_L);
+    }
 
     /* Enable Bus Mastering and configure 64-bit DMA Mask */
     ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
@@ -354,280 +381,280 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
     }
     iowrite32(0x3, qdev->bar0_mmio + REG_IRQ_CTRL);
 
-    /* --------------------------------------------------------------------
-     * 3. Scatter-Gather (SG List) DMA Verification: 4x H2C + 4x C2H Pages
-     * -------------------------------------------------------------------- */
-    dev_info(&pdev->dev, "--- [3. Scatter-Gather (SG List) DMA Verification] ---\n");
-
-    desc_ring = dma_alloc_coherent(&pdev->dev, 64 * 16,
-                                   &desc_ring_dma, GFP_KERNEL);
-
-    if (!desc_ring) {
-        dev_err(&pdev->dev, "[ERROR] dma_alloc_coherent failed for Descriptor Ring!\n");
-        ret = -ENOMEM;
-    } else {
-        memset(desc_ring, 0, 64 * 16);
-        dev_info(&pdev->dev, "  Allocated Coherent Ring: Phys=0x%llX (Virt=%p)\n", (u64)desc_ring_dma, desc_ring);
-
-        for (p = 0; p < SG_PAGES; p++) {
-            h2c_pages[p] = dma_alloc_coherent(&pdev->dev, 4096, &h2c_page_dma[p], GFP_KERNEL);
-            c2h_pages[p] = dma_alloc_coherent(&pdev->dev, 4096, &c2h_page_dma[p], GFP_KERNEL);
-            if (!h2c_pages[p] || !c2h_pages[p]) {
-                dev_err(&pdev->dev, "[ERROR] SG page allocation %d failed\n", p);
-                ret = -ENOMEM;
-                goto free_diag_dma;
-            }
-            for (w = 0; w < 1024; w++)
-                h2c_pages[p][w] = 0xAA000000 | (p << 16) | w;
-            memset(c2h_pages[p], 0x00, 4096);
-            dev_info(&pdev->dev, "  [SG Page %d] H2C Phys=0x%llX (Pattern: 0x%08X), C2H Phys=0x%llX\n",
-                     p, (u64)h2c_page_dma[p], h2c_pages[p] ? h2c_pages[p][0] : 0, (u64)c2h_page_dma[p]);
-        }
-
-        /* The FPGA head pointer and completion counters persist across Linux
-         * module reloads. Anchor this fresh coherent ring at the current head;
-         * programming an absolute tail of 4 on a retained head of 8 would make
-         * hardware consume uninitialized descriptors 8..15 and DMA to IOVA 0. */
-        ring_head = ioread32(qdev->bar0_mmio + 0x40) & 0xffff;
-        if (ring_head >= RING_BUFFER_SIZE) {
-            dev_err(&pdev->dev, "[ERROR] Invalid retained descriptor head %u\n",
-                    ring_head);
-            ret = -EIO;
-            goto free_diag_dma;
-        }
-        c2h_tail = (ring_head + SG_PAGES) % RING_BUFFER_SIZE;
-        h2c_tail = single_rgb24 ? c2h_tail
-                                : (ring_head + (2 * SG_PAGES)) % RING_BUFFER_SIZE;
-        start_c2h = ioread32(qdev->bar0_mmio + REG_COMPLETED_C2H);
-        start_h2c = ioread32(qdev->bar0_mmio + REG_COMPLETED_H2C);
-        dev_info(&pdev->dev,
-                 "  Retained DMA state: Head=%u, C2HCount=%u, H2CCount=%u\n",
-                 ring_head, start_c2h, start_h2c);
-
-        for (p = 0; p < SG_PAGES; p++) {
-            if (single_rgb24) {
-                u32 h2c_idx = (ring_head + p) % RING_BUFFER_SIZE;
-
-                desc_ring[h2c_idx].plane0_src_addr = (u64)h2c_page_dma[p];
-                desc_ring[h2c_idx].plane0_dst_addr = 0x0ULL;
-                desc_ring[h2c_idx].line_width      = 4096;
-                desc_ring[h2c_idx].line_count      = 1;
-                desc_ring[h2c_idx].src_stride      = 4096;
-                desc_ring[h2c_idx].dst_stride      = 4096;
-                desc_ring[h2c_idx].format          = 0;
-                desc_ring[h2c_idx].plane_count     = 1;
-                desc_ring[h2c_idx].control         = 0x00; /* H2C */
-            } else {
-                u32 c2h_idx = (ring_head + p) % RING_BUFFER_SIZE;
-                u32 h2c_idx = (ring_head + SG_PAGES + p) % RING_BUFFER_SIZE;
-
-                desc_ring[c2h_idx].plane0_src_addr = 0x0ULL;
-                desc_ring[c2h_idx].plane0_dst_addr = (u64)c2h_page_dma[p];
-                desc_ring[c2h_idx].line_width      = 4096;
-                desc_ring[c2h_idx].line_count      = 1;
-                desc_ring[c2h_idx].src_stride      = 4096;
-                desc_ring[c2h_idx].dst_stride      = 4096;
-                desc_ring[c2h_idx].format          = 0;
-                desc_ring[c2h_idx].plane_count     = 1;
-                desc_ring[c2h_idx].control         = 0x02; /* C2H */
-
-                desc_ring[h2c_idx].plane0_src_addr = (u64)h2c_page_dma[p];
-                desc_ring[h2c_idx].plane0_dst_addr = 0x0ULL;
-                desc_ring[h2c_idx].line_width      = 4096;
-                desc_ring[h2c_idx].line_count      = 1;
-                desc_ring[h2c_idx].src_stride      = 4096;
-                desc_ring[h2c_idx].dst_stride      = 4096;
-                desc_ring[h2c_idx].format          = 0;
-                desc_ring[h2c_idx].plane_count     = 1;
-                desc_ring[h2c_idx].control         = 0x00; /* H2C */
-            }
-        }
-
-        /* Flush all descriptor writes to memory before informing hardware */
-        dma_wmb();
-
-        /* Program Ring Base Address into BAR0 0x08 (Low) and 0x0C (High) */
-        iowrite32((u32)(desc_ring_dma & 0xFFFFFFFF), qdev->bar0_mmio + REG_H2C_RING_ADDR_L);
-        iowrite32((u32)((desc_ring_dma >> 32) & 0xFFFFFFFF), qdev->bar0_mmio + REG_H2C_RING_ADDR_H);
-
-        if (single_rgb24) {
-            /* RGB24-only build: the format-0 SG C2H engine is disabled in
-             * hardware, so validate the intact H2C read path directly. */
-            iowrite32((h2c_tail << 16) | RING_BUFFER_SIZE,
-                      qdev->bar0_mmio + REG_H2C_RING_CFG);
-
-            /* Trigger DMA Start */
-            iowrite32(0x00000001, qdev->bar0_mmio + REG_DMA_CTRL);
-            dev_info(&pdev->dev, "--- [3.1 Step 1: H2C 4-Page SG List DMA Read Test] ---\n");
-            dev_info(&pdev->dev,
-                     "  Triggered H2C SG Run (Head=%u, Tail=%u, Size=%u)...\n",
-                     ring_head, h2c_tail, RING_BUFFER_SIZE);
-            goto h2c_diag_wait;
-        }
-
-        /* Publish exactly four C2H descriptors after the retained head. */
-        iowrite32((c2h_tail << 16) | RING_BUFFER_SIZE,
-                  qdev->bar0_mmio + REG_H2C_RING_CFG);
-
-        /* Trigger DMA Start */
-        iowrite32(0x00000001, qdev->bar0_mmio + REG_DMA_CTRL);
-        dev_info(&pdev->dev, "--- [3.1 Step 1: C2H 4-Page SG List DMA Write Test] ---\n");
-        dev_info(&pdev->dev,
-                 "  Triggered C2H SG Run (Head=%u, Tail=%u, Size=%u)...\n",
-                 ring_head, c2h_tail, RING_BUFFER_SIZE);
-        ret = qpcie_wait_dma(qdev, REG_COMPLETED_C2H, start_c2h + 4);
-        if (ret) {
-            dev_err(&pdev->dev, "[ERROR] C2H diagnostic DMA timed out\n");
-            qpcie_dump_dma_state(qdev, "C2H timeout");
-            goto stop_diag_dma;
-        }
-
-        dma_stat = ioread32(qdev->bar0_mmio + REG_DMA_STATUS);
-        comp_c2h = ioread32(qdev->bar0_mmio + REG_COMPLETED_C2H);
-        ptr_dbg  = ioread32(qdev->bar0_mmio + 0x40);
-        dev_info(&pdev->dev, "  C2H SG Status: DMA_STATUS=0x%08X, Completed Count=%u, Pointers: Tail=%u, Head=%u\n",
-                 dma_stat, comp_c2h, (ptr_dbg >> 16) & 0xFFFF, ptr_dbg & 0xFFFF);
-        if (comp_c2h != start_c2h + SG_PAGES ||
-            (ptr_dbg & 0xffff) != c2h_tail) {
-            dev_err(&pdev->dev,
-                    "[ERROR] C2H consumed an unexpected descriptor count/head\n");
-            ret = -EIO;
-            goto stop_diag_dma;
-        }
-
-        dma_rmb();
-        for (p = 0; p < SG_PAGES; p++) {
-            for (w = 0; w < 1024; w++) {
-                u32 expected = 0xC2000000 |
-                    (((start_c2h + p) & 0xff) << 16) | w;
-                if (c2h_pages[p][w] != expected) {
-                    dev_err(&pdev->dev,
-                            "[ERROR] C2H data mismatch page=%d word=%d: got=0x%08X expected=0x%08X\n",
-                            p, w, c2h_pages[p][w], expected);
-                    ret = -EIO;
-                    goto stop_diag_dma;
-                }
-            }
-        }
-        dev_info(&pdev->dev,
-                 "  C2H payload validation: 4 pages x 4096 bytes [PASS]\n");
-
-        /* Advance tail by four more entries for the H2C descriptors. */
-        dev_info(&pdev->dev, "--- [3.2 Step 2: H2C 4-Page SG List DMA Read Test] ---\n");
-        iowrite32((h2c_tail << 16) | RING_BUFFER_SIZE,
-                  qdev->bar0_mmio + REG_H2C_RING_CFG);
-        dev_info(&pdev->dev,
-                 "  Triggered H2C SG Run (Head=%u, Tail=%u, Size=%u)...\n",
-                 c2h_tail, h2c_tail, RING_BUFFER_SIZE);
-
-h2c_diag_wait:
-        ret = qpcie_wait_dma(qdev, REG_COMPLETED_H2C, start_h2c + 4);
-        if (ret) {
-            dev_err(&pdev->dev, "[ERROR] H2C diagnostic DMA timed out\n");
-            qpcie_dump_dma_state(qdev, "H2C timeout");
-            goto stop_diag_dma;
-        }
-
-        dma_stat = ioread32(qdev->bar0_mmio + REG_DMA_STATUS);
-        comp_h2c = ioread32(qdev->bar0_mmio + REG_COMPLETED_H2C);
-        ptr_dbg  = ioread32(qdev->bar0_mmio + 0x40);
-        dev_info(&pdev->dev, "  H2C SG Status: DMA_STATUS=0x%08X, Completed Count=%u, Pointers: Tail=%u, Head=%u\n",
-                 dma_stat, comp_h2c, (ptr_dbg >> 16) & 0xFFFF, ptr_dbg & 0xFFFF);
-        if (comp_h2c != start_h2c + SG_PAGES ||
-            (ptr_dbg & 0xffff) != h2c_tail) {
-            dev_err(&pdev->dev,
-                    "[ERROR] H2C consumed an unexpected descriptor count/head\n");
-            ret = -EIO;
-            goto stop_diag_dma;
-        }
-
-        /* Ensure CPU observes all DMA writes from FPGA */
-        dma_rmb();
-
-        dev_info(&pdev->dev,
-                 "  H2C payload validation: 4 pages x 4096 bytes [PASS]\n");
-
-        /* Inspect C2H pages */
-        if (!single_rgb24) {
-            for (p = 0; p < SG_PAGES; p++) {
-                if (c2h_pages[p]) {
-                    dev_info(&pdev->dev, "  C2H Page %d Content: [0]=0x%08X, [1]=0x%08X, [2]=0x%08X, [3]=0x%08X\n",
-                             p, c2h_pages[p][0], c2h_pages[p][1], c2h_pages[p][2], c2h_pages[p][3]);
-                }
-            }
-        }
-
-stop_diag_dma:
-        iowrite32(0, qdev->bar0_mmio + REG_DMA_CTRL);
-        ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
-        if (ret)
-            pci_clear_master(pdev);
-        msleep(20);
-        iowrite32(1, qdev->bar0_mmio + REG_VIDEO_CTRL);
-        ioread32(qdev->bar0_mmio + REG_VIDEO_CTRL);
-        qpcie_dma_soft_reset(qdev);
-        iowrite32(0, qdev->bar0_mmio + REG_VIDEO_CTRL);
-        ioread32(qdev->bar0_mmio + REG_VIDEO_CTRL);
-        usleep_range(1000, 2000);
-free_diag_dma:
-        dma_free_coherent(&pdev->dev, 64 * 16, desc_ring, desc_ring_dma);
-        for (p = 0; p < SG_PAGES; p++) {
-            if (h2c_pages[p]) dma_free_coherent(&pdev->dev, 4096, h2c_pages[p], h2c_page_dma[p]);
-            if (c2h_pages[p]) dma_free_coherent(&pdev->dev, 4096, c2h_pages[p], c2h_page_dma[p]);
-        }
-    }
-
-    if (ret)
-        goto free_irq;
-    dev_info(&pdev->dev, "=======================================================\n");
-    dev_info(&pdev->dev, "🎉 [DMA STEP-BY-STEP DIAGNOSTIC TEST COMPLETED]\n");
-    dev_info(&pdev->dev, "=======================================================\n");
-
-    /* --------------------------------------------------------------------
-     * 4. Stage-2 V4L2 NV12M capture bring-up (ALSA intentionally off)
-     * --------------------------------------------------------------------
-     * The hardware descriptor engine owns one shared ring. Preserve its
-     * current head position after the diagnostic run and start the persistent
-     * V4L2 ring at that same index so head/tail remain coherent.
-     */
-    qdev->h2c_ring_virt = dma_alloc_coherent(&pdev->dev,
-                              sizeof(*qdev->h2c_ring_virt) * RING_BUFFER_SIZE,
-                              &qdev->h2c_ring_dma, GFP_KERNEL);
-    if (!qdev->h2c_ring_virt) {
-        ret = -ENOMEM;
-        dev_err(&pdev->dev, "[ERROR] Cannot allocate persistent V4L2 descriptor ring\n");
-        goto free_irq;
-    }
-    memset(qdev->h2c_ring_virt, 0,
-           sizeof(*qdev->h2c_ring_virt) * RING_BUFFER_SIZE);
-    qdev->c2h_ring_virt = qdev->h2c_ring_virt;
-    qdev->c2h_ring_dma = qdev->h2c_ring_dma;
-
-    {
-        u32 hw_ptr = ioread32(qdev->bar0_mmio + 0x40);
-        u32 hw_head = hw_ptr & 0xffff;
-
-        qdev->h2c_tail = hw_head;
-        qdev->c2h_tail = hw_head;
-        dma_wmb();
-        iowrite32(lower_32_bits(qdev->h2c_ring_dma),
-                  qdev->bar0_mmio + REG_H2C_RING_ADDR_L);
-        iowrite32(upper_32_bits(qdev->h2c_ring_dma),
-                  qdev->bar0_mmio + REG_H2C_RING_ADDR_H);
-        iowrite32((hw_head << 16) | RING_BUFFER_SIZE,
-                  qdev->bar0_mmio + REG_H2C_RING_CFG);
-        dev_info(&pdev->dev,
-                 "V4L2 shared descriptor ring: DMA=0x%llX, head=tail=%u\n",
-                 (u64)qdev->h2c_ring_dma, hw_head);
-    }
-
-    /* Phase 5: Auto-detect Register Map from Version ID and Caps */
+    /* Phase 5/6: Auto-detect Register Map from Version ID, Caps, and Magic ID */
     bool should_use_new_map = false;
     if (use_new_map == 1) {
         should_use_new_map = true;
     } else if (use_new_map == -1) {
-        if (((ver >> 24) >= 3) && (caps & BIT(4)))
+        if (magic == 0x12ABE380 || (((ver >> 24) >= 3) && (caps & BIT(4))))
             should_use_new_map = true;
+    }
+
+    if (should_use_new_map) {
+        dev_info(&pdev->dev, "--- [3. Canonical v3.0 DMA Mode: Thin Descriptors Active (Legacy 64B SG Diagnostic Bypassed)] ---\n");
+    } else {
+        /* --------------------------------------------------------------------
+         * 3. Scatter-Gather (SG List) DMA Verification: 4x H2C + 4x C2H Pages
+         * -------------------------------------------------------------------- */
+        dev_info(&pdev->dev, "--- [3. Scatter-Gather (SG List) DMA Verification] ---\n");
+
+        desc_ring = dma_alloc_coherent(&pdev->dev, 64 * 16,
+                                       &desc_ring_dma, GFP_KERNEL);
+
+        if (!desc_ring) {
+            dev_err(&pdev->dev, "[ERROR] dma_alloc_coherent failed for Descriptor Ring!\n");
+            ret = -ENOMEM;
+        } else {
+            memset(desc_ring, 0, 64 * 16);
+            dev_info(&pdev->dev, "  Allocated Coherent Ring: Phys=0x%llX (Virt=%p)\n", (u64)desc_ring_dma, desc_ring);
+
+            for (p = 0; p < SG_PAGES; p++) {
+                h2c_pages[p] = dma_alloc_coherent(&pdev->dev, 4096, &h2c_page_dma[p], GFP_KERNEL);
+                c2h_pages[p] = dma_alloc_coherent(&pdev->dev, 4096, &c2h_page_dma[p], GFP_KERNEL);
+                if (!h2c_pages[p] || !c2h_pages[p]) {
+                    dev_err(&pdev->dev, "[ERROR] SG page allocation %d failed\n", p);
+                    ret = -ENOMEM;
+                    goto free_diag_dma;
+                }
+                for (w = 0; w < 1024; w++)
+                    h2c_pages[p][w] = 0xAA000000 | (p << 16) | w;
+                memset(c2h_pages[p], 0x00, 4096);
+                dev_info(&pdev->dev, "  [SG Page %d] H2C Phys=0x%llX (Pattern: 0x%08X), C2H Phys=0x%llX\n",
+                         p, (u64)h2c_page_dma[p], h2c_pages[p] ? h2c_pages[p][0] : 0, (u64)c2h_page_dma[p]);
+            }
+
+            /* The FPGA head pointer and completion counters persist across Linux
+             * module reloads. Anchor this fresh coherent ring at the current head;
+             * programming an absolute tail of 4 on a retained head of 8 would make
+             * hardware consume uninitialized descriptors 8..15 and DMA to IOVA 0. */
+            ring_head = ioread32(qdev->bar0_mmio + 0x40) & 0xffff;
+            if (ring_head >= RING_BUFFER_SIZE) {
+                dev_err(&pdev->dev, "[ERROR] Invalid retained descriptor head %u\n",
+                        ring_head);
+                ret = -EIO;
+                goto free_diag_dma;
+            }
+            c2h_tail = (ring_head + SG_PAGES) % RING_BUFFER_SIZE;
+            h2c_tail = single_rgb24 ? c2h_tail
+                                    : (ring_head + (2 * SG_PAGES)) % RING_BUFFER_SIZE;
+            start_c2h = ioread32(qdev->bar0_mmio + REG_COMPLETED_C2H);
+            start_h2c = ioread32(qdev->bar0_mmio + REG_COMPLETED_H2C);
+            dev_info(&pdev->dev,
+                     "  Retained DMA state: Head=%u, C2HCount=%u, H2CCount=%u\n",
+                     ring_head, start_c2h, start_h2c);
+
+            for (p = 0; p < SG_PAGES; p++) {
+                if (single_rgb24) {
+                    u32 h2c_idx = (ring_head + p) % RING_BUFFER_SIZE;
+
+                    desc_ring[h2c_idx].plane0_src_addr = (u64)h2c_page_dma[p];
+                    desc_ring[h2c_idx].plane0_dst_addr = 0x0ULL;
+                    desc_ring[h2c_idx].line_width      = 4096;
+                    desc_ring[h2c_idx].line_count      = 1;
+                    desc_ring[h2c_idx].src_stride      = 4096;
+                    desc_ring[h2c_idx].dst_stride      = 4096;
+                    desc_ring[h2c_idx].format          = 0;
+                    desc_ring[h2c_idx].plane_count     = 1;
+                    desc_ring[h2c_idx].control         = 0x00; /* H2C */
+                } else {
+                    u32 c2h_idx = (ring_head + p) % RING_BUFFER_SIZE;
+                    u32 h2c_idx = (ring_head + SG_PAGES + p) % RING_BUFFER_SIZE;
+
+                    desc_ring[c2h_idx].plane0_src_addr = 0x0ULL;
+                    desc_ring[c2h_idx].plane0_dst_addr = (u64)c2h_page_dma[p];
+                    desc_ring[c2h_idx].line_width      = 4096;
+                    desc_ring[c2h_idx].line_count      = 1;
+                    desc_ring[c2h_idx].src_stride      = 4096;
+                    desc_ring[c2h_idx].dst_stride      = 4096;
+                    desc_ring[c2h_idx].format          = 0;
+                    desc_ring[c2h_idx].plane_count     = 1;
+                    desc_ring[c2h_idx].control         = 0x02; /* C2H */
+
+                    desc_ring[h2c_idx].plane0_src_addr = (u64)h2c_page_dma[p];
+                    desc_ring[h2c_idx].plane0_dst_addr = 0x0ULL;
+                    desc_ring[h2c_idx].line_width      = 4096;
+                    desc_ring[h2c_idx].line_count      = 1;
+                    desc_ring[h2c_idx].src_stride      = 4096;
+                    desc_ring[h2c_idx].dst_stride      = 4096;
+                    desc_ring[h2c_idx].format          = 0;
+                    desc_ring[h2c_idx].plane_count     = 1;
+                    desc_ring[h2c_idx].control         = 0x00; /* H2C */
+                }
+            }
+
+            /* Flush all descriptor writes to memory before informing hardware */
+            dma_wmb();
+
+            /* Program Ring Base Address into BAR0 0x08 (Low) and 0x0C (High) */
+            iowrite32((u32)(desc_ring_dma & 0xFFFFFFFF), qdev->bar0_mmio + REG_H2C_RING_ADDR_L);
+            iowrite32((u32)((desc_ring_dma >> 32) & 0xFFFFFFFF), qdev->bar0_mmio + REG_H2C_RING_ADDR_H);
+
+            if (single_rgb24) {
+                /* RGB24-only build: the format-0 SG C2H engine is disabled in
+                 * hardware, so validate the intact H2C read path directly. */
+                iowrite32((h2c_tail << 16) | RING_BUFFER_SIZE,
+                          qdev->bar0_mmio + REG_H2C_RING_CFG);
+
+                /* Trigger DMA Start */
+                iowrite32(0x00000001, qdev->bar0_mmio + REG_DMA_CTRL);
+                dev_info(&pdev->dev, "--- [3.1 Step 1: H2C 4-Page SG List DMA Read Test] ---\n");
+                dev_info(&pdev->dev,
+                         "  Triggered H2C SG Run (Head=%u, Tail=%u, Size=%u)...\n",
+                         ring_head, h2c_tail, RING_BUFFER_SIZE);
+                goto h2c_diag_wait;
+            }
+
+            /* Publish exactly four C2H descriptors after the retained head. */
+            iowrite32((c2h_tail << 16) | RING_BUFFER_SIZE,
+                      qdev->bar0_mmio + REG_H2C_RING_CFG);
+
+            /* Trigger DMA Start */
+            iowrite32(0x00000001, qdev->bar0_mmio + REG_DMA_CTRL);
+            dev_info(&pdev->dev, "--- [3.1 Step 1: C2H 4-Page SG List DMA Write Test] ---\n");
+            dev_info(&pdev->dev,
+                     "  Triggered C2H SG Run (Head=%u, Tail=%u, Size=%u)...\n",
+                     ring_head, c2h_tail, RING_BUFFER_SIZE);
+            ret = qpcie_wait_dma(qdev, REG_COMPLETED_C2H, start_c2h + 4);
+            if (ret) {
+                dev_err(&pdev->dev, "[ERROR] C2H diagnostic DMA timed out\n");
+                qpcie_dump_dma_state(qdev, "C2H timeout");
+                goto stop_diag_dma;
+            }
+
+            dma_stat = ioread32(qdev->bar0_mmio + REG_DMA_STATUS);
+            comp_c2h = ioread32(qdev->bar0_mmio + REG_COMPLETED_C2H);
+            ptr_dbg  = ioread32(qdev->bar0_mmio + 0x40);
+            dev_info(&pdev->dev, "  C2H SG Status: DMA_STATUS=0x%08X, Completed Count=%u, Pointers: Tail=%u, Head=%u\n",
+                     dma_stat, comp_c2h, (ptr_dbg >> 16) & 0xFFFF, ptr_dbg & 0xFFFF);
+            if (comp_c2h != start_c2h + SG_PAGES ||
+                (ptr_dbg & 0xffff) != c2h_tail) {
+                dev_err(&pdev->dev,
+                        "[ERROR] C2H consumed an unexpected descriptor count/head\n");
+                ret = -EIO;
+                goto stop_diag_dma;
+            }
+
+            dma_rmb();
+            for (p = 0; p < SG_PAGES; p++) {
+                for (w = 0; w < 1024; w++) {
+                    u32 expected = 0xC2000000 |
+                        (((start_c2h + p) & 0xff) << 16) | w;
+                    if (c2h_pages[p][w] != expected) {
+                        dev_err(&pdev->dev,
+                                "[ERROR] C2H data mismatch page=%d word=%d: got=0x%08X expected=0x%08X\n",
+                                p, w, c2h_pages[p][w], expected);
+                        ret = -EIO;
+                        goto stop_diag_dma;
+                    }
+                }
+            }
+            dev_info(&pdev->dev,
+                     "  C2H payload validation: 4 pages x 4096 bytes [PASS]\n");
+
+            /* Advance tail by four more entries for the H2C descriptors. */
+            dev_info(&pdev->dev, "--- [3.2 Step 2: H2C 4-Page SG List DMA Read Test] ---\n");
+            iowrite32((h2c_tail << 16) | RING_BUFFER_SIZE,
+                      qdev->bar0_mmio + REG_H2C_RING_CFG);
+            dev_info(&pdev->dev,
+                     "  Triggered H2C SG Run (Head=%u, Tail=%u, Size=%u)...\n",
+                     c2h_tail, h2c_tail, RING_BUFFER_SIZE);
+
+h2c_diag_wait:
+            ret = qpcie_wait_dma(qdev, REG_COMPLETED_H2C, start_h2c + 4);
+            if (ret) {
+                dev_err(&pdev->dev, "[ERROR] H2C diagnostic DMA timed out\n");
+                qpcie_dump_dma_state(qdev, "H2C timeout");
+                goto stop_diag_dma;
+            }
+
+            dma_stat = ioread32(qdev->bar0_mmio + REG_DMA_STATUS);
+            comp_h2c = ioread32(qdev->bar0_mmio + REG_COMPLETED_H2C);
+            ptr_dbg  = ioread32(qdev->bar0_mmio + 0x40);
+            dev_info(&pdev->dev, "  H2C SG Status: DMA_STATUS=0x%08X, Completed Count=%u, Pointers: Tail=%u, Head=%u\n",
+                     dma_stat, comp_h2c, (ptr_dbg >> 16) & 0xFFFF, ptr_dbg & 0xFFFF);
+            if (comp_h2c != start_h2c + SG_PAGES ||
+                (ptr_dbg & 0xffff) != h2c_tail) {
+                dev_err(&pdev->dev,
+                        "[ERROR] H2C consumed an unexpected descriptor count/head\n");
+                ret = -EIO;
+                goto stop_diag_dma;
+            }
+
+            /* Ensure CPU observes all DMA writes from FPGA */
+            dma_rmb();
+
+            dev_info(&pdev->dev,
+                     "  H2C payload validation: 4 pages x 4096 bytes [PASS]\n");
+
+            /* Inspect C2H pages */
+            if (!single_rgb24) {
+                for (p = 0; p < SG_PAGES; p++) {
+                    if (c2h_pages[p]) {
+                        dev_info(&pdev->dev, "  C2H Page %d Content: [0]=0x%08X, [1]=0x%08X, [2]=0x%08X, [3]=0x%08X\n",
+                                 p, c2h_pages[p][0], c2h_pages[p][1], c2h_pages[p][2], c2h_pages[p][3]);
+                    }
+                }
+            }
+
+stop_diag_dma:
+            iowrite32(0, qdev->bar0_mmio + REG_DMA_CTRL);
+            ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
+            if (ret)
+                pci_clear_master(pdev);
+            msleep(20);
+            iowrite32(1, qdev->bar0_mmio + REG_VIDEO_CTRL);
+            ioread32(qdev->bar0_mmio + REG_VIDEO_CTRL);
+            qpcie_dma_soft_reset(qdev);
+            iowrite32(0, qdev->bar0_mmio + REG_VIDEO_CTRL);
+            ioread32(qdev->bar0_mmio + REG_VIDEO_CTRL);
+            usleep_range(1000, 2000);
+free_diag_dma:
+            dma_free_coherent(&pdev->dev, 64 * 16, desc_ring, desc_ring_dma);
+            for (p = 0; p < SG_PAGES; p++) {
+                if (h2c_pages[p]) dma_free_coherent(&pdev->dev, 4096, h2c_pages[p], h2c_page_dma[p]);
+                if (c2h_pages[p]) dma_free_coherent(&pdev->dev, 4096, c2h_pages[p], c2h_page_dma[p]);
+            }
+        }
+
+        if (ret)
+            goto free_irq;
+        dev_info(&pdev->dev, "=======================================================\n");
+        dev_info(&pdev->dev, "🎉 [DMA STEP-BY-STEP DIAGNOSTIC TEST COMPLETED]\n");
+        dev_info(&pdev->dev, "=======================================================\n");
+
+        /* --------------------------------------------------------------------
+         * 4. Stage-2 Legacy V4L2 capture ring setup
+         * -------------------------------------------------------------------- */
+        qdev->h2c_ring_virt = dma_alloc_coherent(&pdev->dev,
+                                  sizeof(*qdev->h2c_ring_virt) * RING_BUFFER_SIZE,
+                                  &qdev->h2c_ring_dma, GFP_KERNEL);
+        if (!qdev->h2c_ring_virt) {
+            ret = -ENOMEM;
+            dev_err(&pdev->dev, "[ERROR] Cannot allocate persistent V4L2 descriptor ring\n");
+            goto free_irq;
+        }
+        memset(qdev->h2c_ring_virt, 0,
+               sizeof(*qdev->h2c_ring_virt) * RING_BUFFER_SIZE);
+        qdev->c2h_ring_virt = qdev->h2c_ring_virt;
+        qdev->c2h_ring_dma = qdev->h2c_ring_dma;
+
+        {
+            u32 hw_ptr = ioread32(qdev->bar0_mmio + 0x40);
+            u32 hw_head = hw_ptr & 0xffff;
+
+            qdev->h2c_tail = hw_head;
+            qdev->c2h_tail = hw_head;
+            dma_wmb();
+            iowrite32(lower_32_bits(qdev->h2c_ring_dma),
+                      qdev->bar0_mmio + REG_H2C_RING_ADDR_L);
+            iowrite32(upper_32_bits(qdev->h2c_ring_dma),
+                      qdev->bar0_mmio + REG_H2C_RING_ADDR_H);
+            iowrite32((hw_head << 16) | RING_BUFFER_SIZE,
+                      qdev->bar0_mmio + REG_H2C_RING_CFG);
+            dev_info(&pdev->dev,
+                     "V4L2 shared descriptor ring: DMA=0x%llX, head=tail=%u\n",
+                     (u64)qdev->h2c_ring_dma, hw_head);
+        }
     }
 
     /* Phase 5: New Register Map & Per-Channel Thin Descriptor Ring Initialization */
@@ -738,10 +765,12 @@ free_video_ring:
         }
     }
     qdev->thin_ring_virt = NULL;
-    dma_free_coherent(&pdev->dev,
-                      sizeof(*qdev->h2c_ring_virt) * RING_BUFFER_SIZE,
-                      qdev->h2c_ring_virt, qdev->h2c_ring_dma);
-    qdev->h2c_ring_virt = NULL;
+    if (qdev->h2c_ring_virt) {
+        dma_free_coherent(&pdev->dev,
+                          sizeof(*qdev->h2c_ring_virt) * RING_BUFFER_SIZE,
+                          qdev->h2c_ring_virt, qdev->h2c_ring_dma);
+        qdev->h2c_ring_virt = NULL;
+    }
     qdev->c2h_ring_virt = NULL;
 free_irq:
     iowrite32(0, qdev->bar0_mmio + REG_IRQ_CTRL);

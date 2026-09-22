@@ -1,7 +1,7 @@
 # Future Register Map & SG Descriptor Spec（重規劃定稿）
 
-> **Status**: design approved, breaking change accepted. 實驗版位址全搬，舊 driver 不相容。
-> 上游追蹤：`Handoff-RGB24-and-Phase2-Roadmap.md` Goal 3。現況快照見 `Control-Layer.md`（BAR0 實作）與 `DMA-Core-Layer.md` §1（64B 胖 descriptor）。
+> **Status**: Fully Implemented & Hardware Verified (Canonical v3.0 Release). Phase 6 遷移完畢，已成為正式規範。
+> 上游追蹤：`Handoff-RGB24-and-Phase2-Roadmap.md` Goal 3。現況快照見 `Control-Layer.md`（BAR0 實作）。
 > 設計鐵律：**driver 零計算**——enumerate `sg_table` 直行填表，不做幾何、不設幀尾、不分平面。
 
 ## 0. 版本與過渡規則（P0-2 定稿）

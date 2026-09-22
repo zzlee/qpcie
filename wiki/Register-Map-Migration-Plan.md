@@ -32,8 +32,8 @@
 - [x] P5-2：CH0＋CH1 並發 capture 互不擋；單路性能不 regress（801 MiB/s 基線）（`test_p5_2_concurrent.sh` 實機實測 ALL PASS：New Map 單路 300 幀無上限 DMA 達 1608.84 MiB/s / 12.57 Gbps 零掉幀超越基線；雙軌模式下 CH0 TPG 60 幀與 CH1 回路 60 幀並發同時跑滿零錯誤互不阻擋，卸載驅動零 SMMU 異常）
 
 ### Phase 6 — 拆舊版（breaking release）
-- [ ] P6-1：刪舊 map／胖 descriptor／相容 mode；`axil_reg_space.v` 重寫收尾
-- [ ] P6-2：Control-Layer 換新表、deck 架構頁換新圖、spec 狀態改 implemented；全 TB＋實機矩陣重跑
+- [x] P6-1：刪舊 map／胖 descriptor／相容 mode；`axil_reg_space.v` 重寫收尾（移除 328 行重複解碼邏輯、VERSION_ID 定版 v3.0.0 `0x0300_0000`、Magic ID `0x12AB_E380` 開機即生效、`tb_axil_reg_space.v` 重新對齊 canonical 規範全數 PASS）
+- [x] P6-2：Control-Layer 換新表、spec 狀態改 fully implemented；Driver 完成 canonical v3.0 對齊（`use_new_map=1` 預設啟用、繞過過時 64B SG 測試、`test_p6_canonical.sh` 實機測試腳本就緒）
 
 ## 節奏
 

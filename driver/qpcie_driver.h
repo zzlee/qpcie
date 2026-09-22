@@ -163,6 +163,18 @@
 #define REG_NEW_GLOBAL_BUILDTIME    0x10
 #define REG_NEW_GLOBAL_RESET        0x14
 #define REG_NEW_GLOBAL_IRQ_TOP      0x18
+#define REG_NEW_GLOBAL_TIMESTAMP_L  0x1C
+#define REG_NEW_GLOBAL_TIMESTAMP_H  0x20
+#define REG_NEW_GLOBAL_IRQ_STATUS   0x24
+#define REG_NEW_GLOBAL_DMA_STATUS   0x28
+
+/* Debug Block (0x900 - 0x9FF) */
+#define REG_NEW_DEBUG_BASE          0x900
+#define REG_NEW_DEBUG_LOOPBACK_CTRL 0x900
+#define REG_NEW_DEBUG_PATTERN_GEN   0x904
+#define REG_NEW_DEBUG_PACER_OVERRIDE 0x908
+#define REG_NEW_DEBUG_LAST_WDATA    0x90C
+#define REG_NEW_DEBUG_LAST_WADDR    0x910
 
 /* Video Channel Blocks (0x100 + n*0x100) */
 #define REG_VCH_BASE(n)             (0x100 * (1 + (n)))
