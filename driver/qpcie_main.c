@@ -619,14 +619,19 @@ free_diag_dma:
     }
     qdev->v4l2_registered = true;
 
-    ret = qpcie_alsa_init(qdev);
-    if (ret) {
-        dev_err(&pdev->dev, "[ERROR] ALSA initialization failed: %d\n", ret);
-        goto v4l2_remove;
+    if (!qdev->use_new_map) {
+        ret = qpcie_alsa_init(qdev);
+        if (ret) {
+            dev_err(&pdev->dev, "[ERROR] ALSA initialization failed: %d\n", ret);
+            goto v4l2_remove;
+        }
+        qdev->alsa_registered = true;
+        dev_info(&pdev->dev,
+                 "Stage-3 V4L2 NV12M + ALSA AES3 Audio capture ready\n");
+    } else {
+        dev_info(&pdev->dev,
+                 "[PHASE 3] Video-only mode active (ALSA deferred to Phase 4)\n");
     }
-    qdev->alsa_registered = true;
-    dev_info(&pdev->dev,
-             "Stage-3 V4L2 NV12M + ALSA AES3 Audio capture ready\n");
 
     ret = qpcie_sysfs_init(qdev);
     if (ret)
