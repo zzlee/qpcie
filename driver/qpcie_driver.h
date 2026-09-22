@@ -164,24 +164,62 @@
 #define REG_NEW_GLOBAL_RESET        0x14
 #define REG_NEW_GLOBAL_IRQ_TOP      0x18
 
-/* Video CH0 Block (0x100 - 0x170) */
-#define REG_VCH0_CTRL               0x100
-#define REG_VCH0_STATUS             0x104
-#define REG_VCH0_WIDTH              0x108
-#define REG_VCH0_HEIGHT             0x10C
-#define REG_VCH0_STRIDE0            0x110
-#define REG_VCH0_STRIDE1            0x114
-#define REG_VCH0_RING0_BASE_L       0x120
-#define REG_VCH0_RING0_BASE_H       0x124
-#define REG_VCH0_RING0_CFG          0x128
-#define REG_VCH0_RING0_HEAD         0x12C
-#define REG_VCH0_RING1_BASE_L       0x130
-#define REG_VCH0_RING1_BASE_H       0x134
-#define REG_VCH0_RING1_CFG          0x138
-#define REG_VCH0_RING1_HEAD         0x13C
-#define REG_VCH0_FRAMES             0x160
-#define REG_VCH0_DROPS              0x164
-#define REG_VCH0_IRQ_STATUS         0x170
+/* Video Channel Blocks (0x100 + n*0x100) */
+#define REG_VCH_BASE(n)             (0x100 * (1 + (n)))
+#define REG_VCH_OFFSET_CTRL         0x00
+#define REG_VCH_OFFSET_STATUS       0x04
+#define REG_VCH_OFFSET_WIDTH        0x08
+#define REG_VCH_OFFSET_HEIGHT       0x0C
+#define REG_VCH_OFFSET_STRIDE0      0x10
+#define REG_VCH_OFFSET_STRIDE1      0x14
+#define REG_VCH_OFFSET_RING0_BASE_L 0x20
+#define REG_VCH_OFFSET_RING0_BASE_H 0x24
+#define REG_VCH_OFFSET_RING0_CFG    0x28
+#define REG_VCH_OFFSET_RING0_HEAD   0x2C
+#define REG_VCH_OFFSET_RING1_BASE_L 0x30
+#define REG_VCH_OFFSET_RING1_BASE_H 0x34
+#define REG_VCH_OFFSET_RING1_CFG    0x38
+#define REG_VCH_OFFSET_RING1_HEAD   0x3C
+#define REG_VCH_OFFSET_FRAMES       0x60
+#define REG_VCH_OFFSET_DROPS        0x64
+#define REG_VCH_OFFSET_IRQ_STATUS   0x70
+
+#define REG_VCH_CTRL(n)             (REG_VCH_BASE(n) + REG_VCH_OFFSET_CTRL)
+#define REG_VCH_STATUS(n)           (REG_VCH_BASE(n) + REG_VCH_OFFSET_STATUS)
+#define REG_VCH_WIDTH(n)            (REG_VCH_BASE(n) + REG_VCH_OFFSET_WIDTH)
+#define REG_VCH_HEIGHT(n)           (REG_VCH_BASE(n) + REG_VCH_OFFSET_HEIGHT)
+#define REG_VCH_STRIDE0(n)          (REG_VCH_BASE(n) + REG_VCH_OFFSET_STRIDE0)
+#define REG_VCH_STRIDE1(n)          (REG_VCH_BASE(n) + REG_VCH_OFFSET_STRIDE1)
+#define REG_VCH_RING0_BASE_L(n)     (REG_VCH_BASE(n) + REG_VCH_OFFSET_RING0_BASE_L)
+#define REG_VCH_RING0_BASE_H(n)     (REG_VCH_BASE(n) + REG_VCH_OFFSET_RING0_BASE_H)
+#define REG_VCH_RING0_CFG(n)        (REG_VCH_BASE(n) + REG_VCH_OFFSET_RING0_CFG)
+#define REG_VCH_RING0_HEAD(n)       (REG_VCH_BASE(n) + REG_VCH_OFFSET_RING0_HEAD)
+#define REG_VCH_RING1_BASE_L(n)     (REG_VCH_BASE(n) + REG_VCH_OFFSET_RING1_BASE_L)
+#define REG_VCH_RING1_BASE_H(n)     (REG_VCH_BASE(n) + REG_VCH_OFFSET_RING1_BASE_H)
+#define REG_VCH_RING1_CFG(n)        (REG_VCH_BASE(n) + REG_VCH_OFFSET_RING1_CFG)
+#define REG_VCH_RING1_HEAD(n)       (REG_VCH_BASE(n) + REG_VCH_OFFSET_RING1_HEAD)
+#define REG_VCH_FRAMES(n)           (REG_VCH_BASE(n) + REG_VCH_OFFSET_FRAMES)
+#define REG_VCH_DROPS(n)            (REG_VCH_BASE(n) + REG_VCH_OFFSET_DROPS)
+#define REG_VCH_IRQ_STATUS(n)       (REG_VCH_BASE(n) + REG_VCH_OFFSET_IRQ_STATUS)
+
+/* Legacy / CH0 Aliases */
+#define REG_VCH0_CTRL               REG_VCH_CTRL(0)
+#define REG_VCH0_STATUS             REG_VCH_STATUS(0)
+#define REG_VCH0_WIDTH              REG_VCH_WIDTH(0)
+#define REG_VCH0_HEIGHT             REG_VCH_HEIGHT(0)
+#define REG_VCH0_STRIDE0            REG_VCH_STRIDE0(0)
+#define REG_VCH0_STRIDE1            REG_VCH_STRIDE1(0)
+#define REG_VCH0_RING0_BASE_L       REG_VCH_RING0_BASE_L(0)
+#define REG_VCH0_RING0_BASE_H       REG_VCH_RING0_BASE_H(0)
+#define REG_VCH0_RING0_CFG          REG_VCH_RING0_CFG(0)
+#define REG_VCH0_RING0_HEAD         REG_VCH_RING0_HEAD(0)
+#define REG_VCH0_RING1_BASE_L       REG_VCH_RING1_BASE_L(0)
+#define REG_VCH0_RING1_BASE_H       REG_VCH_RING1_BASE_H(0)
+#define REG_VCH0_RING1_CFG          REG_VCH_RING1_CFG(0)
+#define REG_VCH0_RING1_HEAD         REG_VCH_RING1_HEAD(0)
+#define REG_VCH0_FRAMES             REG_VCH_FRAMES(0)
+#define REG_VCH0_DROPS              REG_VCH_DROPS(0)
+#define REG_VCH0_IRQ_STATUS         REG_VCH_IRQ_STATUS(0)
 
 /* Phase 4 P4-2: Audio DEV0 Block (New Map: 0x500 - 0x5A8) */
 #define REG_ADEV0_CTRL              0x500  /* [0]=enable, [8]=irq_en, [31]=xrun_inject */
@@ -224,6 +262,8 @@ struct __packed qpcie_sgl_entry {
     u32 len_bytes;   /* Bytes 8..11  : DW2     (Contiguous length in bytes) */
     u32 flags;       /* Bytes 12..15 : DW3     (Bit 0: Chain Pointer, Bit 1: Last Segment) */
 };
+
+#define qpcie_dma_desc_16b qpcie_sgl_entry
 
 #define SGL_FLAG_CHAIN_PTR          BIT(0) /* Points to next 4KB SGL slot */
 #define SGL_FLAG_LAST_SEG           BIT(1) /* End of current planar payload */
@@ -288,6 +328,12 @@ struct qpcie_v4l2_channel {
     u32 error_count_start;
     bool pacer_enable;
     enum v4l2_buf_type buf_type;
+    /* Phase 5: Per-channel register block & thin descriptor ring */
+    u32 ch_reg_base;
+    struct qpcie_dma_desc_16b *thin_ring_virt;
+    dma_addr_t thin_ring_dma;
+    u32 thin_ring_tail;
+    u32 thin_ring_head;
 };
 
 struct qpcie_alsa_channel {

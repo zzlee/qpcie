@@ -635,6 +635,113 @@ static ssize_t sg_fetch_mode_store(struct device *dev, struct device_attribute *
 }
 static DEVICE_ATTR_RW(sg_fetch_mode);
 
+/* ============================================================================
+ * Phase 5: Per-Channel Sysfs Attributes
+ * ============================================================================ */
+
+static ssize_t ch0_frames_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+    struct pci_dev *pdev = to_pci_dev(dev);
+    struct qpcie_dev *qdev = pci_get_drvdata(pdev);
+    u32 frames = 0;
+
+    if (qdev && qdev->bar0_mmio) {
+        if (qdev->use_new_map)
+            frames = ioread32(qdev->bar0_mmio + REG_VCH_FRAMES(0));
+        else
+            frames = qdev->v4l2_ch[0].sequence;
+    }
+    return sysfs_emit(buf, "%u\n", frames);
+}
+static DEVICE_ATTR_RO(ch0_frames);
+
+static ssize_t ch0_drops_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+    struct pci_dev *pdev = to_pci_dev(dev);
+    struct qpcie_dev *qdev = pci_get_drvdata(pdev);
+    u32 drops = 0;
+
+    if (qdev && qdev->bar0_mmio) {
+        if (qdev->use_new_map)
+            drops = ioread32(qdev->bar0_mmio + REG_VCH_DROPS(0));
+    }
+    return sysfs_emit(buf, "%u\n", drops);
+}
+static DEVICE_ATTR_RO(ch0_drops);
+
+static ssize_t ch0_status_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+    struct pci_dev *pdev = to_pci_dev(dev);
+    struct qpcie_dev *qdev = pci_get_drvdata(pdev);
+    u32 status = 0;
+
+    if (qdev && qdev->bar0_mmio) {
+        if (qdev->use_new_map)
+            status = ioread32(qdev->bar0_mmio + REG_VCH_STATUS(0));
+        else
+            status = ioread32(qdev->bar0_mmio + REG_DMA_STATUS);
+    }
+    return sysfs_emit(buf, "0x%08X (running=%u, overflow=%u)\n",
+                      status, status & 1, (status >> 31) & 1);
+}
+static DEVICE_ATTR_RO(ch0_status);
+
+static ssize_t ch0_head_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+    struct pci_dev *pdev = to_pci_dev(dev);
+    struct qpcie_dev *qdev = pci_get_drvdata(pdev);
+    u32 head = 0;
+
+    if (qdev && qdev->bar0_mmio) {
+        if (qdev->use_new_map)
+            head = ioread32(qdev->bar0_mmio + REG_VCH_RING0_HEAD(0)) & 0xFFFF;
+    }
+    return sysfs_emit(buf, "%u\n", head);
+}
+static DEVICE_ATTR_RO(ch0_head);
+
+static ssize_t ch0_tail_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+    struct pci_dev *pdev = to_pci_dev(dev);
+    struct qpcie_dev *qdev = pci_get_drvdata(pdev);
+    u32 tail = 0;
+
+    if (qdev)
+        tail = qdev->v4l2_ch[0].thin_ring_tail;
+    return sysfs_emit(buf, "%u\n", tail);
+}
+static DEVICE_ATTR_RO(ch0_tail);
+
+static ssize_t ch1_frames_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+    struct pci_dev *pdev = to_pci_dev(dev);
+    struct qpcie_dev *qdev = pci_get_drvdata(pdev);
+    u32 frames = 0;
+
+    if (qdev && qdev->v4l2_node_count > 1)
+        frames = qdev->v4l2_ch[1].sequence;
+    return sysfs_emit(buf, "%u\n", frames);
+}
+static DEVICE_ATTR_RO(ch1_frames);
+
+static ssize_t ch1_drops_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+    return sysfs_emit(buf, "0\n");
+}
+static DEVICE_ATTR_RO(ch1_drops);
+
+static ssize_t ch1_status_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+    struct pci_dev *pdev = to_pci_dev(dev);
+    struct qpcie_dev *qdev = pci_get_drvdata(pdev);
+    bool streaming = false;
+
+    if (qdev && qdev->v4l2_node_count > 1)
+        streaming = vb2_is_streaming(&qdev->v4l2_ch[1].queue);
+    return sysfs_emit(buf, "streaming=%u\n", streaming ? 1 : 0);
+}
+static DEVICE_ATTR_RO(ch1_status);
+
 /* Sysfs Attribute Group Table */
 static struct attribute *qpcie_sysfs_attrs[] = {
     &dev_attr_tpg_pattern.attr,
@@ -656,6 +763,15 @@ static struct attribute *qpcie_sysfs_attrs[] = {
     &dev_attr_aud_volume.attr,
     &dev_attr_aud_sample_cnt.attr,
     &dev_attr_version.attr,
+    /* Phase 5 per-channel sysfs */
+    &dev_attr_ch0_frames.attr,
+    &dev_attr_ch0_drops.attr,
+    &dev_attr_ch0_status.attr,
+    &dev_attr_ch0_head.attr,
+    &dev_attr_ch0_tail.attr,
+    &dev_attr_ch1_frames.attr,
+    &dev_attr_ch1_drops.attr,
+    &dev_attr_ch1_status.attr,
     NULL,
 };
 

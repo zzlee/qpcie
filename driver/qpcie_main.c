@@ -135,10 +135,10 @@ MODULE_PARM_DESC(rgb24_only,
                  "Force RGB24-only mode (1): skip the format-0 C2H SG diagnostic "
                  "for QPCIe_single_rgb24_path bitstreams");
 
-static int use_new_map;
+static int use_new_map = -1;
 module_param(use_new_map, int, 0644);
 MODULE_PARM_DESC(use_new_map,
-                 "Enable Phase 3 new register map and thin descriptor engine (0: legacy, 1: new map)");
+                 "Register map selection (-1: auto-detect from version/caps, 0: legacy, 1: new map v3.0)");
 
 static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
@@ -149,7 +149,7 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
     dma_addr_t c2h_page_dma[SG_PAGES] = { 0 };
     u32 *h2c_pages[SG_PAGES] = { NULL };
     u32 *c2h_pages[SG_PAGES] = { NULL };
-    int ret, p, w;
+    int ret, p, w, i;
     u32 ver, git, date, caps, ctrl, stat, readback;
     u32 dbg_wdata, dbg_waddr;
     u32 ring_head, c2h_tail, h2c_tail;
@@ -619,19 +619,36 @@ free_diag_dma:
                  (u64)qdev->h2c_ring_dma, hw_head);
     }
 
-    /* Phase 3: New Register Map & Thin Descriptor Ring Initialization */
-    if (use_new_map) {
+    /* Phase 5: Auto-detect Register Map from Version ID and Caps */
+    bool should_use_new_map = false;
+    if (use_new_map == 1) {
+        should_use_new_map = true;
+    } else if (use_new_map == -1) {
+        if (((ver >> 24) >= 3) && (caps & BIT(4)))
+            should_use_new_map = true;
+    }
+
+    /* Phase 5: New Register Map & Per-Channel Thin Descriptor Ring Initialization */
+    if (should_use_new_map) {
         if (((ver >> 24) >= 3) && (caps & BIT(4))) {
-            qdev->thin_ring_virt = dma_alloc_coherent(&pdev->dev,
-                                    sizeof(*qdev->thin_ring_virt) * RING_BUFFER_SIZE,
-                                    &qdev->thin_ring_dma, GFP_KERNEL);
-            if (!qdev->thin_ring_virt) {
-                dev_err(&pdev->dev, "[ERROR] Cannot allocate thin descriptor ring\n");
+            struct qpcie_v4l2_channel *vch0 = &qdev->v4l2_ch[0];
+            vch0->ch_reg_base = REG_VCH_BASE(0);
+            vch0->thin_ring_virt = dma_alloc_coherent(&pdev->dev,
+                                    sizeof(*vch0->thin_ring_virt) * RING_BUFFER_SIZE,
+                                    &vch0->thin_ring_dma, GFP_KERNEL);
+            if (!vch0->thin_ring_virt) {
+                dev_err(&pdev->dev, "[ERROR] Cannot allocate thin descriptor ring for CH0\n");
                 ret = -ENOMEM;
                 goto free_video_ring;
             }
-            memset(qdev->thin_ring_virt, 0,
-                   sizeof(*qdev->thin_ring_virt) * RING_BUFFER_SIZE);
+            memset(vch0->thin_ring_virt, 0,
+                   sizeof(*vch0->thin_ring_virt) * RING_BUFFER_SIZE);
+            vch0->thin_ring_tail = 0;
+            vch0->thin_ring_head = 0;
+
+            /* Global aliases for backward compatibility */
+            qdev->thin_ring_virt = (struct qpcie_sgl_entry *)vch0->thin_ring_virt;
+            qdev->thin_ring_dma  = vch0->thin_ring_dma;
             qdev->thin_ring_tail = 0;
             qdev->thin_ring_head = 0;
 
@@ -642,12 +659,15 @@ free_diag_dma:
             if (readback == 0x12ABE380) {
                 qdev->use_new_map = true;
                 dev_info(&pdev->dev,
-                         "=== [PHASE 3 NEW MAP ACTIVE] Magic ID=0x%08X (Thin Descriptor Ring DMA=0x%llX Size=%u) ===\n",
-                         readback, (u64)qdev->thin_ring_dma, RING_BUFFER_SIZE);
+                         "=== [PHASE 5 NEW MAP ACTIVE] Magic ID=0x%08X (Auto-detected from Version v%u.%u.%u, Caps=0x%08X) ===\n",
+                         readback, (ver >> 24) & 0xff, (ver >> 16) & 0xff, (ver >> 8) & 0xff, caps);
+                dev_info(&pdev->dev,
+                         "CH0 Thin Ring: DMA=0x%llX, Size=%u, RegBase=0x%03X\n",
+                         (u64)vch0->thin_ring_dma, RING_BUFFER_SIZE, vch0->ch_reg_base);
                 /* Initialize RING0 Base and initial CFG */
-                iowrite32(lower_32_bits(qdev->thin_ring_dma),
+                iowrite32(lower_32_bits(vch0->thin_ring_dma),
                           qdev->bar0_mmio + REG_VCH0_RING0_BASE_L);
-                iowrite32(upper_32_bits(qdev->thin_ring_dma),
+                iowrite32(upper_32_bits(vch0->thin_ring_dma),
                           qdev->bar0_mmio + REG_VCH0_RING0_BASE_H);
                 iowrite32(RING_BUFFER_SIZE,
                           qdev->bar0_mmio + REG_VCH0_RING0_CFG);
@@ -664,6 +684,9 @@ free_diag_dma:
                      ver, caps);
             qdev->use_new_map = false;
         }
+    } else {
+        qdev->use_new_map = false;
+        dev_info(&pdev->dev, "=== [LEGACY MAP ACTIVE] (ver=0x%08X caps=0x%08X) ===\n", ver, caps);
     }
 
     ret = qpcie_v4l2_init(qdev);
@@ -703,12 +726,16 @@ v4l2_remove:
         qdev->v4l2_registered = false;
     }
 free_video_ring:
-    if (qdev->thin_ring_virt) {
-        dma_free_coherent(&pdev->dev,
-                          sizeof(*qdev->thin_ring_virt) * RING_BUFFER_SIZE,
-                          qdev->thin_ring_virt, qdev->thin_ring_dma);
-        qdev->thin_ring_virt = NULL;
+    for (i = 0; i < NUM_VIDEO_NODES; i++) {
+        struct qpcie_v4l2_channel *vch = &qdev->v4l2_ch[i];
+        if (vch->thin_ring_virt) {
+            dma_free_coherent(&pdev->dev,
+                              sizeof(*vch->thin_ring_virt) * RING_BUFFER_SIZE,
+                              vch->thin_ring_virt, vch->thin_ring_dma);
+            vch->thin_ring_virt = NULL;
+        }
     }
+    qdev->thin_ring_virt = NULL;
     dma_free_coherent(&pdev->dev,
                       sizeof(*qdev->h2c_ring_virt) * RING_BUFFER_SIZE,
                       qdev->h2c_ring_virt, qdev->h2c_ring_dma);
@@ -732,6 +759,7 @@ disable_pci:
 static void qpcie_remove(struct pci_dev *pdev)
 {
     struct qpcie_dev *qdev = pci_get_drvdata(pdev);
+    int i;
 
     dev_info(&pdev->dev, "Removing QPCIe Driver (Minimal Diagnostic Mode)...\n");
 
@@ -761,12 +789,16 @@ static void qpcie_remove(struct pci_dev *pdev)
         qpcie_v4l2_remove(qdev);
         qdev->v4l2_registered = false;
     }
-    if (qdev->thin_ring_virt) {
-        dma_free_coherent(&pdev->dev,
-                          sizeof(*qdev->thin_ring_virt) * RING_BUFFER_SIZE,
-                          qdev->thin_ring_virt, qdev->thin_ring_dma);
-        qdev->thin_ring_virt = NULL;
+    for (i = 0; i < NUM_VIDEO_NODES; i++) {
+        struct qpcie_v4l2_channel *vch = &qdev->v4l2_ch[i];
+        if (vch->thin_ring_virt) {
+            dma_free_coherent(&pdev->dev,
+                              sizeof(*vch->thin_ring_virt) * RING_BUFFER_SIZE,
+                              vch->thin_ring_virt, vch->thin_ring_dma);
+            vch->thin_ring_virt = NULL;
+        }
     }
+    qdev->thin_ring_virt = NULL;
     if (qdev->h2c_ring_virt) {
         dma_free_coherent(&pdev->dev,
                           sizeof(*qdev->h2c_ring_virt) * RING_BUFFER_SIZE,
