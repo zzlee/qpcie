@@ -17,7 +17,7 @@
 
 ### Phase 2 — 新 register file 上線（先上一通道）
 - [x] P2-1：GLOBAL＋VIDEO CH0＋AUDIO DEV0＋DEBUG 四區（其餘通道暫留；階層式 8-bit 解碼與暫存器腳印最佳化完成）
-- [x] P2-2：mode 位元（預設舊路），TB 同測新舊兩套讀寫互不干擾（TB 21項全數通過；A50T Bitstream 建置完成，WNS >= 0.000ns 零時序違規）
+- [x] P2-2：mode 位元（預設舊路），TB 同測新舊兩套讀寫互不干擾（TB 21項全數通過；A50T Bitstream 建置完成，WNS >= 0.000ns 零時序違規；實機 1080p60 回歸通過，target 實測 ALL PASS，49,766,400B 零錯誤）
 
 ### Phase 3 — Thin descriptor＋per-plane 表（核心戰役，預估半數工時）
 - [ ] P3-1：新 fetch 引擎（16B entry、byte-count framing、RING0–1 雙表並行、doorbell/HEAD）
