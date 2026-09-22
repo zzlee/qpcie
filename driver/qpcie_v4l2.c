@@ -1105,21 +1105,34 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
     bool drained = false;
     u32 head;
 
-    if (vch->channel_id == 0) {
-        void __iomem *tpg = qdev->bar1_mmio + 0x000;
-        /* Halt pacing and stop TPG before draining DMA */
-        qpcie_tpg_pace_stop(qdev);
-        iowrite32(0x00, tpg + 0x00);
-    }
-
     qpcie_return_all_buffers(vch, VB2_BUF_STATE_ERROR);
 
-    /* Only reset hardware if ALL active video channels have finished streaming */
+    /* Return any buffers still in active_buffers for this channel */
+    {
+        struct qpcie_v4l2_buffer *b, *tmp;
+        unsigned long flags;
+
+        spin_lock_irqsave(&vch->slock, flags);
+        list_for_each_entry_safe(b, tmp, &vch->active_buffers, list) {
+            list_del(&b->list);
+            vb2_buffer_done(&b->vb.vb2_buf, VB2_BUF_STATE_ERROR);
+        }
+        spin_unlock_irqrestore(&vch->slock, flags);
+    }
+
+    /* Only reset hardware and stop TPG if ALL active video channels have finished streaming */
     if (atomic_dec_return(&qdev->streaming_count) > 0) {
         dev_info(&qdev->pdev->dev,
                  "NV12M STREAMOFF (Ch%u): stream stopped, remaining active streams: %d\n",
                  vch->channel_id, atomic_read(&qdev->streaming_count));
         return;
+    }
+
+    /* All streams idle: halt TPG pacing and stop TPG */
+    if (qdev->bar1_mmio) {
+        void __iomem *tpg = qdev->bar1_mmio + 0x000;
+        qpcie_tpg_pace_stop(qdev);
+        iowrite32(0x00, tpg + 0x00);
     }
 
     iowrite32(0, qdev->bar0_mmio + REG_PACER_CTRL);

@@ -155,7 +155,7 @@ int main(int argc, char **argv)
     struct v4l2_requestbuffers req;
     struct mapped_buffer *buffers = NULL;
     FILE *output = NULL;
-    unsigned int i, p, captured = 0, data_errors = 0;
+    unsigned int i, p, captured = 0, total_queued = 0, data_errors = 0;
     unsigned int num_buffers = DEFAULT_BUFFERS;
     uint64_t first_y_hash = 0, first_uv_hash = 0;
     uint64_t second_y_hash = 0, second_uv_hash = 0;
@@ -416,6 +416,7 @@ int main(int argc, char **argv)
             goto out;
         }
     }
+    total_queued = req.count;
     printf("[PASS] Allocated and queued %u NV12M MMAP buffers; "
            "check driver DESC logs for per-buffer linear/SGL mappings\n",
            req.count);
@@ -554,9 +555,12 @@ int main(int argc, char **argv)
                    captured, buf.index, buf.sequence,
                    (long)buf.timestamp.tv_sec, (long)buf.timestamp.tv_usec);
 
-        if (captured < frame_target && xioctl(fd, VIDIOC_QBUF, &buf) < 0) {
-            perror("VIDIOC_QBUF requeue");
-            break;
+        if (total_queued < frame_target) {
+            if (xioctl(fd, VIDIOC_QBUF, &buf) < 0) {
+                perror("VIDIOC_QBUF requeue");
+                break;
+            }
+            total_queued++;
         }
     }
     end_ms = benchmark_mode ? last_frame_ms : monotonic_ms();

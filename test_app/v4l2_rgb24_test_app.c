@@ -193,6 +193,7 @@ int main(int argc, char **argv)
     struct v4l2_requestbuffers req;
     struct v4l2_control ctrl;
     uint32_t captured = 0;
+    uint32_t total_queued = 0;
     uint32_t seq_errors = 0;
     uint32_t expected_sequence = 0;
     uint32_t frame_drop_start = 0;
@@ -400,6 +401,7 @@ int main(int argc, char **argv)
             goto out;
         }
     }
+    total_queued = req.count;
     printf("[PASS] Mapped and queued %u RGB24 buffers\n", req.count);
 
     if (output_name) {
@@ -553,9 +555,12 @@ int main(int argc, char **argv)
                 bench_frames++;
         }
 
-        if (xioctl(fd, VIDIOC_QBUF, &buf) < 0) {
-            perror("VIDIOC_QBUF requeue");
-            goto streamoff;
+        if (total_queued < frame_target) {
+            if (xioctl(fd, VIDIOC_QBUF, &buf) < 0) {
+                perror("VIDIOC_QBUF requeue");
+                goto streamoff;
+            }
+            total_queued++;
         }
     }
 
