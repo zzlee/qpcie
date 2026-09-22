@@ -606,6 +606,18 @@ module custom_pcie_dma_top #(
     wire [3:0]  vch0_irq_status_w1c_w;
     wire        vch0_irq_en_w;
 
+    // Phase 4 P4-2: Audio DEV0 Wires
+    wire [31:0] adev0_ctrl_w;
+    wire [31:0] adev0_rate_w;
+    wire [31:0] adev0_period_bytes_w;
+    wire [31:0] adev0_buffer_bytes_w;
+    wire [63:0] adev0_ring0_base_w;
+    wire [31:0] adev0_ring0_cfg_w;
+    wire [1:0]  adev0_irq_status_w;
+    wire [1:0]  adev0_irq_status_w1c_w;
+    wire        adev0_xrun_inject_w;
+    wire [3:0]  a_xrun;
+
     reg  [31:0] d_thin_drop_count;
     always @(posedge clk or negedge dma_rst_n) begin
         if (!dma_rst_n)
@@ -730,7 +742,20 @@ module custom_pcie_dma_top #(
         .out_irq_top_status_w1c(irq_top_status_w1c_w),
         .in_vch0_irq_status(vch0_irq_status_w),
         .out_vch0_irq_status_w1c(vch0_irq_status_w1c_w),
-        .out_vch0_irq_en(vch0_irq_en_w)
+        .out_vch0_irq_en(vch0_irq_en_w),
+        // Phase 4 P4-2: Audio DEV0 Ports
+        .out_adev0_ctrl(adev0_ctrl_w),
+        .out_adev0_rate(adev0_rate_w),
+        .out_adev0_period_bytes(adev0_period_bytes_w),
+        .out_adev0_buffer_bytes(adev0_buffer_bytes_w),
+        .out_adev0_ring0_base(adev0_ring0_base_w),
+        .out_adev0_ring0_cfg(adev0_ring0_cfg_w),
+        .in_adev0_running(a_busy[0]),
+        .in_adev0_xrun(a_xrun[0]),
+        .in_adev0_position(reg_audio_dma_ptr),
+        .in_adev0_irq_status(adev0_irq_status_w),
+        .out_adev0_irq_status_w1c(adev0_irq_status_w1c_w),
+        .out_adev0_xrun_inject(adev0_xrun_inject_w)
     );
 
     // 3.1 Hardware Performance Monitor Instance
@@ -1810,17 +1835,22 @@ module custom_pcie_dma_top #(
     assign h2c_fifo_rd_en_ch3     = m_axis_audio_tvalid[3] && m_axis_audio_tready[3];
 
     // 9. Multi-Channel AES3 Audio Stream Engines
+    wire        audio0_start        = map_mode_new_w ? adev0_ctrl_w[0] : reg_dma_ctrl[2];
+    wire [63:0] audio0_buffer_addr  = map_mode_new_w ? adev0_ring0_base_w : reg_audio_dma_addr;
+    wire [31:0] audio0_buffer_size  = map_mode_new_w ? adev0_buffer_bytes_w : {16'd0, reg_audio_dma_cfg[15:0]};
+    wire [31:0] audio0_period_size  = map_mode_new_w ? adev0_period_bytes_w : {16'd0, reg_audio_dma_cfg[31:16]};
+
     audio_stream_engine #(
         .AUDIO_DATA_WIDTH(AUDIO_DATA_WIDTH),
         .PCIE_DATA_WIDTH(PCIE_DATA_WIDTH)
     ) u_audio_stream_engine_ch0 (
         .clk(clk),
         .rst_n(dma_rst_n),
-        .audio_start(reg_dma_ctrl[2]),
+        .audio_start(audio0_start),
         .aes3_sync_disable(reg_audio_loopback_ctrl[4]),
-        .host_buffer_addr(reg_audio_dma_addr),
-        .buffer_size_bytes({16'd0, reg_audio_dma_cfg[15:0]}),
-        .period_size_bytes({16'd0, reg_audio_dma_cfg[31:16]}),
+        .host_buffer_addr(audio0_buffer_addr),
+        .buffer_size_bytes(audio0_buffer_size),
+        .period_size_bytes(audio0_period_size),
         .cur_write_ptr(reg_audio_dma_ptr),
         .global_timestamp(global_timestamp),
         .s_axis_audio_tdata(s_axis_audio_tdata[31:0]),
@@ -1835,6 +1865,7 @@ module custom_pcie_dma_top #(
         .c2h_req_ack(a_c2h_req_ack[0]),
         .audio_busy(a_busy[0]),
         .audio_block_done(a_done[0]),
+        .audio_xrun(a_xrun[0]),
         .audio_pts(a_pts[0])
     );
 
@@ -1863,6 +1894,7 @@ module custom_pcie_dma_top #(
         .c2h_req_ack(a_c2h_req_ack[1]),
         .audio_busy(a_busy[1]),
         .audio_block_done(a_done[1]),
+        .audio_xrun(a_xrun[1]),
         .audio_pts(a_pts[1])
     );
 
@@ -1891,6 +1923,7 @@ module custom_pcie_dma_top #(
         .c2h_req_ack(a_c2h_req_ack[2]),
         .audio_busy(a_busy[2]),
         .audio_block_done(a_done[2]),
+        .audio_xrun(a_xrun[2]),
         .audio_pts(a_pts[2])
     );
 
@@ -1919,6 +1952,7 @@ module custom_pcie_dma_top #(
         .c2h_req_ack(a_c2h_req_ack[3]),
         .audio_busy(a_busy[3]),
         .audio_block_done(a_done[3]),
+        .audio_xrun(a_xrun[3]),
         .audio_pts(a_pts[3])
     );
 
@@ -1950,9 +1984,9 @@ module custom_pcie_dma_top #(
         .vch3_irq_status(),
         .vch3_irq_status_w1c(4'd0),
         .vch3_irq_en(1'b0),
-        .adev0_irq_status(),
-        .adev0_irq_status_w1c(2'd0),
-        .adev0_irq_en(1'b0),
+        .adev0_irq_status(adev0_irq_status_w),
+        .adev0_irq_status_w1c(adev0_irq_status_w1c_w),
+        .adev0_irq_en(adev0_ctrl_w[8]),
         .h2c_done(sg_h2c_done_irq),
         .c2h_done(v_done[0] | v_done[1] | v_done[2] | v_done[3] | sg_c2h_done_irq | (|a_done)),
         .v_done_ch(v_done_ch),
@@ -1961,7 +1995,7 @@ module custom_pcie_dma_top #(
         .v_overflow_ch({3'd0, vch0_overflow_pulse}),
         .v_desc_err_ch(4'd0),
         .v_fifo_err_ch(4'd0),
-        .a_xrun_ch(4'd0),
+        .a_xrun_ch({a_xrun[3:1], (a_xrun[0] | adev0_xrun_inject_w)}),
         .global_err(1'b0),
         .irq_req_valid(irq_req_valid),
         .irq_req_code(irq_req_code),

@@ -51,6 +51,14 @@ static irqreturn_t qpcie_irq_handler(int irq, void *data)
             iowrite32(ch_irq, qdev->bar0_mmio + REG_VCH0_IRQ_STATUS);
         }
 
+        /* Level 3 Dispatch: Audio DEV0 (Bit 4: AUD) */
+        if ((top & IRQ_TOP_AUD) && qdev->alsa_registered)
+            qpcie_alsa_irq_handler(qdev, 0);
+
+        /* Bit 5 (ERR): xrun events are dispatched inside the ALSA handler via ADEV0_IRQ_STATUS */
+        if ((top & IRQ_TOP_ERR) && qdev->alsa_registered)
+            qpcie_alsa_irq_handler(qdev, 0);
+
         /* Level 3 Dispatch: H2C DMA (Bit 7) */
         if (top & BIT(7)) {
             if (qdev->v4l2_registered)
@@ -665,19 +673,15 @@ free_diag_dma:
     }
     qdev->v4l2_registered = true;
 
-    if (!qdev->use_new_map) {
-        ret = qpcie_alsa_init(qdev);
-        if (ret) {
-            dev_err(&pdev->dev, "[ERROR] ALSA initialization failed: %d\n", ret);
-            goto v4l2_remove;
-        }
-        qdev->alsa_registered = true;
-        dev_info(&pdev->dev,
-                 "Stage-3 V4L2 NV12M + ALSA AES3 Audio capture ready\n");
-    } else {
-        dev_info(&pdev->dev,
-                 "[PHASE 3] Video-only mode active (ALSA deferred to Phase 4)\n");
+    ret = qpcie_alsa_init(qdev);
+    if (ret) {
+        dev_err(&pdev->dev, "[ERROR] ALSA initialization failed: %d\n", ret);
+        goto v4l2_remove;
     }
+    qdev->alsa_registered = true;
+    dev_info(&pdev->dev,
+             "Stage-3 V4L2 NV12M + ALSA AES3 Audio capture ready (map=%s)\n",
+             qdev->use_new_map ? "new" : "legacy");
 
     ret = qpcie_sysfs_init(qdev);
     if (ret)

@@ -431,6 +431,8 @@ module tb_interrupt_ctrl;
         vch0_irq_en <= 1;
         @(posedge clk);
         wait(irq_req_valid);
+        // Disable irq_en before ACK so IDLE state won't re-fire
+        vch0_irq_en <= 1'b0;
         @(posedge clk);
         usr_irq_ack <= 1;
         @(posedge clk);
@@ -442,9 +444,97 @@ module tb_interrupt_ctrl;
         end
         $display("[%0t] PASS: Test 7 Saturating pending counter verified.", $time);
 
+        // ====================================================================
+        // Test 8: Audio DEV0 Period Done and XRUN Interrupt Verification
+        // ====================================================================
+        #30;
+        $display("[%0t] Test 8: Audio DEV0 Period Done & XRUN Interrupt...", $time);
+        // At this point: vch0_irq_en=0, reg_irq_ctrl[1]=0 (from Test 7)
+        // => vch0_req=0 regardless of vch0_pending; AUD will win arbitration.
+        // Clear all lingering statuses and enable adev0 irq
+        @(posedge clk);
+        vch0_irq_status_w1c <= 4'hF;
+        irq_top_status_w1c  <= 32'hFFFF_FFFF;
+        reg_irq_status_w1c  <= 32'hFFFF_FFFF;
+        @(posedge clk);
+        vch0_irq_status_w1c <= 4'h0;
+        irq_top_status_w1c  <= 32'h0;
+        reg_irq_status_w1c  <= 32'h0;
+        adev0_irq_en        <= 1'b1;
+        @(posedge clk);
+
+        @(posedge clk);
+        a_done_irq[0] <= 1'b1;
+        @(posedge clk);
+        a_done_irq[0] <= 1'b0;
+        wait(irq_req_valid);
+        if (irq_req_code !== 8'h06) begin
+            $display("FAIL: Test 8 Expected MSI code 0x06 for Audio, got 0x%h", irq_req_code);
+            $fatal(1);
+        end
+        if (adev0_irq_status[0] !== 1'b1) begin
+            $display("FAIL: Test 8 adev0_irq_status[0] (period_done) not set");
+            $fatal(1);
+        end
+        if (irq_top_status[4] !== 1'b1) begin
+            $display("FAIL: Test 8 irq_top_status[4] (AUD) not set");
+            $fatal(1);
+        end
+        @(posedge clk);
+        usr_irq_ack <= 1;
+        @(posedge clk);
+        usr_irq_ack <= 0;
+        @(posedge clk);
+        adev0_irq_status_w1c[0] <= 1'b1;
+        irq_top_status_w1c[4]   <= 1'b1;
+        @(posedge clk);
+        adev0_irq_status_w1c[0] <= 1'b0;
+        irq_top_status_w1c[4]   <= 1'b0;
+        #1;
+        if (adev0_irq_status[0] !== 1'b0 || irq_top_status[4] !== 1'b0) begin
+            $display("FAIL: Test 8 audio period done W1C clear failed");
+            $fatal(1);
+        end
+        $display("[%0t]   Audio period done verified.", $time);
+
+        // Test Audio XRUN (should trigger ERR code 0xE0 and set both AUD and ERR in IRQ_TOP)
+        @(posedge clk);
+        a_xrun_ch[0] <= 1'b1;
+        @(posedge clk);
+        a_xrun_ch[0] <= 1'b0;
+        wait(irq_req_valid);
+        if (irq_req_code !== 8'hE0) begin
+            $display("FAIL: Test 8 Expected MSI code 0xE0 for XRUN, got 0x%h", irq_req_code);
+            $fatal(1);
+        end
+        if (adev0_irq_status[1] !== 1'b1) begin
+            $display("FAIL: Test 8 adev0_irq_status[1] (xrun) not set");
+            $fatal(1);
+        end
+        if (irq_top_status[5] !== 1'b1 || irq_top_status[4] !== 1'b1) begin
+            $display("FAIL: Test 8 irq_top_status[5] (ERR) or [4] (AUD) not set: 0x%h", irq_top_status);
+            $fatal(1);
+        end
+        @(posedge clk);
+        usr_irq_ack <= 1;
+        @(posedge clk);
+        usr_irq_ack <= 0;
+        @(posedge clk);
+        adev0_irq_status_w1c[1] <= 1'b1;
+        irq_top_status_w1c[5:4] <= 2'b11;
+        @(posedge clk);
+        adev0_irq_status_w1c[1] <= 1'b0;
+        irq_top_status_w1c[5:4] <= 2'b00;
+        #1;
+        if (adev0_irq_status[1] !== 1'b0 || irq_top_status[5] !== 1'b0) begin
+            $display("FAIL: Test 8 audio xrun W1C clear failed");
+            $fatal(1);
+        end
+        $display("[%0t] PASS: Test 8 Audio DEV0 Period Done & XRUN verified.", $time);
+
         #50;
         $display("================================================================");
-        $display(" 🎉 ALL P4-1 INTERRUPT CONTROLLER TESTS PASSED SUCCESSFULLY!   ");
+        $display(" 🎉 ALL INTERRUPT CONTROLLER TESTS PASSED SUCCESSFULLY!         ");
         $display("================================================================");
         $finish;
     end

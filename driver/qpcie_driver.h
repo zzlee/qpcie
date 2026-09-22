@@ -183,6 +183,23 @@
 #define REG_VCH0_DROPS              0x164
 #define REG_VCH0_IRQ_STATUS         0x170
 
+/* Phase 4 P4-2: Audio DEV0 Block (New Map: 0x500 - 0x5A8) */
+#define REG_ADEV0_CTRL              0x500  /* [0]=enable, [8]=irq_en, [31]=xrun_inject */
+#define REG_ADEV0_STATUS            0x504  /* [0]=running (RO), [1]=xrun (W1C sticky) */
+#define REG_ADEV0_RATE              0x508  /* Sample rate in Hz (e.g. 48000) */
+#define REG_ADEV0_PERIOD_BYTES      0x50C  /* Period size in bytes */
+#define REG_ADEV0_BUFFER_BYTES      0x510  /* Circular buffer size in bytes */
+#define REG_ADEV0_POSITION          0x514  /* RO: current HW write pointer (bytes) */
+#define REG_ADEV0_RING0_BASE_L      0x520  /* Host circular buffer DMA phys addr [31:0] */
+#define REG_ADEV0_RING0_BASE_H      0x524  /* Host circular buffer DMA phys addr [63:32] */
+#define REG_ADEV0_RING0_CFG         0x528  /* Ring config (reserved) */
+#define REG_ADEV0_PTR               0x5A4  /* RO: alias of POSITION */
+#define REG_ADEV0_IRQ_STATUS        0x5A8  /* [0]=period_done, [1]=xrun (all W1C) */
+
+/* IRQ_TOP bits for Audio DEV0 */
+#define IRQ_TOP_AUD                 BIT(4) /* Audio DEV0 event (period done or xrun) */
+#define IRQ_TOP_ERR                 BIT(5) /* Any error event */
+
 /* Scatter-Gather Page Table & Status Registers (BAR0 Offsets 0xE0..0xEC) */
 #define REG_SG_PT_CTRL              0xE0 /* Page Table Target Address [10:0] */
 #define REG_SG_PT_DATA_LO           0xE4 /* Physical Address [31:0] */

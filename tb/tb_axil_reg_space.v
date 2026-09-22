@@ -60,6 +60,23 @@ module tb_axil_reg_space;
     wire        tb_vch0_irq_en;
     reg         vch0_w1c_pulsed;
     reg         top_w1c_pulsed;
+
+    // Phase 4 P4-2: Audio DEV0 TB Signals
+    reg         tb_adev0_running;
+    reg         tb_adev0_xrun;
+    reg  [31:0] tb_adev0_position;
+    reg  [1:0]  tb_adev0_irq_status;
+    wire [1:0]  tb_adev0_irq_status_w1c;
+    wire        tb_adev0_xrun_inject;
+    wire [31:0] tb_adev0_ctrl;
+    wire [31:0] tb_adev0_rate;
+    wire [31:0] tb_adev0_period_bytes;
+    wire [31:0] tb_adev0_buffer_bytes;
+    wire [63:0] tb_adev0_ring0_base;
+    wire [31:0] tb_adev0_ring0_cfg;
+    reg         adev0_w1c_pulsed;
+    reg         adev0_inject_pulsed;
+
     always @(posedge clk) begin
         if (irq_w1c_obs === 32'h00000003)
             w1c_pulsed <= 1'b1;
@@ -67,6 +84,10 @@ module tb_axil_reg_space;
             vch0_w1c_pulsed <= 1'b1;
         if (tb_irq_top_status_w1c === 32'h0000_0001)
             top_w1c_pulsed <= 1'b1;
+        if (tb_adev0_irq_status_w1c === 2'b11)
+            adev0_w1c_pulsed <= 1'b1;
+        if (tb_adev0_xrun_inject)
+            adev0_inject_pulsed <= 1'b1;
     end
 
     // Instantiate uut
@@ -112,7 +133,19 @@ module tb_axil_reg_space;
         .out_irq_top_status_w1c(tb_irq_top_status_w1c),
         .in_vch0_irq_status(tb_vch0_irq_status),
         .out_vch0_irq_status_w1c(tb_vch0_irq_status_w1c),
-        .out_vch0_irq_en(tb_vch0_irq_en)
+        .out_vch0_irq_en(tb_vch0_irq_en),
+        .out_adev0_ctrl(tb_adev0_ctrl),
+        .out_adev0_rate(tb_adev0_rate),
+        .out_adev0_period_bytes(tb_adev0_period_bytes),
+        .out_adev0_buffer_bytes(tb_adev0_buffer_bytes),
+        .out_adev0_ring0_base(tb_adev0_ring0_base),
+        .out_adev0_ring0_cfg(tb_adev0_ring0_cfg),
+        .in_adev0_running(tb_adev0_running),
+        .in_adev0_xrun(tb_adev0_xrun),
+        .in_adev0_position(tb_adev0_position),
+        .in_adev0_irq_status(tb_adev0_irq_status),
+        .out_adev0_irq_status_w1c(tb_adev0_irq_status_w1c),
+        .out_adev0_xrun_inject(tb_adev0_xrun_inject)
     );
 
     always #5 clk = ~clk;
@@ -179,6 +212,11 @@ module tb_axil_reg_space;
         c2h_head_stub = 0;
         tb_irq_top_status = 0;
         tb_vch0_irq_status = 0;
+        tb_adev0_running = 0;
+        tb_adev0_xrun = 0;
+        tb_adev0_position = 0;
+        tb_adev0_irq_status = 0;
+        adev0_w1c_pulsed = 0;
 
         #20;
         rst_n = 1;
@@ -584,6 +622,80 @@ module tb_axil_reg_space;
         axil_write(32'h100, 32'h0000_0101); // CH_CTRL: enable=1, irq_en=1
         if (tb_vch0_irq_en !== 1'b1) begin
             $display("FAIL: Test 22 tb_vch0_irq_en not asserted");
+            $fatal(1);
+        end
+
+        // Test 23: Phase 4 P4-2 Audio DEV0 Compliance
+        $display("[%0t] Test 23: Phase 4 P4-2 Audio DEV0 Compliance...", $time);
+        tb_adev0_running  <= 1'b1;
+        tb_adev0_position <= 32'h0000_1234;
+        axil_read(32'h504, read_val); // STATUS
+        if (read_val[0] !== 1'b1 || read_val[1] !== 1'b0) begin
+            $display("FAIL: Test 23 STATUS mismatch: 0x%h (Expect bit 0=1, bit 1=0)", read_val);
+            $fatal(1);
+        end
+        axil_read(32'h514, read_val); // POSITION
+        if (read_val !== 32'h0000_1234) begin
+            $display("FAIL: Test 23 POSITION mismatch: 0x%h (Expect 0x1234)", read_val);
+            $fatal(1);
+        end
+        axil_read(32'h5A4, read_val); // PTR
+        if (read_val !== 32'h0000_1234) begin
+            $display("FAIL: Test 23 PTR mismatch: 0x%h (Expect 0x1234)", read_val);
+            $fatal(1);
+        end
+
+        // Hardware xrun pulse -> sticky bit set in STATUS
+        tb_adev0_xrun <= 1'b1;
+        #10;
+        tb_adev0_xrun <= 1'b0;
+        #10;
+        axil_read(32'h504, read_val);
+        if (read_val[1] !== 1'b1) begin
+            $display("FAIL: Test 23 STATUS xrun bit not set after tb_adev0_xrun: 0x%h", read_val);
+            $fatal(1);
+        end
+
+        // W1C sticky xrun
+        axil_write(32'h504, 32'h0000_0002);
+        axil_read(32'h504, read_val);
+        if (read_val[1] !== 1'b0) begin
+            $display("FAIL: Test 23 STATUS xrun bit not cleared after W1C: 0x%h", read_val);
+            $fatal(1);
+        end
+
+        // Software xrun injection: write bit 31 to 0x500
+        adev0_inject_pulsed <= 1'b0;
+        axil_write(32'h500, 32'h8000_0101); // enable=1, irq_en=1, xrun_inject=1
+        if (!adev0_inject_pulsed) begin
+            $display("FAIL: Test 23 tb_adev0_xrun_inject not asserted");
+            $fatal(1);
+        end
+        axil_read(32'h504, read_val);
+        if (read_val[1] !== 1'b1) begin
+            $display("FAIL: Test 23 STATUS xrun bit not set after software xrun inject: 0x%h", read_val);
+            $fatal(1);
+        end
+
+        // Clear sticky xrun again
+        axil_write(32'h504, 32'h0000_0002);
+        axil_read(32'h504, read_val);
+        if (read_val[1] !== 1'b0) begin
+            $display("FAIL: Test 23 STATUS xrun bit not cleared after 2nd W1C: 0x%h", read_val);
+            $fatal(1);
+        end
+
+        // Audio IRQ Status (0x5A8) and W1C
+        tb_adev0_irq_status <= 2'b11;
+        axil_read(32'h5A8, read_val);
+        if (read_val !== 32'h0000_0003) begin
+            $display("FAIL: Test 23 ADEV0_IRQ_STATUS read mismatch: 0x%h (Expect 0x3)", read_val);
+            $fatal(1);
+        end
+        adev0_w1c_pulsed <= 1'b0;
+        axil_write(32'h5A8, 32'h0000_0003);
+        if (!adev0_w1c_pulsed) begin
+            $display("FAIL: Test 23 adev0_w1c_pulsed not detected");
             $fatal(1);
         end
 

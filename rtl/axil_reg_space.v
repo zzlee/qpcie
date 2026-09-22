@@ -144,7 +144,21 @@ module axil_reg_space (
     output reg  [31:0] out_irq_top_status_w1c,
     input  wire [3:0]  in_vch0_irq_status,
     output reg  [3:0]  out_vch0_irq_status_w1c,
-    output wire        out_vch0_irq_en
+    output wire        out_vch0_irq_en,
+
+    // Phase 4 P4-2: Audio DEV0 Ports
+    output wire [31:0] out_adev0_ctrl,
+    output wire [31:0] out_adev0_rate,
+    output wire [31:0] out_adev0_period_bytes,
+    output wire [31:0] out_adev0_buffer_bytes,
+    output wire [63:0] out_adev0_ring0_base,
+    output wire [31:0] out_adev0_ring0_cfg,
+    input  wire        in_adev0_running,
+    input  wire        in_adev0_xrun,
+    input  wire [31:0] in_adev0_position,
+    input  wire [1:0]  in_adev0_irq_status,
+    output reg  [1:0]  out_adev0_irq_status_w1c,
+    output reg         out_adev0_xrun_inject
 );
 
     // BAR0 Register Offset Definitions (12-bit decode aperture)
@@ -219,24 +233,41 @@ module axil_reg_space (
 
     // Audio DEV0 Block (New Map: 0x0500 - 0x05FF)
     reg  [31:0] adev0_ctrl;
-    reg  [31:0] adev0_status;
     reg  [31:0] adev0_rate;
     reg  [31:0] adev0_period_bytes;
     reg  [31:0] adev0_buffer_bytes;
     reg  [63:0] adev0_ring0_base;
     reg  [31:0] adev0_ring0_cfg;
-    reg  [31:0] adev0_irq_w1c;
+    reg         adev0_xrun_sticky;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            adev0_xrun_sticky <= 1'b0;
+        end else begin
+            if (in_adev0_xrun || out_adev0_xrun_inject)
+                adev0_xrun_sticky <= 1'b1;
+            else if (map_mode_new && s_axil_awvalid && s_axil_wvalid && (s_axil_awaddr[11:0] == 12'h504) && s_axil_wdata[1])
+                adev0_xrun_sticky <= 1'b0;
+        end
+    end
 
     // Debug Block (New Map: 0x0900 - 0x09FF)
     reg  [31:0] dbg_pattern_gen;
 
-    assign out_vch0_ctrl     = vch0_ctrl;
-    assign out_vch0_width    = vch0_width;
-    assign out_vch0_height   = vch0_height;
-    assign out_vch0_stride0  = vch0_stride0;
-    assign out_vch0_stride1  = vch0_stride1;
-    assign out_map_mode_new  = map_mode_new;
-    assign out_vch0_irq_en   = vch0_ctrl[8];
+    assign out_vch0_ctrl          = vch0_ctrl;
+    assign out_vch0_width         = vch0_width;
+    assign out_vch0_height        = vch0_height;
+    assign out_vch0_stride0       = vch0_stride0;
+    assign out_vch0_stride1       = vch0_stride1;
+    assign out_map_mode_new       = map_mode_new;
+    assign out_vch0_irq_en        = vch0_ctrl[8];
+
+    assign out_adev0_ctrl         = adev0_ctrl;
+    assign out_adev0_rate         = adev0_rate;
+    assign out_adev0_period_bytes = adev0_period_bytes;
+    assign out_adev0_buffer_bytes = adev0_buffer_bytes;
+    assign out_adev0_ring0_base   = adev0_ring0_base;
+    assign out_adev0_ring0_cfg    = adev0_ring0_cfg;
 
     // Write Logic
     always @(posedge clk or negedge rst_n) begin
@@ -285,31 +316,32 @@ module axil_reg_space (
             vch0_stride0           <= 32'd1920;
             vch0_stride1           <= 32'd1920;
             out_vch0_irq_status_w1c<= 4'd0;
-            adev0_ctrl             <= 32'd0;
-            adev0_status           <= 32'd0;
-            adev0_rate             <= 32'd48000;
-            adev0_period_bytes     <= 32'd4096;
-            adev0_buffer_bytes     <= 32'd65536;
-            adev0_ring0_base       <= 64'd0;
-            adev0_ring0_cfg        <= 32'd0;
-            adev0_irq_w1c          <= 32'd0;
-            dbg_pattern_gen        <= 32'd0;
-            s_axil_awready         <= 1'b0;
-            s_axil_wready          <= 1'b0;
-            s_axil_bvalid          <= 1'b0;
-            s_axil_bresp           <= 2'b00; // OKAY
+            adev0_ctrl              <= 32'd0;
+            adev0_rate              <= 32'd48000;
+            adev0_period_bytes      <= 32'd4096;
+            adev0_buffer_bytes      <= 32'd65536;
+            adev0_ring0_base        <= 64'd0;
+            adev0_ring0_cfg         <= 32'd0;
+            out_adev0_irq_status_w1c<= 2'd0;
+            out_adev0_xrun_inject   <= 1'b0;
+            dbg_pattern_gen         <= 32'd0;
+            s_axil_awready          <= 1'b0;
+            s_axil_wready           <= 1'b0;
+            s_axil_bvalid           <= 1'b0;
+            s_axil_bresp            <= 2'b00; // OKAY
         end else begin
-            reg_irq_status_w1c      <= 32'd0;
-            reg_perf_reset_w1c      <= 1'b0;
-            pt_y_wr_en              <= 1'b0;
-            pt_uv_wr_en             <= 1'b0;
-            h2c_fifo_wr_en_ch1      <= 1'b0;
-            h2c_fifo_wr_en_ch2      <= 1'b0;
-            h2c_fifo_wr_en_ch3      <= 1'b0;
-            global_reset_pulse      <= 1'b0;
-            out_irq_top_status_w1c  <= 32'd0;
-            out_vch0_irq_status_w1c <= 4'd0;
-            adev0_irq_w1c           <= 32'd0;
+            reg_irq_status_w1c       <= 32'd0;
+            reg_perf_reset_w1c       <= 1'b0;
+            pt_y_wr_en               <= 1'b0;
+            pt_uv_wr_en              <= 1'b0;
+            h2c_fifo_wr_en_ch1       <= 1'b0;
+            h2c_fifo_wr_en_ch2       <= 1'b0;
+            h2c_fifo_wr_en_ch3       <= 1'b0;
+            global_reset_pulse       <= 1'b0;
+            out_irq_top_status_w1c   <= 32'd0;
+            out_vch0_irq_status_w1c  <= 4'd0;
+            out_adev0_irq_status_w1c <= 2'd0;
+            out_adev0_xrun_inject    <= 1'b0;
             if (s_axil_awvalid && s_axil_wvalid && !s_axil_bvalid) begin
                 s_axil_awready <= 1'b1;
                 s_axil_wready  <= 1'b1;
@@ -442,15 +474,17 @@ module axil_reg_space (
                     4'h5: begin
                         if (map_mode_new) begin
                             case (s_axil_awaddr[7:0])
-                                8'h00: adev0_ctrl                 <= s_axil_wdata;
-                                8'h04: if (s_axil_wdata[1]) adev0_status[1] <= 1'b0;
+                                8'h00: begin
+                                    adev0_ctrl <= s_axil_wdata;
+                                    if (s_axil_wdata[31]) out_adev0_xrun_inject <= 1'b1;
+                                end
                                 8'h08: adev0_rate                 <= s_axil_wdata;
                                 8'h0C: adev0_period_bytes         <= s_axil_wdata;
                                 8'h10: adev0_buffer_bytes         <= s_axil_wdata;
                                 8'h20: adev0_ring0_base[31:0]     <= s_axil_wdata;
                                 8'h24: adev0_ring0_base[63:32]    <= s_axil_wdata;
                                 8'h28: adev0_ring0_cfg            <= s_axil_wdata;
-                                8'hA8: adev0_irq_w1c              <= s_axil_wdata;
+                                8'hA8: out_adev0_irq_status_w1c   <= s_axil_wdata[1:0];
                                 default: ;
                             endcase
                         end
@@ -639,16 +673,16 @@ module axil_reg_space (
                         if (map_mode_new) begin
                             case (s_axil_araddr[7:0])
                                 8'h00: s_axil_rdata <= adev0_ctrl;
-                                8'h04: s_axil_rdata <= adev0_status;
+                                8'h04: s_axil_rdata <= {30'd0, adev0_xrun_sticky, in_adev0_running};
                                 8'h08: s_axil_rdata <= adev0_rate;
                                 8'h0C: s_axil_rdata <= adev0_period_bytes;
                                 8'h10: s_axil_rdata <= adev0_buffer_bytes;
-                                8'h14: s_axil_rdata <= reg_audio_dma_ptr;
+                                8'h14: s_axil_rdata <= in_adev0_position;
                                 8'h20: s_axil_rdata <= adev0_ring0_base[31:0];
                                 8'h24: s_axil_rdata <= adev0_ring0_base[63:32];
                                 8'h28: s_axil_rdata <= adev0_ring0_cfg;
-                                8'hA4: s_axil_rdata <= reg_audio_dma_ptr;
-                                8'hA8: s_axil_rdata <= adev0_irq_w1c;
+                                8'hA4: s_axil_rdata <= in_adev0_position;
+                                8'hA8: s_axil_rdata <= {30'd0, in_adev0_irq_status};
                                 default: s_axil_rdata <= 32'd0;
                             endcase
                         end else begin

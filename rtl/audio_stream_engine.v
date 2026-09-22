@@ -45,6 +45,7 @@ module audio_stream_engine #(
     // Status & PTS Signals
     output reg                           audio_busy,
     output reg                           audio_block_done,
+    output reg                           audio_xrun,
     output reg  [63:0]                   audio_pts          // Latched AES3 Block PTS Timestamp (ns)
 );
 
@@ -92,14 +93,17 @@ module audio_stream_engine #(
             fifo_wr_en     <= 1'b0;
             fifo_din       <= 128'd0;
             audio_pts      <= 64'd0;
+            audio_xrun     <= 1'b0;
         end else if (!audio_start) begin
             pack_cnt       <= 2'd0;
             pack_buf       <= 96'd0;
             stream_synced  <= 1'b0;
             fifo_wr_en     <= 1'b0;
             fifo_din       <= 128'd0;
+            audio_xrun     <= 1'b0;
         end else begin
             fifo_wr_en <= 1'b0; // Default pulse
+            audio_xrun <= (s_axis_audio_tvalid && fifo_full);
 
             if (sample_fire) begin
                 // Latch PTS on AES3 Block Start (Preamble 4'hB)

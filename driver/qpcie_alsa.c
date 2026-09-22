@@ -66,26 +66,39 @@ static int qpcie_alsa_cap_prepare(struct snd_pcm_substream *substream)
     dma_addr_t dma_addr = substream->runtime->dma_addr;
     size_t buffer_bytes = snd_pcm_lib_buffer_bytes(substream);
     size_t period_bytes = snd_pcm_lib_period_bytes(substream);
+    u32 rate = substream->runtime->rate;
 
     ach->cap_buffer_pos = 0;
 
-    // Backward compatibility for Ch0 registers
-    if (ach->channel_id == 0) {
-        iowrite32(lower_32_bits(dma_addr), qdev->bar0_mmio + REG_AUDIO_DMA_ADDR_L);
-        iowrite32(upper_32_bits(dma_addr), qdev->bar0_mmio + REG_AUDIO_DMA_ADDR_H);
+    if (ach->channel_id == 0 && qdev->use_new_map) {
+        /* Phase 4 P4-2: New-map Audio DEV0 registers */
+        iowrite32(lower_32_bits(dma_addr), qdev->bar0_mmio + REG_ADEV0_RING0_BASE_L);
+        iowrite32(upper_32_bits(dma_addr), qdev->bar0_mmio + REG_ADEV0_RING0_BASE_H);
+        iowrite32((u32)buffer_bytes,       qdev->bar0_mmio + REG_ADEV0_BUFFER_BYTES);
+        iowrite32((u32)period_bytes,       qdev->bar0_mmio + REG_ADEV0_PERIOD_BYTES);
+        iowrite32(rate,                    qdev->bar0_mmio + REG_ADEV0_RATE);
+        dev_info(&qdev->pdev->dev,
+                 "[ALSA Ch0 New-Map Prepare] DMA=0x%llX, buffer=%zu, period=%zu, rate=%u\n",
+                 (u64)dma_addr, buffer_bytes, period_bytes, rate);
+    } else {
+        /* Legacy map: backward compatibility */
+        if (ach->channel_id == 0) {
+            iowrite32(lower_32_bits(dma_addr), qdev->bar0_mmio + REG_AUDIO_DMA_ADDR_L);
+            iowrite32(upper_32_bits(dma_addr), qdev->bar0_mmio + REG_AUDIO_DMA_ADDR_H);
+            iowrite32(((u32)period_bytes << 16) | ((u32)buffer_bytes & 0xFFFF),
+                      qdev->bar0_mmio + REG_AUDIO_DMA_CFG);
+        }
+
+        /* Program channel-specific C2H DMA address and config (0x100..0x13C) */
+        iowrite32(lower_32_bits(dma_addr), qdev->bar0_mmio + REG_AUDIO_DMA_ADDR_CH_L(ach->channel_id));
+        iowrite32(upper_32_bits(dma_addr), qdev->bar0_mmio + REG_AUDIO_DMA_ADDR_CH_H(ach->channel_id));
         iowrite32(((u32)period_bytes << 16) | ((u32)buffer_bytes & 0xFFFF),
-                  qdev->bar0_mmio + REG_AUDIO_DMA_CFG);
+                  qdev->bar0_mmio + REG_AUDIO_DMA_CFG_CH(ach->channel_id));
+
+        dev_info(&qdev->pdev->dev,
+                 "[ALSA Ch%d Capture Prepare] DMA=0x%llX, buffer=%zu bytes, period=%zu bytes\n",
+                 ach->channel_id, (u64)dma_addr, buffer_bytes, period_bytes);
     }
-
-    // Program channel-specific C2H DMA address and config (0x100..0x13C)
-    iowrite32(lower_32_bits(dma_addr), qdev->bar0_mmio + REG_AUDIO_DMA_ADDR_CH_L(ach->channel_id));
-    iowrite32(upper_32_bits(dma_addr), qdev->bar0_mmio + REG_AUDIO_DMA_ADDR_CH_H(ach->channel_id));
-    iowrite32(((u32)period_bytes << 16) | ((u32)buffer_bytes & 0xFFFF),
-              qdev->bar0_mmio + REG_AUDIO_DMA_CFG_CH(ach->channel_id));
-
-    dev_info(&qdev->pdev->dev,
-             "[ALSA Ch%d Capture Prepare] DMA=0x%llX, buffer=%zu bytes, period=%zu bytes\n",
-             ach->channel_id, (u64)dma_addr, buffer_bytes, period_bytes);
     return 0;
 }
 
@@ -94,6 +107,25 @@ static int qpcie_alsa_cap_trigger(struct snd_pcm_substream *substream, int cmd)
     struct qpcie_alsa_channel *ach = snd_pcm_substream_chip(substream);
     struct qpcie_dev *qdev = ach->qdev;
     u32 ctrl;
+
+    if (ach->channel_id == 0 && qdev->use_new_map) {
+        /* Phase 4 P4-2: New-map — write ADEV0_CTRL, NEVER touch REG_DMA_CTRL */
+        switch (cmd) {
+        case SNDRV_PCM_TRIGGER_START:
+            /* BIT(0)=enable, BIT(8)=irq_en */
+            iowrite32(BIT(0) | BIT(8), qdev->bar0_mmio + REG_ADEV0_CTRL);
+            dev_info(&qdev->pdev->dev, "[ALSA Ch0 New-Map] Started (ADEV0_CTRL=0x%08X)\n",
+                     (u32)(BIT(0) | BIT(8)));
+            break;
+        case SNDRV_PCM_TRIGGER_STOP:
+            iowrite32(0, qdev->bar0_mmio + REG_ADEV0_CTRL);
+            dev_info(&qdev->pdev->dev, "[ALSA Ch0 New-Map] Stopped\n");
+            break;
+        default:
+            return -EINVAL;
+        }
+        return 0;
+    }
 
     switch (cmd) {
     case SNDRV_PCM_TRIGGER_START:
@@ -120,7 +152,11 @@ static snd_pcm_uframes_t qpcie_alsa_cap_pointer(struct snd_pcm_substream *substr
     u32 hw_pos;
     size_t buf_bytes = snd_pcm_lib_buffer_bytes(substream);
 
-    hw_pos = ioread32(qdev->bar0_mmio + REG_AUDIO_DMA_PTR_CH(ach->channel_id));
+    if (ach->channel_id == 0 && qdev->use_new_map)
+        hw_pos = ioread32(qdev->bar0_mmio + REG_ADEV0_POSITION);
+    else
+        hw_pos = ioread32(qdev->bar0_mmio + REG_AUDIO_DMA_PTR_CH(ach->channel_id));
+
     if (hw_pos >= buf_bytes)
         hw_pos = 0;
     ach->cap_buffer_pos = hw_pos;
@@ -586,8 +622,38 @@ void qpcie_alsa_irq_handler(struct qpcie_dev *qdev, u32 status)
     for (i = 0; i < NUM_AUDIO_CHANNELS; i++) {
         struct qpcie_alsa_channel *ach = &qdev->alsa_ch[i];
 
+        if (i == 0 && qdev->use_new_map) {
+            /* Phase 4 P4-2: Handle via REG_ADEV0_IRQ_STATUS */
+            u32 adev_irq = ioread32(qdev->bar0_mmio + REG_ADEV0_IRQ_STATUS);
+            if (!adev_irq)
+                continue;
+
+            if (adev_irq & BIT(1)) {
+                /* XRUN detected */
+                dev_warn_ratelimited(&qdev->pdev->dev, "[ALSA Ch0 New-Map] XRUN detected\n");
+                /* Clear xrun sticky in STATUS register */
+                iowrite32(BIT(1), qdev->bar0_mmio + REG_ADEV0_STATUS);
+            }
+
+            if (adev_irq & BIT(0)) {
+                /* Period done: update pointer and notify ALSA */
+                if (ach->cap_substream && snd_pcm_running(ach->cap_substream)) {
+                    u32 hw_pos = ioread32(qdev->bar0_mmio + REG_ADEV0_POSITION);
+                    size_t buf_bytes = snd_pcm_lib_buffer_bytes(ach->cap_substream);
+                    if (hw_pos >= buf_bytes)
+                        hw_pos = 0;
+                    ach->cap_buffer_pos = hw_pos;
+                    snd_pcm_period_elapsed(ach->cap_substream);
+                }
+            }
+
+            /* W1C ADEV0_IRQ_STATUS */
+            iowrite32(adev_irq, qdev->bar0_mmio + REG_ADEV0_IRQ_STATUS);
+            continue;
+        }
+
         if (status & IRQ_STATUS_AUDIO_CH(i)) {
-            // Capture period done
+            /* Legacy: Capture period done */
             if (ach->cap_substream && snd_pcm_running(ach->cap_substream)) {
                 u32 hw_pos = ioread32(qdev->bar0_mmio + REG_AUDIO_DMA_PTR_CH(i));
                 size_t buf_bytes = snd_pcm_lib_buffer_bytes(ach->cap_substream);
@@ -599,4 +665,3 @@ void qpcie_alsa_irq_handler(struct qpcie_dev *qdev, u32 status)
         }
     }
 }
-
