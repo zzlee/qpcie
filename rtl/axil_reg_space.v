@@ -127,7 +127,17 @@ module axil_reg_space (
     input  wire        h2c_fifo_empty_ch2,
     input  wire        h2c_fifo_empty_ch3,
 
-    output reg  [31:0] reg_audio_loopback_ctrl
+    output reg  [31:0] reg_audio_loopback_ctrl,
+
+    // Phase 3: Video CH0 & Mode Signals for Thin Descriptor Engine
+    output wire [31:0] out_vch0_ctrl,
+    output wire [31:0] out_vch0_width,
+    output wire [31:0] out_vch0_height,
+    output wire [31:0] out_vch0_stride0,
+    output wire [31:0] out_vch0_stride1,
+    output wire        out_map_mode_new,
+    input  wire [31:0] in_vch0_frame_count,
+    input  wire [31:0] in_vch0_drop_count
 );
 
     // BAR0 Register Offset Definitions (12-bit decode aperture)
@@ -214,6 +224,13 @@ module axil_reg_space (
 
     // Debug Block (New Map: 0x0900 - 0x09FF)
     reg  [31:0] dbg_pattern_gen;
+
+    assign out_vch0_ctrl     = vch0_ctrl;
+    assign out_vch0_width    = vch0_width;
+    assign out_vch0_height   = vch0_height;
+    assign out_vch0_stride0  = vch0_stride0;
+    assign out_vch0_stride1  = vch0_stride1;
+    assign out_map_mode_new  = map_mode_new;
 
     // Write Logic
     always @(posedge clk or negedge rst_n) begin
@@ -578,8 +595,9 @@ module axil_reg_space (
                                 8'h30: s_axil_rdata <= reg_h2c_ring_addr[31:0];
                                 8'h34: s_axil_rdata <= reg_h2c_ring_addr[63:32];
                                 8'h38: s_axil_rdata <= {reg_h2c_tail_ptr, reg_h2c_ring_size};
-                                8'h60: s_axil_rdata <= reg_sof_count;
-                                8'h64: s_axil_rdata <= reg_frame_drop_count;
+                                8'h3C: s_axil_rdata <= {16'd0, reg_h2c_head_ptr};
+                                8'h60: s_axil_rdata <= in_vch0_frame_count;
+                                8'h64: s_axil_rdata <= in_vch0_drop_count;
                                 8'h68: s_axil_rdata <= reg_last_video_pts[31:0];
                                 8'h6C: s_axil_rdata <= reg_last_video_pts[63:32];
                                 8'h70: s_axil_rdata <= vch0_irq_status_w1c;

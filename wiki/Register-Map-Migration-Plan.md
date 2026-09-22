@@ -20,7 +20,7 @@
 - [x] P2-2：mode 位元（預設舊路），TB 同測新舊兩套讀寫互不干擾（TB 21項全數通過；A50T Bitstream 建置完成，WNS >= 0.000ns 零時序違規；實機 1080p60 回歸通過，target 實測 ALL PASS，49,766,400B 零錯誤）
 
 ### Phase 3 — Thin descriptor＋per-plane 表（核心戰役，預估半數工時）
-- [ ] P3-1：新 fetch 引擎（16B entry、byte-count framing、RING0–1 雙表並行、doorbell/HEAD）
+- [x] P3-1：新 fetch 引擎（16B entry、byte-count framing、RING0–1 雙表並行、doorbell/HEAD；tb_thin_desc_fetch_engine 6項全過；custom_pcie_dma_top 整合完成並通過系統級回歸）
 - [ ] P3-2：CH0 切新路跑單路 1080p60，與舊路 bit-exact 比對（逐 byte）
 
 ### Phase 4 — 中斷＋Audio 合規
