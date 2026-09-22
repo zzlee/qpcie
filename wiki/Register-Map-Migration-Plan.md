@@ -24,7 +24,7 @@
 - [x] P3-2：CH0 切新路跑單路 1080p60，與舊路 bit-exact 比對（逐 byte）；**實測確認 100% BIT-EXACT PASS（Legacy 與 New 兩路 8 幀 49,766,400 bytes 逐 byte 完全一致，SHA256: 55658ea5e2ba76280c0b2b3cae7549a39aeedd9ddae6ca065aa2b48490be4ea3）**
 
 ### Phase 4 — 中斷＋Audio 合規
-- [ ] P4-1：三層中斷＋per-source pending counter＋仲裁；in-flight 灌 burst 斷言語一個不少（150MHz 案重演）
+- [x] P4-1：三層中斷＋per-source pending counter＋仲裁；in-flight 灌 burst 斷言全數通過（`tb_interrupt_ctrl.v` 7項全過、`tb_axil_reg_space.v` 22項全過；Vivado A50T Bitstream 建置完成，WNS = +8.692ns 零違規；Driver 整合完成）
 - [ ] P4-2：POSITION/PERIOD/BUFFER＋`pointer` 回調；xrun 注入走一遍
 
 ### Phase 5 — Driver 雙軌＋多通道

@@ -1550,10 +1550,29 @@ void qpcie_v4l2_irq_handler(struct qpcie_dev *qdev)
     int i;
     u32 slice_height = 0;
 
-    if (qdev && qdev->bar0_mmio) {
-        status = ioread32(qdev->bar0_mmio + REG_IRQ_STATUS);
-        slice_height = ioread32(qdev->bar0_mmio + REG_SLICE_HEIGHT);
+    if (!qdev || !qdev->bar0_mmio)
+        return;
+
+    if (qdev->use_new_map) {
+        /* In new map mode, VCH0 completion is direct */
+        struct qpcie_v4l2_channel *vch = &qdev->v4l2_ch[0];
+        struct qpcie_v4l2_buffer *buf;
+
+        spin_lock(&vch->slock);
+        if (!list_empty(&vch->active_buffers)) {
+            buf = list_first_entry(&vch->active_buffers, struct qpcie_v4l2_buffer, list);
+            list_del(&buf->list);
+            qdev->ring_completed++;
+            buf->vb.vb2_buf.timestamp = ktime_get_ns();
+            buf->vb.sequence = vch->sequence++;
+            vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
+        }
+        spin_unlock(&vch->slock);
+        return;
     }
+
+    status = ioread32(qdev->bar0_mmio + REG_IRQ_STATUS);
+    slice_height = ioread32(qdev->bar0_mmio + REG_SLICE_HEIGHT);
 
     /* --------------------------------------------------------------------
      * 1. Per-Channel C2H Video Capture Completions (Bits 4..7: Ch0..Ch3)

@@ -53,9 +53,20 @@ module tb_axil_reg_space;
     reg  [15:0] h2c_head_stub;
     reg  [15:0] c2h_head_stub;
     reg         w1c_pulsed;
+    reg  [31:0] tb_irq_top_status;
+    wire [31:0] tb_irq_top_status_w1c;
+    reg  [3:0]  tb_vch0_irq_status;
+    wire [3:0]  tb_vch0_irq_status_w1c;
+    wire        tb_vch0_irq_en;
+    reg         vch0_w1c_pulsed;
+    reg         top_w1c_pulsed;
     always @(posedge clk) begin
         if (irq_w1c_obs === 32'h00000003)
             w1c_pulsed <= 1'b1;
+        if (tb_vch0_irq_status_w1c === 4'h1)
+            vch0_w1c_pulsed <= 1'b1;
+        if (tb_irq_top_status_w1c === 32'h0000_0001)
+            top_w1c_pulsed <= 1'b1;
     end
 
     // Instantiate uut
@@ -96,7 +107,12 @@ module tb_axil_reg_space;
         .reg_slice_height(reg_slice_height),
         .reg_video_ctrl(reg_video_ctrl),
         .completed_h2c_count(completed_h2c_count),
-        .completed_c2h_count(completed_c2h_count)
+        .completed_c2h_count(completed_c2h_count),
+        .in_irq_top_status(tb_irq_top_status),
+        .out_irq_top_status_w1c(tb_irq_top_status_w1c),
+        .in_vch0_irq_status(tb_vch0_irq_status),
+        .out_vch0_irq_status_w1c(tb_vch0_irq_status_w1c),
+        .out_vch0_irq_en(tb_vch0_irq_en)
     );
 
     always #5 clk = ~clk;
@@ -161,6 +177,8 @@ module tb_axil_reg_space;
         completed_c2h_count = 0;
         h2c_head_stub = 0;
         c2h_head_stub = 0;
+        tb_irq_top_status = 0;
+        tb_vch0_irq_status = 0;
 
         #20;
         rst_n = 1;
@@ -533,6 +551,39 @@ module tb_axil_reg_space;
         axil_read(32'h030, read_val);
         if (read_val !== 32'h0300_0001) begin
             $display("FAIL: Test 21 legacy 0x30 VERSION_ID mismatch: 0x%h", read_val);
+            $fatal(1);
+        end
+
+        // Test 22: Phase 4 Three-Level Hierarchy Register R/W (0x18 and 0x170)
+        $display("[%0t] Test 22: Phase 4 Three-Level Hierarchy Register R/W in new map...", $time);
+        axil_write(32'h000, 32'h0000_0008); // Enter new map
+        tb_irq_top_status  <= 32'h0000_0001;
+        tb_vch0_irq_status <= 4'h1;
+        axil_read(32'h018, read_val);
+        if (read_val !== 32'h0000_0001) begin
+            $display("FAIL: Test 22 IRQ_TOP (0x18) read mismatch: 0x%h (Expect 0x1)", read_val);
+            $fatal(1);
+        end
+        axil_read(32'h170, read_val);
+        if (read_val !== 32'h0000_0001) begin
+            $display("FAIL: Test 22 CH0_IRQ_STATUS (0x170) read mismatch: 0x%h (Expect 0x1)", read_val);
+            $fatal(1);
+        end
+        vch0_w1c_pulsed <= 1'b0;
+        top_w1c_pulsed  <= 1'b0;
+        axil_write(32'h170, 32'h0000_0001); // W1C CH0
+        if (!vch0_w1c_pulsed) begin
+            $display("FAIL: Test 22 vch0_w1c_pulsed not detected");
+            $fatal(1);
+        end
+        axil_write(32'h018, 32'h0000_0001); // W1C TOP
+        if (!top_w1c_pulsed) begin
+            $display("FAIL: Test 22 top_w1c_pulsed not detected");
+            $fatal(1);
+        end
+        axil_write(32'h100, 32'h0000_0101); // CH_CTRL: enable=1, irq_en=1
+        if (tb_vch0_irq_en !== 1'b1) begin
+            $display("FAIL: Test 22 tb_vch0_irq_en not asserted");
             $fatal(1);
         end
 

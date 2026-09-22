@@ -137,7 +137,14 @@ module axil_reg_space (
     output wire [31:0] out_vch0_stride1,
     output wire        out_map_mode_new,
     input  wire [31:0] in_vch0_frame_count,
-    input  wire [31:0] in_vch0_drop_count
+    input  wire [31:0] in_vch0_drop_count,
+
+    // Phase 4: Three-Level Hierarchy Interrupt Ports
+    input  wire [31:0] in_irq_top_status,
+    output reg  [31:0] out_irq_top_status_w1c,
+    input  wire [3:0]  in_vch0_irq_status,
+    output reg  [3:0]  out_vch0_irq_status_w1c,
+    output wire        out_vch0_irq_en
 );
 
     // BAR0 Register Offset Definitions (12-bit decode aperture)
@@ -201,7 +208,6 @@ module axil_reg_space (
 
     // Global Block (New Map: 0x0000 - 0x00FF)
     reg        global_reset_pulse;
-    reg [31:0] irq_top_status_w1c;
 
     // Video CH0 Block (New Map: 0x0100 - 0x01FF)
     reg  [31:0] vch0_ctrl;
@@ -210,7 +216,6 @@ module axil_reg_space (
     reg  [31:0] vch0_height;
     reg  [31:0] vch0_stride0;
     reg  [31:0] vch0_stride1;
-    reg  [31:0] vch0_irq_status_w1c;
 
     // Audio DEV0 Block (New Map: 0x0500 - 0x05FF)
     reg  [31:0] adev0_ctrl;
@@ -231,6 +236,7 @@ module axil_reg_space (
     assign out_vch0_stride0  = vch0_stride0;
     assign out_vch0_stride1  = vch0_stride1;
     assign out_map_mode_new  = map_mode_new;
+    assign out_vch0_irq_en   = vch0_ctrl[8];
 
     // Write Logic
     always @(posedge clk or negedge rst_n) begin
@@ -271,14 +277,14 @@ module axil_reg_space (
             reg_debug_last_wdata   <= 32'd0;
             reg_debug_last_waddr   <= 32'd0;
             global_reset_pulse     <= 1'b0;
-            irq_top_status_w1c     <= 32'd0;
+            out_irq_top_status_w1c <= 32'd0;
             vch0_ctrl              <= 32'd0;
             vch0_status            <= 32'd0;
             vch0_width             <= 32'd1920;
             vch0_height            <= 32'd1080;
             vch0_stride0           <= 32'd1920;
             vch0_stride1           <= 32'd1920;
-            vch0_irq_status_w1c    <= 32'd0;
+            out_vch0_irq_status_w1c<= 4'd0;
             adev0_ctrl             <= 32'd0;
             adev0_status           <= 32'd0;
             adev0_rate             <= 32'd48000;
@@ -293,17 +299,17 @@ module axil_reg_space (
             s_axil_bvalid          <= 1'b0;
             s_axil_bresp           <= 2'b00; // OKAY
         end else begin
-            reg_irq_status_w1c  <= 32'd0;
-            reg_perf_reset_w1c  <= 1'b0;
-            pt_y_wr_en          <= 1'b0;
-            pt_uv_wr_en         <= 1'b0;
-            h2c_fifo_wr_en_ch1  <= 1'b0;
-            h2c_fifo_wr_en_ch2  <= 1'b0;
-            h2c_fifo_wr_en_ch3  <= 1'b0;
-            global_reset_pulse  <= 1'b0;
-            irq_top_status_w1c  <= 32'd0;
-            vch0_irq_status_w1c <= 32'd0;
-            adev0_irq_w1c       <= 32'd0;
+            reg_irq_status_w1c      <= 32'd0;
+            reg_perf_reset_w1c      <= 1'b0;
+            pt_y_wr_en              <= 1'b0;
+            pt_uv_wr_en             <= 1'b0;
+            h2c_fifo_wr_en_ch1      <= 1'b0;
+            h2c_fifo_wr_en_ch2      <= 1'b0;
+            h2c_fifo_wr_en_ch3      <= 1'b0;
+            global_reset_pulse      <= 1'b0;
+            out_irq_top_status_w1c  <= 32'd0;
+            out_vch0_irq_status_w1c <= 4'd0;
+            adev0_irq_w1c           <= 32'd0;
             if (s_axil_awvalid && s_axil_wvalid && !s_axil_bvalid) begin
                 s_axil_awready <= 1'b1;
                 s_axil_wready  <= 1'b1;
@@ -367,7 +373,7 @@ module axil_reg_space (
                                 8'h00: reg_dma_ctrl        <= s_axil_wdata;
                                 8'h14: global_reset_pulse  <= s_axil_wdata[0];
                                 8'h18: begin
-                                    irq_top_status_w1c     <= s_axil_wdata;
+                                    out_irq_top_status_w1c <= s_axil_wdata;
                                     reg_irq_status_w1c     <= s_axil_wdata;
                                 end
                                 8'h20: reg_irq_ctrl        <= s_axil_wdata;
@@ -426,8 +432,8 @@ module axil_reg_space (
                                     reg_h2c_tail_ptr                <= s_axil_wdata[31:16];
                                 end
                                 8'h70: begin
-                                    vch0_irq_status_w1c   <= s_axil_wdata;
-                                    reg_irq_status_w1c[4] <= s_axil_wdata[0];
+                                    out_vch0_irq_status_w1c <= s_axil_wdata[3:0];
+                                    reg_irq_status_w1c[4]   <= s_axil_wdata[0];
                                 end
                                 default: ;
                             endcase
@@ -558,7 +564,7 @@ module axil_reg_space (
                                 8'h0C: s_axil_rdata <= GIT_COMMIT_HASH_VAL;
                                 8'h10: s_axil_rdata <= BUILD_TIMESTAMP_VAL;
                                 8'h14: s_axil_rdata <= {31'd0, global_reset_pulse};
-                                8'h18: s_axil_rdata <= reg_irq_status;
+                                8'h18: s_axil_rdata <= in_irq_top_status;
                                 8'h1C: s_axil_rdata <= reg_global_timestamp[31:0];
                                 8'h20: s_axil_rdata <= reg_global_timestamp[63:32];
                                 8'h24: s_axil_rdata <= reg_irq_status;
@@ -624,7 +630,7 @@ module axil_reg_space (
                                 8'h64: s_axil_rdata <= in_vch0_drop_count;
                                 8'h68: s_axil_rdata <= reg_last_video_pts[31:0];
                                 8'h6C: s_axil_rdata <= reg_last_video_pts[63:32];
-                                8'h70: s_axil_rdata <= {31'd0, reg_irq_status[4]};
+                                8'h70: s_axil_rdata <= {28'd0, in_vch0_irq_status};
                                 default: s_axil_rdata <= 32'd0;
                             endcase
                         end

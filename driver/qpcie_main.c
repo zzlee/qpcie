@@ -24,6 +24,45 @@ void qpcie_dma_soft_reset(struct qpcie_dev *qdev)
 static irqreturn_t qpcie_irq_handler(int irq, void *data)
 {
     struct qpcie_dev *qdev = data;
+
+    if (qdev->use_new_map) {
+        /* Phase 4: Three-Level Hierarchy Interrupt Dispatch */
+        u32 top = ioread32(qdev->bar0_mmio + REG_NEW_GLOBAL_IRQ_TOP);
+
+        if (!top)
+            return IRQ_NONE;
+
+        /* Level 3 Dispatch: Video CH0 (Bit 0) */
+        if (top & BIT(0)) {
+            u32 ch_irq = ioread32(qdev->bar0_mmio + REG_VCH0_IRQ_STATUS);
+            if (ch_irq & BIT(0)) {
+                /* Frame done completion */
+                if (qdev->v4l2_registered)
+                    qpcie_v4l2_irq_handler(qdev);
+            }
+            if (ch_irq & BIT(1))
+                dev_warn_ratelimited(&qdev->pdev->dev, "VCH0 overflow IRQ detected\n");
+            if (ch_irq & BIT(2))
+                dev_err_ratelimited(&qdev->pdev->dev, "VCH0 descriptor error IRQ detected\n");
+            if (ch_irq & BIT(3))
+                dev_err_ratelimited(&qdev->pdev->dev, "VCH0 FIFO error IRQ detected\n");
+
+            /* Step 1: Clear branch / channel status first (W1C) */
+            iowrite32(ch_irq, qdev->bar0_mmio + REG_VCH0_IRQ_STATUS);
+        }
+
+        /* Level 3 Dispatch: H2C DMA (Bit 7) */
+        if (top & BIT(7)) {
+            if (qdev->v4l2_registered)
+                qpcie_v4l2_irq_handler(qdev);
+        }
+
+        /* Step 2: Clear Level 2 TOP status (W1C) */
+        iowrite32(top, qdev->bar0_mmio + REG_NEW_GLOBAL_IRQ_TOP);
+        return IRQ_HANDLED;
+    }
+
+    /* Legacy Map Interrupt Dispatch */
     u32 status = ioread32(qdev->bar0_mmio + REG_IRQ_STATUS);
 
     if (!(status & IRQ_STATUS_ALL_MASK))

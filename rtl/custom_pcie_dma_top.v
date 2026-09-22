@@ -599,6 +599,22 @@ module custom_pcie_dma_top #(
     wire [15:0] thin_ring1_head;
     wire        thin_active = map_mode_new_w && vch0_ctrl_w[0];
 
+    // Phase 4: Three-Level Interrupt Wires
+    wire [31:0] irq_top_status_w;
+    wire [31:0] irq_top_status_w1c_w;
+    wire [3:0]  vch0_irq_status_w;
+    wire [3:0]  vch0_irq_status_w1c_w;
+    wire        vch0_irq_en_w;
+
+    reg  [31:0] d_thin_drop_count;
+    always @(posedge clk or negedge dma_rst_n) begin
+        if (!dma_rst_n)
+            d_thin_drop_count <= 32'd0;
+        else
+            d_thin_drop_count <= thin_drop_count;
+    end
+    wire vch0_overflow_pulse = (thin_drop_count != d_thin_drop_count);
+
     // 3. BAR0 AXI4-Lite Register Space
     axil_reg_space u_axil_reg_space (
         .clk(clk),
@@ -709,7 +725,12 @@ module custom_pcie_dma_top #(
         .out_vch0_stride1(vch0_stride1_w),
         .out_map_mode_new(map_mode_new_w),
         .in_vch0_frame_count(thin_frame_count),
-        .in_vch0_drop_count(thin_drop_count)
+        .in_vch0_drop_count(thin_drop_count),
+        .in_irq_top_status(irq_top_status_w),
+        .out_irq_top_status_w1c(irq_top_status_w1c_w),
+        .in_vch0_irq_status(vch0_irq_status_w),
+        .out_vch0_irq_status_w1c(vch0_irq_status_w1c_w),
+        .out_vch0_irq_en(vch0_irq_en_w)
     );
 
     // 3.1 Hardware Performance Monitor Instance
@@ -1915,11 +1936,33 @@ module custom_pcie_dma_top #(
         .reg_irq_ctrl(reg_irq_ctrl),
         .reg_irq_status_w1c(reg_irq_status_w1c),
         .reg_irq_status(reg_irq_status),
+        .irq_top_status(irq_top_status_w),
+        .irq_top_status_w1c(irq_top_status_w1c_w),
+        .vch0_irq_status(vch0_irq_status_w),
+        .vch0_irq_status_w1c(vch0_irq_status_w1c_w),
+        .vch0_irq_en(vch0_irq_en_w),
+        .vch1_irq_status(),
+        .vch1_irq_status_w1c(4'd0),
+        .vch1_irq_en(1'b0),
+        .vch2_irq_status(),
+        .vch2_irq_status_w1c(4'd0),
+        .vch2_irq_en(1'b0),
+        .vch3_irq_status(),
+        .vch3_irq_status_w1c(4'd0),
+        .vch3_irq_en(1'b0),
+        .adev0_irq_status(),
+        .adev0_irq_status_w1c(2'd0),
+        .adev0_irq_en(1'b0),
         .h2c_done(sg_h2c_done_irq),
         .c2h_done(v_done[0] | v_done[1] | v_done[2] | v_done[3] | sg_c2h_done_irq | (|a_done)),
         .v_done_ch(v_done_ch),
         .h2c_done_ch(h2c_done_ch),
         .a_done_irq(a_done),
+        .v_overflow_ch({3'd0, vch0_overflow_pulse}),
+        .v_desc_err_ch(4'd0),
+        .v_fifo_err_ch(4'd0),
+        .a_xrun_ch(4'd0),
+        .global_err(1'b0),
         .irq_req_valid(irq_req_valid),
         .irq_req_code(irq_req_code),
         .irq_req_ack(irq_req_ack),
