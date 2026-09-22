@@ -1130,37 +1130,34 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
         iowrite32(0, qdev->bar0_mmio + REG_DMA_CTRL);
         ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
     }
-    if (qdev->use_new_map && vch->channel_id == 0) {
-        drained = true;
-    } else {
-        do {
-            u32 status = ioread32(qdev->bar0_mmio + REG_DMA_STATUS);
+    u32 stat_reg = (qdev->use_new_map && vch->channel_id == 0) ?
+                   REG_VCH0_STATUS : REG_DMA_STATUS;
 
-            if (status & DMA_STATUS_VIDEO_TX_IDLE) {
-                drained = true;
-                break;
-            }
-            usleep_range(1000, 2000);
-        } while (time_before(jiffies, timeout));
-    }
+    do {
+        u32 status = ioread32(qdev->bar0_mmio + stat_reg);
+
+        if (status & DMA_STATUS_VIDEO_TX_IDLE) {
+            drained = true;
+            break;
+        }
+        usleep_range(1000, 2000);
+    } while (time_before(jiffies, timeout));
 
     /* Freeze the video engine and its CDC FIFO before cancelling descriptors.
      * STREAMON releases this reset after new mappings have been queued. */
     iowrite32(1, qdev->bar0_mmio + REG_VIDEO_CTRL);
     ioread32(qdev->bar0_mmio + REG_VIDEO_CTRL);
     usleep_range(1000, 2000);
-    if (!qdev->use_new_map) {
-        timeout = jiffies + msecs_to_jiffies(500);
-        do {
-            u32 status = ioread32(qdev->bar0_mmio + REG_DMA_STATUS);
+    timeout = jiffies + msecs_to_jiffies(500);
+    do {
+        u32 status = ioread32(qdev->bar0_mmio + stat_reg);
 
-            if ((status & (DMA_STATUS_VIDEO_TX_IDLE |
-                           DMA_STATUS_DESC_IDLE)) ==
-                (DMA_STATUS_VIDEO_TX_IDLE | DMA_STATUS_DESC_IDLE))
-                break;
-            usleep_range(1000, 2000);
-        } while (time_before(jiffies, timeout));
-    }
+        if ((status & (DMA_STATUS_VIDEO_TX_IDLE |
+                       DMA_STATUS_DESC_IDLE)) ==
+            (DMA_STATUS_VIDEO_TX_IDLE | DMA_STATUS_DESC_IDLE))
+            break;
+        usleep_range(1000, 2000);
+    } while (time_before(jiffies, timeout));
 
     qpcie_dma_soft_reset(qdev);
 

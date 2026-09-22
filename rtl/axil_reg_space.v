@@ -562,6 +562,7 @@ module axil_reg_space (
                                 8'h1C: s_axil_rdata <= reg_global_timestamp[31:0];
                                 8'h20: s_axil_rdata <= reg_global_timestamp[63:32];
                                 8'h24: s_axil_rdata <= reg_irq_status;
+                                8'h28: s_axil_rdata <= reg_dma_status;
                                 8'h74: s_axil_rdata <= reg_pacer_ctrl;
                                 8'h78: s_axil_rdata <= reg_slice_height;
                                 8'h7C: s_axil_rdata <= reg_frame_drop_count;
@@ -606,7 +607,7 @@ module axil_reg_space (
                         end else begin
                             case (s_axil_araddr[7:0])
                                 8'h00: s_axil_rdata <= vch0_ctrl;
-                                8'h04: s_axil_rdata <= vch0_status;
+                                8'h04: s_axil_rdata <= {vch0_status[31:16], reg_dma_status[15:0]};
                                 8'h08: s_axil_rdata <= vch0_width;
                                 8'h0C: s_axil_rdata <= vch0_height;
                                 8'h10: s_axil_rdata <= vch0_stride0;

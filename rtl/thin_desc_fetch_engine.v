@@ -141,7 +141,14 @@ module thin_desc_fetch_engine #(
             sgl_uv_wr_len        <= 32'd0;
             sgl_uv_wr_flags      <= 32'd0;
             frame_launch_req     <= 1'b0;
-            frame_launch_bus     <= 245'd0;
+        end else if (!enable) begin
+            state                <= S_IDLE;
+            sel_ring1            <= 1'b0;
+            frame_active         <= 1'b0;
+            mrd_req_valid        <= 1'b0;
+            sgl_y_wr_en          <= 1'b0;
+            sgl_uv_wr_en         <= 1'b0;
+            frame_launch_req     <= 1'b0;
         end else begin
             // Frame completion tracking
             if (frame_done_in) begin

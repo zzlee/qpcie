@@ -38,7 +38,7 @@ DEV=$(ls /dev/video* 2>/dev/null | head -n 1 || echo "/dev/video0")
 echo "Using video device: $DEV"
 
 rm -f "$RAW_LEGACY"
-"$APP" -d "$DEV" -w "$W" -h "$H" -f "$FRAMES" -o "$RAW_LEGACY" > /tmp/p3_legacy.log 2>&1 || {
+"$APP" -d "$DEV" -w "$W" -h "$H" -f "$FRAMES" -S -o "$RAW_LEGACY" > /tmp/p3_legacy.log 2>&1 || {
     echo "[FAIL] Legacy capture failed. Log:"
     cat /tmp/p3_legacy.log
     dmesg | tail -n 25
@@ -66,7 +66,7 @@ echo "Using video device: $DEV"
 dmesg | tail -n 15 | grep -i "NEW MAP" || true
 
 rm -f "$RAW_NEW"
-"$APP" -d "$DEV" -w "$W" -h "$H" -f "$FRAMES" -o "$RAW_NEW" > /tmp/p3_new.log 2>&1 || {
+"$APP" -d "$DEV" -w "$W" -h "$H" -f "$FRAMES" -S -o "$RAW_NEW" > /tmp/p3_new.log 2>&1 || {
     echo "[FAIL] New thin path capture failed. Log:"
     cat /tmp/p3_new.log
     dmesg | tail -n 25
@@ -92,7 +92,8 @@ if cmp -s "$RAW_LEGACY" "$RAW_NEW"; then
     echo " SHA256: $SHA_NEW"
     echo "================================================================="
 else
-    DIFF_COUNT=$(cmp -l "$RAW_LEGACY" "$RAW_NEW" | wc -l)
-    echo "[FAIL] Byte mismatch detected between legacy and new paths ($DIFF_COUNT differing bytes)"
+    echo "[FAIL] Byte mismatch detected between legacy and new paths"
+    echo "  Legacy SHA256: $SHA_LEGACY"
+    echo "  New SHA256:    $SHA_NEW"
     exit 1
 fi
