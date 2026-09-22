@@ -355,6 +355,7 @@ struct qpcie_dev {
     struct qpcie_v4l2_channel v4l2_ch[NUM_VIDEO_NODES];
     unsigned int v4l2_node_count;
     struct qpcie_alsa_channel alsa_ch[NUM_AUDIO_CHANNELS];
+    unsigned int alsa_channel_count;
 
     struct snd_card *card;
     struct snd_pcm *pcm;

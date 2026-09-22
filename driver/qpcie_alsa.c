@@ -507,6 +507,8 @@ int qpcie_alsa_init(struct qpcie_dev *qdev)
     if (num_audio == 0 || num_audio > NUM_AUDIO_CHANNELS)
         num_audio = NUM_AUDIO_CHANNELS;
 
+    qdev->alsa_channel_count = num_audio;
+
     dev_info(&qdev->pdev->dev, "Starting Multi-Channel ALSA Audio Subsystem Init (%u Channels, caps=0x%08x)...\n",
              num_audio, hw_caps);
 
@@ -601,8 +603,8 @@ free_card:
         snd_card_free(card);
         return ret;
     }
-    dev_info(&qdev->pdev->dev, "🎉 [ALSA INIT COMPLETE] All %d ALSA Audio Cards Initialized Successfully!\n",
-             NUM_AUDIO_CHANNELS);
+    dev_info(&qdev->pdev->dev, "🎉 [ALSA INIT COMPLETE] All %u ALSA Audio Cards Initialized Successfully!\n",
+             num_audio);
     return 0;
 }
 
@@ -616,17 +618,20 @@ void qpcie_alsa_remove(struct qpcie_dev *qdev)
             iowrite32(0, qdev->bar0_mmio + REG_ADEV0_CTRL);
             ioread32(qdev->bar0_mmio + REG_ADEV0_CTRL);
         }
-        for (i = 0; i < NUM_AUDIO_CHANNELS; i++) {
+        for (i = 0; i < qdev->alsa_channel_count; i++) {
             u32 ctrl = ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
             iowrite32(ctrl & ~DMA_CTRL_AUDIO_RUN_CH(i), qdev->bar0_mmio + REG_DMA_CTRL);
         }
     }
     udelay(100);
 
-    for (i = 0; i < NUM_AUDIO_CHANNELS; i++) {
+    for (i = 0; i < qdev->alsa_channel_count; i++) {
         struct qpcie_alsa_channel *ach = &qdev->alsa_ch[i];
-        if (i > 0) {
+        if (i > 0 && ach->card) {
+            unsigned long flags;
+            spin_lock_irqsave(&ach->slock, flags);
             ach->play_timer_active = false;
+            spin_unlock_irqrestore(&ach->slock, flags);
             hrtimer_cancel(&ach->play_timer);
         }
         if (ach->card) {
@@ -640,7 +645,7 @@ void qpcie_alsa_remove(struct qpcie_dev *qdev)
 void qpcie_alsa_irq_handler(struct qpcie_dev *qdev, u32 status)
 {
     int i;
-    for (i = 0; i < NUM_AUDIO_CHANNELS; i++) {
+    for (i = 0; i < qdev->alsa_channel_count; i++) {
         struct qpcie_alsa_channel *ach = &qdev->alsa_ch[i];
 
         if (i == 0 && qdev->use_new_map) {
