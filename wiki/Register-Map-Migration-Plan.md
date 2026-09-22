@@ -24,8 +24,8 @@
 - [x] P3-2：CH0 切新路跑單路 1080p60，與舊路 bit-exact 比對（逐 byte）；**實測確認 100% BIT-EXACT PASS（Legacy 與 New 兩路 8 幀 49,766,400 bytes 逐 byte 完全一致，SHA256: 55658ea5e2ba76280c0b2b3cae7549a39aeedd9ddae6ca065aa2b48490be4ea3）**
 
 ### Phase 4 — 中斷＋Audio 合規
-- [x] P4-1：三層中斷＋per-source pending counter＋仲裁；in-flight 灌 burst 斷言全數通過（`tb_interrupt_ctrl.v` 7項全過、`tb_axil_reg_space.v` 22項全過；Vivado A50T Bitstream 建置完成，WNS = +8.692ns 零違規；Driver 整合完成）
-- [ ] P4-2：POSITION/PERIOD/BUFFER＋`pointer` 回調；xrun 注入走一遍
+- [x] P4-1：三層中斷＋per-source pending counter＋仲裁；in-flight 灌 burst 斷言全數通過（`tb_interrupt_ctrl.v` 7項全過、`tb_axil_reg_space.v` 22項全過；Vivado A50T Bitstream 建置完成，WNS = +8.692ns 零違規；Driver 整合完成；`test_p4_interrupt.sh` 實機 8 幀 1080p60 實測 ALL PASS，49,766,400B 100% Bit-Exact）
+- [x] P4-2：POSITION/PERIOD/BUFFER＋`pointer` 回調；xrun 注入走一遍（`tb_axil_reg_space.v` Test 23 全過、`tb_interrupt_ctrl.v` Test 8 全過；`test_p4_audio.sh` 實機 48kHz Stereo AES3 擷取 144,384 幀 1,155,072B 實測 ALL PASS，L/R 同步完美，Driver 卸載零 SMMU 異常）
 
 ### Phase 5 — Driver 雙軌＋多通道
 - [ ] P5-1：driver 讀 VERSION 綁新舊路徑；`vch` 綁 channel block；sysfs 拆分
