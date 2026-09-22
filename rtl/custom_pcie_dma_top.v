@@ -2071,7 +2071,7 @@ module custom_pcie_dma_top #(
         .adev0_irq_status_w1c(adev0_irq_status_w1c_w),
         .adev0_irq_en(adev0_ctrl_w[8]),
         .h2c_done(sg_h2c_done_irq),
-        .c2h_done((|v_done) | sg_c2h_done_irq | (|a_done)),
+        .c2h_done(sg_c2h_done_irq),
         .v_done_ch(v_done_ch),
         .h2c_done_ch(h2c_done_ch),
         .a_done_irq(a_done_irq_vec),

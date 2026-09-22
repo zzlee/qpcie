@@ -83,6 +83,8 @@ module audio_stream_engine #(
 
     assign s_axis_audio_tready = audio_start && !fifo_full;
 
+    reg         prev_fifo_full;
+
     wire sample_fire = s_axis_audio_tvalid && s_axis_audio_tready && can_push;
 
     always @(posedge clk or negedge rst_n) begin
@@ -94,6 +96,7 @@ module audio_stream_engine #(
             fifo_din       <= 128'd0;
             audio_pts      <= 64'd0;
             audio_xrun     <= 1'b0;
+            prev_fifo_full <= 1'b0;
         end else if (!audio_start) begin
             pack_cnt       <= 2'd0;
             pack_buf       <= 96'd0;
@@ -101,9 +104,11 @@ module audio_stream_engine #(
             fifo_wr_en     <= 1'b0;
             fifo_din       <= 128'd0;
             audio_xrun     <= 1'b0;
+            prev_fifo_full <= 1'b0;
         end else begin
-            fifo_wr_en <= 1'b0; // Default pulse
-            audio_xrun <= (s_axis_audio_tvalid && fifo_full);
+            fifo_wr_en     <= 1'b0; // Default pulse
+            prev_fifo_full <= fifo_full;
+            audio_xrun     <= (s_axis_audio_tvalid && fifo_full && !prev_fifo_full);
 
             if (sample_fire) begin
                 // Latch PTS on AES3 Block Start (Preamble 4'hB)

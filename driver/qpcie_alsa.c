@@ -609,14 +609,31 @@ free_card:
 void qpcie_alsa_remove(struct qpcie_dev *qdev)
 {
     int i;
+
+    /* First, explicitly halt audio hardware DMA */
+    if (qdev->bar0_mmio) {
+        if (qdev->use_new_map) {
+            iowrite32(0, qdev->bar0_mmio + REG_ADEV0_CTRL);
+            ioread32(qdev->bar0_mmio + REG_ADEV0_CTRL);
+        }
+        for (i = 0; i < NUM_AUDIO_CHANNELS; i++) {
+            u32 ctrl = ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
+            iowrite32(ctrl & ~DMA_CTRL_AUDIO_RUN_CH(i), qdev->bar0_mmio + REG_DMA_CTRL);
+        }
+    }
+    udelay(100);
+
     for (i = 0; i < NUM_AUDIO_CHANNELS; i++) {
         struct qpcie_alsa_channel *ach = &qdev->alsa_ch[i];
         if (i > 0) {
             ach->play_timer_active = false;
             hrtimer_cancel(&ach->play_timer);
         }
-        if (ach->card)
+        if (ach->card) {
+            snd_card_disconnect(ach->card);
             snd_card_free(ach->card);
+            ach->card = NULL;
+        }
     }
 }
 

@@ -673,12 +673,16 @@ free_diag_dma:
     }
     qdev->v4l2_registered = true;
 
-    ret = qpcie_alsa_init(qdev);
-    if (ret) {
-        dev_err(&pdev->dev, "[ERROR] ALSA initialization failed: %d\n", ret);
-        goto v4l2_remove;
+    if (!rgb24_only) {
+        ret = qpcie_alsa_init(qdev);
+        if (ret) {
+            dev_err(&pdev->dev, "[ERROR] ALSA initialization failed: %d\n", ret);
+            goto v4l2_remove;
+        }
+        qdev->alsa_registered = true;
+    } else {
+        dev_info(&pdev->dev, "rgb24_only mode: Skipping ALSA audio subsystem init\n");
     }
-    qdev->alsa_registered = true;
     dev_info(&pdev->dev,
              "Stage-3 V4L2 NV12M + ALSA AES3 Audio capture ready (map=%s)\n",
              qdev->use_new_map ? "new" : "legacy");
@@ -689,11 +693,15 @@ free_diag_dma:
     return 0;
 
 alsa_remove:
-    qpcie_alsa_remove(qdev);
-    qdev->alsa_registered = false;
+    if (qdev->alsa_registered) {
+        qpcie_alsa_remove(qdev);
+        qdev->alsa_registered = false;
+    }
 v4l2_remove:
-    qpcie_v4l2_remove(qdev);
-    qdev->v4l2_registered = false;
+    if (qdev->v4l2_registered) {
+        qpcie_v4l2_remove(qdev);
+        qdev->v4l2_registered = false;
+    }
 free_video_ring:
     if (qdev->thin_ring_virt) {
         dma_free_coherent(&pdev->dev,
@@ -729,9 +737,21 @@ static void qpcie_remove(struct pci_dev *pdev)
 
     qpcie_sysfs_remove(qdev);
 
-    iowrite32(0, qdev->bar0_mmio + REG_DMA_CTRL);
-    ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
-    iowrite32(0, qdev->bar0_mmio + REG_IRQ_CTRL);
+    /* 1. Halt all DMA engines and interrupt controller before freeing memory */
+    if (qdev->bar0_mmio) {
+        /* Stop Video CH0 in new map */
+        iowrite32(0, qdev->bar0_mmio + REG_VCH0_CTRL);
+        /* Stop Audio DEV0 in new map */
+        iowrite32(0, qdev->bar0_mmio + REG_ADEV0_CTRL);
+        /* Stop legacy DMA */
+        iowrite32(0, qdev->bar0_mmio + REG_DMA_CTRL);
+        /* Disable interrupts */
+        iowrite32(0, qdev->bar0_mmio + REG_IRQ_CTRL);
+        ioread32(qdev->bar0_mmio + REG_DMA_CTRL); /* Flush posted writes */
+    }
+
+    /* Drain in-flight PCIe TLPs to host memory */
+    msleep(20);
 
     if (qdev->alsa_registered) {
         qpcie_alsa_remove(qdev);
