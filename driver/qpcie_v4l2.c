@@ -1047,13 +1047,14 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
         iowrite32(stride0, qdev->bar0_mmio + REG_VCH0_STRIDE0);
         iowrite32(stride1, qdev->bar0_mmio + REG_VCH0_STRIDE1);
 
-        /* Program RING0 Base Address & CFG */
+        /* Program RING0 Base Address & CFG with current tail doorbell */
         iowrite32(lower_32_bits(qdev->thin_ring_dma),
                   qdev->bar0_mmio + REG_VCH0_RING0_BASE_L);
         iowrite32(upper_32_bits(qdev->thin_ring_dma),
                   qdev->bar0_mmio + REG_VCH0_RING0_BASE_H);
-        qdev->thin_ring_tail = 0;
-        iowrite32(RING_BUFFER_SIZE, qdev->bar0_mmio + REG_VCH0_RING0_CFG);
+        dma_wmb();
+        iowrite32((qdev->thin_ring_tail << 16) | RING_BUFFER_SIZE,
+                  qdev->bar0_mmio + REG_VCH0_RING0_CFG);
 
         /* Enable CH0 */
         iowrite32(ch0_ctrl, qdev->bar0_mmio + REG_VCH0_CTRL);

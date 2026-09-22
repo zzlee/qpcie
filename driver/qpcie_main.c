@@ -597,6 +597,13 @@ free_diag_dma:
                 dev_info(&pdev->dev,
                          "=== [PHASE 3 NEW MAP ACTIVE] Magic ID=0x%08X (Thin Descriptor Ring DMA=0x%llX Size=%u) ===\n",
                          readback, (u64)qdev->thin_ring_dma, RING_BUFFER_SIZE);
+                /* Initialize RING0 Base and initial CFG */
+                iowrite32(lower_32_bits(qdev->thin_ring_dma),
+                          qdev->bar0_mmio + REG_VCH0_RING0_BASE_L);
+                iowrite32(upper_32_bits(qdev->thin_ring_dma),
+                          qdev->bar0_mmio + REG_VCH0_RING0_BASE_H);
+                iowrite32(RING_BUFFER_SIZE,
+                          qdev->bar0_mmio + REG_VCH0_RING0_CFG);
             } else {
                 dev_err(&pdev->dev,
                         "[ERROR] New Map Magic ID mismatch: 0x%08X (expected 0x12ABE380)\n",
