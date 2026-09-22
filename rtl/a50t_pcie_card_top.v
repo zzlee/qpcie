@@ -12,8 +12,8 @@
 module a50t_pcie_card_top #(
     parameter PCIE_DATA_WIDTH  = 128,
     parameter PCIE_KEEP_WIDTH  = PCIE_DATA_WIDTH / 8,
-    parameter NUM_VIDEO_CH     = 4,
-    parameter NUM_AUDIO_CH     = 4,
+    parameter NUM_VIDEO_CH     = 2,
+    parameter NUM_AUDIO_CH     = 2,
     parameter VIDEO_DATA_WIDTH = 128,
     parameter AUDIO_DATA_WIDTH = 32
 )(
@@ -471,12 +471,12 @@ module a50t_pcie_card_top #(
     assign s_video_tlast[0]     = 1'b0;
     assign s_video_tuser[0]     = 1'b0;
 
-    assign s_video_tdata[511:128] = m_video_tdata[511:128];
-    assign s_video_tvalid[3:1]    = m_video_tvalid[3:1];
-    assign s_video_tlast[3:1]     = m_video_tlast[3:1];
-    assign s_video_tuser[3:1]     = m_video_tuser[3:1];
-    assign m_video_tready[3:1]    = s_video_tready[3:1];
-    assign m_video_tready[0]      = 1'b1;
+    assign s_video_tdata[(NUM_VIDEO_CH*VIDEO_DATA_WIDTH)-1:VIDEO_DATA_WIDTH] = m_video_tdata[(NUM_VIDEO_CH*VIDEO_DATA_WIDTH)-1:VIDEO_DATA_WIDTH];
+    assign s_video_tvalid[NUM_VIDEO_CH-1:1]    = m_video_tvalid[NUM_VIDEO_CH-1:1];
+    assign s_video_tlast[NUM_VIDEO_CH-1:1]     = m_video_tlast[NUM_VIDEO_CH-1:1];
+    assign s_video_tuser[NUM_VIDEO_CH-1:1]     = m_video_tuser[NUM_VIDEO_CH-1:1];
+    assign m_video_tready[NUM_VIDEO_CH-1:1]    = s_video_tready[NUM_VIDEO_CH-1:1];
+    assign m_video_tready[0]                   = 1'b1;
 
     // Multi-Channel Audio Streams
     wire [(NUM_AUDIO_CH*AUDIO_DATA_WIDTH)-1:0] s_audio_tdata;
@@ -494,11 +494,11 @@ module a50t_pcie_card_top #(
     assign s_audio_tlast[0]    = aud_pat_axis_tlast;
     assign aud_pat_axis_tready = s_audio_tready[0];
 
-    assign s_audio_tdata[127:32] = m_audio_tdata[127:32];
-    assign s_audio_tvalid[3:1]   = m_audio_tvalid[3:1];
-    assign s_audio_tlast[3:1]    = m_audio_tlast[3:1];
-    assign m_audio_tready[3:1]   = s_audio_tready[3:1];
-    assign m_audio_tready[0]     = 1'b1;
+    assign s_audio_tdata[(NUM_AUDIO_CH*AUDIO_DATA_WIDTH)-1:AUDIO_DATA_WIDTH] = m_audio_tdata[(NUM_AUDIO_CH*AUDIO_DATA_WIDTH)-1:AUDIO_DATA_WIDTH];
+    assign s_audio_tvalid[NUM_AUDIO_CH-1:1]   = m_audio_tvalid[NUM_AUDIO_CH-1:1];
+    assign s_audio_tlast[NUM_AUDIO_CH-1:1]    = m_audio_tlast[NUM_AUDIO_CH-1:1];
+    assign m_audio_tready[NUM_AUDIO_CH-1:1]   = s_audio_tready[NUM_AUDIO_CH-1:1];
+    assign m_audio_tready[0]                  = 1'b1;
 
     // PCIe 128-bit AXI-Stream Internal CQ / CC / RQ / RC Wires
     wire [PCIE_DATA_WIDTH-1:0] m_axis_cq_tdata;

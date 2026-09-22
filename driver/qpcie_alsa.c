@@ -502,11 +502,15 @@ static const struct snd_kcontrol_new qpcie_alsa_controls[] = {
 int qpcie_alsa_init(struct qpcie_dev *qdev)
 {
     int i, ret;
+    u32 hw_caps = ioread32(qdev->bar0_mmio + (qdev->use_new_map ? REG_NEW_GLOBAL_CAPS : REG_HARDWARE_CAPS));
+    unsigned int num_audio = (hw_caps >> 8) & 0x0f;
+    if (num_audio == 0 || num_audio > NUM_AUDIO_CHANNELS)
+        num_audio = NUM_AUDIO_CHANNELS;
 
-    dev_info(&qdev->pdev->dev, "Starting Multi-Channel ALSA Audio Subsystem Init (%d Channels)...\n",
-             NUM_AUDIO_CHANNELS);
+    dev_info(&qdev->pdev->dev, "Starting Multi-Channel ALSA Audio Subsystem Init (%u Channels, caps=0x%08x)...\n",
+             num_audio, hw_caps);
 
-    for (i = 0; i < NUM_AUDIO_CHANNELS; i++) {
+    for (i = 0; i < num_audio; i++) {
         struct qpcie_alsa_channel *ach = &qdev->alsa_ch[i];
         struct snd_card *card;
         char card_id[32];

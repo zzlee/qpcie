@@ -7,7 +7,10 @@
 
 `timescale 1ns / 1ps
 
-module axil_reg_space (
+module axil_reg_space #(
+    parameter integer NUM_VIDEO_CH = 4,
+    parameter integer NUM_AUDIO_CH = 4
+)(
     input  wire        clk,
     input  wire        rst_n,
 
@@ -209,7 +212,7 @@ module axil_reg_space (
     // Single-path build: 4 Audio, 1 Video (RGB24 TPG only), Caps: 2D+AES3+DualBAR+Stream, [4]=NEW_MAP_PRESENT
     localparam [31:0] HARDWARE_CAPS_VAL   = 32'h0001_041F;
 `else
-    localparam [31:0] HARDWARE_CAPS_VAL   = 32'h0004_041F; // 4 Audio, 4 Video, Caps: 2D+AES3+DualBAR+Stream, [4]=NEW_MAP_PRESENT
+    localparam [31:0] HARDWARE_CAPS_VAL   = {8'h00, 4'h0, NUM_VIDEO_CH[3:0], 4'h0, NUM_AUDIO_CH[3:0], 8'h1F};
 `endif
     localparam [31:0] MAGIC_DEVICE_ID_VAL = 32'h12AB_E380;
 
