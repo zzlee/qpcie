@@ -28,7 +28,7 @@
 - [x] P4-2：POSITION/PERIOD/BUFFER＋`pointer` 回調；xrun 注入走一遍（`tb_axil_reg_space.v` Test 23 全過、`tb_interrupt_ctrl.v` Test 8 全過；`test_p4_audio.sh` 實機 48kHz Stereo AES3 擷取 144,384 幀 1,155,072B 實測 ALL PASS，L/R 同步完美，Driver 卸載零 SMMU 異常）
 
 ### Phase 5 — Driver 雙軌＋多通道
-- [ ] P5-1：driver 讀 VERSION 綁新舊路徑；`vch` 綁 channel block；sysfs 拆分
+- [x] P5-1：driver 讀 VERSION 綁新舊路徑；`vch` 綁 channel block；sysfs 拆分（`test_p5_1_driver.sh` 實機實測 ALL PASS：預設免參數自動探索切換 New Map、`vch[0]` 獨立 thin ring 配置與按鈴、`ch0_*`/`ch1_*` sysfs 遙測就緒、`use_new_map=0` 強制舊路 100% Bit-Exact 雙軌共存）
 - [ ] P5-2：CH0＋CH1 並發 capture 互不擋；單路性能不 regress（801 MiB/s 基線）
 
 ### Phase 6 — 拆舊版（breaking release）
