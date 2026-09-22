@@ -22,6 +22,12 @@ module tb_axil_reg_space;
     wire       s_axil_bvalid;
     reg        s_axil_bready;
 
+`ifdef QPCIe_single_rgb24_path
+    localparam [31:0] EXP_CAPS = 32'h0001_041F;
+`else
+    localparam [31:0] EXP_CAPS = 32'h0004_041F;
+`endif
+
     reg [31:0] s_axil_araddr;
     reg        s_axil_arvalid;
     wire       s_axil_arready;
@@ -168,7 +174,7 @@ module tb_axil_reg_space;
         #20;
         $display("[%0t] Test 2: Read Version Register (0x30)...", $time);
         axil_read(32'h30, read_val);
-        $display("[%0t] Read REG_VERSION_ID (0x30): 0x%h (Expect 0x02010001)", $time, read_val);
+        $display("[%0t] Read REG_VERSION_ID (0x30): 0x%h (Expect 0x03000001)", $time, read_val);
 
         $display("[%0t] Test 3: Read Git Commit Hash Register (0x34)...", $time);
         axil_read(32'h34, read_val);
@@ -176,11 +182,15 @@ module tb_axil_reg_space;
 
         $display("[%0t] Test 4: Read Build Timestamp Register (0x38)...", $time);
         axil_read(32'h38, read_val);
-        $display("[%0t] Read REG_BUILD_TIMESTAMP (0x38): 0x%h (Expect 0x20260812)", $time, read_val);
+        $display("[%0t] Read REG_BUILD_TIMESTAMP (0x38): 0x%h (Expect 0x20260821)", $time, read_val);
 
         $display("[%0t] Test 5: Read Hardware Capabilities Register (0x3C)...", $time);
         axil_read(32'h3C, read_val);
-        $display("[%0t] Read REG_HARDWARE_CAPS (0x3C): 0x%h (Expect 0x0004040F)", $time, read_val);
+        $display("[%0t] Read REG_HARDWARE_CAPS (0x3C): 0x%h (Expect 0x%h)", $time, read_val, EXP_CAPS);
+        if (read_val !== EXP_CAPS) begin
+            $display("FAIL: HARDWARE_CAPS mismatch: 0x%h (Expect 0x%h)", read_val, EXP_CAPS);
+            $fatal(1);
+        end
 
         $display("[%0t] Test 6: Toggle Video Pipeline Reset (0x80)...", $time);
         axil_write(32'h80, 32'h00000001);
@@ -262,7 +272,8 @@ module tb_axil_reg_space;
         // NOTE: future dual-map transition will use DMA_CTRL bit3 as NEW_MAP
         // select. Reset MUST stay 0 so old drivers (bits 0-2 only) always land
         // on the old map, even on new hardware.
-        $display("[%0t] Test 11: DMA_CTRL reset default + CAPS new-map absent ...", $time);
+        // ---- P0-2 / P2-2: DMA_CTRL reset == 0 (mode-bit default), CAPS bit4 == 1 (NEW_MAP_PRESENT) ----
+        $display("[%0t] Test 11: DMA_CTRL reset default + CAPS new-map present ...", $time);
         axil_write(32'h00, 32'h00000000);
         axil_read(32'h00, read_val);
         if (read_val !== 32'h00000000) begin
@@ -270,8 +281,8 @@ module tb_axil_reg_space;
             $fatal(1);
         end
         axil_read(32'h3C, read_val);
-        if ((read_val & 32'h00000010) !== 32'h00000000) begin
-            $display("FAIL: CAPS bit4 (NEW_MAP) set before Phase 2: 0x%h", read_val);
+        if ((read_val & 32'h00000010) !== 32'h00000010) begin
+            $display("FAIL: CAPS bit4 (NEW_MAP) not set in Phase 2: 0x%h", read_val);
             $fatal(1);
         end
 
@@ -321,6 +332,207 @@ module tb_axil_reg_space;
         axil_read(32'h06C, read_val);      // REG_DEBUG_LAST_WADDR
         if (read_val !== 32'h00000160) begin
             $display("FAIL: Debug write address not 0x160 (truncated?): 0x%h", read_val);
+            $fatal(1);
+        end
+
+        // ---- Phase 2 Tests (Dual Map Migration) ----
+
+        // Test 15: Read legacy 0x30 (v3.0.0) and 0x3C (CAPS[4] == 1)
+        $display("[%0t] Test 15: Read legacy 0x30 (v3.0.0) and 0x3C (CAPS[4] == 1)...", $time);
+        axil_read(32'h030, read_val);
+        if (read_val !== 32'h0300_0001) begin
+            $display("FAIL: Test 15 VERSION_ID mismatch: 0x%h", read_val);
+            $fatal(1);
+        end
+        axil_read(32'h03C, read_val);
+        if ((read_val & 32'h0000_0010) == 32'd0) begin
+            $display("FAIL: Test 15 CAPS[4] (NEW_MAP_PRESENT) not set: 0x%h", read_val);
+            $fatal(1);
+        end
+
+        // Test 16: Verify reset default mode: DMA_CTRL[3] == 0, reading 0x00 returns 0x00, not magic ID
+        $display("[%0t] Test 16: Verify legacy mode 0x00 is DMA_CTRL, not Magic ID...", $time);
+        axil_write(32'h000, 32'h0000_0000);
+        axil_read(32'h000, read_val);
+        if (read_val !== 32'h0000_0000) begin
+            $display("FAIL: Test 16 offset 0x00 in legacy mode returned 0x%h instead of 0x0", read_val);
+            $fatal(1);
+        end
+
+        // Test 17: Switch to new map (axil_write(0x00, 32'h08)):
+        // Offset 0x00 returns MAGIC_DEVICE_ID (0x12AB_E380)
+        // Offset 0x04 returns VERSION_ID (0x0300_0001)
+        // Offset 0x08 returns CAPS (0x0004_041F)
+        // Offset 0x0C returns GIT_HASH (0x01D6_A9C5)
+        // Offset 0x10 returns BUILD_TIME (0x2026_0821)
+        $display("[%0t] Test 17: Switch to new map via DMA_CTRL[3]=1 & verify GLOBAL block...", $time);
+        axil_write(32'h000, 32'h0000_0008); // Set bit 3 -> map_mode_new = 1
+        axil_read(32'h000, read_val);
+        if (read_val !== 32'h12AB_E380) begin
+            $display("FAIL: Test 17 offset 0x00 in new map returned 0x%h (Expect 0x12AB_E380)", read_val);
+            $fatal(1);
+        end
+        axil_read(32'h004, read_val);
+        if (read_val !== 32'h0300_0001) begin
+            $display("FAIL: Test 17 offset 0x04 in new map returned 0x%h (Expect 0x0300_0001)", read_val);
+            $fatal(1);
+        end
+        axil_read(32'h008, read_val);
+        if (read_val !== EXP_CAPS) begin
+            $display("FAIL: Test 17 offset 0x08 in new map returned 0x%h (Expect 0x%h)", read_val, EXP_CAPS);
+            $fatal(1);
+        end
+        axil_read(32'h00C, read_val);
+        if (read_val !== 32'h01D6_A9C5) begin
+            $display("FAIL: Test 17 offset 0x0C in new map returned 0x%h (Expect 0x01D6_A9C5)", read_val);
+            $fatal(1);
+        end
+        axil_read(32'h010, read_val);
+        if (read_val !== 32'h2026_0821) begin
+            $display("FAIL: Test 17 offset 0x10 in new map returned 0x%h (Expect 0x2026_0821)", read_val);
+            $fatal(1);
+        end
+
+        // Test 18: VIDEO CH0 read/write in new map (0x100 - 0x170)
+        $display("[%0t] Test 18: VIDEO CH0 read/write in new map...", $time);
+        axil_write(32'h100, 32'h0000_0101); // CH_CTRL: enable=1, irq_en=1
+        axil_read(32'h100, read_val);
+        if (read_val !== 32'h0000_0101) begin
+            $display("FAIL: Test 18 CH0_CTRL mismatch: 0x%h", read_val);
+            $fatal(1);
+        end
+        axil_write(32'h108, 32'd1920);      // WIDTH
+        axil_write(32'h10C, 32'd1080);      // HEIGHT
+        axil_write(32'h110, 32'd1920);      // STRIDE0
+        axil_read(32'h108, read_val);
+        if (read_val !== 32'd1920) begin
+            $display("FAIL: Test 18 CH0_WIDTH mismatch: 0x%h", read_val);
+            $fatal(1);
+        end
+        axil_read(32'h10C, read_val);
+        if (read_val !== 32'd1080) begin
+            $display("FAIL: Test 18 CH0_HEIGHT mismatch: 0x%h", read_val);
+            $fatal(1);
+        end
+        axil_read(32'h110, read_val);
+        if (read_val !== 32'd1920) begin
+            $display("FAIL: Test 18 CH0_STRIDE0 mismatch: 0x%h", read_val);
+            $fatal(1);
+        end
+        axil_write(32'h120, 32'h8000_0000); // RING0_BASE_L
+        axil_write(32'h124, 32'h0000_0008); // RING0_BASE_H
+        axil_write(32'h128, 32'h0005_0100); // RING0_CFG (tail=5, size=256)
+        axil_read(32'h120, read_val);
+        if (read_val !== 32'h8000_0000) begin
+            $display("FAIL: Test 18 RING0_BASE_L mismatch: 0x%h", read_val);
+            $fatal(1);
+        end
+        axil_read(32'h124, read_val);
+        if (read_val !== 32'h0000_0008) begin
+            $display("FAIL: Test 18 RING0_BASE_H mismatch: 0x%h", read_val);
+            $fatal(1);
+        end
+        axil_read(32'h128, read_val);
+        if (read_val !== 32'h0005_0100) begin
+            $display("FAIL: Test 18 RING0_CFG mismatch: 0x%h", read_val);
+            $fatal(1);
+        end
+
+        // Test 19: AUDIO DEV0 read/write in new map (0x500 - 0x5A8)
+        $display("[%0t] Test 19: AUDIO DEV0 read/write in new map...", $time);
+        axil_write(32'h500, 32'h0000_0001); // DEV0_CTRL: enable=1
+        axil_read(32'h500, read_val);
+        if (read_val !== 32'h0000_0001) begin
+            $display("FAIL: Test 19 DEV0_CTRL mismatch: 0x%h", read_val);
+            $fatal(1);
+        end
+        axil_write(32'h508, 32'd48000);     // RATE
+        axil_write(32'h50C, 32'd4096);      // PERIOD_BYTES
+        axil_write(32'h510, 32'd65536);     // BUFFER_BYTES
+        axil_read(32'h508, read_val);
+        if (read_val !== 32'd48000) begin
+            $display("FAIL: Test 19 RATE mismatch: 0x%h", read_val);
+            $fatal(1);
+        end
+        axil_read(32'h50C, read_val);
+        if (read_val !== 32'd4096) begin
+            $display("FAIL: Test 19 PERIOD_BYTES mismatch: 0x%h", read_val);
+            $fatal(1);
+        end
+        axil_read(32'h510, read_val);
+        if (read_val !== 32'd65536) begin
+            $display("FAIL: Test 19 BUFFER_BYTES mismatch: 0x%h", read_val);
+            $fatal(1);
+        end
+        axil_write(32'h520, 32'hA000_0000); // RING0_BASE_L
+        axil_write(32'h524, 32'h0000_0004); // RING0_BASE_H
+        axil_write(32'h528, 32'h0002_0080); // RING0_CFG
+        axil_read(32'h520, read_val);
+        if (read_val !== 32'hA000_0000) begin
+            $display("FAIL: Test 19 AUDIO RING0_BASE_L mismatch: 0x%h", read_val);
+            $fatal(1);
+        end
+        axil_read(32'h524, read_val);
+        if (read_val !== 32'h0000_0004) begin
+            $display("FAIL: Test 19 AUDIO RING0_BASE_H mismatch: 0x%h", read_val);
+            $fatal(1);
+        end
+        axil_read(32'h528, read_val);
+        if (read_val !== 32'h0002_0080) begin
+            $display("FAIL: Test 19 AUDIO RING0_CFG mismatch: 0x%h", read_val);
+            $fatal(1);
+        end
+
+        // Test 20: DEBUG block read/write in new map (0x900 - 0x910)
+        $display("[%0t] Test 20: DEBUG block read/write in new map...", $time);
+        axil_write(32'h900, 32'h0000_0007); // dbg_loopback_ctrl
+        axil_read(32'h900, read_val);
+        if (read_val !== 32'h0000_0007) begin
+            $display("FAIL: Test 20 LOOPBACK_CTRL mismatch: 0x%h", read_val);
+            $fatal(1);
+        end
+        axil_write(32'h904, 32'h0000_00AA); // dbg_pattern_gen
+        axil_read(32'h904, read_val);
+        if (read_val !== 32'h0000_00AA) begin
+            $display("FAIL: Test 20 PATTERN_GEN mismatch: 0x%h", read_val);
+            $fatal(1);
+        end
+        axil_write(32'h908, 32'h0000_0055); // dbg_pacer_override
+        axil_read(32'h908, read_val);
+        if (read_val !== 32'h0000_0055) begin
+            $display("FAIL: Test 20 PACER_OVERRIDE mismatch: 0x%h", read_val);
+            $fatal(1);
+        end
+        axil_read(32'h90C, read_val);      // dbg_last_wdata
+        if (read_val !== 32'h0000_0055) begin
+            $display("FAIL: Test 20 LAST_WDATA mismatch: 0x%h", read_val);
+            $fatal(1);
+        end
+        axil_read(32'h910, read_val);      // dbg_last_waddr
+        if (read_val !== 32'h0000_0908) begin
+            $display("FAIL: Test 20 LAST_WADDR mismatch: 0x%h", read_val);
+            $fatal(1);
+        end
+
+        // Test 21: Switch back to legacy map (axil_write(0x00, 32'h00)):
+        // Verify 0x00 returns 0x00000000 (not magic ID); legacy registers operate normally
+        $display("[%0t] Test 21: Switch back to legacy map & verify full legacy isolation...", $time);
+        axil_write(32'h000, 32'h0000_0000); // Clear bit 3 -> map_mode_new = 0
+        axil_read(32'h000, read_val);
+        if (read_val !== 32'h0000_0000) begin
+            $display("FAIL: Test 21 offset 0x00 in legacy mode returned 0x%h (Expect 0x0)", read_val);
+            $fatal(1);
+        end
+        // Verify legacy audio alias 0x100 reads audio addr (0xDEADBEEF from Test 7), NOT vch0_ctrl
+        axil_read(32'h100, read_val);
+        if (read_val !== 32'hDEADBEEF) begin
+            $display("FAIL: Test 21 legacy 0x100 audio alias corrupted: 0x%h (Expect 0xDEADBEEF)", read_val);
+            $fatal(1);
+        end
+        // Verify legacy version 0x30 still accessible
+        axil_read(32'h030, read_val);
+        if (read_val !== 32'h0300_0001) begin
+            $display("FAIL: Test 21 legacy 0x30 VERSION_ID mismatch: 0x%h", read_val);
             $fatal(1);
         end
 
