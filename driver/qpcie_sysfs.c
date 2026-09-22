@@ -645,11 +645,12 @@ static ssize_t ch0_frames_show(struct device *dev, struct device_attribute *attr
     struct qpcie_dev *qdev = pci_get_drvdata(pdev);
     u32 frames = 0;
 
-    if (qdev && qdev->bar0_mmio) {
-        if (qdev->use_new_map)
-            frames = ioread32(qdev->bar0_mmio + REG_VCH_FRAMES(0));
-        else
-            frames = qdev->v4l2_ch[0].sequence;
+    if (qdev) {
+        u32 hw_frames = 0;
+        if (qdev->bar0_mmio && qdev->use_new_map)
+            hw_frames = ioread32(qdev->bar0_mmio + REG_VCH_FRAMES(0));
+        frames = (hw_frames > qdev->v4l2_ch[0].sequence) ?
+                 hw_frames : qdev->v4l2_ch[0].sequence;
     }
     return sysfs_emit(buf, "%u\n", frames);
 }
