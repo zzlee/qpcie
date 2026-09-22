@@ -1130,42 +1130,57 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
         iowrite32(0, qdev->bar0_mmio + REG_DMA_CTRL);
         ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
     }
-    do {
-        u32 status = ioread32(qdev->bar0_mmio + REG_DMA_STATUS);
+    if (qdev->use_new_map && vch->channel_id == 0) {
+        drained = true;
+    } else {
+        do {
+            u32 status = ioread32(qdev->bar0_mmio + REG_DMA_STATUS);
 
-        if (status & DMA_STATUS_VIDEO_TX_IDLE) {
-            drained = true;
-            break;
-        }
-        usleep_range(1000, 2000);
-    } while (time_before(jiffies, timeout));
+            if (status & DMA_STATUS_VIDEO_TX_IDLE) {
+                drained = true;
+                break;
+            }
+            usleep_range(1000, 2000);
+        } while (time_before(jiffies, timeout));
+    }
 
     /* Freeze the video engine and its CDC FIFO before cancelling descriptors.
      * STREAMON releases this reset after new mappings have been queued. */
     iowrite32(1, qdev->bar0_mmio + REG_VIDEO_CTRL);
     ioread32(qdev->bar0_mmio + REG_VIDEO_CTRL);
     usleep_range(1000, 2000);
-    timeout = jiffies + msecs_to_jiffies(500);
-    do {
-        u32 status = ioread32(qdev->bar0_mmio + REG_DMA_STATUS);
+    if (!qdev->use_new_map) {
+        timeout = jiffies + msecs_to_jiffies(500);
+        do {
+            u32 status = ioread32(qdev->bar0_mmio + REG_DMA_STATUS);
 
-        if ((status & (DMA_STATUS_VIDEO_TX_IDLE |
-                       DMA_STATUS_DESC_IDLE)) ==
-            (DMA_STATUS_VIDEO_TX_IDLE | DMA_STATUS_DESC_IDLE))
-            break;
-        usleep_range(1000, 2000);
-    } while (time_before(jiffies, timeout));
+            if ((status & (DMA_STATUS_VIDEO_TX_IDLE |
+                           DMA_STATUS_DESC_IDLE)) ==
+                (DMA_STATUS_VIDEO_TX_IDLE | DMA_STATUS_DESC_IDLE))
+                break;
+            usleep_range(1000, 2000);
+        } while (time_before(jiffies, timeout));
+    }
 
     qpcie_dma_soft_reset(qdev);
 
     /* Cancel descriptors that were queued for frames the stopped TPG will
      * never produce. Rebase both producer pointers to the hardware consumer. */
-    head = ioread32(qdev->bar0_mmio + 0x40) & 0xffff;
-    qdev->h2c_tail = head;
-    qdev->c2h_tail = head;
-    iowrite32((head << 16) | RING_BUFFER_SIZE,
-              qdev->bar0_mmio + REG_H2C_RING_CFG);
-    ioread32(qdev->bar0_mmio + REG_H2C_RING_CFG);
+    if (qdev->use_new_map && vch->channel_id == 0) {
+        head = ioread32(qdev->bar0_mmio + REG_VCH0_RING0_HEAD) & 0xffff;
+        qdev->thin_ring_tail = head;
+        qdev->thin_ring_head = head;
+        iowrite32((head << 16) | RING_BUFFER_SIZE,
+                  qdev->bar0_mmio + REG_VCH0_RING0_CFG);
+        ioread32(qdev->bar0_mmio + REG_VCH0_RING0_CFG);
+    } else {
+        head = ioread32(qdev->bar0_mmio + 0x40) & 0xffff;
+        qdev->h2c_tail = head;
+        qdev->c2h_tail = head;
+        iowrite32((head << 16) | RING_BUFFER_SIZE,
+                  qdev->bar0_mmio + REG_H2C_RING_CFG);
+        ioread32(qdev->bar0_mmio + REG_H2C_RING_CFG);
+    }
 
     /* Freeze counters after all channel-0 writes have retired. */
     iowrite32(0, qdev->bar0_mmio + REG_PERF_CTRL);
@@ -1323,7 +1338,7 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
              "[V4L2] negotiated MaxPayloadSize %d bytes supports 256-byte MWr\n",
              ret);
 
-    hw_caps = ioread32(qdev->bar0_mmio + REG_HARDWARE_CAPS);
+    hw_caps = ioread32(qdev->bar0_mmio + (qdev->use_new_map ? REG_NEW_GLOBAL_CAPS : REG_HARDWARE_CAPS));
     hw_video_ch = (hw_caps >> 8) & 0xff;
     if (hw_video_ch == 0) {
         dev_err(&qdev->pdev->dev,

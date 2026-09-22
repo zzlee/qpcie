@@ -364,14 +364,22 @@ module axil_reg_space (
                             endcase
                         end else begin
                             case (s_axil_awaddr[7:0])
-                                8'h00: reg_dma_ctrl       <= s_axil_wdata;
-                                8'h14: global_reset_pulse <= s_axil_wdata[0];
+                                8'h00: reg_dma_ctrl        <= s_axil_wdata;
+                                8'h14: global_reset_pulse  <= s_axil_wdata[0];
                                 8'h18: begin
-                                    irq_top_status_w1c <= s_axil_wdata;
-                                    reg_irq_status_w1c <= s_axil_wdata;
+                                    irq_top_status_w1c     <= s_axil_wdata;
+                                    reg_irq_status_w1c     <= s_axil_wdata;
                                 end
-                                8'h20: reg_irq_ctrl       <= s_axil_wdata;
-                                8'h24: reg_irq_status_w1c <= s_axil_wdata;
+                                8'h20: reg_irq_ctrl        <= s_axil_wdata;
+                                8'h24: reg_irq_status_w1c  <= s_axil_wdata;
+                                8'h74: reg_pacer_ctrl      <= s_axil_wdata;
+                                8'h78: reg_slice_height    <= s_axil_wdata;
+                                8'h80: reg_video_ctrl      <= s_axil_wdata;
+                                8'h84: reg_video_sub_reset <= s_axil_wdata;
+                                8'hA0: begin
+                                    reg_perf_enable        <= s_axil_wdata[0];
+                                    reg_perf_reset_w1c     <= s_axil_wdata[1];
+                                end
                                 default: ;
                             endcase
                         end
@@ -553,6 +561,13 @@ module axil_reg_space (
                                 8'h18: s_axil_rdata <= reg_irq_status;
                                 8'h1C: s_axil_rdata <= reg_global_timestamp[31:0];
                                 8'h20: s_axil_rdata <= reg_global_timestamp[63:32];
+                                8'h24: s_axil_rdata <= reg_irq_status;
+                                8'h74: s_axil_rdata <= reg_pacer_ctrl;
+                                8'h78: s_axil_rdata <= reg_slice_height;
+                                8'h7C: s_axil_rdata <= reg_frame_drop_count;
+                                8'h80: s_axil_rdata <= reg_video_ctrl;
+                                8'h84: s_axil_rdata <= reg_video_sub_reset;
+                                8'hA0: s_axil_rdata <= {30'd0, reg_perf_reset_w1c, reg_perf_enable};
                                 default: s_axil_rdata <= 32'd0;
                             endcase
                         end

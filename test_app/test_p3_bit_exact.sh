@@ -32,12 +32,16 @@ echo ""
 echo "--- Step 1: Capture 8 frames using LEGACY descriptor path ---"
 rmmod custom_pcie_av 2>/dev/null || true
 insmod "$KO" rgb24_only=1 use_new_map=0
-sleep 1
+sleep 2
+
+DEV=$(ls /dev/video* 2>/dev/null | head -n 1 || echo "/dev/video0")
+echo "Using video device: $DEV"
 
 rm -f "$RAW_LEGACY"
 "$APP" -d "$DEV" -w "$W" -h "$H" -f "$FRAMES" -o "$RAW_LEGACY" > /tmp/p3_legacy.log 2>&1 || {
     echo "[FAIL] Legacy capture failed. Log:"
     cat /tmp/p3_legacy.log
+    dmesg | tail -n 25
     exit 1
 }
 
@@ -55,14 +59,17 @@ echo ""
 echo "--- Step 2: Capture 8 frames using NEW Thin Descriptor path ---"
 rmmod custom_pcie_av 2>/dev/null || true
 insmod "$KO" rgb24_only=1 use_new_map=1
-sleep 1
+sleep 2
 
+DEV=$(ls /dev/video* 2>/dev/null | head -n 1 || echo "/dev/video0")
+echo "Using video device: $DEV"
 dmesg | tail -n 15 | grep -i "NEW MAP" || true
 
 rm -f "$RAW_NEW"
 "$APP" -d "$DEV" -w "$W" -h "$H" -f "$FRAMES" -o "$RAW_NEW" > /tmp/p3_new.log 2>&1 || {
     echo "[FAIL] New thin path capture failed. Log:"
     cat /tmp/p3_new.log
+    dmesg | tail -n 25
     exit 1
 }
 
