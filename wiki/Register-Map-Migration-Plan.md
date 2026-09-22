@@ -29,7 +29,7 @@
 
 ### Phase 5 — Driver 雙軌＋多通道
 - [x] P5-1：driver 讀 VERSION 綁新舊路徑；`vch` 綁 channel block；sysfs 拆分（`test_p5_1_driver.sh` 實機實測 ALL PASS：預設免參數自動探索切換 New Map、`vch[0]` 獨立 thin ring 配置與按鈴、`ch0_*`/`ch1_*` sysfs 遙測就緒、`use_new_map=0` 強制舊路 100% Bit-Exact 雙軌共存）
-- [ ] P5-2：CH0＋CH1 並發 capture 互不擋；單路性能不 regress（801 MiB/s 基線）
+- [x] P5-2：CH0＋CH1 並發 capture 互不擋；單路性能不 regress（801 MiB/s 基線）（`test_p5_2_concurrent.sh` 實機實測 ALL PASS：New Map 單路 300 幀無上限 DMA 達 1608.84 MiB/s / 12.57 Gbps 零掉幀超越基線；雙軌模式下 CH0 TPG 60 幀與 CH1 回路 60 幀並發同時跑滿零錯誤互不阻擋，卸載驅動零 SMMU 異常）
 
 ### Phase 6 — 拆舊版（breaking release）
 - [ ] P6-1：刪舊 map／胖 descriptor／相容 mode；`axil_reg_space.v` 重寫收尾
