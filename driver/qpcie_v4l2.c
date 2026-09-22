@@ -1060,7 +1060,8 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
         iowrite32(ch_ctrl, qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_CTRL);
         ioread32(qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_CTRL);
     } else {
-        iowrite32(DMA_CTRL_RUN, qdev->bar0_mmio + REG_DMA_CTRL);
+        u32 ctrl_val = DMA_CTRL_RUN | (qdev->use_new_map ? BIT(3) : 0);
+        iowrite32(ctrl_val, qdev->bar0_mmio + REG_DMA_CTRL);
         ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
     }
 
@@ -1074,7 +1075,7 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
                 if (qdev->use_new_map && vch->thin_ring_virt)
                     iowrite32(0, qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_CTRL);
                 else
-                    iowrite32(0, qdev->bar0_mmio + REG_DMA_CTRL);
+                    iowrite32(qdev->use_new_map ? BIT(3) : 0, qdev->bar0_mmio + REG_DMA_CTRL);
                 qpcie_return_all_buffers(vch, VB2_BUF_STATE_QUEUED);
                 return ret;
             }
@@ -1128,7 +1129,8 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
         iowrite32(0, qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_CTRL);
         ioread32(qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_CTRL);
     } else {
-        iowrite32(0, qdev->bar0_mmio + REG_DMA_CTRL);
+        u32 ctrl_val = qdev->use_new_map ? BIT(3) : 0;
+        iowrite32(ctrl_val, qdev->bar0_mmio + REG_DMA_CTRL);
         ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
     }
     u32 stat_reg = (qdev->use_new_map && vch->thin_ring_virt) ?
@@ -1546,6 +1548,27 @@ void qpcie_v4l2_remove(struct qpcie_dev *qdev)
     v4l2_device_unregister(&qdev->v4l2_dev);
 }
 
+void qpcie_v4l2_node_done(struct qpcie_dev *qdev, int node_idx)
+{
+    struct qpcie_v4l2_channel *vch;
+    struct qpcie_v4l2_buffer *buf;
+
+    if (!qdev || node_idx < 0 || node_idx >= qdev->v4l2_node_count)
+        return;
+
+    vch = &qdev->v4l2_ch[node_idx];
+    spin_lock(&vch->slock);
+    if (!list_empty(&vch->active_buffers)) {
+        buf = list_first_entry(&vch->active_buffers, struct qpcie_v4l2_buffer, list);
+        list_del(&buf->list);
+        qdev->ring_completed++;
+        buf->vb.vb2_buf.timestamp = ktime_get_ns();
+        buf->vb.sequence = vch->sequence++;
+        vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
+    }
+    spin_unlock(&vch->slock);
+}
+
 void qpcie_v4l2_irq_handler(struct qpcie_dev *qdev)
 {
     u32 status = 0;
@@ -1556,20 +1579,7 @@ void qpcie_v4l2_irq_handler(struct qpcie_dev *qdev)
         return;
 
     if (qdev->use_new_map) {
-        /* In new map mode, VCH0 completion is direct */
-        struct qpcie_v4l2_channel *vch = &qdev->v4l2_ch[0];
-        struct qpcie_v4l2_buffer *buf;
-
-        spin_lock(&vch->slock);
-        if (!list_empty(&vch->active_buffers)) {
-            buf = list_first_entry(&vch->active_buffers, struct qpcie_v4l2_buffer, list);
-            list_del(&buf->list);
-            qdev->ring_completed++;
-            buf->vb.vb2_buf.timestamp = ktime_get_ns();
-            buf->vb.sequence = vch->sequence++;
-            vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
-        }
-        spin_unlock(&vch->slock);
+        qpcie_v4l2_node_done(qdev, 0);
         return;
     }
 

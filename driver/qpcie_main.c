@@ -38,7 +38,7 @@ static irqreturn_t qpcie_irq_handler(int irq, void *data)
             if (ch_irq & BIT(0)) {
                 /* Frame done completion */
                 if (qdev->v4l2_registered)
-                    qpcie_v4l2_irq_handler(qdev);
+                    qpcie_v4l2_node_done(qdev, 0);
             }
             if (ch_irq & BIT(1))
                 dev_warn_ratelimited(&qdev->pdev->dev, "VCH0 overflow IRQ detected\n");
@@ -51,6 +51,10 @@ static irqreturn_t qpcie_irq_handler(int irq, void *data)
             iowrite32(ch_irq, qdev->bar0_mmio + REG_VCH0_IRQ_STATUS);
         }
 
+        /* Level 3 Dispatch: Video CH1 Capture (Bit 1) */
+        if ((top & BIT(1)) && qdev->v4l2_registered)
+            qpcie_v4l2_node_done(qdev, 2);
+
         /* Level 3 Dispatch: Audio DEV0 (Bit 4: AUD) */
         if ((top & IRQ_TOP_AUD) && qdev->alsa_registered)
             qpcie_alsa_irq_handler(qdev, 0);
@@ -59,11 +63,9 @@ static irqreturn_t qpcie_irq_handler(int irq, void *data)
         if ((top & IRQ_TOP_ERR) && qdev->alsa_registered)
             qpcie_alsa_irq_handler(qdev, 0);
 
-        /* Level 3 Dispatch: H2C DMA (Bit 7) */
-        if (top & BIT(7)) {
-            if (qdev->v4l2_registered)
-                qpcie_v4l2_irq_handler(qdev);
-        }
+        /* Level 3 Dispatch: H2C DMA (Bit 7: Video Node 1) */
+        if ((top & BIT(7)) && qdev->v4l2_registered)
+            qpcie_v4l2_node_done(qdev, 1);
 
         /* Step 2: Clear Level 2 TOP status (W1C) */
         iowrite32(top, qdev->bar0_mmio + REG_NEW_GLOBAL_IRQ_TOP);
