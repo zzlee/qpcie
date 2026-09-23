@@ -178,7 +178,11 @@ module axil_reg_space #(
     input  wire [31:0] in_adev0_position,
     input  wire [1:0]  in_adev0_irq_status,
     output reg  [1:0]  out_adev0_irq_status_w1c,
-    output reg         out_adev0_xrun_inject
+    output reg         out_adev0_xrun_inject,
+
+    // Global DMA reset pulse (BAR0 0x14) -- exported so the top level
+    // can OR it into dma_rst_n to flush loopback CDC FIFOs between sessions.
+    output wire        out_global_reset_pulse
 );
 
     // BAR0 Register Offset Definitions (12-bit decode aperture)
@@ -309,6 +313,9 @@ module axil_reg_space #(
     assign out_adev0_buffer_bytes = adev0_buffer_bytes;
     assign out_adev0_ring0_base   = adev0_ring0_base;
     assign out_adev0_ring0_cfg    = adev0_ring0_cfg;
+
+    assign out_global_reset_pulse = global_reset_pulse;
+
 
     // Write Logic
     always @(posedge clk or negedge rst_n) begin

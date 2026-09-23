@@ -135,7 +135,9 @@ module custom_pcie_dma_top #(
     wire [10:0] read_req_tc;
 
     wire [31:0] reg_dma_ctrl, reg_dma_status, reg_irq_ctrl, reg_irq_status;
-    wire        dma_rst_n = rst_n && !reg_dma_ctrl[1];
+    wire        global_reset_pulse_w; // From axil_reg_space BAR0[0x14] — flushes DMA-domain FIFOs
+    wire        dma_rst_n = rst_n && !reg_dma_ctrl[1] && !global_reset_pulse_w;
+
     wire [31:0] reg_irq_status_w1c;
     wire [31:0] reg_slice_height;
     wire [31:0] reg_video_ctrl;
@@ -801,8 +803,10 @@ module custom_pcie_dma_top #(
         .in_adev0_position(reg_audio_dma_ptr),
         .in_adev0_irq_status(adev0_irq_status_w),
         .out_adev0_irq_status_w1c(adev0_irq_status_w1c_w),
-        .out_adev0_xrun_inject(adev0_xrun_inject_w)
+        .out_adev0_xrun_inject(adev0_xrun_inject_w),
+        .out_global_reset_pulse(global_reset_pulse_w)
     );
+
 
     // 3.1 Hardware Performance Monitor Instance
     qpcie_perfmon u_qpcie_perfmon (
