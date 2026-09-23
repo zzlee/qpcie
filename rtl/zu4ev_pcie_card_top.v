@@ -19,8 +19,8 @@
 module zu4ev_pcie_card_top #(
     parameter PCIE_DATA_WIDTH  = 256,
     parameter PCIE_KEEP_WIDTH  = PCIE_DATA_WIDTH / 32, // 8 DW keep for 256-bit
-    parameter NUM_VIDEO_CH     = 4,
-    parameter NUM_AUDIO_CH     = 4,
+    parameter NUM_VIDEO_CH     = 2,
+    parameter NUM_AUDIO_CH     = 2,
     parameter VIDEO_DATA_WIDTH = 128,
     parameter AUDIO_DATA_WIDTH = 32
 )(
@@ -50,10 +50,33 @@ module zu4ev_pcie_card_top #(
     wire phy_ready;
     wire mcap_design_switch;
 
-    // Application reset: PCIe link up AND reset deasserted
     wire pcie_user_rst_n;
     assign pcie_user_rst_n       = pcie_user_lnk_up && ~pcie_user_reset;
     assign user_led_pcie_link_up = pcie_user_lnk_up;
+
+    // Fine-grained sub-domain resets (BAR0 0x84)
+    wire video_pipeline_reset;
+    wire video_tpg_reset;
+    wire video_engine_reset;
+    (* ASYNC_REG = "TRUE" *) reg [1:0] video_pipeline_reset_sync = 2'b00;
+    (* ASYNC_REG = "TRUE" *) reg [1:0] video_tpg_reset_sync      = 2'b00;
+    (* ASYNC_REG = "TRUE" *) reg [1:0] video_engine_reset_sync   = 2'b00;
+
+    always @(posedge pcie_user_clk or negedge pcie_user_rst_n) begin
+        if (!pcie_user_rst_n) begin
+            video_pipeline_reset_sync <= 2'b00;
+            video_tpg_reset_sync      <= 2'b00;
+            video_engine_reset_sync   <= 2'b00;
+        end else begin
+            video_pipeline_reset_sync <= {video_pipeline_reset_sync[0], video_pipeline_reset};
+            video_tpg_reset_sync      <= {video_tpg_reset_sync[0], video_tpg_reset};
+            video_engine_reset_sync   <= {video_engine_reset_sync[0], video_engine_reset};
+        end
+    end
+
+    wire video_pipeline_rst_n = pcie_user_rst_n && !video_pipeline_reset_sync[1];
+    wire video_tpg_rst_n      = video_pipeline_rst_n && !video_tpg_reset_sync[1];
+    wire video_engine_rst_n   = video_pipeline_rst_n && !video_engine_reset_sync[1];
 
     // =========================================================================
     // BAR1 AXI4-Lite Master Interconnect Wires
@@ -191,7 +214,7 @@ module zu4ev_pcie_card_top #(
 
     v_tpg_0 u_v_tpg (
         .ap_clk(pcie_user_clk),
-        .ap_rst_n(pcie_user_rst_n),
+        .ap_rst_n(video_tpg_rst_n),
 
         // AXI4-Lite Control Slave (s_axi_CTRL)
         .s_axi_CTRL_AWADDR(tpg_axi_awaddr),
@@ -339,9 +362,7 @@ module zu4ev_pcie_card_top #(
     end
 
     // =========================================================================
-    // Multi-Channel AXI4-Stream Video Multiplexing:
-    // Channel 0: Connected directly to Xilinx Video TPG IP (m_axis_video)
-    // Channels 1-3: Connected in internal loopback mode (H2C -> C2H)
+    // Multi-Channel AXI4-Stream Video Multiplexing & Diagnostic Marker Overlay
     // =========================================================================
     wire [(NUM_VIDEO_CH*VIDEO_DATA_WIDTH)-1:0] s_video_tdata;
     wire [NUM_VIDEO_CH-1:0]                    s_video_tvalid;
@@ -355,30 +376,61 @@ module zu4ev_pcie_card_top #(
     wire [NUM_VIDEO_CH-1:0]                    m_video_tuser;
     wire [NUM_VIDEO_CH-1:0]                    m_video_tready;
 
-    // Channel 0: Video TPG (4 PPC) -> PCIe DMA C2H Stream Input (128-bit = 4 Pixels * 32-bit AYUV/RGB32)
-    assign s_video_tdata[127:0] = {
-        8'hFF, tpg_axis_tdata[95:72], // Pixel 3
-        8'hFF, tpg_axis_tdata[71:48], // Pixel 2
-        8'hFF, tpg_axis_tdata[47:24], // Pixel 1
-        8'hFF, tpg_axis_tdata[23:0]   // Pixel 0
+    // v_tpg emits each pixel as {R,G,B}. PCIe payload dwords are little-endian,
+    // so present {8'hFF, B, G, R} to expose V4L2 RGB24 bytes as R,G,B in host memory.
+    wire [127:0] tpg_padded_tdata = {
+        8'hFF, tpg_axis_tdata[79:72], tpg_axis_tdata[87:80], tpg_axis_tdata[95:88],
+        8'hFF, tpg_axis_tdata[55:48], tpg_axis_tdata[63:56], tpg_axis_tdata[71:64],
+        8'hFF, tpg_axis_tdata[31:24], tpg_axis_tdata[39:32], tpg_axis_tdata[47:40],
+        8'hFF, tpg_axis_tdata[7:0],   tpg_axis_tdata[15:8],  tpg_axis_tdata[23:16]
     };
-    assign s_video_tvalid[0]   = tpg_axis_tvalid;
-    assign s_video_tlast[0]    = tpg_axis_tlast;    // EOL
-    assign s_video_tuser[0]    = tpg_axis_tuser[0]; // SOF
-    assign tpg_axis_tready     = s_video_tready[0];
+    wire [127:0] tpg_capture_tdata;
+    wire         tpg_capture_tvalid, tpg_capture_tlast, tpg_capture_tuser;
+    wire         tpg_capture_tready;
 
-    // Channels 1..3: Internal loopback for testing
-    assign s_video_tdata[511:128] = m_video_tdata[511:128];
-    assign s_video_tvalid[3:1]    = m_video_tvalid[3:1];
-    assign s_video_tlast[3:1]     = m_video_tlast[3:1];
-    assign s_video_tuser[3:1]     = m_video_tuser[3:1];
-    assign m_video_tready[3:1]    = s_video_tready[3:1];
-    assign m_video_tready[0]      = 1'b1; // Channel 0 H2C sink ready
+    wire        dma_overlay_en;
+    wire [15:0] dma_overlay_width;
+    wire [15:0] dma_overlay_height;
+
+    tpg_marker_overlay #(
+        .FRAME_WIDTH(4096),
+        .FRAME_HEIGHT(2160)
+    ) u_tpg_marker_overlay (
+        .clk(pcie_user_clk),
+        .rst_n(video_engine_rst_n),
+        .overlay_en(dma_overlay_en),
+        .frame_width(dma_overlay_width),
+        .frame_height(dma_overlay_height),
+        .s_axis_tdata(tpg_padded_tdata),
+        .s_axis_tvalid(tpg_axis_tvalid),
+        .s_axis_tlast(tpg_axis_tlast),
+        .s_axis_tuser(tpg_axis_tuser),
+        .s_axis_tready(tpg_axis_tready),
+        .m_axis_tdata(tpg_capture_tdata),
+        .m_axis_tvalid(tpg_capture_tvalid),
+        .m_axis_tlast(tpg_capture_tlast),
+        .m_axis_tuser(tpg_capture_tuser),
+        .m_axis_tready(tpg_capture_tready)
+    );
+
+    // Channel 0 capture consumes TPG directly via video_ch0_t* ports inside u_dma_top.
+    assign s_video_tvalid[0] = 1'b0;
+    assign s_video_tlast[0]  = 1'b0;
+    assign s_video_tuser[0]  = 1'b0;
+
+    // Channel 1..NUM_VIDEO_CH-1: Internal DMA hardware loopback (H2C -> C2H)
+    assign s_video_tdata[(NUM_VIDEO_CH*VIDEO_DATA_WIDTH)-1:VIDEO_DATA_WIDTH] =
+        m_video_tdata[(NUM_VIDEO_CH*VIDEO_DATA_WIDTH)-1:VIDEO_DATA_WIDTH];
+    assign s_video_tvalid[NUM_VIDEO_CH-1:1]  = m_video_tvalid[NUM_VIDEO_CH-1:1];
+    assign s_video_tlast[NUM_VIDEO_CH-1:1]   = m_video_tlast[NUM_VIDEO_CH-1:1];
+    assign s_video_tuser[NUM_VIDEO_CH-1:1]   = m_video_tuser[NUM_VIDEO_CH-1:1];
+    assign m_video_tready[NUM_VIDEO_CH-1:1]  = s_video_tready[NUM_VIDEO_CH-1:1];
+    assign m_video_tready[0]                 = 1'b1;
 
     // =========================================================================
     // Multi-Channel AXI4-Stream Audio Multiplexing:
     // Channel 0: Connected directly to AES3 Audio Pattern Generator
-    // Channels 1-3: Connected in internal loopback mode (H2C -> C2H)
+    // Channel 1..NUM_AUDIO_CH-1: Connected in internal loopback mode (H2C -> C2H)
     // =========================================================================
     wire [(NUM_AUDIO_CH*AUDIO_DATA_WIDTH)-1:0] s_audio_tdata;
     wire [NUM_AUDIO_CH-1:0]                    s_audio_tvalid;
@@ -396,12 +448,13 @@ module zu4ev_pcie_card_top #(
     assign s_audio_tlast[0]    = aud_pat_axis_tlast;
     assign aud_pat_axis_tready = s_audio_tready[0];
 
-    // Channels 1..3: Internal loopback for testing
-    assign s_audio_tdata[127:32] = m_audio_tdata[127:32];
-    assign s_audio_tvalid[3:1]   = m_audio_tvalid[3:1];
-    assign s_audio_tlast[3:1]    = m_audio_tlast[3:1];
-    assign m_audio_tready[3:1]   = s_audio_tready[3:1];
-    assign m_audio_tready[0]     = 1'b1; // Channel 0 H2C sink ready
+    // Channel 1..NUM_AUDIO_CH-1: Internal DMA hardware loopback (H2C -> C2H)
+    assign s_audio_tdata[(NUM_AUDIO_CH*AUDIO_DATA_WIDTH)-1:AUDIO_DATA_WIDTH] =
+        m_audio_tdata[(NUM_AUDIO_CH*AUDIO_DATA_WIDTH)-1:AUDIO_DATA_WIDTH];
+    assign s_audio_tvalid[NUM_AUDIO_CH-1:1]  = m_audio_tvalid[NUM_AUDIO_CH-1:1];
+    assign s_audio_tlast[NUM_AUDIO_CH-1:1]   = m_audio_tlast[NUM_AUDIO_CH-1:1];
+    assign m_audio_tready[NUM_AUDIO_CH-1:1]  = s_audio_tready[NUM_AUDIO_CH-1:1];
+    assign m_audio_tready[0]                 = 1'b1;
 
     // =========================================================================
     // PCIe AXI-Stream CQ / CC / RQ / RC Wires (256-bit)
@@ -450,6 +503,40 @@ module zu4ev_pcie_card_top #(
     wire        cfg_interrupt_msi_fail;
 
     wire usr_irq_req, usr_irq_ack;
+
+    // Interrupt generation (MSI or Legacy INTx)
+    reg [31:0] msi_int_reg;
+    reg [3:0]  legacy_int_reg;
+    reg        irq_ack_reg;
+
+    always @(posedge pcie_user_clk or negedge pcie_user_rst_n) begin
+        if (!pcie_user_rst_n) begin
+            msi_int_reg    <= 32'd0;
+            legacy_int_reg <= 4'd0;
+            irq_ack_reg    <= 1'b0;
+        end else begin
+            irq_ack_reg <= 1'b0;
+            if (cfg_interrupt_msi_enable[0]) begin
+                legacy_int_reg <= 4'd0;
+                if (usr_irq_req && !msi_int_reg[0]) begin
+                    msi_int_reg <= 32'h00000001; // Vector 0
+                end else if (cfg_interrupt_msi_sent || cfg_interrupt_msi_fail) begin
+                    msi_int_reg <= 32'd0;
+                    irq_ack_reg <= 1'b1;
+                end
+            end else begin
+                msi_int_reg <= 32'd0;
+                if (usr_irq_req && !legacy_int_reg[0]) begin
+                    legacy_int_reg <= 4'b0001; // Assert INTA
+                end else if (cfg_interrupt_sent) begin
+                    legacy_int_reg <= 4'd0;
+                    irq_ack_reg    <= 1'b1;
+                end
+            end
+        end
+    end
+
+    assign usr_irq_ack = irq_ack_reg;
 
     // Differential Reference Clock Input Buffer (Bank 223)
     wire sys_clk;
@@ -603,8 +690,8 @@ module zu4ev_pcie_card_top #(
 
         .cfg_link_training_enable                  (1'b1),
 
-        .cfg_interrupt_int                         (4'b0),
-        .cfg_interrupt_pending                     (4'b0),
+        .cfg_interrupt_int                         (legacy_int_reg),
+        .cfg_interrupt_pending                     (legacy_int_reg),
         .cfg_interrupt_sent                        (cfg_interrupt_sent),
 
         .cfg_interrupt_msi_enable                  (cfg_interrupt_msi_enable),
@@ -612,7 +699,7 @@ module zu4ev_pcie_card_top #(
         .cfg_interrupt_msi_mask_update             (),
         .cfg_interrupt_msi_data                    (),
         .cfg_interrupt_msi_select                  (2'b0),
-        .cfg_interrupt_msi_int                     (32'b0),
+        .cfg_interrupt_msi_int                     (msi_int_reg),
         .cfg_interrupt_msi_pending_status          (32'b0),
         .cfg_interrupt_msi_pending_status_data_enable (1'b0),
         .cfg_interrupt_msi_pending_status_function_num (2'b0),
@@ -653,6 +740,7 @@ module zu4ev_pcie_card_top #(
 
     custom_pcie_dma_top #(
         .PCIE_DATA_WIDTH(PCIE_DATA_WIDTH),
+        .PCIE_KEEP_WIDTH(PCIE_KEEP_WIDTH),
         .NUM_VIDEO_CH(NUM_VIDEO_CH),
         .NUM_AUDIO_CH(NUM_AUDIO_CH),
         .VIDEO_DATA_WIDTH(VIDEO_DATA_WIDTH),
@@ -712,12 +800,20 @@ module zu4ev_pcie_card_top #(
         .m_axil_bar1_rvalid(bar1_m_rvalid),
         .m_axil_bar1_rready(bar1_m_rready),
 
-        // Multi-Channel Video Streams (Ch0: TPG IP, Ch1-3: Loopback)
+        // Multi-Channel Video Streams
         .s_axis_video_tdata(s_video_tdata),
         .s_axis_video_tvalid(s_video_tvalid),
         .s_axis_video_tlast(s_video_tlast),
         .s_axis_video_tuser(s_video_tuser),
         .s_axis_video_tready(s_video_tready),
+
+        .video_clk(pcie_user_clk),
+        .video_rst_n(video_engine_rst_n),
+        .video_ch0_tdata(tpg_capture_tdata),
+        .video_ch0_tvalid(tpg_capture_tvalid),
+        .video_ch0_tlast(tpg_capture_tlast),
+        .video_ch0_tuser(tpg_capture_tuser),
+        .video_ch0_tready(tpg_capture_tready),
 
         .m_axis_video_tdata(m_video_tdata),
         .m_axis_video_tvalid(m_video_tvalid),
@@ -725,7 +821,7 @@ module zu4ev_pcie_card_top #(
         .m_axis_video_tuser(m_video_tuser),
         .m_axis_video_tready(m_video_tready),
 
-        // Multi-Channel Audio Streams (Ch0: AudPatGen, Ch1-3: Loopback)
+        // Multi-Channel Audio Streams
         .s_axis_audio_tdata(s_audio_tdata),
         .s_axis_audio_tvalid(s_audio_tvalid),
         .s_axis_audio_tlast(s_audio_tlast),
@@ -735,6 +831,14 @@ module zu4ev_pcie_card_top #(
         .m_axis_audio_tvalid(m_audio_tvalid),
         .m_axis_audio_tlast(m_audio_tlast),
         .m_axis_audio_tready(m_audio_tready),
+
+        // Sub-domain Resets & Diagnostic Marker Overlay
+        .video_pipeline_reset(video_pipeline_reset),
+        .video_tpg_reset(video_tpg_reset),
+        .video_engine_reset(video_engine_reset),
+        .overlay_en(dma_overlay_en),
+        .overlay_width(dma_overlay_width),
+        .overlay_height(dma_overlay_height),
 
         // Interrupts
         .usr_irq_req(usr_irq_req),

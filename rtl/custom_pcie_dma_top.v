@@ -349,7 +349,7 @@ module custom_pcie_dma_top #(
     wire [PCIE_DATA_WIDTH-1:0] sg_c2h_req_data;
     wire [31:0] sg_h2c_bytes, sg_c2h_bytes;
     wire        sg_h2c_busy, sg_c2h_busy;
-    wire [PCIE_DATA_WIDTH-1:0] lb_tdata;
+    wire [127:0] lb_tdata;
     wire        lb_tvalid, lb_tlast, lb_tuser;
     wire        sg_loopback_enable;
     wire [1:0]  sg_loopback_channel;

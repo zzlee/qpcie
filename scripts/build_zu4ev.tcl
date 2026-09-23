@@ -67,6 +67,7 @@ set_property -dict [list \
   CONFIG.pf0_bar1_64bit {false} \
   CONFIG.pf0_bar1_scale {Kilobytes} \
   CONFIG.pf0_bar1_size {64} \
+  CONFIG.pf0_msi_enabled {true} \
 ] [get_ips pcie4_uscale_plus_0]
 
 generate_target all [get_ips pcie4_uscale_plus_0]

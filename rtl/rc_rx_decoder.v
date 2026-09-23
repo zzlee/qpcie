@@ -112,25 +112,39 @@ module rc_rx_decoder #(
 
                     if (s_axis_rc_tvalid && s_axis_rc_tready) begin
                         if (rc_tag == 8'h00) begin // CH0 Thin Descriptor CplD (Tag 0, 16B)
-                            thin_cpl_data[31:0] <= s_axis_rc_tdata[127:96];
-                            if (s_axis_rc_tlast) begin
+                            if (DATA_WIDTH >= 256) begin
+                                thin_cpl_data  <= s_axis_rc_tdata[223:96]; // DW0..DW3 all in Beat 0
                                 thin_cpl_valid <= 1'b1;
                                 thin_cpl_last  <= 1'b1;
                                 tag_free_req   <= 1'b1;
                                 tag_free_val   <= 8'h00;
                             end else begin
-                                state          <= ROUTE_THIN;
+                                thin_cpl_data[31:0] <= s_axis_rc_tdata[127:96];
+                                if (s_axis_rc_tlast) begin
+                                    thin_cpl_valid <= 1'b1;
+                                    thin_cpl_last  <= 1'b1;
+                                    tag_free_req   <= 1'b1;
+                                    tag_free_val   <= 8'h00;
+                                end else begin
+                                    state          <= ROUTE_THIN;
+                                end
                             end
                         end else if (rc_tag == 8'h20) begin // CH1 64B Descriptor CplD (Tag 0x20)
-                            desc_cpl_data[31:0] <= s_axis_rc_tdata[127:96];
-                            if (s_axis_rc_tlast) begin
-                                desc_cpl_valid <= 1'b1;
-                                desc_cpl_last  <= 1'b1;
-                                tag_free_req   <= 1'b1;
-                                tag_free_val   <= 8'h20;
+                            if (DATA_WIDTH >= 256) begin
+                                desc_cpl_data[159:0] <= s_axis_rc_tdata[255:96]; // DW0..DW4 in beat 0
+                                desc_beat_cnt        <= 3'd1;
+                                state                <= ROUTE_64B;
                             end else begin
-                                desc_beat_cnt  <= 3'd1;
-                                state          <= ROUTE_64B;
+                                desc_cpl_data[31:0]  <= s_axis_rc_tdata[127:96]; // DW0 in beat 0
+                                if (s_axis_rc_tlast) begin
+                                    desc_cpl_valid <= 1'b1;
+                                    desc_cpl_last  <= 1'b1;
+                                    tag_free_req   <= 1'b1;
+                                    tag_free_val   <= 8'h20;
+                                end else begin
+                                    desc_beat_cnt  <= 3'd1;
+                                    state          <= ROUTE_64B;
+                                end
                             end
                         end else if (rc_tag == 8'h01) begin // SG Host Fetch CplD (Tag 1)
                             sg_cpl_valid <= 1'b1;
@@ -145,13 +159,13 @@ module rc_rx_decoder #(
                             end
                         end else begin // H2C Data CplD (Tags 2..17)
                             h2c_fifo_wvalid <= 1'b1;
-                            h2c_fifo_wdata  <= {96'd0, s_axis_rc_tdata[127:96]};
+                            h2c_fifo_wdata  <= (DATA_WIDTH >= 256) ? s_axis_rc_tdata : {96'd0, s_axis_rc_tdata[127:96]};
                             h2c_fifo_wlast  <= s_axis_rc_tlast;
-                            h2c_fifo_wdw_count <= (rc_dword_len != 0) ? 3'd1 : 3'd0;
+                            h2c_fifo_wdw_count <= (rc_dword_len != 0) ? ((DATA_WIDTH >= 256) ? 3'd5 : 3'd1) : 3'd0;
                             h2c_fifo_wtag   <= rc_tag;
                             h2c_cpl_tag     <= rc_tag;
                             h2c_cpl_dw_remaining <=
-                                (rc_dword_len > 0) ? rc_dword_len - 1'b1 : 11'd0;
+                                (rc_dword_len > ((DATA_WIDTH >= 256) ? 5 : 1)) ? rc_dword_len - ((DATA_WIDTH >= 256) ? 5 : 1) : 11'd0;
                             if (!s_axis_rc_tlast) begin
                                 state <= ROUTE_H2C;
                             end
@@ -172,20 +186,36 @@ module rc_rx_decoder #(
 
                 ROUTE_64B: begin
                     if (s_axis_rc_tvalid && s_axis_rc_tready) begin
-                        case (desc_beat_cnt)
-                            3'd1: desc_cpl_data[159:32]  <= s_axis_rc_tdata[127:0]; // DW1..DW4
-                            3'd2: desc_cpl_data[287:160] <= s_axis_rc_tdata[127:0]; // DW5..DW8
-                            3'd3: desc_cpl_data[415:288] <= s_axis_rc_tdata[127:0]; // DW9..DW12
-                            3'd4: desc_cpl_data[511:416] <= s_axis_rc_tdata[95:0];  // DW13..DW15
-                        endcase
-                        desc_beat_cnt <= desc_beat_cnt + 1'b1;
+                        if (DATA_WIDTH >= 256) begin
+                            case (desc_beat_cnt)
+                                3'd1: desc_cpl_data[415:160] <= s_axis_rc_tdata[255:0]; // DW5..DW12
+                                3'd2: desc_cpl_data[511:416] <= s_axis_rc_tdata[95:0];  // DW13..DW15
+                            endcase
+                            desc_beat_cnt <= desc_beat_cnt + 1'b1;
 
-                        if (s_axis_rc_tlast || desc_beat_cnt >= 3'd4) begin
-                            desc_cpl_valid <= 1'b1;
-                            desc_cpl_last  <= 1'b1;
-                            tag_free_req   <= 1'b1;
-                            tag_free_val   <= 8'h20;
-                            state          <= IDLE;
+                            if (s_axis_rc_tlast || desc_beat_cnt >= 3'd2) begin
+                                desc_cpl_valid <= 1'b1;
+                                desc_cpl_last  <= 1'b1;
+                                tag_free_req   <= 1'b1;
+                                tag_free_val   <= 8'h20;
+                                state          <= IDLE;
+                            end
+                        end else begin
+                            case (desc_beat_cnt)
+                                3'd1: desc_cpl_data[159:32]  <= s_axis_rc_tdata[127:0]; // DW1..DW4
+                                3'd2: desc_cpl_data[287:160] <= s_axis_rc_tdata[127:0]; // DW5..DW8
+                                3'd3: desc_cpl_data[415:288] <= s_axis_rc_tdata[127:0]; // DW9..DW12
+                                3'd4: desc_cpl_data[511:416] <= s_axis_rc_tdata[95:0];  // DW13..DW15
+                            endcase
+                            desc_beat_cnt <= desc_beat_cnt + 1'b1;
+
+                            if (s_axis_rc_tlast || desc_beat_cnt >= 3'd4) begin
+                                desc_cpl_valid <= 1'b1;
+                                desc_cpl_last  <= 1'b1;
+                                tag_free_req   <= 1'b1;
+                                tag_free_val   <= 8'h20;
+                                state          <= IDLE;
+                            end
                         end
                     end
                 end

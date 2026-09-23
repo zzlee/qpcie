@@ -383,7 +383,7 @@ module nv12_capture_engine #(
                     frame_width[6:0] != 0 ||
                     frame_height[0] || frame_stride < frame_width ||
                     (MWR_PAYLOAD_BYTES != 128 && MWR_PAYLOAD_BYTES != 256) ||
-                    PCIE_DATA_WIDTH != 128)
+                    (PCIE_DATA_WIDTH != 128 && PCIE_DATA_WIDTH != 256))
                     protocol_error_count <= protocol_error_count + 1'b1;
             end else if (RAW_INPUT) begin
                 if (input_transfer) begin
