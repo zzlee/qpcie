@@ -2,9 +2,10 @@
 // Module: rc_rx_decoder
 // Description: Decodes PCIe IP RC (Requester Completion) AXI4-Stream TLP packets.
 //              Extracts CplD data and routes:
-//              - Tag 0: Descriptor Fetch Engine (64-Byte Extended Descriptors)
+//              - Tag 0: CH0 Thin Descriptor Fetch Engine (16-Byte Descriptors)
+//              - Tag 0x20: CH1 Extended Descriptor Fetch Engine (64-Byte Descriptors)
 //              - Tag 1: SG Host Linked Page Table Fetch Engine (256-Byte bursts)
-//              - Tag > 1: H2C DMA Data FIFO
+//              - Tag 2..17: H2C DMA Data FIFO
 // Audit Compliance: Verified with UltraScale PCIe Specification pg213 Table 2-19:
 //                   - rc_tag is at bits [71:64]
 //                   - rc_dword_len is at bits [42:32]
@@ -28,18 +29,23 @@ module rc_rx_decoder #(
     input  wire [KEEP_WIDTH-1:0] s_axis_rc_tkeep,
     output reg                   s_axis_rc_tready,
 
-    // Interface to Descriptor Fetch Engine (Tag 0 reserved for 64-Byte Extended Descriptor Fetch)
+    // Interface to CH0 Thin Descriptor Fetch Engine (Tag 8'h00)
+    output reg                   thin_cpl_valid,
+    output reg  [127:0]          thin_cpl_data,
+    output reg                   thin_cpl_last,
+
+    // Interface to CH1 64-Byte Extended Descriptor Fetch Engine (Tag 8'h20)
     output reg                   desc_cpl_valid,
-    output reg  [511:0]          desc_cpl_data, // 64-Byte (512-bit) Extended Descriptor Payload
+    output reg  [511:0]          desc_cpl_data,
     output reg                   desc_cpl_last,
 
-    // Interface to SG Host Fetch Engine (Tag 1 reserved for Scatter-Gather Page Table Fetch)
+    // Interface to SG Host Fetch Engine (Tag 8'h01)
     output reg                   sg_cpl_valid,
     output reg  [DATA_WIDTH-1:0] sg_cpl_data,
     output reg                   sg_cpl_last,
     output reg  [7:0]            sg_cpl_tag,
 
-    // Interface to H2C DMA Data FIFO (Tag > 1)
+    // Interface to H2C DMA Data FIFO (Tags 8'h02..8'h11)
     output reg                   h2c_fifo_wvalid,
     output reg  [DATA_WIDTH-1:0] h2c_fifo_wdata,
     output reg                   h2c_fifo_wlast,
@@ -51,12 +57,13 @@ module rc_rx_decoder #(
     output reg  [7:0]            tag_free_val
 );
 
-    localparam IDLE       = 2'b00;
-    localparam ROUTE_DESC = 2'b01;
-    localparam ROUTE_H2C  = 2'b10;
-    localparam ROUTE_SG   = 2'b11;
+    localparam IDLE        = 3'b000;
+    localparam ROUTE_THIN  = 3'b001;
+    localparam ROUTE_64B   = 3'b010;
+    localparam ROUTE_H2C   = 3'b011;
+    localparam ROUTE_SG    = 3'b100;
 
-    reg [1:0] state;
+    reg [2:0] state;
     reg [2:0] desc_beat_cnt;
     reg [10:0] h2c_cpl_dw_remaining;
     reg [7:0] h2c_cpl_tag;
@@ -68,49 +75,62 @@ module rc_rx_decoder #(
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            state            <= IDLE;
-            s_axis_rc_tready <= 1'b1;
-            desc_cpl_valid   <= 1'b0;
-            desc_cpl_data    <= 512'd0;
-            desc_cpl_last    <= 1'b0;
-            sg_cpl_valid     <= 1'b0;
-            sg_cpl_data      <= {DATA_WIDTH{1'b0}};
-            sg_cpl_last      <= 1'b0;
-            sg_cpl_tag       <= 8'd0;
-            h2c_fifo_wvalid  <= 1'b0;
-            h2c_fifo_wdata   <= {DATA_WIDTH{1'b0}};
-            h2c_fifo_wlast   <= 1'b0;
-            h2c_fifo_wdw_count <= 3'd0;
-            h2c_fifo_wtag    <= 8'd0;
-            tag_free_req     <= 1'b0;
-            tag_free_val     <= 8'd0;
-            desc_beat_cnt    <= 3'd0;
+            state                <= IDLE;
+            s_axis_rc_tready     <= 1'b1;
+            thin_cpl_valid       <= 1'b0;
+            thin_cpl_data        <= 128'd0;
+            thin_cpl_last        <= 1'b0;
+            desc_cpl_valid       <= 1'b0;
+            desc_cpl_data        <= 512'd0;
+            desc_cpl_last        <= 1'b0;
+            sg_cpl_valid         <= 1'b0;
+            sg_cpl_data          <= {DATA_WIDTH{1'b0}};
+            sg_cpl_last          <= 1'b0;
+            sg_cpl_tag           <= 8'd0;
+            h2c_fifo_wvalid      <= 1'b0;
+            h2c_fifo_wdata       <= {DATA_WIDTH{1'b0}};
+            h2c_fifo_wlast       <= 1'b0;
+            h2c_fifo_wdw_count   <= 3'd0;
+            h2c_fifo_wtag        <= 8'd0;
+            tag_free_req         <= 1'b0;
+            tag_free_val         <= 8'd0;
+            desc_beat_cnt        <= 3'd0;
             h2c_cpl_dw_remaining <= 11'd0;
-            h2c_cpl_tag      <= 8'd0;
+            h2c_cpl_tag          <= 8'd0;
         end else begin
-            h2c_fifo_wvalid <= 1'b0;
+            thin_cpl_valid     <= 1'b0;
+            desc_cpl_valid     <= 1'b0;
+            sg_cpl_valid       <= 1'b0;
+            h2c_fifo_wvalid    <= 1'b0;
             h2c_fifo_wdw_count <= 3'd0;
+            tag_free_req       <= 1'b0;
+
             case (state)
                 IDLE: begin
-                    desc_cpl_valid   <= 1'b0;
-                    sg_cpl_valid     <= 1'b0;
-                    h2c_fifo_wvalid  <= 1'b0;
-                    h2c_fifo_wdw_count <= 3'd0;
-                    tag_free_req     <= 1'b0;
                     s_axis_rc_tready <= 1'b1;
                     desc_beat_cnt    <= 3'd0;
 
                     if (s_axis_rc_tvalid && s_axis_rc_tready) begin
-                        if (rc_tag == 8'h00) begin // Descriptor CplD (Tag 0)
-                            desc_cpl_data[31:0] <= s_axis_rc_tdata[127:96]; // Payload DW0 from Beat 0
+                        if (rc_tag == 8'h00) begin // CH0 Thin Descriptor CplD (Tag 0, 16B)
+                            thin_cpl_data[31:0] <= s_axis_rc_tdata[127:96];
+                            if (s_axis_rc_tlast) begin
+                                thin_cpl_valid <= 1'b1;
+                                thin_cpl_last  <= 1'b1;
+                                tag_free_req   <= 1'b1;
+                                tag_free_val   <= 8'h00;
+                            end else begin
+                                state          <= ROUTE_THIN;
+                            end
+                        end else if (rc_tag == 8'h20) begin // CH1 64B Descriptor CplD (Tag 0x20)
+                            desc_cpl_data[31:0] <= s_axis_rc_tdata[127:96];
                             if (s_axis_rc_tlast) begin
                                 desc_cpl_valid <= 1'b1;
                                 desc_cpl_last  <= 1'b1;
                                 tag_free_req   <= 1'b1;
-                                tag_free_val   <= 8'h00;
+                                tag_free_val   <= 8'h20;
                             end else begin
-                                desc_beat_cnt <= 3'd1;
-                                state         <= ROUTE_DESC;
+                                desc_beat_cnt  <= 3'd1;
+                                state          <= ROUTE_64B;
                             end
                         end else if (rc_tag == 8'h01) begin // SG Host Fetch CplD (Tag 1)
                             sg_cpl_valid <= 1'b1;
@@ -123,13 +143,13 @@ module rc_rx_decoder #(
                             if (!s_axis_rc_tlast) begin
                                 state <= ROUTE_SG;
                             end
-                        end else begin // H2C Data CplD (Tag > 1)
+                        end else begin // H2C Data CplD (Tags 2..17)
                             h2c_fifo_wvalid <= 1'b1;
                             h2c_fifo_wdata  <= {96'd0, s_axis_rc_tdata[127:96]};
                             h2c_fifo_wlast  <= s_axis_rc_tlast;
                             h2c_fifo_wdw_count <= (rc_dword_len != 0) ? 3'd1 : 3'd0;
-                            h2c_fifo_wtag <= rc_tag;
-                            h2c_cpl_tag <= rc_tag;
+                            h2c_fifo_wtag   <= rc_tag;
+                            h2c_cpl_tag     <= rc_tag;
                             h2c_cpl_dw_remaining <=
                                 (rc_dword_len > 0) ? rc_dword_len - 1'b1 : 11'd0;
                             if (!s_axis_rc_tlast) begin
@@ -139,7 +159,18 @@ module rc_rx_decoder #(
                     end
                 end
 
-                ROUTE_DESC: begin
+                ROUTE_THIN: begin
+                    if (s_axis_rc_tvalid && s_axis_rc_tready) begin
+                        thin_cpl_data[127:32] <= s_axis_rc_tdata[95:0];
+                        thin_cpl_valid        <= 1'b1;
+                        thin_cpl_last         <= s_axis_rc_tlast;
+                        tag_free_req          <= 1'b1;
+                        tag_free_val          <= 8'h00;
+                        state                 <= IDLE;
+                    end
+                end
+
+                ROUTE_64B: begin
                     if (s_axis_rc_tvalid && s_axis_rc_tready) begin
                         case (desc_beat_cnt)
                             3'd1: desc_cpl_data[159:32]  <= s_axis_rc_tdata[127:0]; // DW1..DW4
@@ -153,7 +184,7 @@ module rc_rx_decoder #(
                             desc_cpl_valid <= 1'b1;
                             desc_cpl_last  <= 1'b1;
                             tag_free_req   <= 1'b1;
-                            tag_free_val   <= 8'h00;
+                            tag_free_val   <= 8'h20;
                             state          <= IDLE;
                         end
                     end

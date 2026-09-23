@@ -150,6 +150,22 @@ module axil_reg_space #(
     output reg  [3:0]  out_vch0_irq_status_w1c,
     output wire        out_vch0_irq_en,
 
+    // Phase 6: Video CH1 Ports (for Loopback Pipeline)
+    output wire [31:0] out_vch1_ctrl,
+    output wire [31:0] out_vch1_width,
+    output wire [31:0] out_vch1_height,
+    output wire [31:0] out_vch1_stride0,
+    output wire [31:0] out_vch1_stride1,
+    output wire [63:0] out_vch1_ring0_base,
+    output wire [15:0] out_vch1_ring0_size,
+    output wire [15:0] out_vch1_ring0_tail,
+    input  wire [15:0] in_vch1_ring0_head,
+    input  wire [31:0] in_vch1_frame_count,
+    input  wire [31:0] in_vch1_drop_count,
+    input  wire [3:0]  in_vch1_irq_status,
+    output reg  [3:0]  out_vch1_irq_status_w1c,
+    output wire        out_vch1_irq_en,
+
     // Phase 4 P4-2: Audio DEV0 Ports
     output wire [31:0] out_adev0_ctrl,
     output wire [31:0] out_adev0_rate,
@@ -266,6 +282,27 @@ module axil_reg_space #(
     assign out_vch0_irq_en        = vch0_ctrl[8];
     assign out_overlay_en         = reg_overlay_ctrl[0] | vch0_ctrl[16];
 
+    // Video CH1 Block (New Map: 0x0200 - 0x02FF)
+    reg  [31:0] vch1_ctrl;
+    reg  [31:0] vch1_status;
+    reg  [31:0] vch1_width;
+    reg  [31:0] vch1_height;
+    reg  [31:0] vch1_stride0;
+    reg  [31:0] vch1_stride1;
+    reg  [63:0] vch1_ring0_base;
+    reg  [15:0] vch1_ring0_size;
+    reg  [15:0] vch1_ring0_tail;
+
+    assign out_vch1_ctrl         = vch1_ctrl;
+    assign out_vch1_width        = vch1_width;
+    assign out_vch1_height       = vch1_height;
+    assign out_vch1_stride0      = vch1_stride0;
+    assign out_vch1_stride1      = vch1_stride1;
+    assign out_vch1_ring0_base   = vch1_ring0_base;
+    assign out_vch1_ring0_size   = vch1_ring0_size;
+    assign out_vch1_ring0_tail   = vch1_ring0_tail;
+    assign out_vch1_irq_en       = vch1_ctrl[8];
+
     assign out_adev0_ctrl         = adev0_ctrl;
     assign out_adev0_rate         = adev0_rate;
     assign out_adev0_period_bytes = adev0_period_bytes;
@@ -320,6 +357,16 @@ module axil_reg_space #(
             vch0_stride0           <= 32'd1920;
             vch0_stride1           <= 32'd1920;
             out_vch0_irq_status_w1c<= 4'd0;
+            vch1_ctrl              <= 32'd0;
+            vch1_status            <= 32'd0;
+            vch1_width             <= 32'd1920;
+            vch1_height            <= 32'd1080;
+            vch1_stride0           <= 32'd1920;
+            vch1_stride1           <= 32'd1920;
+            vch1_ring0_base        <= 64'd0;
+            vch1_ring0_size        <= 16'd0;
+            vch1_ring0_tail        <= 16'd0;
+            out_vch1_irq_status_w1c<= 4'd0;
             adev0_ctrl              <= 32'd0;
             adev0_rate              <= 32'd48000;
             adev0_period_bytes      <= 32'd4096;
@@ -345,6 +392,7 @@ module axil_reg_space #(
             global_reset_pulse       <= 1'b0;
             out_irq_top_status_w1c   <= 32'd0;
             out_vch0_irq_status_w1c  <= 4'd0;
+            out_vch1_irq_status_w1c  <= 4'd0;
             out_adev0_irq_status_w1c <= 2'd0;
             out_adev0_xrun_inject    <= 1'b0;
             if (s_axil_awvalid && s_axil_wvalid && !s_axil_bvalid) begin
@@ -400,6 +448,24 @@ module axil_reg_space #(
                                 out_vch0_irq_status_w1c <= s_axil_wdata[3:0];
                                 reg_irq_status_w1c[4]   <= s_axil_wdata[0];
                             end
+                            default: ;
+                        endcase
+                    end
+                    4'h2: begin // VIDEO CH1 Block (0x0200 - 0x02FF)
+                        case (s_axil_awaddr[7:0])
+                            8'h00: vch1_ctrl                    <= s_axil_wdata;
+                            8'h04: if (s_axil_wdata[31]) vch1_status[31] <= 1'b0;
+                            8'h08: vch1_width                   <= s_axil_wdata;
+                            8'h0C: vch1_height                  <= s_axil_wdata;
+                            8'h10: vch1_stride0                 <= s_axil_wdata;
+                            8'h14: vch1_stride1                 <= s_axil_wdata;
+                            8'h20: vch1_ring0_base[31:0]        <= s_axil_wdata; // CH1 Ring0 Base L
+                            8'h24: vch1_ring0_base[63:32]       <= s_axil_wdata; // CH1 Ring0 Base H
+                            8'h28: begin                                         // CH1 Ring0 Cfg
+                                vch1_ring0_size                 <= s_axil_wdata[15:0];
+                                vch1_ring0_tail                 <= s_axil_wdata[31:16];
+                            end
+                            8'h70: out_vch1_irq_status_w1c      <= s_axil_wdata[3:0];
                             default: ;
                         endcase
                     end
@@ -467,10 +533,6 @@ module axil_reg_space #(
                             8'h20: s_axil_rdata <= reg_global_timestamp[63:32];
                             8'h24: s_axil_rdata <= reg_irq_status;
                             8'h28: s_axil_rdata <= reg_dma_status;
-                            8'h30: s_axil_rdata <= VERSION_ID_VAL;      // Mirror for backward compatibility
-                            8'h34: s_axil_rdata <= GIT_COMMIT_HASH_VAL; // Mirror for backward compatibility
-                            8'h38: s_axil_rdata <= BUILD_TIMESTAMP_VAL; // Mirror for backward compatibility
-                            8'h3C: s_axil_rdata <= HARDWARE_CAPS_VAL;   // Mirror for backward compatibility
                             8'h74: s_axil_rdata <= reg_pacer_ctrl;
                             8'h78: s_axil_rdata <= reg_slice_height;
                             8'h7C: s_axil_rdata <= reg_frame_drop_count;
@@ -503,6 +565,24 @@ module axil_reg_space #(
                             8'h68: s_axil_rdata <= reg_last_video_pts[31:0];
                             8'h6C: s_axil_rdata <= reg_last_video_pts[63:32];
                             8'h70: s_axil_rdata <= {28'd0, in_vch0_irq_status};
+                            default: s_axil_rdata <= 32'd0;
+                        endcase
+                    end
+                    4'h2: begin // VIDEO CH1 Block (0x0200 - 0x02FF)
+                        case (s_axil_araddr[7:0])
+                            8'h00: s_axil_rdata <= vch1_ctrl;
+                            8'h04: s_axil_rdata <= vch1_status;
+                            8'h08: s_axil_rdata <= vch1_width;
+                            8'h0C: s_axil_rdata <= vch1_height;
+                            8'h10: s_axil_rdata <= vch1_stride0;
+                            8'h14: s_axil_rdata <= vch1_stride1;
+                            8'h20: s_axil_rdata <= vch1_ring0_base[31:0];
+                            8'h24: s_axil_rdata <= vch1_ring0_base[63:32];
+                            8'h28: s_axil_rdata <= {vch1_ring0_tail, vch1_ring0_size};
+                            8'h2C: s_axil_rdata <= {16'd0, in_vch1_ring0_head};
+                            8'h60: s_axil_rdata <= in_vch1_frame_count;
+                            8'h64: s_axil_rdata <= in_vch1_drop_count;
+                            8'h70: s_axil_rdata <= {28'd0, in_vch1_irq_status};
                             default: s_axil_rdata <= 32'd0;
                         endcase
                     end

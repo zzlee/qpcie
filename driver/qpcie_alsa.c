@@ -70,25 +70,17 @@ static int qpcie_alsa_cap_prepare(struct snd_pcm_substream *substream)
 
     ach->cap_buffer_pos = 0;
 
-    if (ach->channel_id == 0 && qdev->use_new_map) {
-        /* Phase 4 P4-2: New-map Audio DEV0 registers */
+    if (ach->channel_id == 0) {
+        /* Canonical v3.0 Audio DEV0 registers */
         iowrite32(lower_32_bits(dma_addr), qdev->bar0_mmio + REG_ADEV0_RING0_BASE_L);
         iowrite32(upper_32_bits(dma_addr), qdev->bar0_mmio + REG_ADEV0_RING0_BASE_H);
         iowrite32((u32)buffer_bytes,       qdev->bar0_mmio + REG_ADEV0_BUFFER_BYTES);
         iowrite32((u32)period_bytes,       qdev->bar0_mmio + REG_ADEV0_PERIOD_BYTES);
         iowrite32(rate,                    qdev->bar0_mmio + REG_ADEV0_RATE);
         dev_info(&qdev->pdev->dev,
-                 "[ALSA Ch0 New-Map Prepare] DMA=0x%llX, buffer=%zu, period=%zu, rate=%u\n",
+                 "[ALSA Ch0 Canonical] DMA=0x%llX, buffer=%zu, period=%zu, rate=%u\n",
                  (u64)dma_addr, buffer_bytes, period_bytes, rate);
     } else {
-        /* Legacy map: backward compatibility */
-        if (ach->channel_id == 0) {
-            iowrite32(lower_32_bits(dma_addr), qdev->bar0_mmio + REG_AUDIO_DMA_ADDR_L);
-            iowrite32(upper_32_bits(dma_addr), qdev->bar0_mmio + REG_AUDIO_DMA_ADDR_H);
-            iowrite32(((u32)period_bytes << 16) | ((u32)buffer_bytes & 0xFFFF),
-                      qdev->bar0_mmio + REG_AUDIO_DMA_CFG);
-        }
-
         /* Program channel-specific C2H DMA address and config (0x100..0x13C) */
         iowrite32(lower_32_bits(dma_addr), qdev->bar0_mmio + REG_AUDIO_DMA_ADDR_CH_L(ach->channel_id));
         iowrite32(upper_32_bits(dma_addr), qdev->bar0_mmio + REG_AUDIO_DMA_ADDR_CH_H(ach->channel_id));
@@ -108,18 +100,18 @@ static int qpcie_alsa_cap_trigger(struct snd_pcm_substream *substream, int cmd)
     struct qpcie_dev *qdev = ach->qdev;
     u32 ctrl;
 
-    if (ach->channel_id == 0 && qdev->use_new_map) {
-        /* Phase 4 P4-2: New-map — write ADEV0_CTRL, NEVER touch REG_DMA_CTRL */
+    if (ach->channel_id == 0) {
+        /* Canonical v3.0 — write ADEV0_CTRL, NEVER touch REG_DMA_CTRL */
         switch (cmd) {
         case SNDRV_PCM_TRIGGER_START:
             /* BIT(0)=enable, BIT(8)=irq_en */
             iowrite32(BIT(0) | BIT(8), qdev->bar0_mmio + REG_ADEV0_CTRL);
-            dev_info(&qdev->pdev->dev, "[ALSA Ch0 New-Map] Started (ADEV0_CTRL=0x%08X)\n",
+            dev_info(&qdev->pdev->dev, "[ALSA Ch0 Canonical] Started (ADEV0_CTRL=0x%08X)\n",
                      (u32)(BIT(0) | BIT(8)));
             break;
         case SNDRV_PCM_TRIGGER_STOP:
             iowrite32(0, qdev->bar0_mmio + REG_ADEV0_CTRL);
-            dev_info(&qdev->pdev->dev, "[ALSA Ch0 New-Map] Stopped\n");
+            dev_info(&qdev->pdev->dev, "[ALSA Ch0 Canonical] Stopped\n");
             break;
         default:
             return -EINVAL;
@@ -152,7 +144,7 @@ static snd_pcm_uframes_t qpcie_alsa_cap_pointer(struct snd_pcm_substream *substr
     u32 hw_pos;
     size_t buf_bytes = snd_pcm_lib_buffer_bytes(substream);
 
-    if (ach->channel_id == 0 && qdev->use_new_map)
+    if (ach->channel_id == 0)
         hw_pos = ioread32(qdev->bar0_mmio + REG_ADEV0_POSITION);
     else
         hw_pos = ioread32(qdev->bar0_mmio + REG_AUDIO_DMA_PTR_CH(ach->channel_id));
@@ -502,7 +494,7 @@ static const struct snd_kcontrol_new qpcie_alsa_controls[] = {
 int qpcie_alsa_init(struct qpcie_dev *qdev)
 {
     int i, ret;
-    u32 hw_caps = ioread32(qdev->bar0_mmio + (qdev->use_new_map ? REG_NEW_GLOBAL_CAPS : REG_HARDWARE_CAPS));
+    u32 hw_caps = ioread32(qdev->bar0_mmio + REG_NEW_GLOBAL_CAPS);
     unsigned int num_audio = (hw_caps >> 8) & 0x0f;
     if (num_audio == 0 || num_audio > NUM_AUDIO_CHANNELS)
         num_audio = NUM_AUDIO_CHANNELS;
@@ -614,10 +606,8 @@ void qpcie_alsa_remove(struct qpcie_dev *qdev)
 
     /* First, explicitly halt audio hardware DMA */
     if (qdev->bar0_mmio) {
-        if (qdev->use_new_map) {
-            iowrite32(0, qdev->bar0_mmio + REG_ADEV0_CTRL);
-            ioread32(qdev->bar0_mmio + REG_ADEV0_CTRL);
-        }
+        iowrite32(0, qdev->bar0_mmio + REG_ADEV0_CTRL);
+        ioread32(qdev->bar0_mmio + REG_ADEV0_CTRL);
         for (i = 0; i < qdev->alsa_channel_count; i++) {
             u32 ctrl = ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
             iowrite32(ctrl & ~DMA_CTRL_AUDIO_RUN_CH(i), qdev->bar0_mmio + REG_DMA_CTRL);
@@ -648,8 +638,8 @@ void qpcie_alsa_irq_handler(struct qpcie_dev *qdev, u32 status)
     for (i = 0; i < qdev->alsa_channel_count; i++) {
         struct qpcie_alsa_channel *ach = &qdev->alsa_ch[i];
 
-        if (i == 0 && qdev->use_new_map) {
-            /* Phase 4 P4-2: Handle via REG_ADEV0_IRQ_STATUS */
+        if (i == 0) {
+            /* Canonical v3.0: Handle via REG_ADEV0_IRQ_STATUS */
             u32 adev_irq = ioread32(qdev->bar0_mmio + REG_ADEV0_IRQ_STATUS);
             if (!adev_irq)
                 continue;

@@ -77,7 +77,7 @@ module desc_fetch_engine (
             desc_req_valid      <= 1'b0;
             desc_req_addr       <= 64'd0;
             desc_req_dw_len     <= 11'd16; // 64 Bytes (16 DWs)
-            desc_req_tag        <= 8'h00;  // Tag 0 reserved for Descriptor Fetch
+            desc_req_tag        <= 8'h20;  // Tag 0x20 dedicated for Channel 1 Descriptor Fetch
             h2c_desc_valid      <= 1'b0;
             h2c_plane0_src      <= 64'd0; h2c_plane0_dst <= 64'd0;
             h2c_plane1_src      <= 64'd0; h2c_plane1_dst <= 64'd0;

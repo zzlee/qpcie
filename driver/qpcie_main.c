@@ -12,7 +12,7 @@
 
 void qpcie_dma_soft_reset(struct qpcie_dev *qdev)
 {
-    u32 ctrl_base = qdev->use_new_map ? BIT(3) : 0;
+    u32 ctrl_base = BIT(3);
     iowrite32(ctrl_base | DMA_CTRL_RESET, qdev->bar0_mmio + REG_DMA_CTRL);
     ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
     usleep_range(1000, 2000);
@@ -25,100 +25,62 @@ static irqreturn_t qpcie_irq_handler(int irq, void *data)
 {
     struct qpcie_dev *qdev = data;
 
-    if (qdev->use_new_map) {
-        /* Phase 4: Three-Level Hierarchy Interrupt Dispatch */
-        u32 top = ioread32(qdev->bar0_mmio + REG_NEW_GLOBAL_IRQ_TOP);
+    /* Canonical v3.0 Three-Level Hierarchy Interrupt Dispatch */
+    u32 top = ioread32(qdev->bar0_mmio + REG_NEW_GLOBAL_IRQ_TOP);
 
-        if (!top)
-            return IRQ_NONE;
-
-        /* Level 3 Dispatch: Video CH0 (Bit 0) */
-        if (top & BIT(0)) {
-            u32 ch_irq = ioread32(qdev->bar0_mmio + REG_VCH0_IRQ_STATUS);
-            if (ch_irq & BIT(0)) {
-                /* Frame done completion */
-                if (qdev->v4l2_registered)
-                    qpcie_v4l2_node_done(qdev, 0);
-            }
-            if (ch_irq & BIT(1))
-                dev_warn_ratelimited(&qdev->pdev->dev, "VCH0 overflow IRQ detected\n");
-            if (ch_irq & BIT(2))
-                dev_err_ratelimited(&qdev->pdev->dev, "VCH0 descriptor error IRQ detected\n");
-            if (ch_irq & BIT(3))
-                dev_err_ratelimited(&qdev->pdev->dev, "VCH0 FIFO error IRQ detected\n");
-
-            /* Step 1: Clear branch / channel status first (W1C) */
-            iowrite32(ch_irq, qdev->bar0_mmio + REG_VCH0_IRQ_STATUS);
-        }
-
-        /* Level 3 Dispatch: Video CH1 Capture (Bit 1) */
-        if ((top & BIT(1)) && qdev->v4l2_registered)
-            qpcie_v4l2_node_done(qdev, 2);
-
-        /* Level 3 Dispatch: Audio DEV0 (Bit 4: AUD) */
-        if ((top & IRQ_TOP_AUD) && qdev->alsa_registered)
-            qpcie_alsa_irq_handler(qdev, 0);
-
-        /* Bit 5 (ERR): xrun events are dispatched inside the ALSA handler via ADEV0_IRQ_STATUS */
-        if ((top & IRQ_TOP_ERR) && qdev->alsa_registered)
-            qpcie_alsa_irq_handler(qdev, 0);
-
-        /* Level 3 Dispatch: H2C DMA (Bit 7: Video Node 1) */
-        if ((top & BIT(7)) && qdev->v4l2_registered)
-            qpcie_v4l2_node_done(qdev, 1);
-
-        /* Step 2: Clear Level 2 TOP status (W1C) */
-        iowrite32(top, qdev->bar0_mmio + REG_NEW_GLOBAL_IRQ_TOP);
-        return IRQ_HANDLED;
-    }
-
-    /* Legacy Map Interrupt Dispatch */
-    u32 status = ioread32(qdev->bar0_mmio + REG_IRQ_STATUS);
-
-    if (!(status & IRQ_STATUS_ALL_MASK))
+    if (!top)
         return IRQ_NONE;
 
-    /* Pass completion interrupts to V4L2 handler */
-    if (qdev->v4l2_registered && (status & (IRQ_STATUS_CHANNEL_MASK | IRQ_STATUS_H2C_GLOBAL | IRQ_STATUS_C2H_GLOBAL)))
-        qpcie_v4l2_irq_handler(qdev);
+    /* Level 3 Dispatch: Video CH0 (Bit 0) */
+    if (top & BIT(0)) {
+        u32 ch_irq = ioread32(qdev->bar0_mmio + REG_VCH0_IRQ_STATUS);
+        if (ch_irq & BIT(0)) {
+            /* Frame done completion */
+            if (qdev->v4l2_registered)
+                qpcie_v4l2_node_done(qdev, 0);
+        }
+        if (ch_irq & BIT(1))
+            dev_warn_ratelimited(&qdev->pdev->dev, "VCH0 overflow IRQ detected\n");
+        if (ch_irq & BIT(2))
+            dev_err_ratelimited(&qdev->pdev->dev, "VCH0 descriptor error IRQ detected\n");
+        if (ch_irq & BIT(3))
+            dev_err_ratelimited(&qdev->pdev->dev, "VCH0 FIFO error IRQ detected\n");
 
-    /* Pass completion interrupts to ALSA handler */
-    if (qdev->alsa_registered && (status & IRQ_STATUS_AUDIO_MASK))
-        qpcie_alsa_irq_handler(qdev, status);
-
-    iowrite32(status & IRQ_STATUS_ALL_MASK, qdev->bar0_mmio + REG_IRQ_STATUS);
-    return IRQ_HANDLED;
-}
-
-static int qpcie_wait_dma(struct qpcie_dev *qdev, u32 count_reg, u32 target)
-{
-    int retry;
-
-    for (retry = 0; retry < 500; retry++) {
-        u32 count = ioread32(qdev->bar0_mmio + count_reg);
-        u32 status = ioread32(qdev->bar0_mmio + REG_DMA_STATUS);
-        if (count >= target && !(status & 0x00000c00))
-            return 0;
-        usleep_range(1000, 2000);
+        /* Step 1: Clear branch / channel status first (W1C) */
+        iowrite32(ch_irq, qdev->bar0_mmio + REG_VCH0_IRQ_STATUS);
     }
-    return -ETIMEDOUT;
-}
 
-static void qpcie_dump_dma_state(struct qpcie_dev *qdev, const char *phase)
-{
-    u32 status = ioread32(qdev->bar0_mmio + REG_DMA_STATUS);
-    u32 h2c = ioread32(qdev->bar0_mmio + REG_COMPLETED_H2C);
-    u32 c2h = ioread32(qdev->bar0_mmio + REG_COMPLETED_C2H);
-    u32 hptr = ioread32(qdev->bar0_mmio + 0x40);
-    u32 hcfg = ioread32(qdev->bar0_mmio + REG_H2C_RING_CFG);
-    u32 rlo = ioread32(qdev->bar0_mmio + REG_H2C_RING_ADDR_L);
-    u32 rhi = ioread32(qdev->bar0_mmio + REG_H2C_RING_ADDR_H);
+    /* Level 3 Dispatch: Video CH1 Capture (Bit 1) */
+    if (top & BIT(1)) {
+        u32 ch_irq = ioread32(qdev->bar0_mmio + REG_VCH_BASE(1) + REG_VCH_OFFSET_IRQ_STATUS);
+        if (ch_irq & BIT(0)) {
+            if (qdev->v4l2_registered)
+                qpcie_v4l2_node_done(qdev, 2);
+        }
+        if (ch_irq & BIT(1))
+            dev_warn_ratelimited(&qdev->pdev->dev, "VCH1 overflow IRQ detected\n");
+        if (ch_irq & BIT(2))
+            dev_err_ratelimited(&qdev->pdev->dev, "VCH1 descriptor error IRQ detected\n");
+        if (ch_irq & BIT(3))
+            dev_err_ratelimited(&qdev->pdev->dev, "VCH1 FIFO error IRQ detected\n");
+        iowrite32(ch_irq, qdev->bar0_mmio + REG_VCH_BASE(1) + REG_VCH_OFFSET_IRQ_STATUS);
+    }
 
-    dev_err(&qdev->pdev->dev,
-            "[%s] DMA_STATUS=0x%08X H2C_DONE=%u C2H_DONE=%u "
-            "RING=0x%08X%08X CFG(size=%u tail=%u) PTR(head=%u tail=%u)\n",
-            phase, status, h2c, c2h, rhi, rlo,
-            hcfg & 0xffff, hcfg >> 16, hptr & 0xffff, hptr >> 16);
+    /* Level 3 Dispatch: Audio DEV0 (Bit 4: AUD) */
+    if ((top & IRQ_TOP_AUD) && qdev->alsa_registered)
+        qpcie_alsa_irq_handler(qdev, 0);
+
+    /* Bit 5 (ERR): xrun events are dispatched inside the ALSA handler via ADEV0_IRQ_STATUS */
+    if ((top & IRQ_TOP_ERR) && qdev->alsa_registered)
+        qpcie_alsa_irq_handler(qdev, 0);
+
+    /* Level 3 Dispatch: H2C DMA (Bit 7: Video Node 1) */
+    if ((top & BIT(7)) && qdev->v4l2_registered)
+        qpcie_v4l2_node_done(qdev, 1);
+
+    /* Step 2: Clear Level 2 TOP status (W1C) */
+    iowrite32(top, qdev->bar0_mmio + REG_NEW_GLOBAL_IRQ_TOP);
+    return IRQ_HANDLED;
 }
 
 static const struct pci_device_id qpcie_id_table[] = {
@@ -131,36 +93,15 @@ static int sg_fetch_mode = QPCIE_SG_MODE_HOST_FETCH;
 module_param(sg_fetch_mode, int, 0644);
 MODULE_PARM_DESC(sg_fetch_mode, "Scatter-Gather Page Table Fetch Mode (1: MMIO BRAM, 2: Active Host MRd Fetch)");
 
-static int rgb24_only;
-module_param(rgb24_only, int, 0444);
-MODULE_PARM_DESC(rgb24_only,
-                 "Force RGB24-only mode (1): skip the format-0 C2H SG diagnostic "
-                 "for QPCIe_single_rgb24_path bitstreams");
-
-static int use_new_map = 1;
-module_param(use_new_map, int, 0644);
-MODULE_PARM_DESC(use_new_map,
-                 "Use new canonical register map and thin descriptor ring (0=legacy, 1=new, -1=auto)");
-
 static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
     struct qpcie_dev *qdev;
-    struct qpcie_dma_desc_64b *desc_ring;
-    dma_addr_t desc_ring_dma;
-    dma_addr_t h2c_page_dma[SG_PAGES] = { 0 };
-    dma_addr_t c2h_page_dma[SG_PAGES] = { 0 };
-    u32 *h2c_pages[SG_PAGES] = { NULL };
-    u32 *c2h_pages[SG_PAGES] = { NULL };
-    int ret, p, w, i;
-    u32 ver, git, date, caps, ctrl, stat, readback;
+    int ret, i;
+    u32 magic, ver, git, date, caps, ctrl, readback;
     u32 dbg_wdata, dbg_waddr;
-    u32 ring_head, c2h_tail, h2c_tail;
-    u32 start_c2h, start_h2c;
-    u32 dma_stat, comp_c2h, comp_h2c, ptr_dbg;
-    bool single_rgb24 = false;
 
     dev_info(&pdev->dev, "=======================================================\n");
-    dev_info(&pdev->dev, "=== [MINIMAL DIAGNOSTIC MODE] QPCIe BAR MMIO Test ===\n");
+    dev_info(&pdev->dev, "=== [CANONICAL v3.0 MODE] QPCIe Artix-7 A50T Probe ===\n");
     dev_info(&pdev->dev, "=======================================================\n");
 
     qdev = devm_kzalloc(&pdev->dev, sizeof(*qdev), GFP_KERNEL);
@@ -276,80 +217,49 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
      * ------------------------------------------------------------------------ */
     dev_info(&pdev->dev, "--- [1. BAR0 Register Read Tests] ---\n");
 
-    u32 magic = ioread32(qdev->bar0_mmio + REG_NEW_GLOBAL_ID);
-    if (magic == 0x12ABE380) {
-        ver = ioread32(qdev->bar0_mmio + REG_NEW_GLOBAL_VERSION);
-        git = ioread32(qdev->bar0_mmio + REG_NEW_GLOBAL_GITHASH);
-        date = ioread32(qdev->bar0_mmio + REG_NEW_GLOBAL_BUILDTIME);
-        caps = ioread32(qdev->bar0_mmio + REG_NEW_GLOBAL_CAPS);
-        ctrl = magic;
-        stat = ioread32(qdev->bar0_mmio + REG_NEW_GLOBAL_DMA_STATUS);
-        dev_info(&pdev->dev, "  BAR0 [0x00] Magic Device ID: 0x%08X (Canonical v3.0 Map Active)\n", magic);
-    } else {
-        ver = ioread32(qdev->bar0_mmio + REG_VERSION_ID);
-        git = ioread32(qdev->bar0_mmio + REG_GIT_COMMIT_HASH);
-        date = ioread32(qdev->bar0_mmio + REG_BUILD_TIMESTAMP);
-        caps = ioread32(qdev->bar0_mmio + REG_HARDWARE_CAPS);
-        ctrl = ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
-        stat = ioread32(qdev->bar0_mmio + REG_DMA_STATUS);
-        dev_info(&pdev->dev, "  BAR0 [0x00] DMA Control    : 0x%08X\n", ctrl);
+    magic = ioread32(qdev->bar0_mmio + REG_NEW_GLOBAL_ID);
+    if (magic != 0x12ABE380) {
+        dev_err(&pdev->dev, "[ERROR] Canonical v3.0 Magic ID mismatch: 0x%08X (expected 0x12ABE380)\n", magic);
+        ret = -ENODEV;
+        goto unmap_mmio;
     }
 
+    ver = ioread32(qdev->bar0_mmio + REG_NEW_GLOBAL_VERSION);
+    git = ioread32(qdev->bar0_mmio + REG_NEW_GLOBAL_GITHASH);
+    date = ioread32(qdev->bar0_mmio + REG_NEW_GLOBAL_BUILDTIME);
+    caps = ioread32(qdev->bar0_mmio + REG_NEW_GLOBAL_CAPS);
+    ctrl = magic;
+
+    dev_info(&pdev->dev, "  BAR0 [0x00] Magic Device ID: 0x%08X (Canonical v3.0 Map Active)\n", magic);
     dev_info(&pdev->dev, "  BAR0 Version ID     : 0x%08X (Parsed: v%u.%u.%u Variant %u)\n",
              ver, (ver >> 24) & 0xFF, (ver >> 16) & 0xFF, (ver >> 8) & 0xFF, ver & 0xFF);
     dev_info(&pdev->dev, "  BAR0 Git Commit Hash: 0x%08X\n", git);
     dev_info(&pdev->dev, "  BAR0 Build Timestamp: %08X\n", date);
     dev_info(&pdev->dev, "  BAR0 Hardware Caps  : 0x%08X (VideoCh=%u, AudioCh=%u, Flags=0x%X)\n",
              caps, (caps >> 8) & 0xFF, (caps >> 16) & 0xFF, caps & 0xFF);
-    dev_info(&pdev->dev, "  BAR0 DMA Status     : 0x%08X\n", stat);
-
-    single_rgb24 = rgb24_only || (((caps >> 8) & 0xFF) == 1);
-    if (single_rgb24)
-        dev_info(&pdev->dev,
-                 "  [Single-path RGB24 build] format-0 C2H SG diagnostic will be skipped\n");
 
     /* ------------------------------------------------------------------------
      * 2. BAR0 Write & Read-back Test
      * ------------------------------------------------------------------------ */
     dev_info(&pdev->dev, "--- [2. BAR0 Write & Readback Test] ---\n");
 
-    if (magic == 0x12ABE380 || (ver >> 24) >= 3) {
-        iowrite32(0x12345678, qdev->bar0_mmio + REG_VCH0_RING0_BASE_L); // offset 0x120
-        readback = ioread32(qdev->bar0_mmio + REG_VCH0_RING0_BASE_L);
-        dbg_wdata = ioread32(qdev->bar0_mmio + REG_NEW_DEBUG_LAST_WDATA);
-        dbg_waddr = ioread32(qdev->bar0_mmio + REG_NEW_DEBUG_LAST_WADDR);
-        dev_info(&pdev->dev, "  BAR0 [0x120] Write 0x12345678 -> Readback: 0x%08X %s (Hardware Captured: Addr=0x%03X, Data=0x%08X)\n",
-                 readback, (readback == 0x12345678) ? "[PASS]" : "[FAIL]", dbg_waddr, dbg_wdata);
+    iowrite32(0x12345678, qdev->bar0_mmio + REG_VCH0_RING0_BASE_L); // offset 0x120
+    readback = ioread32(qdev->bar0_mmio + REG_VCH0_RING0_BASE_L);
+    dbg_wdata = ioread32(qdev->bar0_mmio + REG_NEW_DEBUG_LAST_WDATA);
+    dbg_waddr = ioread32(qdev->bar0_mmio + REG_NEW_DEBUG_LAST_WADDR);
+    dev_info(&pdev->dev, "  BAR0 [0x120] Write 0x12345678 -> Readback: 0x%08X %s (Hardware Captured: Addr=0x%03X, Data=0x%08X)\n",
+             readback, (readback == 0x12345678) ? "[PASS]" : "[FAIL]", dbg_waddr, dbg_wdata);
 
-        iowrite32(0x87654321, qdev->bar0_mmio + REG_VCH0_RING0_BASE_H); // offset 0x124
-        readback = ioread32(qdev->bar0_mmio + REG_VCH0_RING0_BASE_H);
-        dbg_wdata = ioread32(qdev->bar0_mmio + REG_NEW_DEBUG_LAST_WDATA);
-        dbg_waddr = ioread32(qdev->bar0_mmio + REG_NEW_DEBUG_LAST_WADDR);
-        dev_info(&pdev->dev, "  BAR0 [0x124] Write 0x87654321 -> Readback: 0x%08X %s (Hardware Captured: Addr=0x%03X, Data=0x%08X)\n",
-                 readback, (readback == 0x87654321) ? "[PASS]" : "[FAIL]", dbg_waddr, dbg_wdata);
+    iowrite32(0x87654321, qdev->bar0_mmio + REG_VCH0_RING0_BASE_H); // offset 0x124
+    readback = ioread32(qdev->bar0_mmio + REG_VCH0_RING0_BASE_H);
+    dbg_wdata = ioread32(qdev->bar0_mmio + REG_NEW_DEBUG_LAST_WDATA);
+    dbg_waddr = ioread32(qdev->bar0_mmio + REG_NEW_DEBUG_LAST_WADDR);
+    dev_info(&pdev->dev, "  BAR0 [0x124] Write 0x87654321 -> Readback: 0x%08X %s (Hardware Captured: Addr=0x%03X, Data=0x%08X)\n",
+             readback, (readback == 0x87654321) ? "[PASS]" : "[FAIL]", dbg_waddr, dbg_wdata);
 
-        /* Restore zero values */
-        iowrite32(0x00000000, qdev->bar0_mmio + REG_VCH0_RING0_BASE_L);
-        iowrite32(0x00000000, qdev->bar0_mmio + REG_VCH0_RING0_BASE_H);
-    } else {
-        iowrite32(0x12345678, qdev->bar0_mmio + REG_H2C_RING_ADDR_L); // offset 0x08
-        readback = ioread32(qdev->bar0_mmio + REG_H2C_RING_ADDR_L);
-        dbg_wdata = ioread32(qdev->bar0_mmio + 0x68);
-        dbg_waddr = ioread32(qdev->bar0_mmio + 0x6C);
-        dev_info(&pdev->dev, "  BAR0 [0x08] Write 0x12345678 -> Readback: 0x%08X %s (Hardware Captured: Addr=0x%02X, Data=0x%08X)\n",
-                 readback, (readback == 0x12345678) ? "[PASS]" : "[FAIL]", dbg_waddr, dbg_wdata);
-
-        iowrite32(0x87654321, qdev->bar0_mmio + REG_C2H_RING_ADDR_L); // offset 0x14
-        readback = ioread32(qdev->bar0_mmio + REG_C2H_RING_ADDR_L);
-        dbg_wdata = ioread32(qdev->bar0_mmio + 0x68);
-        dbg_waddr = ioread32(qdev->bar0_mmio + 0x6C);
-        dev_info(&pdev->dev, "  BAR0 [0x14] Write 0x87654321 -> Readback: 0x%08X %s (Hardware Captured: Addr=0x%02X, Data=0x%08X)\n",
-                 readback, (readback == 0x87654321) ? "[PASS]" : "[FAIL]", dbg_waddr, dbg_wdata);
-
-        /* Restore zero values */
-        iowrite32(0x00000000, qdev->bar0_mmio + REG_H2C_RING_ADDR_L);
-        iowrite32(0x00000000, qdev->bar0_mmio + REG_C2H_RING_ADDR_L);
-    }
+    /* Restore zero values */
+    iowrite32(0x00000000, qdev->bar0_mmio + REG_VCH0_RING0_BASE_L);
+    iowrite32(0x00000000, qdev->bar0_mmio + REG_VCH0_RING0_BASE_H);
 
     /* Enable Bus Mastering and configure 64-bit DMA Mask */
     ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
@@ -381,383 +291,109 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
     }
     iowrite32(0x3, qdev->bar0_mmio + REG_IRQ_CTRL);
 
-    /* Phase 5/6: Auto-detect Register Map from Version ID, Caps, and Magic ID */
-    bool should_use_new_map = false;
-    if (use_new_map == 1) {
-        should_use_new_map = true;
-    } else if (use_new_map == -1) {
-        if (magic == 0x12ABE380 || (((ver >> 24) >= 3) && (caps & BIT(4))))
-            should_use_new_map = true;
-    }
+    /* ------------------------------------------------------------------------
+     * 3. Canonical v3.0 Native Mode: Thin Descriptor Ring Initialization
+     * ------------------------------------------------------------------------ */
+    dev_info(&pdev->dev, "--- [3. Canonical v3.0 Native Mode: Thin Descriptors Active] ---\n");
 
-    if (should_use_new_map) {
-        dev_info(&pdev->dev, "--- [3. Canonical v3.0 DMA Mode: Thin Descriptors Active (Legacy 64B SG Diagnostic Bypassed)] ---\n");
-    } else {
-        /* --------------------------------------------------------------------
-         * 3. Scatter-Gather (SG List) DMA Verification: 4x H2C + 4x C2H Pages
-         * -------------------------------------------------------------------- */
-        dev_info(&pdev->dev, "--- [3. Scatter-Gather (SG List) DMA Verification] ---\n");
+    /* Switch hardware to Canonical v3.0 mode via DMA_CTRL[3] */
+    ctrl = ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
+    iowrite32(ctrl | BIT(3), qdev->bar0_mmio + REG_DMA_CTRL);
 
-        desc_ring = dma_alloc_coherent(&pdev->dev, 64 * 16,
-                                       &desc_ring_dma, GFP_KERNEL);
-
-        if (!desc_ring) {
-            dev_err(&pdev->dev, "[ERROR] dma_alloc_coherent failed for Descriptor Ring!\n");
+    {
+        struct qpcie_v4l2_channel *vch0 = &qdev->v4l2_ch[0];
+        vch0->ch_reg_base = REG_VCH_BASE(0);
+        vch0->thin_ring_virt = dma_alloc_coherent(&pdev->dev,
+                                sizeof(*vch0->thin_ring_virt) * RING_BUFFER_SIZE,
+                                &vch0->thin_ring_dma, GFP_KERNEL);
+        if (!vch0->thin_ring_virt) {
+            dev_err(&pdev->dev, "[ERROR] Cannot allocate thin descriptor ring 0 for CH0\n");
             ret = -ENOMEM;
-        } else {
-            memset(desc_ring, 0, 64 * 16);
-            dev_info(&pdev->dev, "  Allocated Coherent Ring: Phys=0x%llX (Virt=%p)\n", (u64)desc_ring_dma, desc_ring);
-
-            for (p = 0; p < SG_PAGES; p++) {
-                h2c_pages[p] = dma_alloc_coherent(&pdev->dev, 4096, &h2c_page_dma[p], GFP_KERNEL);
-                c2h_pages[p] = dma_alloc_coherent(&pdev->dev, 4096, &c2h_page_dma[p], GFP_KERNEL);
-                if (!h2c_pages[p] || !c2h_pages[p]) {
-                    dev_err(&pdev->dev, "[ERROR] SG page allocation %d failed\n", p);
-                    ret = -ENOMEM;
-                    goto free_diag_dma;
-                }
-                for (w = 0; w < 1024; w++)
-                    h2c_pages[p][w] = 0xAA000000 | (p << 16) | w;
-                memset(c2h_pages[p], 0x00, 4096);
-                dev_info(&pdev->dev, "  [SG Page %d] H2C Phys=0x%llX (Pattern: 0x%08X), C2H Phys=0x%llX\n",
-                         p, (u64)h2c_page_dma[p], h2c_pages[p] ? h2c_pages[p][0] : 0, (u64)c2h_page_dma[p]);
-            }
-
-            /* The FPGA head pointer and completion counters persist across Linux
-             * module reloads. Anchor this fresh coherent ring at the current head;
-             * programming an absolute tail of 4 on a retained head of 8 would make
-             * hardware consume uninitialized descriptors 8..15 and DMA to IOVA 0. */
-            ring_head = ioread32(qdev->bar0_mmio + 0x40) & 0xffff;
-            if (ring_head >= RING_BUFFER_SIZE) {
-                dev_err(&pdev->dev, "[ERROR] Invalid retained descriptor head %u\n",
-                        ring_head);
-                ret = -EIO;
-                goto free_diag_dma;
-            }
-            c2h_tail = (ring_head + SG_PAGES) % RING_BUFFER_SIZE;
-            h2c_tail = single_rgb24 ? c2h_tail
-                                    : (ring_head + (2 * SG_PAGES)) % RING_BUFFER_SIZE;
-            start_c2h = ioread32(qdev->bar0_mmio + REG_COMPLETED_C2H);
-            start_h2c = ioread32(qdev->bar0_mmio + REG_COMPLETED_H2C);
-            dev_info(&pdev->dev,
-                     "  Retained DMA state: Head=%u, C2HCount=%u, H2CCount=%u\n",
-                     ring_head, start_c2h, start_h2c);
-
-            for (p = 0; p < SG_PAGES; p++) {
-                if (single_rgb24) {
-                    u32 h2c_idx = (ring_head + p) % RING_BUFFER_SIZE;
-
-                    desc_ring[h2c_idx].plane0_src_addr = (u64)h2c_page_dma[p];
-                    desc_ring[h2c_idx].plane0_dst_addr = 0x0ULL;
-                    desc_ring[h2c_idx].line_width      = 4096;
-                    desc_ring[h2c_idx].line_count      = 1;
-                    desc_ring[h2c_idx].src_stride      = 4096;
-                    desc_ring[h2c_idx].dst_stride      = 4096;
-                    desc_ring[h2c_idx].format          = 0;
-                    desc_ring[h2c_idx].plane_count     = 1;
-                    desc_ring[h2c_idx].control         = 0x00; /* H2C */
-                } else {
-                    u32 c2h_idx = (ring_head + p) % RING_BUFFER_SIZE;
-                    u32 h2c_idx = (ring_head + SG_PAGES + p) % RING_BUFFER_SIZE;
-
-                    desc_ring[c2h_idx].plane0_src_addr = 0x0ULL;
-                    desc_ring[c2h_idx].plane0_dst_addr = (u64)c2h_page_dma[p];
-                    desc_ring[c2h_idx].line_width      = 4096;
-                    desc_ring[c2h_idx].line_count      = 1;
-                    desc_ring[c2h_idx].src_stride      = 4096;
-                    desc_ring[c2h_idx].dst_stride      = 4096;
-                    desc_ring[c2h_idx].format          = 0;
-                    desc_ring[c2h_idx].plane_count     = 1;
-                    desc_ring[c2h_idx].control         = 0x02; /* C2H */
-
-                    desc_ring[h2c_idx].plane0_src_addr = (u64)h2c_page_dma[p];
-                    desc_ring[h2c_idx].plane0_dst_addr = 0x0ULL;
-                    desc_ring[h2c_idx].line_width      = 4096;
-                    desc_ring[h2c_idx].line_count      = 1;
-                    desc_ring[h2c_idx].src_stride      = 4096;
-                    desc_ring[h2c_idx].dst_stride      = 4096;
-                    desc_ring[h2c_idx].format          = 0;
-                    desc_ring[h2c_idx].plane_count     = 1;
-                    desc_ring[h2c_idx].control         = 0x00; /* H2C */
-                }
-            }
-
-            /* Flush all descriptor writes to memory before informing hardware */
-            dma_wmb();
-
-            /* Program Ring Base Address into BAR0 0x08 (Low) and 0x0C (High) */
-            iowrite32((u32)(desc_ring_dma & 0xFFFFFFFF), qdev->bar0_mmio + REG_H2C_RING_ADDR_L);
-            iowrite32((u32)((desc_ring_dma >> 32) & 0xFFFFFFFF), qdev->bar0_mmio + REG_H2C_RING_ADDR_H);
-
-            if (single_rgb24) {
-                /* RGB24-only build: the format-0 SG C2H engine is disabled in
-                 * hardware, so validate the intact H2C read path directly. */
-                iowrite32((h2c_tail << 16) | RING_BUFFER_SIZE,
-                          qdev->bar0_mmio + REG_H2C_RING_CFG);
-
-                /* Trigger DMA Start */
-                iowrite32(0x00000001, qdev->bar0_mmio + REG_DMA_CTRL);
-                dev_info(&pdev->dev, "--- [3.1 Step 1: H2C 4-Page SG List DMA Read Test] ---\n");
-                dev_info(&pdev->dev,
-                         "  Triggered H2C SG Run (Head=%u, Tail=%u, Size=%u)...\n",
-                         ring_head, h2c_tail, RING_BUFFER_SIZE);
-                goto h2c_diag_wait;
-            }
-
-            /* Publish exactly four C2H descriptors after the retained head. */
-            iowrite32((c2h_tail << 16) | RING_BUFFER_SIZE,
-                      qdev->bar0_mmio + REG_H2C_RING_CFG);
-
-            /* Trigger DMA Start */
-            iowrite32(0x00000001, qdev->bar0_mmio + REG_DMA_CTRL);
-            dev_info(&pdev->dev, "--- [3.1 Step 1: C2H 4-Page SG List DMA Write Test] ---\n");
-            dev_info(&pdev->dev,
-                     "  Triggered C2H SG Run (Head=%u, Tail=%u, Size=%u)...\n",
-                     ring_head, c2h_tail, RING_BUFFER_SIZE);
-            ret = qpcie_wait_dma(qdev, REG_COMPLETED_C2H, start_c2h + 4);
-            if (ret) {
-                dev_err(&pdev->dev, "[ERROR] C2H diagnostic DMA timed out\n");
-                qpcie_dump_dma_state(qdev, "C2H timeout");
-                goto stop_diag_dma;
-            }
-
-            dma_stat = ioread32(qdev->bar0_mmio + REG_DMA_STATUS);
-            comp_c2h = ioread32(qdev->bar0_mmio + REG_COMPLETED_C2H);
-            ptr_dbg  = ioread32(qdev->bar0_mmio + 0x40);
-            dev_info(&pdev->dev, "  C2H SG Status: DMA_STATUS=0x%08X, Completed Count=%u, Pointers: Tail=%u, Head=%u\n",
-                     dma_stat, comp_c2h, (ptr_dbg >> 16) & 0xFFFF, ptr_dbg & 0xFFFF);
-            if (comp_c2h != start_c2h + SG_PAGES ||
-                (ptr_dbg & 0xffff) != c2h_tail) {
-                dev_err(&pdev->dev,
-                        "[ERROR] C2H consumed an unexpected descriptor count/head\n");
-                ret = -EIO;
-                goto stop_diag_dma;
-            }
-
-            dma_rmb();
-            for (p = 0; p < SG_PAGES; p++) {
-                for (w = 0; w < 1024; w++) {
-                    u32 expected = 0xC2000000 |
-                        (((start_c2h + p) & 0xff) << 16) | w;
-                    if (c2h_pages[p][w] != expected) {
-                        dev_err(&pdev->dev,
-                                "[ERROR] C2H data mismatch page=%d word=%d: got=0x%08X expected=0x%08X\n",
-                                p, w, c2h_pages[p][w], expected);
-                        ret = -EIO;
-                        goto stop_diag_dma;
-                    }
-                }
-            }
-            dev_info(&pdev->dev,
-                     "  C2H payload validation: 4 pages x 4096 bytes [PASS]\n");
-
-            /* Advance tail by four more entries for the H2C descriptors. */
-            dev_info(&pdev->dev, "--- [3.2 Step 2: H2C 4-Page SG List DMA Read Test] ---\n");
-            iowrite32((h2c_tail << 16) | RING_BUFFER_SIZE,
-                      qdev->bar0_mmio + REG_H2C_RING_CFG);
-            dev_info(&pdev->dev,
-                     "  Triggered H2C SG Run (Head=%u, Tail=%u, Size=%u)...\n",
-                     c2h_tail, h2c_tail, RING_BUFFER_SIZE);
-
-h2c_diag_wait:
-            ret = qpcie_wait_dma(qdev, REG_COMPLETED_H2C, start_h2c + 4);
-            if (ret) {
-                dev_err(&pdev->dev, "[ERROR] H2C diagnostic DMA timed out\n");
-                qpcie_dump_dma_state(qdev, "H2C timeout");
-                goto stop_diag_dma;
-            }
-
-            dma_stat = ioread32(qdev->bar0_mmio + REG_DMA_STATUS);
-            comp_h2c = ioread32(qdev->bar0_mmio + REG_COMPLETED_H2C);
-            ptr_dbg  = ioread32(qdev->bar0_mmio + 0x40);
-            dev_info(&pdev->dev, "  H2C SG Status: DMA_STATUS=0x%08X, Completed Count=%u, Pointers: Tail=%u, Head=%u\n",
-                     dma_stat, comp_h2c, (ptr_dbg >> 16) & 0xFFFF, ptr_dbg & 0xFFFF);
-            if (comp_h2c != start_h2c + SG_PAGES ||
-                (ptr_dbg & 0xffff) != h2c_tail) {
-                dev_err(&pdev->dev,
-                        "[ERROR] H2C consumed an unexpected descriptor count/head\n");
-                ret = -EIO;
-                goto stop_diag_dma;
-            }
-
-            /* Ensure CPU observes all DMA writes from FPGA */
-            dma_rmb();
-
-            dev_info(&pdev->dev,
-                     "  H2C payload validation: 4 pages x 4096 bytes [PASS]\n");
-
-            /* Inspect C2H pages */
-            if (!single_rgb24) {
-                for (p = 0; p < SG_PAGES; p++) {
-                    if (c2h_pages[p]) {
-                        dev_info(&pdev->dev, "  C2H Page %d Content: [0]=0x%08X, [1]=0x%08X, [2]=0x%08X, [3]=0x%08X\n",
-                                 p, c2h_pages[p][0], c2h_pages[p][1], c2h_pages[p][2], c2h_pages[p][3]);
-                    }
-                }
-            }
-
-stop_diag_dma:
-            iowrite32(0, qdev->bar0_mmio + REG_DMA_CTRL);
-            ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
-            if (ret)
-                pci_clear_master(pdev);
-            msleep(20);
-            iowrite32(1, qdev->bar0_mmio + REG_VIDEO_CTRL);
-            ioread32(qdev->bar0_mmio + REG_VIDEO_CTRL);
-            qpcie_dma_soft_reset(qdev);
-            iowrite32(0, qdev->bar0_mmio + REG_VIDEO_CTRL);
-            ioread32(qdev->bar0_mmio + REG_VIDEO_CTRL);
-            usleep_range(1000, 2000);
-free_diag_dma:
-            dma_free_coherent(&pdev->dev, 64 * 16, desc_ring, desc_ring_dma);
-            for (p = 0; p < SG_PAGES; p++) {
-                if (h2c_pages[p]) dma_free_coherent(&pdev->dev, 4096, h2c_pages[p], h2c_page_dma[p]);
-                if (c2h_pages[p]) dma_free_coherent(&pdev->dev, 4096, c2h_pages[p], c2h_page_dma[p]);
-            }
-        }
-
-        if (ret)
-            goto free_irq;
-        dev_info(&pdev->dev, "=======================================================\n");
-        dev_info(&pdev->dev, "🎉 [DMA STEP-BY-STEP DIAGNOSTIC TEST COMPLETED]\n");
-        dev_info(&pdev->dev, "=======================================================\n");
-
-        /* --------------------------------------------------------------------
-         * 4. Stage-2 Legacy V4L2 capture ring setup
-         * -------------------------------------------------------------------- */
-        qdev->h2c_ring_virt = dma_alloc_coherent(&pdev->dev,
-                                  sizeof(*qdev->h2c_ring_virt) * RING_BUFFER_SIZE,
-                                  &qdev->h2c_ring_dma, GFP_KERNEL);
-        if (!qdev->h2c_ring_virt) {
-            ret = -ENOMEM;
-            dev_err(&pdev->dev, "[ERROR] Cannot allocate persistent V4L2 descriptor ring\n");
             goto free_irq;
         }
-        memset(qdev->h2c_ring_virt, 0,
-               sizeof(*qdev->h2c_ring_virt) * RING_BUFFER_SIZE);
-        qdev->c2h_ring_virt = qdev->h2c_ring_virt;
-        qdev->c2h_ring_dma = qdev->h2c_ring_dma;
+        memset(vch0->thin_ring_virt, 0,
+               sizeof(*vch0->thin_ring_virt) * RING_BUFFER_SIZE);
+        vch0->thin_ring_tail = 0;
+        vch0->thin_ring_head = 0;
 
-        {
-            u32 hw_ptr = ioread32(qdev->bar0_mmio + 0x40);
-            u32 hw_head = hw_ptr & 0xffff;
-
-            qdev->h2c_tail = hw_head;
-            qdev->c2h_tail = hw_head;
-            dma_wmb();
-            iowrite32(lower_32_bits(qdev->h2c_ring_dma),
-                      qdev->bar0_mmio + REG_H2C_RING_ADDR_L);
-            iowrite32(upper_32_bits(qdev->h2c_ring_dma),
-                      qdev->bar0_mmio + REG_H2C_RING_ADDR_H);
-            iowrite32((hw_head << 16) | RING_BUFFER_SIZE,
-                      qdev->bar0_mmio + REG_H2C_RING_CFG);
-            dev_info(&pdev->dev,
-                     "V4L2 shared descriptor ring: DMA=0x%llX, head=tail=%u\n",
-                     (u64)qdev->h2c_ring_dma, hw_head);
+        vch0->thin_ring1_virt = dma_alloc_coherent(&pdev->dev,
+                                sizeof(*vch0->thin_ring1_virt) * RING_BUFFER_SIZE,
+                                &vch0->thin_ring1_dma, GFP_KERNEL);
+        if (!vch0->thin_ring1_virt) {
+            dev_err(&pdev->dev, "[ERROR] Cannot allocate thin descriptor ring 1 for CH0\n");
+            ret = -ENOMEM;
+            goto free_video_ring;
         }
+        memset(vch0->thin_ring1_virt, 0,
+               sizeof(*vch0->thin_ring1_virt) * RING_BUFFER_SIZE);
+        vch0->thin_ring1_tail = 0;
+        vch0->thin_ring1_head = 0;
+
+        qdev->thin_ring_virt = (struct qpcie_sgl_entry *)vch0->thin_ring_virt;
+        qdev->thin_ring_dma  = vch0->thin_ring_dma;
+        qdev->thin_ring_tail = 0;
+        qdev->thin_ring_head = 0;
+
+        dev_info(&pdev->dev,
+                 "CH0 Thin Ring: RING0=0x%llX, RING1=0x%llX, Size=%u, RegBase=0x%03X\n",
+                 (u64)vch0->thin_ring_dma, (u64)vch0->thin_ring1_dma, RING_BUFFER_SIZE, vch0->ch_reg_base);
+        /* Initialize RING0 Base and initial CFG */
+        iowrite32(lower_32_bits(vch0->thin_ring_dma),
+                  qdev->bar0_mmio + REG_VCH0_RING0_BASE_L);
+        iowrite32(upper_32_bits(vch0->thin_ring_dma),
+                  qdev->bar0_mmio + REG_VCH0_RING0_BASE_H);
+        iowrite32(RING_BUFFER_SIZE,
+                  qdev->bar0_mmio + REG_VCH0_RING0_CFG);
+        /* Initialize RING1 Base and initial CFG */
+        iowrite32(lower_32_bits(vch0->thin_ring1_dma),
+                  qdev->bar0_mmio + REG_VCH0_RING1_BASE_L);
+        iowrite32(upper_32_bits(vch0->thin_ring1_dma),
+                  qdev->bar0_mmio + REG_VCH0_RING1_BASE_H);
+        iowrite32(RING_BUFFER_SIZE,
+                  qdev->bar0_mmio + REG_VCH0_RING1_CFG);
     }
 
-    /* Phase 5: New Register Map & Per-Channel Thin Descriptor Ring Initialization */
-    if (should_use_new_map) {
-        if (((ver >> 24) >= 3) && (caps & BIT(4))) {
-            struct qpcie_v4l2_channel *vch0 = &qdev->v4l2_ch[0];
-            vch0->ch_reg_base = REG_VCH_BASE(0);
-            vch0->thin_ring_virt = dma_alloc_coherent(&pdev->dev,
-                                    sizeof(*vch0->thin_ring_virt) * RING_BUFFER_SIZE,
-                                    &vch0->thin_ring_dma, GFP_KERNEL);
-            if (!vch0->thin_ring_virt) {
-                dev_err(&pdev->dev, "[ERROR] Cannot allocate thin descriptor ring 0 for CH0\n");
-                ret = -ENOMEM;
-                goto free_video_ring;
-            }
-            memset(vch0->thin_ring_virt, 0,
-                   sizeof(*vch0->thin_ring_virt) * RING_BUFFER_SIZE);
-            vch0->thin_ring_tail = 0;
-            vch0->thin_ring_head = 0;
-
-            vch0->thin_ring1_virt = dma_alloc_coherent(&pdev->dev,
-                                    sizeof(*vch0->thin_ring1_virt) * RING_BUFFER_SIZE,
-                                    &vch0->thin_ring1_dma, GFP_KERNEL);
-            if (!vch0->thin_ring1_virt) {
-                dev_err(&pdev->dev, "[ERROR] Cannot allocate thin descriptor ring 1 for CH0\n");
-                ret = -ENOMEM;
-                goto free_video_ring;
-            }
-            memset(vch0->thin_ring1_virt, 0,
-                   sizeof(*vch0->thin_ring1_virt) * RING_BUFFER_SIZE);
-            vch0->thin_ring1_tail = 0;
-            vch0->thin_ring1_head = 0;
-
-            /* Global aliases for backward compatibility */
-            qdev->thin_ring_virt = (struct qpcie_sgl_entry *)vch0->thin_ring_virt;
-            qdev->thin_ring_dma  = vch0->thin_ring_dma;
-            qdev->thin_ring_tail = 0;
-            qdev->thin_ring_head = 0;
-
-            /* Switch hardware to new register map via DMA_CTRL[3] */
-            ctrl = ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
-            iowrite32(ctrl | BIT(3), qdev->bar0_mmio + REG_DMA_CTRL);
-            readback = ioread32(qdev->bar0_mmio + REG_NEW_GLOBAL_ID);
-            if (readback == 0x12ABE380) {
-                qdev->use_new_map = true;
-                dev_info(&pdev->dev,
-                         "=== [PHASE 5 NEW MAP ACTIVE] Magic ID=0x%08X (Auto-detected from Version v%u.%u.%u, Caps=0x%08X) ===\n",
-                         readback, (ver >> 24) & 0xff, (ver >> 16) & 0xff, (ver >> 8) & 0xff, caps);
-                dev_info(&pdev->dev,
-                         "CH0 Thin Ring: RING0=0x%llX, RING1=0x%llX, Size=%u, RegBase=0x%03X\n",
-                         (u64)vch0->thin_ring_dma, (u64)vch0->thin_ring1_dma, RING_BUFFER_SIZE, vch0->ch_reg_base);
-                /* Initialize RING0 Base and initial CFG */
-                iowrite32(lower_32_bits(vch0->thin_ring_dma),
-                          qdev->bar0_mmio + REG_VCH0_RING0_BASE_L);
-                iowrite32(upper_32_bits(vch0->thin_ring_dma),
-                          qdev->bar0_mmio + REG_VCH0_RING0_BASE_H);
-                iowrite32(RING_BUFFER_SIZE,
-                          qdev->bar0_mmio + REG_VCH0_RING0_CFG);
-                /* Initialize RING1 Base and initial CFG */
-                iowrite32(lower_32_bits(vch0->thin_ring1_dma),
-                          qdev->bar0_mmio + REG_VCH0_RING1_BASE_L);
-                iowrite32(upper_32_bits(vch0->thin_ring1_dma),
-                          qdev->bar0_mmio + REG_VCH0_RING1_BASE_H);
-                iowrite32(RING_BUFFER_SIZE,
-                          qdev->bar0_mmio + REG_VCH0_RING1_CFG);
-            } else {
-                dev_err(&pdev->dev,
-                        "[ERROR] New Map Magic ID mismatch: 0x%08X (expected 0x12ABE380)\n",
-                        readback);
-                iowrite32(ctrl & ~BIT(3), qdev->bar0_mmio + REG_DMA_CTRL);
-                qdev->use_new_map = false;
-            }
-        } else {
-            dev_warn(&pdev->dev,
-                     "[NEW MAP WARN] New map requested but hardware does not support it (ver=0x%08X caps=0x%08X)\n",
-                     ver, caps);
-            qdev->use_new_map = false;
-        }
-    } else {
-        qdev->use_new_map = false;
-        dev_info(&pdev->dev, "=== [LEGACY MAP ACTIVE] (ver=0x%08X caps=0x%08X) ===\n", ver, caps);
+    /* ------------------------------------------------------------------------
+     * Allocate & Initialize CH1 Loopback Descriptor Ring
+     * ------------------------------------------------------------------------ */
+    qdev->h2c_ring_virt = dma_alloc_coherent(&pdev->dev,
+                            sizeof(*qdev->h2c_ring_virt) * RING_BUFFER_SIZE,
+                            &qdev->h2c_ring_dma, GFP_KERNEL);
+    if (!qdev->h2c_ring_virt) {
+        dev_err(&pdev->dev, "[ERROR] Cannot allocate CH1 descriptor ring\n");
+        ret = -ENOMEM;
+        goto free_video_ring;
     }
+    memset(qdev->h2c_ring_virt, 0,
+           sizeof(*qdev->h2c_ring_virt) * RING_BUFFER_SIZE);
+    qdev->h2c_tail = 0;
+    qdev->c2h_tail = 0;
+
+    iowrite32(lower_32_bits(qdev->h2c_ring_dma),
+              qdev->bar0_mmio + REG_VCH_BASE(1) + REG_VCH_OFFSET_RING0_BASE_L);
+    iowrite32(upper_32_bits(qdev->h2c_ring_dma),
+              qdev->bar0_mmio + REG_VCH_BASE(1) + REG_VCH_OFFSET_RING0_BASE_H);
+    iowrite32(RING_BUFFER_SIZE,
+              qdev->bar0_mmio + REG_VCH_BASE(1) + REG_VCH_OFFSET_RING0_CFG);
+    dev_info(&pdev->dev,
+             "CH1 Loopback Ring: RingBase=0x%llX, Size=%u, RegBase=0x%03X\n",
+             (u64)qdev->h2c_ring_dma, RING_BUFFER_SIZE, REG_VCH_BASE(1));
 
     ret = qpcie_v4l2_init(qdev);
     if (ret) {
-        dev_err(&pdev->dev, "[ERROR] V4L2-only initialization failed: %d\n", ret);
+        dev_err(&pdev->dev, "[ERROR] V4L2 initialization failed: %d\n", ret);
         goto free_video_ring;
     }
     qdev->v4l2_registered = true;
 
-    if (!rgb24_only) {
-        ret = qpcie_alsa_init(qdev);
-        if (ret) {
-            dev_err(&pdev->dev, "[ERROR] ALSA initialization failed: %d\n", ret);
-            goto v4l2_remove;
-        }
-        qdev->alsa_registered = true;
-    } else {
-        dev_info(&pdev->dev, "rgb24_only mode: Skipping ALSA audio subsystem init\n");
+    ret = qpcie_alsa_init(qdev);
+    if (ret) {
+        dev_err(&pdev->dev, "[ERROR] ALSA initialization failed: %d\n", ret);
+        goto v4l2_remove;
     }
-    dev_info(&pdev->dev,
-             "Stage-3 V4L2 NV12M + ALSA AES3 Audio capture ready (map=%s)\n",
-             qdev->use_new_map ? "new" : "legacy");
+    qdev->alsa_registered = true;
+
+    dev_info(&pdev->dev, "Canonical v3.0 V4L2 NV12M + ALSA AES3 Audio capture ready\n");
 
     ret = qpcie_sysfs_init(qdev);
     if (ret)

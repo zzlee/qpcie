@@ -602,8 +602,25 @@ module custom_pcie_dma_top #(
     wire [31:0] thin_drop_count;
     wire [15:0] thin_ring0_head;
     wire [15:0] thin_ring1_head;
-    wire        thin_active = map_mode_new_w && vch0_ctrl_w[0];
+    wire        thin_active = vch0_ctrl_w[0];
     wire        overlay_en_w;
+
+    wire [31:0] vch1_ctrl_w;
+    wire [31:0] vch1_width_w;
+    wire [31:0] vch1_height_w;
+    wire [31:0] vch1_stride0_w;
+    wire [31:0] vch1_stride1_w;
+    wire [63:0] vch1_ring0_base_w;
+    wire [15:0] vch1_ring0_size_w;
+    wire [15:0] vch1_ring0_tail_w;
+    wire [15:0] vch1_ring0_head_w;
+    wire [3:0]  vch1_irq_status_w;
+    wire [3:0]  vch1_irq_status_w1c_w;
+    wire        vch1_irq_en_w;
+
+    wire        thin_cpld_valid;
+    wire [127:0] thin_cpld_data;
+    wire        thin_cpld_last;
 
     assign overlay_en     = overlay_en_w;
     assign overlay_width  = vch0_width_w[15:0];
@@ -674,8 +691,8 @@ module custom_pcie_dma_top #(
         .reg_irq_status_w1c(reg_irq_status_w1c),
         .completed_h2c_count(completed_h2c_count),
         .completed_c2h_count(completed_c2h_count),
-        .reg_h2c_head_ptr(map_mode_new_w ? thin_ring1_head : reg_h2c_head_ptr),
-        .reg_c2h_head_ptr(map_mode_new_w ? thin_ring0_head : reg_c2h_head_ptr),
+        .reg_h2c_head_ptr(thin_ring1_head),
+        .reg_c2h_head_ptr(thin_ring0_head),
         .reg_global_timestamp(global_timestamp),
         .reg_last_video_pts(v_pts[0]),
         .reg_last_audio_pts(a_pts[0]),
@@ -757,6 +774,21 @@ module custom_pcie_dma_top #(
         .in_vch0_irq_status(vch0_irq_status_w),
         .out_vch0_irq_status_w1c(vch0_irq_status_w1c_w),
         .out_vch0_irq_en(vch0_irq_en_w),
+        // Phase 6: Video CH1 Ports
+        .out_vch1_ctrl(vch1_ctrl_w),
+        .out_vch1_width(vch1_width_w),
+        .out_vch1_height(vch1_height_w),
+        .out_vch1_stride0(vch1_stride0_w),
+        .out_vch1_stride1(vch1_stride1_w),
+        .out_vch1_ring0_base(vch1_ring0_base_w),
+        .out_vch1_ring0_size(vch1_ring0_size_w),
+        .out_vch1_ring0_tail(vch1_ring0_tail_w),
+        .in_vch1_ring0_head(reg_h2c_head_ptr),
+        .in_vch1_frame_count(completed_c2h_count),
+        .in_vch1_drop_count(v_drop_cnt[1]),
+        .in_vch1_irq_status(vch1_irq_status_w),
+        .out_vch1_irq_status_w1c(vch1_irq_status_w1c_w),
+        .out_vch1_irq_en(vch1_irq_en_w),
         // Phase 4 P4-2: Audio DEV0 Ports
         .out_adev0_ctrl(adev0_ctrl_w),
         .out_adev0_rate(adev0_rate_w),
@@ -882,12 +914,27 @@ module custom_pcie_dma_top #(
     wire        pcie_frame_done;
     reg         ch0_owner_busy;
 
-    wire        desc_req_valid_mux  = thin_active ? thin_mrd_req_valid  : legacy_desc_req_valid;
-    wire [63:0] desc_req_addr_mux   = thin_active ? thin_mrd_req_addr   : legacy_desc_req_addr;
-    wire [10:0] desc_req_dw_len_mux = thin_active ? thin_mrd_req_dw_len : legacy_desc_req_dw_len;
-    wire [7:0]  desc_req_tag_mux    = thin_active ? thin_mrd_req_tag    : legacy_desc_req_tag;
-    assign thin_mrd_req_ack         = thin_active ? desc_req_ack        : 1'b0;
-    assign legacy_desc_req_ack      = thin_active ? 1'b0                : desc_req_ack;
+    // Fair arbiter between CH0 Thin Descriptors and CH1 64B Descriptors
+    reg desc_arb_grant; // 0 = CH0 thin, 1 = CH1 64B
+    wire thin_req_pending = thin_mrd_req_valid;
+    wire leg_req_pending  = legacy_desc_req_valid;
+
+    always @(posedge clk or negedge dma_rst_n) begin
+        if (!dma_rst_n) begin
+            desc_arb_grant <= 1'b0;
+        end else if (desc_req_ack) begin
+            desc_arb_grant <= ~desc_arb_grant;
+        end
+    end
+
+    wire choose_legacy = (desc_arb_grant && leg_req_pending) || (!thin_req_pending && leg_req_pending);
+
+    wire        desc_req_valid_mux  = choose_legacy ? legacy_desc_req_valid : thin_mrd_req_valid;
+    wire [63:0] desc_req_addr_mux   = choose_legacy ? legacy_desc_req_addr  : thin_mrd_req_addr;
+    wire [10:0] desc_req_dw_len_mux = choose_legacy ? legacy_desc_req_dw_len : thin_mrd_req_dw_len;
+    wire [7:0]  desc_req_tag_mux    = choose_legacy ? legacy_desc_req_tag   : thin_mrd_req_tag;
+    assign thin_mrd_req_ack         = desc_req_ack && !choose_legacy;
+    assign legacy_desc_req_ack      = desc_req_ack && choose_legacy;
 
     // 5. RQ TX Encoder
     rq_tx_encoder #(
@@ -943,6 +990,9 @@ module custom_pcie_dma_top #(
         .s_axis_rc_tuser(s_axis_rc_tuser),
         .s_axis_rc_tkeep(s_axis_rc_tkeep),
         .s_axis_rc_tready(s_axis_rc_tready),
+        .thin_cpl_valid(thin_cpld_valid),
+        .thin_cpl_data(thin_cpld_data),
+        .thin_cpl_last(thin_cpld_last),
         .desc_cpl_valid(desc_cpl_valid),
         .desc_cpl_data(desc_cpl_data),
         .desc_cpl_last(desc_cpl_last),
@@ -1039,22 +1089,22 @@ module custom_pcie_dma_top #(
         .channel_uv_almost_full(channel_uv_almost_full)
     );
 
-    // 7. Descriptor Fetch Engine (Legacy 64-Byte)
+    // 7. Descriptor Fetch Engine (CH1 Loopback 64-Byte)
     desc_fetch_engine u_desc_fetch_engine (
         .clk(clk),
         .rst_n(dma_rst_n),
-        .dma_run(reg_dma_ctrl[0]),
-        .ring_base_addr(reg_h2c_ring_addr),
-        .ring_size(reg_h2c_ring_size),
-        .tail_ptr(reg_h2c_tail_ptr),
-        .head_ptr(reg_h2c_head_ptr),
+        .dma_run(vch1_ctrl_w[0]),
+        .ring_base_addr(vch1_ring0_base_w),
+        .ring_size(vch1_ring0_size_w),
+        .tail_ptr(vch1_ring0_tail_w),
+        .head_ptr(vch1_ring0_head_w),
         .idle(desc_fetch_idle),
         .desc_req_valid(legacy_desc_req_valid),
         .desc_req_addr(legacy_desc_req_addr),
         .desc_req_dw_len(legacy_desc_req_dw_len),
         .desc_req_tag(legacy_desc_req_tag),
         .desc_req_ack(legacy_desc_req_ack),
-        .desc_cpl_valid(!thin_active && desc_cpl_valid),
+        .desc_cpl_valid(desc_cpl_valid),
         .desc_cpl_data(desc_cpl_data),
         .desc_cpl_last(desc_cpl_last),
         .h2c_desc_valid(h2c_desc_valid),
@@ -1110,9 +1160,9 @@ module custom_pcie_dma_top #(
         .mrd_req_dw_len(thin_mrd_req_dw_len),
         .mrd_req_tag(thin_mrd_req_tag),
         .mrd_req_ack(thin_mrd_req_ack),
-        .cpld_valid(thin_active && desc_cpl_valid),
-        .cpld_data(desc_cpl_data[127:0]),
-        .cpld_last(desc_cpl_last),
+        .cpld_valid(thin_cpld_valid),
+        .cpld_data(thin_cpld_data),
+        .cpld_last(thin_cpld_last),
         .cpld_tag(8'h00),
         .sgl_y_wr_en(thin_sgl_y_wr_en),
         .sgl_y_wr_addr(thin_sgl_y_wr_addr),
@@ -2067,9 +2117,9 @@ module custom_pcie_dma_top #(
         .vch0_irq_status(vch0_irq_status_w),
         .vch0_irq_status_w1c(vch0_irq_status_w1c_w),
         .vch0_irq_en(vch0_irq_en_w),
-        .vch1_irq_status(),
-        .vch1_irq_status_w1c(4'd0),
-        .vch1_irq_en(1'b0),
+        .vch1_irq_status(vch1_irq_status_w),
+        .vch1_irq_status_w1c(vch1_irq_status_w1c_w),
+        .vch1_irq_en(vch1_irq_en_w),
         .vch2_irq_status(),
         .vch2_irq_status_w1c(4'd0),
         .vch2_irq_en(1'b0),

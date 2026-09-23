@@ -403,8 +403,7 @@ struct qpcie_dev {
     spinlock_t ring_lock;
     atomic_t streaming_count;
 
-    /* Phase 3 New Register Map & Thin Descriptor Handles */
-    bool use_new_map;
+    /* Canonical v3.0 Register Map & Thin Descriptor Handles */
     struct qpcie_sgl_entry *thin_ring_virt;
     dma_addr_t thin_ring_dma;
     u32 thin_ring_tail;

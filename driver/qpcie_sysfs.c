@@ -70,7 +70,7 @@ static ssize_t tpg_overlay_show(struct device *dev, struct device_attribute *att
     u32 overlay_val = 0;
 
     if (qdev && qdev->bar0_mmio) {
-        if (qdev->use_new_map && qdev->v4l2_ch[0].ch_reg_base)
+        if (qdev->v4l2_ch[0].ch_reg_base)
             overlay_val = ioread32(qdev->bar0_mmio + qdev->v4l2_ch[0].ch_reg_base + REG_VCH_OFFSET_OVERLAY);
         else
             overlay_val = ioread32(qdev->bar0_mmio + REG_VIDEO_OVERLAY);
@@ -88,7 +88,7 @@ static ssize_t tpg_overlay_store(struct device *dev, struct device_attribute *at
 
     if (qdev && qdev->bar0_mmio) {
         qdev->v4l2_ch[0].overlay_enable = !!val;
-        if (qdev->use_new_map && qdev->v4l2_ch[0].ch_reg_base)
+        if (qdev->v4l2_ch[0].ch_reg_base)
             iowrite32(val ? 1 : 0, qdev->bar0_mmio + qdev->v4l2_ch[0].ch_reg_base + REG_VCH_OFFSET_OVERLAY);
         iowrite32(val ? 1 : 0, qdev->bar0_mmio + REG_VIDEO_OVERLAY);
         ioread32(qdev->bar0_mmio + REG_VIDEO_OVERLAY);
@@ -682,7 +682,7 @@ static ssize_t ch0_frames_show(struct device *dev, struct device_attribute *attr
 
     if (qdev) {
         u32 hw_frames = 0;
-        if (qdev->bar0_mmio && qdev->use_new_map)
+        if (qdev->bar0_mmio)
             hw_frames = ioread32(qdev->bar0_mmio + REG_VCH_FRAMES(0));
         frames = (hw_frames > qdev->v4l2_ch[0].sequence) ?
                  hw_frames : qdev->v4l2_ch[0].sequence;
@@ -698,8 +698,7 @@ static ssize_t ch0_drops_show(struct device *dev, struct device_attribute *attr,
     u32 drops = 0;
 
     if (qdev && qdev->bar0_mmio) {
-        if (qdev->use_new_map)
-            drops = ioread32(qdev->bar0_mmio + REG_VCH_DROPS(0));
+        drops = ioread32(qdev->bar0_mmio + REG_VCH_DROPS(0));
     }
     return sysfs_emit(buf, "%u\n", drops);
 }
@@ -712,10 +711,7 @@ static ssize_t ch0_status_show(struct device *dev, struct device_attribute *attr
     u32 status = 0;
 
     if (qdev && qdev->bar0_mmio) {
-        if (qdev->use_new_map)
-            status = ioread32(qdev->bar0_mmio + REG_VCH_STATUS(0));
-        else
-            status = ioread32(qdev->bar0_mmio + REG_DMA_STATUS);
+        status = ioread32(qdev->bar0_mmio + REG_VCH_STATUS(0));
     }
     return sysfs_emit(buf, "0x%08X (running=%u, overflow=%u)\n",
                       status, status & 1, (status >> 31) & 1);
@@ -729,8 +725,7 @@ static ssize_t ch0_head_show(struct device *dev, struct device_attribute *attr, 
     u32 head = 0;
 
     if (qdev && qdev->bar0_mmio) {
-        if (qdev->use_new_map)
-            head = ioread32(qdev->bar0_mmio + REG_VCH_RING0_HEAD(0)) & 0xFFFF;
+        head = ioread32(qdev->bar0_mmio + REG_VCH_RING0_HEAD(0)) & 0xFFFF;
     }
     return sysfs_emit(buf, "%u\n", head);
 }

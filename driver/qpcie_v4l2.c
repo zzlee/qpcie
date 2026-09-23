@@ -678,8 +678,7 @@ static int qpcie_publish_buffer(struct qpcie_v4l2_channel *vch,
     u32 control;
     u32 tail;
     int ret;
-
-    if (qdev->use_new_map && vch->thin_ring_virt) {
+    if (vch->thin_ring_virt) {
         struct scatterlist *sg;
         unsigned int i;
         u32 thin_tail = vch->thin_ring_tail;
@@ -882,8 +881,8 @@ static int qpcie_publish_buffer(struct qpcie_v4l2_channel *vch,
     qdev->h2c_tail = (tail + 1) % RING_BUFFER_SIZE;
     qdev->c2h_tail = qdev->h2c_tail;
     iowrite32((qdev->h2c_tail << 16) | RING_BUFFER_SIZE,
-              qdev->bar0_mmio + REG_H2C_RING_CFG);
-    ioread32(qdev->bar0_mmio + REG_H2C_RING_CFG);
+              qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING0_CFG);
+    ioread32(qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING0_CFG);
     qdev->ring_published++;
 
     return 0;
@@ -1063,7 +1062,7 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
     iowrite32(0x03, qdev->bar0_mmio + REG_PERF_CTRL);
     ioread32(qdev->bar0_mmio + REG_PERF_CTRL);
 
-    if (qdev->use_new_map && vch->thin_ring_virt) {
+    if (vch->thin_ring_virt) {
         bool is_rgb = (vch->pixelformat == V4L2_PIX_FMT_RGB24);
         u32 stride0 = is_rgb ? (vch->stride ? vch->stride : (vch->width * 3)) :
                                (vch->stride ? vch->stride : vch->width);
@@ -1103,9 +1102,16 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
         iowrite32(ch_ctrl, qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_CTRL);
         ioread32(qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_CTRL);
     } else {
-        u32 ctrl_val = DMA_CTRL_RUN | (qdev->use_new_map ? BIT(3) : 0);
-        iowrite32(ctrl_val, qdev->bar0_mmio + REG_DMA_CTRL);
-        ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
+        u32 ch_ctrl = BIT(0) | BIT(8); /* enable=1, irq_en=1 */
+        iowrite32(lower_32_bits(qdev->h2c_ring_dma),
+                  qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING0_BASE_L);
+        iowrite32(upper_32_bits(qdev->h2c_ring_dma),
+                  qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING0_BASE_H);
+        dma_wmb();
+        iowrite32((qdev->h2c_tail << 16) | RING_BUFFER_SIZE,
+                  qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING0_CFG);
+        iowrite32(ch_ctrl, qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_CTRL);
+        ioread32(qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_CTRL);
     }
 
     /* Start TPG AFTER DMA is enabled so frame 1 starts cleanly without FIFO backpressure */
@@ -1115,10 +1121,10 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
             if (ret) {
                 dev_err(&qdev->pdev->dev,
                         "Cannot start TPG pacing kthread: %d\n", ret);
-                if (qdev->use_new_map && vch->thin_ring_virt)
+                if (vch->thin_ring_virt)
                     iowrite32(0, qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_CTRL);
                 else
-                    iowrite32(qdev->use_new_map ? BIT(3) : 0, qdev->bar0_mmio + REG_DMA_CTRL);
+                    iowrite32(BIT(3), qdev->bar0_mmio + REG_DMA_CTRL);
                 qpcie_return_all_buffers(vch, VB2_BUF_STATE_QUEUED);
                 return ret;
             }
@@ -1181,16 +1187,9 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
     iowrite32(0, qdev->bar0_mmio + REG_PACER_CTRL);
     /* Stop fetching descriptors. Queued descriptors are cancelled below;
      * only already-buffered PCIe writes must drain before mappings return. */
-    if (qdev->use_new_map && vch->thin_ring_virt) {
-        iowrite32(0, qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_CTRL);
-        ioread32(qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_CTRL);
-    } else {
-        u32 ctrl_val = qdev->use_new_map ? BIT(3) : 0;
-        iowrite32(ctrl_val, qdev->bar0_mmio + REG_DMA_CTRL);
-        ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
-    }
-    u32 stat_reg = (qdev->use_new_map && vch->thin_ring_virt) ?
-                   (vch->ch_reg_base + REG_VCH_OFFSET_STATUS) : REG_DMA_STATUS;
+    iowrite32(0, qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_CTRL);
+    ioread32(qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_CTRL);
+    u32 stat_reg = vch->ch_reg_base + REG_VCH_OFFSET_STATUS;
 
     do {
         u32 status = ioread32(qdev->bar0_mmio + stat_reg);
@@ -1222,7 +1221,7 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
 
     /* Cancel descriptors that were queued for frames the stopped TPG will
      * never produce. Rebase both producer pointers to the hardware consumer. */
-    if (qdev->use_new_map && vch->thin_ring_virt) {
+    if (vch->thin_ring_virt) {
         head = ioread32(qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING0_HEAD) & 0xffff;
         vch->thin_ring_tail = head;
         vch->thin_ring_head = head;
@@ -1238,12 +1237,12 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
             ioread32(qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING1_CFG);
         }
     } else {
-        head = ioread32(qdev->bar0_mmio + 0x40) & 0xffff;
+        head = ioread32(qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING0_HEAD) & 0xffff;
         qdev->h2c_tail = head;
         qdev->c2h_tail = head;
         iowrite32((head << 16) | RING_BUFFER_SIZE,
-                  qdev->bar0_mmio + REG_H2C_RING_CFG);
-        ioread32(qdev->bar0_mmio + REG_H2C_RING_CFG);
+                  qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING0_CFG);
+        ioread32(qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING0_CFG);
     }
 
     /* Freeze counters after all channel-0 writes have retired. */
@@ -1321,7 +1320,7 @@ static int qpcie_s_ctrl(struct v4l2_ctrl *ctrl)
     case V4L2_CID_QPCIE_TPG_OVERLAY:
         vch->overlay_enable = !!ctrl->val;
         if (qdev && qdev->bar0_mmio) {
-            if (qdev->use_new_map && vch->ch_reg_base)
+            if (vch->ch_reg_base)
                 iowrite32(vch->overlay_enable ? 1 : 0, qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_OVERLAY);
             iowrite32(vch->overlay_enable ? 1 : 0, qdev->bar0_mmio + REG_VIDEO_OVERLAY);
             ioread32(qdev->bar0_mmio + REG_VIDEO_OVERLAY);
@@ -1422,7 +1421,7 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
              "[V4L2] negotiated MaxPayloadSize %d bytes supports 256-byte MWr\n",
              ret);
 
-    hw_caps = ioread32(qdev->bar0_mmio + (qdev->use_new_map ? REG_NEW_GLOBAL_CAPS : REG_HARDWARE_CAPS));
+    hw_caps = ioread32(qdev->bar0_mmio + REG_NEW_GLOBAL_CAPS);
     hw_video_ch = (hw_caps >> 8) & 0xff;
     if (hw_video_ch == 0) {
         dev_err(&qdev->pdev->dev,
@@ -1657,147 +1656,6 @@ void qpcie_v4l2_node_done(struct qpcie_dev *qdev, int node_idx)
 
 void qpcie_v4l2_irq_handler(struct qpcie_dev *qdev)
 {
-    u32 status = 0;
-    int i;
-    u32 slice_height = 0;
-
-    if (!qdev || !qdev->bar0_mmio)
-        return;
-
-    if (qdev->use_new_map) {
+    if (qdev && qdev->v4l2_registered)
         qpcie_v4l2_node_done(qdev, 0);
-        return;
-    }
-
-    status = ioread32(qdev->bar0_mmio + REG_IRQ_STATUS);
-    slice_height = ioread32(qdev->bar0_mmio + REG_SLICE_HEIGHT);
-
-    /* --------------------------------------------------------------------
-     * 1. Per-Channel C2H Video Capture Completions (Bits 4..7: Ch0..Ch3)
-     * -------------------------------------------------------------------- */
-    if (status & IRQ_STATUS_CHANNEL_MASK) {
-        for (i = 0; i < NUM_VIDEO_CHANNELS; i++) {
-            if (status & IRQ_STATUS_C2H_CH(i)) {
-                int node_idx = (i == 0) ? 0 : (i * 2);
-                struct qpcie_v4l2_channel *vch = &qdev->v4l2_ch[node_idx];
-                struct qpcie_v4l2_buffer *buf;
-
-                spin_lock(&vch->slock);
-                if (!list_empty(&vch->active_buffers)) {
-                    buf = list_first_entry(&vch->active_buffers, struct qpcie_v4l2_buffer, list);
-
-                    if (slice_height > 0) {
-                        u32 total_slices = (vch->height + slice_height - 1) / slice_height;
-                        struct v4l2_event ev = {
-                            .type = V4L2_EVENT_FRAME_SYNC,
-                            .u.frame_sync.frame_sequence = vch->sequence,
-                        };
-
-                        vch->current_slice_idx++;
-                        v4l2_event_queue(&vch->vdev, &ev);
-
-                        if (vch->current_slice_idx >= total_slices) {
-                            vch->current_slice_idx = 0;
-                            list_del(&buf->list);
-                            qdev->ring_completed++;
-                            buf->vb.vb2_buf.timestamp = ktime_get_ns();
-                            buf->vb.sequence = vch->sequence++;
-                            vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
-                        }
-                    } else {
-                        list_del(&buf->list);
-                        qdev->ring_completed++;
-                        buf->vb.vb2_buf.timestamp = ktime_get_ns();
-                        buf->vb.sequence = vch->sequence++;
-                        vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
-                    }
-                }
-                spin_unlock(&vch->slock);
-            }
-        }
-
-        /* Per-Channel H2C Completions (Bits 8..10: Ch1..Ch3) */
-        for (i = 1; i < NUM_VIDEO_CHANNELS; i++) {
-            if (status & IRQ_STATUS_H2C_CH(i)) {
-                int node_idx = (i * 2) - 1;
-                struct qpcie_v4l2_channel *vch = &qdev->v4l2_ch[node_idx];
-                struct qpcie_v4l2_buffer *buf;
-
-                spin_lock(&vch->slock);
-                if (!list_empty(&vch->active_buffers)) {
-                    buf = list_first_entry(&vch->active_buffers, struct qpcie_v4l2_buffer, list);
-                    list_del(&buf->list);
-                    qdev->ring_completed++;
-                    buf->vb.vb2_buf.timestamp = ktime_get_ns();
-                    buf->vb.sequence = vch->sequence++;
-                    vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
-                }
-                spin_unlock(&vch->slock);
-            }
-        }
-    } else {
-        /* Legacy fallback for bitstream without per-channel IRQ bits */
-        if (status & BIT(0)) {
-            for (i = 0; i < NUM_VIDEO_NODES; i++) {
-                struct qpcie_v4l2_channel *vch = &qdev->v4l2_ch[i];
-                struct qpcie_v4l2_buffer *buf;
-
-                if (vch->buf_type != V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE)
-                    continue;
-
-                spin_lock(&vch->slock);
-                if (!list_empty(&vch->active_buffers)) {
-                    buf = list_first_entry(&vch->active_buffers, struct qpcie_v4l2_buffer, list);
-                    list_del(&buf->list);
-                    qdev->ring_completed++;
-                    buf->vb.vb2_buf.timestamp = ktime_get_ns();
-                    buf->vb.sequence = vch->sequence++;
-                    vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
-                }
-                spin_unlock(&vch->slock);
-            }
-        }
-
-        if (status & BIT(1)) {
-            for (i = 0; i < NUM_VIDEO_NODES; i++) {
-                struct qpcie_v4l2_channel *vch = &qdev->v4l2_ch[i];
-                struct qpcie_v4l2_buffer *buf;
-
-                if (vch->buf_type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)
-                    continue;
-
-                spin_lock(&vch->slock);
-                if (!list_empty(&vch->active_buffers)) {
-                    buf = list_first_entry(&vch->active_buffers, struct qpcie_v4l2_buffer, list);
-
-                    if (slice_height > 0) {
-                        u32 total_slices = (vch->height + slice_height - 1) / slice_height;
-                        struct v4l2_event ev = {
-                            .type = V4L2_EVENT_FRAME_SYNC,
-                            .u.frame_sync.frame_sequence = vch->sequence,
-                        };
-
-                        vch->current_slice_idx++;
-                        v4l2_event_queue(&vch->vdev, &ev);
-
-                        if (vch->current_slice_idx >= total_slices) {
-                            vch->current_slice_idx = 0;
-                            list_del(&buf->list);
-                            qdev->ring_completed++;
-                            buf->vb.vb2_buf.timestamp = ktime_get_ns();
-                            buf->vb.sequence = vch->sequence++;
-                            vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
-                        }
-                    } else {
-                        list_del(&buf->list);
-                        qdev->ring_completed++;
-                        buf->vb.vb2_buf.timestamp = ktime_get_ns();
-                        buf->vb.sequence = vch->sequence++;
-                        vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
-                    }
-                }
-                spin_unlock(&vch->slock);
-            }
-        }
-    }
 }
