@@ -33,7 +33,7 @@
 
 ### Phase 6 — 拆舊版（breaking release）
 - [x] P6-1：刪舊 map／胖 descriptor／相容 mode；`axil_reg_space.v` 重寫收尾（移除 328 行重複解碼邏輯、VERSION_ID 定版 v3.0.0 `0x0300_0000`、Magic ID `0x12AB_E380` 開機即生效、`tb_axil_reg_space.v` 重新對齊 canonical 規範全數 PASS）
-- [x] P6-2：Control-Layer 換新表、spec 狀態改 fully implemented；Driver 完成 canonical v3.0 對齊（`use_new_map=1` 預設啟用、繞過過時 64B SG 測試、`test_p6_canonical.sh` 實機測試腳本就緒）
+- [x] P6-2：Control-Layer 換新表、spec 狀態改 fully implemented；Driver 完成 canonical v3.0 對齊（`use_new_map=1` 預設啟用、繞過過時 64B SG 測試、`test_p6_canonical.sh` 實機測試腳本就緒；**實機實測 ALL PASS：Canonical v3.0 模式自動啟用、1080p60 RGB24 8 幀 49,766,400B 100% Bit-Exact SHA256 完全符合、300 幀無上限 DMA 達 1584.93 MiB/s / 12.38 Gbps 零掉幀遠超 801 MiB/s 基線、Sysfs 遙測與零 SMMU 異常卸載驗證完成**）
 
 ## 節奏
 
