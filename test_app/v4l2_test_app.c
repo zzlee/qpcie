@@ -35,7 +35,8 @@
     ((double)FOUR_K_WIDTH * FOUR_K_HEIGHT * 3.0 / 2.0 * 60.0 / (1024.0 * 1024.0))
 
 /* Must match the private control ID in driver/qpcie_driver.h. */
-#define V4L2_CID_QPCIE_PACER_ENABLE (V4L2_CID_USER_BASE + 0x1000)
+#define V4L2_CID_QPCIE_PACER_ENABLE      (V4L2_CID_USER_BASE + 0x1000)
+#define V4L2_CID_QPCIE_TPG_MOTION_SPEED  (V4L2_CID_USER_BASE + 0x1001)
 
 struct plane_map {
     void *addr;
@@ -361,6 +362,13 @@ int main(int argc, char **argv)
         goto out;
     }
     printf("[PASS] TPG menu value=%d (hardware pattern %d)\n", ctrl.value, pattern);
+
+    memset(&ctrl, 0, sizeof(ctrl));
+    ctrl.id = V4L2_CID_QPCIE_TPG_MOTION_SPEED;
+    ctrl.value = 0;
+    if (xioctl(fd, VIDIOC_S_CTRL, &ctrl) == 0) {
+        printf("[PASS] TPG motion speed set to 0 (static)\n");
+    }
 
     memset(&ctrl, 0, sizeof(ctrl));
     ctrl.id = V4L2_CID_QPCIE_PACER_ENABLE;

@@ -1043,7 +1043,7 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
         }
         /* REG_VIDEO_SUB_RESET resets v_tpg controls, so restore the user
          * selected motion state after the TPG configuration is reapplied. */
-        ret = qpcie_program_tpg_motion(vch, motion_ctrl ? motion_ctrl->val : 1);
+        ret = qpcie_program_tpg_motion(vch, motion_ctrl ? motion_ctrl->val : 0);
         if (ret) {
             qpcie_return_all_buffers(vch, VB2_BUF_STATE_QUEUED);
             return ret;
@@ -1359,7 +1359,7 @@ static const struct v4l2_ctrl_config qpcie_tpg_motion_ctrl_config = {
     .min  = 0,
     .max  = 255,
     .step = 1,
-    .def  = 1,
+    .def  = 0,
 };
 
 static const struct v4l2_ctrl_config qpcie_frame_drop_ctrl_config = {
