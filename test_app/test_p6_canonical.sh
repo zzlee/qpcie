@@ -42,10 +42,11 @@ sleep 1
 
 # Ensure kernel module dependencies are loaded (V4L2, DMA-SG, ALSA)
 modprobe videodev 2>/dev/null || true
-modprobe videobuf2_common 2>/dev/null || true
-modprobe videobuf2_v4l2 2>/dev/null || true
-modprobe videobuf2_dma_sg 2>/dev/null || true
-modprobe snd_pcm 2>/dev/null || true
+modprobe videobuf2_common 2>/dev/null || modprobe videobuf2-common 2>/dev/null || true
+modprobe videobuf2_memops 2>/dev/null || modprobe videobuf2-memops 2>/dev/null || true
+modprobe videobuf2_v4l2 2>/dev/null || modprobe videobuf2-v4l2 2>/dev/null || true
+modprobe videobuf2_dma_sg 2>/dev/null || modprobe videobuf2-dma-sg 2>/dev/null || true
+modprobe snd_pcm 2>/dev/null || modprobe snd-pcm 2>/dev/null || true
 
 if ! insmod "$KO" rgb24_only=1; then
     echo "[FAIL] insmod failed! Check missing symbol in dmesg below:"
