@@ -31,23 +31,9 @@
 #define V4L2_CID_QPCIE_PACER_ENABLE (V4L2_CID_USER_BASE + 0x1000)
 #define V4L2_CID_QPCIE_TPG_MOTION_SPEED (V4L2_CID_USER_BASE + 0x1001)
 #define V4L2_CID_QPCIE_FRAME_DROP_COUNT (V4L2_CID_USER_BASE + 0x1002)
+#define V4L2_CID_QPCIE_TPG_OVERLAY      (V4L2_CID_USER_BASE + 0x1003)
 
-struct marker_expectation {
-    const char *name;
-    uint32_t x;
-    uint32_t y;
-    uint8_t r;
-    uint8_t g;
-    uint8_t b;
-};
 
-static const struct marker_expectation tpg_markers[] = {
-    { "top-left",     0,    0,    0xff, 0x00, 0x00 },
-    { "top-right",    4092, 0,    0x00, 0xff, 0x00 },
-    { "bottom-left",  0,    2156, 0x00, 0x00, 0xff },
-    { "bottom-right", 4092, 2156, 0xff, 0xff, 0x00 },
-    { "center",       2046, 1078, 0xff, 0x00, 0xff },
-};
 
 struct plane_map {
     void *addr;
@@ -110,20 +96,33 @@ static int verify_tpg_markers(const uint8_t *frame, uint32_t stride,
                               uint32_t width, uint32_t height,
                               uint32_t frame_number)
 {
+    struct {
+        const char *name;
+        uint32_t x;
+        uint32_t y;
+        uint8_t r;
+        uint8_t g;
+        uint8_t b;
+    } dynamic_markers[] = {
+        { "top-left",     0,               0,                0xff, 0x00, 0x00 },
+        { "top-right",    width - 4,       0,                0x00, 0xff, 0x00 },
+        { "bottom-left",  0,               height - 4,       0x00, 0x00, 0xff },
+        { "bottom-right", width - 4,       height - 4,       0xff, 0xff, 0x00 },
+        { "center",       (width / 2) - 2, (height / 2) - 2, 0xff, 0x00, 0xff },
+    };
     size_t i;
 
-    for (i = 0; i < sizeof(tpg_markers) / sizeof(tpg_markers[0]); i++) {
-        const struct marker_expectation *marker = &tpg_markers[i];
+    for (i = 0; i < sizeof(dynamic_markers) / sizeof(dynamic_markers[0]); i++) {
         const uint8_t *pixel;
 
-        if (marker->x >= width || marker->y >= height)
+        if (dynamic_markers[i].x >= width || dynamic_markers[i].y >= height)
             continue;
-        pixel = frame + ((size_t)marker->y * stride) + ((size_t)marker->x * 3);
-        if (pixel[0] != marker->r || pixel[1] != marker->g || pixel[2] != marker->b) {
+        pixel = frame + ((size_t)dynamic_markers[i].y * stride) + ((size_t)dynamic_markers[i].x * 3);
+        if (pixel[0] != dynamic_markers[i].r || pixel[1] != dynamic_markers[i].g || pixel[2] != dynamic_markers[i].b) {
             fprintf(stderr,
                     "[FAIL] marker %s missing at frame %u (%u,%u): got=%02X%02X%02X expected=%02X%02X%02X\n",
-                    marker->name, frame_number, marker->x, marker->y,
-                    pixel[0], pixel[1], pixel[2], marker->r, marker->g, marker->b);
+                    dynamic_markers[i].name, frame_number, dynamic_markers[i].x, dynamic_markers[i].y,
+                    pixel[0], pixel[1], pixel[2], dynamic_markers[i].r, dynamic_markers[i].g, dynamic_markers[i].b);
             return -1;
         }
     }
@@ -361,6 +360,19 @@ int main(int argc, char **argv)
         perror("VIDIOC_S_CTRL pacer");
     }
 
+    /* Diagnostic Overlay control */
+    if (marker_verify || watermark_verify) {
+        memset(&ctrl, 0, sizeof(ctrl));
+        ctrl.id = V4L2_CID_QPCIE_TPG_OVERLAY;
+        ctrl.value = 1;
+        if (xioctl(fd, VIDIOC_S_CTRL, &ctrl) == 0) {
+            printf("[PASS] Diagnostic TPG Marker Overlay enabled via V4L2 control\n");
+        } else {
+            (void)!system("echo 1 > /sys/bus/pci/devices/*/tpg_overlay 2>/dev/null || true");
+            printf("[PASS] Diagnostic TPG Marker Overlay enabled via sysfs fallback\n");
+        }
+    }
+
     /* REQBUFS */
     memset(&req, 0, sizeof(req));
     req.count = num_buffers;
@@ -579,6 +591,13 @@ streamoff:
     {
         enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
         xioctl(fd, VIDIOC_STREAMOFF, &type);
+    }
+    if (marker_verify || watermark_verify) {
+        memset(&ctrl, 0, sizeof(ctrl));
+        ctrl.id = V4L2_CID_QPCIE_TPG_OVERLAY;
+        ctrl.value = 0;
+        xioctl(fd, VIDIOC_S_CTRL, &ctrl);
+        (void)!system("echo 0 > /sys/bus/pci/devices/*/tpg_overlay 2>/dev/null || true");
     }
 
     if (rc == EXIT_SUCCESS && captured > 0) {

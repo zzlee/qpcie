@@ -438,13 +438,35 @@ module a50t_pcie_card_top #(
     wire         tpg_capture_tvalid, tpg_capture_tlast, tpg_capture_tuser;
     wire         tpg_capture_tready;
 
-`ifdef QPCIe_tpg_markers
+    wire        dma_overlay_en;
+    wire [15:0] dma_overlay_width;
+    wire [15:0] dma_overlay_height;
+
+    // Cross overlay controls to video_clk_150 domain
+    reg [1:0]  overlay_en_sync;
+    reg [15:0] overlay_w_sync, overlay_h_sync;
+    always @(posedge video_clk_150 or negedge video_engine_rst_n) begin
+        if (!video_engine_rst_n) begin
+            overlay_en_sync <= 2'b00;
+            overlay_w_sync  <= 16'd1920;
+            overlay_h_sync  <= 16'd1080;
+        end else begin
+            overlay_en_sync <= {overlay_en_sync[0], dma_overlay_en};
+            overlay_w_sync  <= dma_overlay_width;
+            overlay_h_sync  <= dma_overlay_height;
+        end
+    end
+    wire video_overlay_en = overlay_en_sync[1];
+
     tpg_marker_overlay #(
         .FRAME_WIDTH(4096),
         .FRAME_HEIGHT(2160)
     ) u_tpg_marker_overlay (
         .clk(video_clk_150),
         .rst_n(video_engine_rst_n),
+        .overlay_en(video_overlay_en),
+        .frame_width(overlay_w_sync),
+        .frame_height(overlay_h_sync),
         .s_axis_tdata(tpg_padded_tdata),
         .s_axis_tvalid(tpg_axis_tvalid),
         .s_axis_tlast(tpg_axis_tlast),
@@ -456,13 +478,6 @@ module a50t_pcie_card_top #(
         .m_axis_tuser(tpg_capture_tuser),
         .m_axis_tready(tpg_capture_tready)
     );
-`else
-    assign tpg_capture_tdata  = tpg_padded_tdata;
-    assign tpg_capture_tvalid = tpg_axis_tvalid;
-    assign tpg_capture_tlast  = tpg_axis_tlast;
-    assign tpg_capture_tuser  = tpg_axis_tuser;
-    assign tpg_axis_tready    = tpg_capture_tready;
-`endif
 
     // The NV12 capture engine now lives in the 150 MHz video domain and
     // consumes the TPG stream directly (same clock). Its C2H requests cross
@@ -810,6 +825,9 @@ module a50t_pcie_card_top #(
         .video_pipeline_reset(video_pipeline_reset),
         .video_tpg_reset(video_tpg_reset),
         .video_engine_reset(video_engine_reset),
+        .overlay_en(dma_overlay_en),
+        .overlay_width(dma_overlay_width),
+        .overlay_height(dma_overlay_height),
         .usr_irq_req(usr_irq_req),
         .usr_irq_ack(usr_irq_ack)
     );

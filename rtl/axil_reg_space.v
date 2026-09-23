@@ -141,6 +141,7 @@ module axil_reg_space #(
     output wire        out_map_mode_new,
     input  wire [31:0] in_vch0_frame_count,
     input  wire [31:0] in_vch0_drop_count,
+    output wire        out_overlay_en,
 
     // Phase 4: Three-Level Hierarchy Interrupt Ports
     input  wire [31:0] in_irq_top_status,
@@ -254,6 +255,7 @@ module axil_reg_space #(
 
     // Debug Block (New Map: 0x0900 - 0x09FF)
     reg  [31:0] dbg_pattern_gen;
+    reg  [31:0] reg_overlay_ctrl;
 
     assign out_vch0_ctrl          = vch0_ctrl;
     assign out_vch0_width         = vch0_width;
@@ -262,6 +264,7 @@ module axil_reg_space #(
     assign out_vch0_stride1       = vch0_stride1;
     assign out_map_mode_new       = 1'b1;
     assign out_vch0_irq_en        = vch0_ctrl[8];
+    assign out_overlay_en         = reg_overlay_ctrl[0] | vch0_ctrl[16];
 
     assign out_adev0_ctrl         = adev0_ctrl;
     assign out_adev0_rate         = adev0_rate;
@@ -326,6 +329,7 @@ module axil_reg_space #(
             out_adev0_irq_status_w1c<= 2'd0;
             out_adev0_xrun_inject   <= 1'b0;
             dbg_pattern_gen         <= 32'd0;
+            reg_overlay_ctrl        <= 32'd0;
             s_axil_awready          <= 1'b0;
             s_axil_wready           <= 1'b0;
             s_axil_bvalid           <= 1'b0;
@@ -363,6 +367,7 @@ module axil_reg_space #(
                             8'h78: reg_slice_height    <= s_axil_wdata;
                             8'h80: reg_video_ctrl      <= s_axil_wdata;
                             8'h84: reg_video_sub_reset <= s_axil_wdata;
+                            8'h88: reg_overlay_ctrl    <= s_axil_wdata;
                             8'hA0: begin
                                 reg_perf_enable        <= s_axil_wdata[0];
                                 reg_perf_reset_w1c     <= s_axil_wdata[1];
@@ -378,6 +383,7 @@ module axil_reg_space #(
                             8'h0C: vch0_height                  <= s_axil_wdata;
                             8'h10: vch0_stride0                 <= s_axil_wdata;
                             8'h14: vch0_stride1                 <= s_axil_wdata;
+                            8'h18: reg_overlay_ctrl             <= s_axil_wdata;
                             8'h20: reg_c2h_ring_addr[31:0]      <= s_axil_wdata; // CH0 Ring0 Base L
                             8'h24: reg_c2h_ring_addr[63:32]     <= s_axil_wdata; // CH0 Ring0 Base H
                             8'h28: begin                                         // CH0 Ring0 Cfg
@@ -470,6 +476,7 @@ module axil_reg_space #(
                             8'h7C: s_axil_rdata <= reg_frame_drop_count;
                             8'h80: s_axil_rdata <= reg_video_ctrl;
                             8'h84: s_axil_rdata <= reg_video_sub_reset;
+                            8'h88: s_axil_rdata <= reg_overlay_ctrl;
                             8'hA0: s_axil_rdata <= {30'd0, reg_perf_reset_w1c, reg_perf_enable};
                             default: s_axil_rdata <= 32'd0;
                         endcase
@@ -482,6 +489,7 @@ module axil_reg_space #(
                             8'h0C: s_axil_rdata <= vch0_height;
                             8'h10: s_axil_rdata <= vch0_stride0;
                             8'h14: s_axil_rdata <= vch0_stride1;
+                            8'h18: s_axil_rdata <= reg_overlay_ctrl;
                             8'h20: s_axil_rdata <= reg_c2h_ring_addr[31:0];
                             8'h24: s_axil_rdata <= reg_c2h_ring_addr[63:32];
                             8'h28: s_axil_rdata <= {reg_c2h_tail_ptr, reg_c2h_ring_size};

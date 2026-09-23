@@ -85,6 +85,7 @@
 #define V4L2_CID_QPCIE_PACER_ENABLE     (V4L2_CID_USER_BASE + 0x1000)
 #define V4L2_CID_QPCIE_TPG_MOTION_SPEED (V4L2_CID_USER_BASE + 0x1001)
 #define V4L2_CID_QPCIE_FRAME_DROP_COUNT (V4L2_CID_USER_BASE + 0x1002)
+#define V4L2_CID_QPCIE_TPG_OVERLAY      (V4L2_CID_USER_BASE + 0x1003)
 
 /* BAR0 DMA Register Offsets */
 #define REG_DMA_CTRL         0x00
@@ -133,6 +134,7 @@
 #define REG_SLICE_HEIGHT     0x78    /* Sub-Frame Slice Height in Lines (0=Full Frame IRQ, >0=Slice IRQ) */
 #define REG_VIDEO_ERRORS     0x7C    /* Ch0 capture engine frame-drop count */
 #define REG_VIDEO_CTRL       0x80    /* Bit 0: reset TPG and video CDC FIFO */
+#define REG_VIDEO_OVERLAY    0x88    /* Bit 0: diagnostic marker overlay enable */
 
 /* Hardware Performance Monitor Registers (BAR0 Offsets 0xA0..0xDC) */
 #define REG_PERF_CTRL               0xA0 /* Bit 0: Enable, Bit 1: Reset (W1C) */
@@ -184,6 +186,7 @@
 #define REG_VCH_OFFSET_HEIGHT       0x0C
 #define REG_VCH_OFFSET_STRIDE0      0x10
 #define REG_VCH_OFFSET_STRIDE1      0x14
+#define REG_VCH_OFFSET_OVERLAY      0x18
 #define REG_VCH_OFFSET_RING0_BASE_L 0x20
 #define REG_VCH_OFFSET_RING0_BASE_H 0x24
 #define REG_VCH_OFFSET_RING0_CFG    0x28
@@ -202,6 +205,7 @@
 #define REG_VCH_HEIGHT(n)           (REG_VCH_BASE(n) + REG_VCH_OFFSET_HEIGHT)
 #define REG_VCH_STRIDE0(n)          (REG_VCH_BASE(n) + REG_VCH_OFFSET_STRIDE0)
 #define REG_VCH_STRIDE1(n)          (REG_VCH_BASE(n) + REG_VCH_OFFSET_STRIDE1)
+#define REG_VCH_OVERLAY(n)          (REG_VCH_BASE(n) + REG_VCH_OFFSET_OVERLAY)
 #define REG_VCH_RING0_BASE_L(n)     (REG_VCH_BASE(n) + REG_VCH_OFFSET_RING0_BASE_L)
 #define REG_VCH_RING0_BASE_H(n)     (REG_VCH_BASE(n) + REG_VCH_OFFSET_RING0_BASE_H)
 #define REG_VCH_RING0_CFG(n)        (REG_VCH_BASE(n) + REG_VCH_OFFSET_RING0_CFG)
@@ -340,6 +344,7 @@ struct qpcie_v4l2_channel {
     u32 current_slice_idx;
     u32 error_count_start;
     bool pacer_enable;
+    bool overlay_enable;
     enum v4l2_buf_type buf_type;
     /* Phase 5 / Phase 6: Per-channel register block & thin descriptor rings */
     u32 ch_reg_base;

@@ -1076,6 +1076,8 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
         iowrite32(vch->height, qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_HEIGHT);
         iowrite32(stride0, qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_STRIDE0);
         iowrite32(stride1, qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_STRIDE1);
+        iowrite32(vch->overlay_enable ? 1 : 0, qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_OVERLAY);
+        iowrite32(vch->overlay_enable ? 1 : 0, qdev->bar0_mmio + REG_VIDEO_OVERLAY);
 
         /* Program RING0 Base Address & CFG with current tail doorbell */
         iowrite32(lower_32_bits(vch->thin_ring_dma),
@@ -1316,6 +1318,15 @@ static int qpcie_s_ctrl(struct v4l2_ctrl *ctrl)
         if (vb2_is_streaming(&vch->queue))
             return -EBUSY;
         return qpcie_program_tpg_motion(vch, ctrl->val);
+    case V4L2_CID_QPCIE_TPG_OVERLAY:
+        vch->overlay_enable = !!ctrl->val;
+        if (qdev && qdev->bar0_mmio) {
+            if (qdev->use_new_map && vch->ch_reg_base)
+                iowrite32(vch->overlay_enable ? 1 : 0, qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_OVERLAY);
+            iowrite32(vch->overlay_enable ? 1 : 0, qdev->bar0_mmio + REG_VIDEO_OVERLAY);
+            ioread32(qdev->bar0_mmio + REG_VIDEO_OVERLAY);
+        }
+        break;
     }
     return 0;
 }
@@ -1372,6 +1383,17 @@ static const struct v4l2_ctrl_config qpcie_frame_drop_ctrl_config = {
     .step  = 1,
     .def   = 0,
     .flags = V4L2_CTRL_FLAG_READ_ONLY | V4L2_CTRL_FLAG_VOLATILE,
+};
+
+static const struct v4l2_ctrl_config qpcie_tpg_overlay_ctrl_config = {
+    .ops  = &qpcie_ctrl_ops,
+    .id   = V4L2_CID_QPCIE_TPG_OVERLAY,
+    .name = "QPCIe TPG Marker Overlay",
+    .type = V4L2_CTRL_TYPE_BOOLEAN,
+    .min  = 0,
+    .max  = 1,
+    .step = 1,
+    .def  = 0,
 };
 
 int qpcie_v4l2_init(struct qpcie_dev *qdev)
@@ -1473,7 +1495,7 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
 
         /* Initialize V4L2 Control Handler */
         dev_info(&qdev->pdev->dev, "[DEBUG STEP 2.3] Node %d: Initializing Control Handler...\n", i);
-        v4l2_ctrl_handler_init(&vch->ctrl_handler, i == 0 ? 4 : 1);
+        v4l2_ctrl_handler_init(&vch->ctrl_handler, i == 0 ? 5 : 1);
         if (i == 0) {
             v4l2_ctrl_new_std_menu_items(&vch->ctrl_handler, &qpcie_ctrl_ops,
                                          V4L2_CID_TEST_PATTERN,
@@ -1482,6 +1504,8 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
                                  &qpcie_tpg_motion_ctrl_config, NULL);
             v4l2_ctrl_new_custom(&vch->ctrl_handler,
                                  &qpcie_frame_drop_ctrl_config, NULL);
+            v4l2_ctrl_new_custom(&vch->ctrl_handler,
+                                 &qpcie_tpg_overlay_ctrl_config, NULL);
         }
         v4l2_ctrl_new_custom(&vch->ctrl_handler,
                              &qpcie_pacer_ctrl_config, NULL);

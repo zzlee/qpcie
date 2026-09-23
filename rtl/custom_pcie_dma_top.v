@@ -111,6 +111,9 @@ module custom_pcie_dma_top #(
     output wire                                             video_pipeline_reset,
     output wire                                             video_tpg_reset,
     output wire                                             video_engine_reset,
+    output wire                                             overlay_en,
+    output wire [15:0]                                      overlay_width,
+    output wire [15:0]                                      overlay_height,
 
     // Interrupt Pins
     output wire                                             usr_irq_req,
@@ -600,6 +603,11 @@ module custom_pcie_dma_top #(
     wire [15:0] thin_ring0_head;
     wire [15:0] thin_ring1_head;
     wire        thin_active = map_mode_new_w && vch0_ctrl_w[0];
+    wire        overlay_en_w;
+
+    assign overlay_en     = overlay_en_w;
+    assign overlay_width  = vch0_width_w[15:0];
+    assign overlay_height = vch0_height_w[15:0];
 
     // Phase 4: Three-Level Interrupt Wires
     wire [31:0] irq_top_status_w;
@@ -743,6 +751,7 @@ module custom_pcie_dma_top #(
         .out_map_mode_new(map_mode_new_w),
         .in_vch0_frame_count(thin_frame_count),
         .in_vch0_drop_count(thin_drop_count),
+        .out_overlay_en(overlay_en_w),
         .in_irq_top_status(irq_top_status_w),
         .out_irq_top_status_w1c(irq_top_status_w1c_w),
         .in_vch0_irq_status(vch0_irq_status_w),

@@ -63,6 +63,41 @@ static ssize_t tpg_pattern_store(struct device *dev, struct device_attribute *at
 }
 static DEVICE_ATTR_RW(tpg_pattern);
 
+static ssize_t tpg_overlay_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+    struct pci_dev *pdev = to_pci_dev(dev);
+    struct qpcie_dev *qdev = pci_get_drvdata(pdev);
+    u32 overlay_val = 0;
+
+    if (qdev && qdev->bar0_mmio) {
+        if (qdev->use_new_map && qdev->v4l2_ch[0].ch_reg_base)
+            overlay_val = ioread32(qdev->bar0_mmio + qdev->v4l2_ch[0].ch_reg_base + REG_VCH_OFFSET_OVERLAY);
+        else
+            overlay_val = ioread32(qdev->bar0_mmio + REG_VIDEO_OVERLAY);
+    }
+    return sysfs_emit(buf, "%u\n", overlay_val & 1);
+}
+
+static ssize_t tpg_overlay_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+{
+    struct pci_dev *pdev = to_pci_dev(dev);
+    struct qpcie_dev *qdev = pci_get_drvdata(pdev);
+    u32 val = 0;
+
+    if (kstrtou32(buf, 0, &val)) return -EINVAL;
+
+    if (qdev && qdev->bar0_mmio) {
+        qdev->v4l2_ch[0].overlay_enable = !!val;
+        if (qdev->use_new_map && qdev->v4l2_ch[0].ch_reg_base)
+            iowrite32(val ? 1 : 0, qdev->bar0_mmio + qdev->v4l2_ch[0].ch_reg_base + REG_VCH_OFFSET_OVERLAY);
+        iowrite32(val ? 1 : 0, qdev->bar0_mmio + REG_VIDEO_OVERLAY);
+        ioread32(qdev->bar0_mmio + REG_VIDEO_OVERLAY);
+        dev_info(dev, "Updated Video TPG Overlay to %u\n", val ? 1 : 0);
+    }
+    return count;
+}
+static DEVICE_ATTR_RW(tpg_overlay);
+
 static ssize_t tpg_resolution_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
     struct pci_dev *pdev = to_pci_dev(dev);
@@ -746,6 +781,7 @@ static DEVICE_ATTR_RO(ch1_status);
 /* Sysfs Attribute Group Table */
 static struct attribute *qpcie_sysfs_attrs[] = {
     &dev_attr_tpg_pattern.attr,
+    &dev_attr_tpg_overlay.attr,
     &dev_attr_tpg_resolution.attr,
     &dev_attr_tpg_fps.attr,
     &dev_attr_tpg_stream_stats.attr,
