@@ -1010,6 +1010,8 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
     vch->sequence = 0;
     vch->current_slice_idx = 0;
     vch->error_count_start = ioread32(qdev->bar0_mmio + REG_VIDEO_ERRORS);
+    iowrite32(0, qdev->bar0_mmio + REG_VIDEO_CTRL);
+    ioread32(qdev->bar0_mmio + REG_VIDEO_CTRL);
 
     /* Only Channel 0 uses the Video Test Pattern Generator (TPG0) & Pacer.
      * Channels 1 and 2 are dedicated hardware loopback and user streaming. */
@@ -1197,31 +1199,36 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
     ioread32(qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_CTRL);
     u32 stat_reg = vch->ch_reg_base + REG_VCH_OFFSET_STATUS;
 
-    do {
-        u32 status = ioread32(qdev->bar0_mmio + stat_reg);
+    if (vch->channel_id == 0) {
+        do {
+            u32 status = ioread32(qdev->bar0_mmio + stat_reg);
 
-        if (status & DMA_STATUS_VIDEO_TX_IDLE) {
-            drained = true;
-            break;
-        }
+            if (status & DMA_STATUS_VIDEO_TX_IDLE) {
+                drained = true;
+                break;
+            }
+            usleep_range(1000, 2000);
+        } while (time_before(jiffies, timeout));
+
+        /* Pulse reset on the video engine and its CDC FIFO before cancelling descriptors */
+        iowrite32(1, qdev->bar0_mmio + REG_VIDEO_CTRL);
+        ioread32(qdev->bar0_mmio + REG_VIDEO_CTRL);
         usleep_range(1000, 2000);
-    } while (time_before(jiffies, timeout));
+        iowrite32(0, qdev->bar0_mmio + REG_VIDEO_CTRL);
+        ioread32(qdev->bar0_mmio + REG_VIDEO_CTRL);
+        timeout = jiffies + msecs_to_jiffies(500);
+        do {
+            u32 status = ioread32(qdev->bar0_mmio + stat_reg);
 
-    /* Freeze the video engine and its CDC FIFO before cancelling descriptors.
-     * STREAMON releases this reset after new mappings have been queued. */
-    iowrite32(1, qdev->bar0_mmio + REG_VIDEO_CTRL);
-    ioread32(qdev->bar0_mmio + REG_VIDEO_CTRL);
-    usleep_range(1000, 2000);
-    timeout = jiffies + msecs_to_jiffies(500);
-    do {
-        u32 status = ioread32(qdev->bar0_mmio + stat_reg);
-
-        if ((status & (DMA_STATUS_VIDEO_TX_IDLE |
-                       DMA_STATUS_DESC_IDLE)) ==
-            (DMA_STATUS_VIDEO_TX_IDLE | DMA_STATUS_DESC_IDLE))
-            break;
-        usleep_range(1000, 2000);
-    } while (time_before(jiffies, timeout));
+            if ((status & (DMA_STATUS_VIDEO_TX_IDLE |
+                           DMA_STATUS_DESC_IDLE)) ==
+                (DMA_STATUS_VIDEO_TX_IDLE | DMA_STATUS_DESC_IDLE))
+                break;
+            usleep_range(1000, 2000);
+        } while (time_before(jiffies, timeout));
+    } else {
+        drained = true;
+    }
 
     qpcie_dma_soft_reset(qdev);
 

@@ -12,12 +12,11 @@
 
 void qpcie_dma_soft_reset(struct qpcie_dev *qdev)
 {
-    u32 ctrl_base = BIT(3);
-    iowrite32(ctrl_base | DMA_CTRL_RESET, qdev->bar0_mmio + REG_DMA_CTRL);
-    ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
+    iowrite32(1, qdev->bar0_mmio + REG_NEW_GLOBAL_RESET);
+    ioread32(qdev->bar0_mmio + REG_NEW_GLOBAL_RESET);
     usleep_range(1000, 2000);
-    iowrite32(ctrl_base, qdev->bar0_mmio + REG_DMA_CTRL);
-    ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
+    iowrite32(0, qdev->bar0_mmio + REG_NEW_GLOBAL_RESET);
+    ioread32(qdev->bar0_mmio + REG_NEW_GLOBAL_RESET);
     usleep_range(1000, 2000);
 }
 
