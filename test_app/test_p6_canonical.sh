@@ -39,7 +39,19 @@ echo ""
 echo "--- Step 1: Loading QPCIe Driver in Canonical v3.0 Mode ---"
 rmmod custom_pcie_av 2>/dev/null || true
 sleep 1
-insmod "$KO" rgb24_only=1
+
+# Ensure kernel module dependencies are loaded (V4L2, DMA-SG, ALSA)
+modprobe videodev 2>/dev/null || true
+modprobe videobuf2_common 2>/dev/null || true
+modprobe videobuf2_v4l2 2>/dev/null || true
+modprobe videobuf2_dma_sg 2>/dev/null || true
+modprobe snd_pcm 2>/dev/null || true
+
+if ! insmod "$KO" rgb24_only=1; then
+    echo "[FAIL] insmod failed! Check missing symbol in dmesg below:"
+    dmesg | tail -n 25
+    exit 1
+fi
 sleep 2
 
 dmesg | tail -n 30 | grep -E "Canonical v3.0 Map Active|PHASE 5 NEW MAP|CH0 Thin Ring" || {
