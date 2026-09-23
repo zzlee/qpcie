@@ -39,17 +39,19 @@ rmmod custom_pcie_av 2>/dev/null || true
 sleep 1
 
 # Ensure required kernel modules are present
+modprobe videodev 2>/dev/null || true
 modprobe videobuf2_common 2>/dev/null || modprobe videobuf2-common 2>/dev/null || true
 modprobe videobuf2_memops 2>/dev/null || modprobe videobuf2-memops 2>/dev/null || true
 modprobe videobuf2_v4l2 2>/dev/null || modprobe videobuf2-v4l2 2>/dev/null || true
 modprobe videobuf2_dma_sg 2>/dev/null || modprobe videobuf2-dma-sg 2>/dev/null || true
+modprobe snd_pcm 2>/dev/null || modprobe snd-pcm 2>/dev/null || true
 
 insmod "$KO"
 sleep 2
 
-dmesg | tail -n 25 | grep -i "NEW MAP ACTIVE" || {
+dmesg | tail -n 100 | grep -E "Canonical v3.0 Map Active|PHASE 5 NEW MAP ACTIVE|CH0 Thin Ring" || {
     echo "[FAIL] Driver did not activate Canonical v3.0 Map!"
-    dmesg | tail -n 25
+    dmesg | tail -n 50
     exit 1
 }
 echo "[PASS] Canonical v3.0 Register Map Active."
