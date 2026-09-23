@@ -1010,18 +1010,19 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
     vch->sequence = 0;
     vch->current_slice_idx = 0;
     vch->error_count_start = ioread32(qdev->bar0_mmio + REG_VIDEO_ERRORS);
-    iowrite32(0, qdev->bar0_mmio + REG_VIDEO_CTRL);
-    ioread32(qdev->bar0_mmio + REG_VIDEO_CTRL);
-    iowrite32(0, qdev->bar0_mmio + REG_SLICE_HEIGHT);
-    iowrite32(vch->pacer_enable ? 1 : 0,
-              qdev->bar0_mmio + REG_PACER_CTRL);
 
-    /* Only Channel 0 uses the Video Test Pattern Generator (TPG0).
+    /* Only Channel 0 uses the Video Test Pattern Generator (TPG0) & Pacer.
      * Channels 1 and 2 are dedicated hardware loopback and user streaming. */
     if (vch->channel_id == 0) {
         struct v4l2_ctrl *pattern_ctrl;
         struct v4l2_ctrl *motion_ctrl;
         u32 pattern_id;
+
+        iowrite32(0, qdev->bar0_mmio + REG_VIDEO_CTRL);
+        ioread32(qdev->bar0_mmio + REG_VIDEO_CTRL);
+        iowrite32(0, qdev->bar0_mmio + REG_SLICE_HEIGHT);
+        iowrite32(vch->pacer_enable ? 1 : 0,
+                  qdev->bar0_mmio + REG_PACER_CTRL);
 
         pattern_ctrl = v4l2_ctrl_find(&vch->ctrl_handler,
                                       V4L2_CID_TEST_PATTERN);
@@ -1047,20 +1048,25 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
             qpcie_return_all_buffers(vch, VB2_BUF_STATE_QUEUED);
             return ret;
         }
+
+        pacer_ctrl = ioread32(qdev->bar0_mmio + REG_PACER_CTRL);
+        if (!!(pacer_ctrl & BIT(0)) != vch->pacer_enable) {
+            dev_err(&qdev->pdev->dev,
+                    "NV12M pacer readback mismatch: requested=%u readback=0x%08x\n",
+                    vch->pacer_enable, pacer_ctrl);
+            qpcie_return_all_buffers(vch, VB2_BUF_STATE_QUEUED);
+            return -EIO;
+        }
+    } else {
+        pacer_ctrl = 1;
     }
 
-    pacer_ctrl = ioread32(qdev->bar0_mmio + REG_PACER_CTRL);
-    if (!!(pacer_ctrl & BIT(0)) != vch->pacer_enable) {
-        dev_err(&qdev->pdev->dev,
-                "NV12M pacer readback mismatch: requested=%u readback=0x%08x\n",
-                vch->pacer_enable, pacer_ctrl);
-        qpcie_return_all_buffers(vch, VB2_BUF_STATE_QUEUED);
-        return -EIO;
-    }
     dma_wmb();
-    /* Reset for one PCIe clock, then count the complete streaming window. */
-    iowrite32(0x03, qdev->bar0_mmio + REG_PERF_CTRL);
-    ioread32(qdev->bar0_mmio + REG_PERF_CTRL);
+    if (atomic_read(&qdev->streaming_count) == 0) {
+        /* Reset for one PCIe clock, then count the complete streaming window. */
+        iowrite32(0x03, qdev->bar0_mmio + REG_PERF_CTRL);
+        ioread32(qdev->bar0_mmio + REG_PERF_CTRL);
+    }
 
     if (vch->thin_ring_virt) {
         bool is_rgb = (vch->pixelformat == V4L2_PIX_FMT_RGB24);

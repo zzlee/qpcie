@@ -87,7 +87,7 @@ echo "[PASS] 4K (3840x2160) Hardware Loopback verified with 100% bit-exact integ
 echo ""
 echo "--- Step 4: Concurrent Multi-Channel Streaming Test (CH0 TPG + CH1 Loopback) ---"
 echo "  Starting CH0 TPG capture on $TPG_DEV in background (120 frames)..."
-"$TPG_APP" -d "$TPG_DEV" -w 1920 -h 1080 -f 120 -S > /tmp/step5_tpg_concurrent.log 2>&1 &
+"$TPG_APP" -d "$TPG_DEV" -w 1920 -h 1080 -f 120 > /tmp/step5_tpg_concurrent.log 2>&1 &
 TPG_PID=$!
 
 sleep 0.5

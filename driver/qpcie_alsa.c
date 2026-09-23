@@ -495,9 +495,9 @@ int qpcie_alsa_init(struct qpcie_dev *qdev)
 {
     int i, ret;
     u32 hw_caps = ioread32(qdev->bar0_mmio + REG_NEW_GLOBAL_CAPS);
-    unsigned int num_audio = (hw_caps >> 8) & 0x0f;
-    if (num_audio == 0 || num_audio > NUM_AUDIO_CHANNELS)
-        num_audio = NUM_AUDIO_CHANNELS;
+    /* In Canonical v3.0, only Audio DEV0 (Pattern Gen Capture at 0x500) is supported.
+     * Legacy playback/loopback channels at 0x100..0x160 collided with Video CH0 and are purged. */
+    unsigned int num_audio = 1;
 
     qdev->alsa_channel_count = num_audio;
 
