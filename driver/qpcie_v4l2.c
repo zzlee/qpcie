@@ -330,8 +330,11 @@ static int qpcie_vidioc_s_fmt_vid_cap_mplane(struct file *file, void *priv,
     vch->pixelformat = pixelformat;
     if (pixelformat == V4L2_PIX_FMT_RGB24) {
         vch->stride = req_stride >= mode->width * 3 ? req_stride : ALIGN(mode->width * 3, 128);
+        vch->stride1 = 0;
     } else {
+        u32 req_stride1 = f->fmt.pix_mp.plane_fmt[1].bytesperline;
         vch->stride = req_stride >= mode->width ? req_stride : ALIGN(mode->width, 128);
+        vch->stride1 = req_stride1 >= mode->width ? req_stride1 : vch->stride;
     }
 
     pattern_ctrl = v4l2_ctrl_find(&vch->ctrl_handler,
@@ -695,6 +698,25 @@ static int qpcie_publish_buffer(struct qpcie_v4l2_channel *vch,
             entries_added++;
         }
 
+        if (!is_rgb && vch->thin_ring1_virt) {
+            u32 thin_tail1 = vch->thin_ring1_tail;
+            u32 entries_added1 = 0;
+
+            sgt1 = vb2_dma_sg_plane_desc(vb, 1);
+            if (WARN_ON(!sgt1))
+                return -EINVAL;
+
+            for_each_sg(sgt1->sgl, sg, sgt1->nents, i) {
+                u32 slot = (thin_tail1 + entries_added1) % RING_BUFFER_SIZE;
+                vch->thin_ring1_virt[slot].phys_addr = sg_dma_address(sg);
+                vch->thin_ring1_virt[slot].len_bytes = sg_dma_len(sg);
+                vch->thin_ring1_virt[slot].flags     = 0;
+                entries_added1++;
+            }
+
+            vch->thin_ring1_tail = (thin_tail1 + entries_added1) % RING_BUFFER_SIZE;
+        }
+
         spin_lock(&vch->slock);
         list_add_tail(&buf->list, &vch->active_buffers);
         spin_unlock(&vch->slock);
@@ -705,6 +727,12 @@ static int qpcie_publish_buffer(struct qpcie_v4l2_channel *vch,
         iowrite32((vch->thin_ring_tail << 16) | RING_BUFFER_SIZE,
                   qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING0_CFG);
         ioread32(qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING0_CFG);
+
+        if (!is_rgb && vch->thin_ring1_virt) {
+            iowrite32((vch->thin_ring1_tail << 16) | RING_BUFFER_SIZE,
+                      qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING1_CFG);
+            ioread32(qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING1_CFG);
+        }
         qdev->ring_published++;
 
         if (!buf->sgl_logged) {
@@ -1037,8 +1065,10 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
 
     if (qdev->use_new_map && vch->thin_ring_virt) {
         bool is_rgb = (vch->pixelformat == V4L2_PIX_FMT_RGB24);
-        u32 stride0 = is_rgb ? (vch->width * 3) : vch->width;
-        u32 stride1 = is_rgb ? 0 : vch->width;
+        u32 stride0 = is_rgb ? (vch->stride ? vch->stride : (vch->width * 3)) :
+                               (vch->stride ? vch->stride : vch->width);
+        u32 stride1 = is_rgb ? 0 :
+                               (vch->stride1 ? vch->stride1 : (vch->stride ? vch->stride : vch->width));
         u32 ch_ctrl = BIT(0) | ((is_rgb ? 1 : 2) << 4) | BIT(8); /* enable=1, format, irq_en=1 */
 
         /* Program CH Geometry */
@@ -1055,6 +1085,17 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
         dma_wmb();
         iowrite32((vch->thin_ring_tail << 16) | RING_BUFFER_SIZE,
                   qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING0_CFG);
+
+        /* Program RING1 Base Address & CFG with current tail doorbell if multi-plane */
+        if (!is_rgb && vch->thin_ring1_virt) {
+            iowrite32(lower_32_bits(vch->thin_ring1_dma),
+                      qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING1_BASE_L);
+            iowrite32(upper_32_bits(vch->thin_ring1_dma),
+                      qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING1_BASE_H);
+            dma_wmb();
+            iowrite32((vch->thin_ring1_tail << 16) | RING_BUFFER_SIZE,
+                      qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING1_CFG);
+        }
 
         /* Enable CH */
         iowrite32(ch_ctrl, qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_CTRL);
@@ -1186,6 +1227,14 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
         iowrite32((head << 16) | RING_BUFFER_SIZE,
                   qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING0_CFG);
         ioread32(qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING0_CFG);
+        if (vch->thin_ring1_virt) {
+            u32 head1 = ioread32(qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING1_HEAD) & 0xffff;
+            vch->thin_ring1_tail = head1;
+            vch->thin_ring1_head = head1;
+            iowrite32((head1 << 16) | RING_BUFFER_SIZE,
+                      qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING1_CFG);
+            ioread32(qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING1_CFG);
+        }
     } else {
         head = ioread32(qdev->bar0_mmio + 0x40) & 0xffff;
         qdev->h2c_tail = head;

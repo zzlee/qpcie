@@ -110,10 +110,15 @@ module thin_desc_fetch_engine #(
 
     // Target frame bytes calculation
     // RGB24: line_width_bytes * height = stride0 * height (e.g. 5760 * 1080 = 6,220,800 bytes)
-    // NV12M: Y = width * height, UV = width * (height / 2)
-    wire [15:0] effective_width = (format == 4'd1) ? ((frame_stride0 > 16'd0) ? frame_stride0 : (frame_width * 16'd3)) : frame_width;
-    wire [31:0] target_y  = effective_width * frame_height;
-    wire [31:0] target_uv = (format == 4'd1) ? 32'd0 : (frame_width * (frame_height >> 1));
+    // NV12M: Y = stride0 * height, UV = stride1 * (height / 2)
+    wire [15:0] effective_stride0 = (frame_stride0 > 16'd0) ? frame_stride0 :
+                                    ((format == 4'd1) ? (frame_width * 16'd3) : frame_width);
+    wire [15:0] effective_stride1 = (frame_stride1 > 16'd0) ? frame_stride1 : frame_width;
+    wire [15:0] effective_width   = (format == 4'd1) ? ((frame_stride0 > 16'd0) ? frame_stride0 : (frame_width * 16'd3)) : frame_width;
+    wire [15:0] launch_stride     = (frame_stride0 > 16'd0) ? frame_stride0 : effective_width;
+
+    wire [31:0] target_y  = effective_stride0 * frame_height;
+    wire [31:0] target_uv = (format == 4'd1) ? 32'd0 : (effective_stride1 * (frame_height >> 1));
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -187,7 +192,7 @@ module thin_desc_fetch_engine #(
                                 format,
                                 1'b1, // sg_mode = 1
                                 global_timestamp,
-                                frame_stride0,
+                                launch_stride,
                                 frame_height,
                                 effective_width,
                                 64'd0, // plane1 dummy (walker supplies address)

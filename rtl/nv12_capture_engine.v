@@ -78,6 +78,7 @@ module nv12_capture_engine #(
     wire       is_rgb_mode = (format_q == 4'd1);
 
     reg [15:0] width_q, height_q, stride_q;
+    reg [15:0] stride_padding_q;
     reg [15:0] line_idx, beat_col;
     reg [63:0] y_send_addr, uv_send_addr;
     reg [63:0] y_line_start_addr, uv_line_start_addr;
@@ -136,6 +137,7 @@ module nv12_capture_engine #(
     reg pending_req_is_uv;
     reg [4:0] payload_beats_to_load;
     reg [15:0] active_req_bytes;
+    reg [15:0] req_advance_bytes;
     reg [15:0] y_rem_bytes;
     reg [15:0] uv_rem_bytes;
 
@@ -161,7 +163,7 @@ module nv12_capture_engine #(
         .sgl_wr_len(sgl_y_wr_len),
         .sgl_wr_flags(sgl_y_wr_flags),
         .advance_burst(c2h_req_ack && c2h_req_valid && !request_is_uv),
-        .burst_bytes(active_req_bytes),
+        .burst_bytes(req_advance_bytes),
         .current_addr(y_walker_addr),
         .seg_bytes_left(y_walker_bytes_left),
         .seg_valid(y_seg_valid),
@@ -190,7 +192,7 @@ module nv12_capture_engine #(
         .sgl_wr_len(sgl_uv_wr_len),
         .sgl_wr_flags(sgl_uv_wr_flags),
         .advance_burst(c2h_req_ack && c2h_req_valid && request_is_uv),
-        .burst_bytes(active_req_bytes),
+        .burst_bytes(req_advance_bytes),
         .current_addr(uv_walker_addr),
         .seg_bytes_left(uv_walker_bytes_left),
         .seg_valid(uv_seg_valid),
@@ -332,6 +334,7 @@ module nv12_capture_engine #(
             width_q <= 0;
             height_q <= 0;
             stride_q <= 0;
+            stride_padding_q <= 0;
             line_idx <= 0;
             beat_col <= 0;
             y_pack <= 0;
@@ -358,6 +361,7 @@ module nv12_capture_engine #(
                 width_q <= frame_width;
                 height_q <= frame_height;
                 stride_q <= frame_stride;
+                stride_padding_q <= (frame_stride > frame_width) ? (frame_stride - frame_width) : 16'd0;
                 line_idx <= 0;
                 beat_col <= 0;
                 y_pack <= 0;
@@ -478,6 +482,7 @@ module nv12_capture_engine #(
             pending_req_is_uv <= 0;
             payload_beats_to_load <= 0;
             active_req_bytes <= 0;
+            req_advance_bytes <= 0;
             y_send_addr <= 0;
             uv_send_addr <= 0;
             y_line_start_addr <= 0;
@@ -500,6 +505,7 @@ module nv12_capture_engine #(
             pending_req_is_uv <= 0;
             payload_beats_to_load <= 0;
             active_req_bytes <= 0;
+            req_advance_bytes <= 0;
             y_send_addr <= plane_y_addr;
             uv_send_addr <= plane_uv_addr;
             y_line_start_addr <= plane_y_addr;
@@ -520,6 +526,9 @@ module nv12_capture_engine #(
                     c2h_req_last          <= 1'b1;
                     payload_beats_to_load <= pending_req_is_uv ? uv_next_beats : y_next_beats;
                     active_req_bytes      <= pending_req_is_uv ? uv_next_bytes : y_next_bytes;
+                    req_advance_bytes     <= pending_req_is_uv ?
+                        ((uv_send_offset + uv_next_bytes >= width_q) ? (uv_next_bytes + stride_padding_q) : uv_next_bytes) :
+                        ((y_send_offset + y_next_bytes >= width_q) ? (y_next_bytes + stride_padding_q) : y_next_bytes);
                     c2h_req_valid         <= 1'b1;
                     prefer_uv             <= pending_req_is_uv ? 1'b0 : (is_rgb_mode ? 1'b0 : 1'b1);
                     pending_req_valid     <= 1'b0;

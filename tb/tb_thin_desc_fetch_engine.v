@@ -275,7 +275,33 @@ module tb_thin_desc_fetch_engine;
         ring0_size = 16'd10; // size = 10
         ring0_tail = 16'd2;  // tail = 2 (wrapped: 8 -> 9 -> 0 -> 1 -> 2)
         wait(ring0_head == 16'd2);
-        $display("  PASS: Ring wrapped cleanly past size=10 to head=2");
+        #40;
+        $display("--- [Test 7: NV12M with Padded Stride (1920 width, 2048 stride)] ---");
+        // Pulse frame completion to clear previous active frame
+        frame_done_in = 1'b1;
+        #8;
+        frame_done_in = 1'b0;
+        #20;
+        format = 4'd2; // NV12M format = 2
+        frame_width = 16'd1920;
+        frame_height = 16'd1080;
+        frame_stride0 = 16'd2048; // padded stride 2048
+        frame_stride1 = 16'd2048; // padded stride 2048
+        ring0_size = 16'd128;
+        ring1_size = 16'd128;
+        ring0_tail = ring0_head + 16'd2;
+        ring1_tail = ring1_head + 16'd2;
+
+        @(posedge frame_launch_req);
+        // Verify launch stride in frame_launch_bus [175:160] is 2048
+        if (frame_launch_bus[175:160] !== 16'd2048) begin
+            $display("FAIL: Test 7 launch_stride mismatch: expected 2048, got %d", frame_launch_bus[175:160]);
+            $fatal(1);
+        end
+        $display("  PASS: Frame launch correctly emitted launch_stride = 2048");
+
+        wait(ring0_head == ring0_tail && ring1_head == ring1_tail);
+        $display("  PASS: Dual-ring parallel fetch completed for padded NV12M");
 
         #40;
         $display("=================================================================");

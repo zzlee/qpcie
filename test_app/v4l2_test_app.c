@@ -157,6 +157,7 @@ int main(int argc, char **argv)
     FILE *output = NULL;
     unsigned int i, p, captured = 0, total_queued = 0, data_errors = 0;
     unsigned int num_buffers = DEFAULT_BUFFERS;
+    unsigned int req_stride = 0;
     uint64_t first_y_hash = 0, first_uv_hash = 0;
     uint64_t second_y_hash = 0, second_uv_hash = 0;
     uint64_t y_frame_bytes, uv_frame_bytes, nv12_frame_bytes;
@@ -171,6 +172,7 @@ int main(int argc, char **argv)
         {"fps", required_argument, NULL, 'r'},
         {"width", required_argument, NULL, 'w'},
         {"height", required_argument, NULL, 'h'},
+        {"stride", required_argument, NULL, 's'},
         {"out", required_argument, NULL, 'o'},
         {"buffers", required_argument, NULL, 'n'},
         {"benchmark", no_argument, NULL, 'b'},
@@ -179,7 +181,7 @@ int main(int argc, char **argv)
         {NULL, 0, NULL, 0}
     };
 
-    while ((opt = getopt_long(argc, argv, "d:f:p:r:w:h:o:bn:", options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "d:f:p:r:w:h:s:o:bn:", options, NULL)) != -1) {
         switch (opt) {
         case 'd': device = optarg; break;
         case 'f': frame_target = strtoul(optarg, NULL, 0); frames_set = 1; break;
@@ -187,6 +189,7 @@ int main(int argc, char **argv)
         case 'r': fps = strtol(optarg, NULL, 0); break;
         case 'w': width = strtoul(optarg, NULL, 0); break;
         case 'h': height = strtoul(optarg, NULL, 0); break;
+        case 's': req_stride = strtoul(optarg, NULL, 0); break;
         case 'o': output_name = optarg; break;
         case 'n': num_buffers = strtoul(optarg, NULL, 0); break;
         case 'b': benchmark_mode = 1; break;
@@ -209,10 +212,13 @@ int main(int argc, char **argv)
         fprintf(stderr, "Only 60 FPS is supported\n");
         return EXIT_FAILURE;
     }
-    y_frame_bytes = (uint64_t)width * height;
-    uv_frame_bytes = y_frame_bytes / 2;
-    nv12_frame_bytes = y_frame_bytes + uv_frame_bytes;
-    nv12_mwr_per_frame = nv12_frame_bytes / NV12_MWR_PAYLOAD_BYTES;
+    {
+        uint32_t eff_stride = req_stride ? req_stride : width;
+        y_frame_bytes = (uint64_t)eff_stride * height;
+        uv_frame_bytes = (uint64_t)eff_stride * (height / 2);
+        nv12_frame_bytes = y_frame_bytes + uv_frame_bytes;
+        nv12_mwr_per_frame = nv12_frame_bytes / NV12_MWR_PAYLOAD_BYTES;
+    }
 
     if (num_buffers < 2 || num_buffers > 8) {
         fprintf(stderr, "Buffer count must be between 2 and 8\n");
@@ -301,20 +307,27 @@ int main(int argc, char **argv)
     fmt.fmt.pix_mp.height = height;
     fmt.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_NV12M;
     fmt.fmt.pix_mp.field = V4L2_FIELD_NONE;
+    if (req_stride) {
+        fmt.fmt.pix_mp.plane_fmt[0].bytesperline = req_stride;
+        fmt.fmt.pix_mp.plane_fmt[1].bytesperline = req_stride;
+    }
     if (xioctl(fd, VIDIOC_S_FMT, &fmt) < 0) {
         perror("VIDIOC_S_FMT");
         goto out;
     }
-    if (fmt.fmt.pix_mp.width != width ||
-        fmt.fmt.pix_mp.height != height ||
-        fmt.fmt.pix_mp.pixelformat != V4L2_PIX_FMT_NV12M ||
-        fmt.fmt.pix_mp.num_planes != NV12_PLANES ||
-        fmt.fmt.pix_mp.plane_fmt[0].bytesperline != width ||
-        fmt.fmt.pix_mp.plane_fmt[1].bytesperline != width ||
-        fmt.fmt.pix_mp.plane_fmt[0].sizeimage != y_frame_bytes ||
-        fmt.fmt.pix_mp.plane_fmt[1].sizeimage != uv_frame_bytes) {
-        fprintf(stderr, "[FAIL] Driver did not select requested NV12M/2-plane mode\n");
-        goto out;
+    {
+        uint32_t expected_stride = req_stride ? req_stride : width;
+        if (fmt.fmt.pix_mp.width != width ||
+            fmt.fmt.pix_mp.height != height ||
+            fmt.fmt.pix_mp.pixelformat != V4L2_PIX_FMT_NV12M ||
+            fmt.fmt.pix_mp.num_planes != NV12_PLANES ||
+            fmt.fmt.pix_mp.plane_fmt[0].bytesperline != expected_stride ||
+            fmt.fmt.pix_mp.plane_fmt[1].bytesperline != expected_stride ||
+            fmt.fmt.pix_mp.plane_fmt[0].sizeimage != y_frame_bytes ||
+            fmt.fmt.pix_mp.plane_fmt[1].sizeimage != uv_frame_bytes) {
+            fprintf(stderr, "[FAIL] Driver did not select requested NV12M/2-plane mode\n");
+            goto out;
+        }
     }
     printf("[PASS] Mode: %ux%u NV12M planes=%u Y=%u UV=%u bytes\n",
            fmt.fmt.pix_mp.width, fmt.fmt.pix_mp.height,

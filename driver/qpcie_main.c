@@ -666,7 +666,7 @@ free_diag_dma:
                                     sizeof(*vch0->thin_ring_virt) * RING_BUFFER_SIZE,
                                     &vch0->thin_ring_dma, GFP_KERNEL);
             if (!vch0->thin_ring_virt) {
-                dev_err(&pdev->dev, "[ERROR] Cannot allocate thin descriptor ring for CH0\n");
+                dev_err(&pdev->dev, "[ERROR] Cannot allocate thin descriptor ring 0 for CH0\n");
                 ret = -ENOMEM;
                 goto free_video_ring;
             }
@@ -674,6 +674,19 @@ free_diag_dma:
                    sizeof(*vch0->thin_ring_virt) * RING_BUFFER_SIZE);
             vch0->thin_ring_tail = 0;
             vch0->thin_ring_head = 0;
+
+            vch0->thin_ring1_virt = dma_alloc_coherent(&pdev->dev,
+                                    sizeof(*vch0->thin_ring1_virt) * RING_BUFFER_SIZE,
+                                    &vch0->thin_ring1_dma, GFP_KERNEL);
+            if (!vch0->thin_ring1_virt) {
+                dev_err(&pdev->dev, "[ERROR] Cannot allocate thin descriptor ring 1 for CH0\n");
+                ret = -ENOMEM;
+                goto free_video_ring;
+            }
+            memset(vch0->thin_ring1_virt, 0,
+                   sizeof(*vch0->thin_ring1_virt) * RING_BUFFER_SIZE);
+            vch0->thin_ring1_tail = 0;
+            vch0->thin_ring1_head = 0;
 
             /* Global aliases for backward compatibility */
             qdev->thin_ring_virt = (struct qpcie_sgl_entry *)vch0->thin_ring_virt;
@@ -691,8 +704,8 @@ free_diag_dma:
                          "=== [PHASE 5 NEW MAP ACTIVE] Magic ID=0x%08X (Auto-detected from Version v%u.%u.%u, Caps=0x%08X) ===\n",
                          readback, (ver >> 24) & 0xff, (ver >> 16) & 0xff, (ver >> 8) & 0xff, caps);
                 dev_info(&pdev->dev,
-                         "CH0 Thin Ring: DMA=0x%llX, Size=%u, RegBase=0x%03X\n",
-                         (u64)vch0->thin_ring_dma, RING_BUFFER_SIZE, vch0->ch_reg_base);
+                         "CH0 Thin Ring: RING0=0x%llX, RING1=0x%llX, Size=%u, RegBase=0x%03X\n",
+                         (u64)vch0->thin_ring_dma, (u64)vch0->thin_ring1_dma, RING_BUFFER_SIZE, vch0->ch_reg_base);
                 /* Initialize RING0 Base and initial CFG */
                 iowrite32(lower_32_bits(vch0->thin_ring_dma),
                           qdev->bar0_mmio + REG_VCH0_RING0_BASE_L);
@@ -700,6 +713,13 @@ free_diag_dma:
                           qdev->bar0_mmio + REG_VCH0_RING0_BASE_H);
                 iowrite32(RING_BUFFER_SIZE,
                           qdev->bar0_mmio + REG_VCH0_RING0_CFG);
+                /* Initialize RING1 Base and initial CFG */
+                iowrite32(lower_32_bits(vch0->thin_ring1_dma),
+                          qdev->bar0_mmio + REG_VCH0_RING1_BASE_L);
+                iowrite32(upper_32_bits(vch0->thin_ring1_dma),
+                          qdev->bar0_mmio + REG_VCH0_RING1_BASE_H);
+                iowrite32(RING_BUFFER_SIZE,
+                          qdev->bar0_mmio + REG_VCH0_RING1_CFG);
             } else {
                 dev_err(&pdev->dev,
                         "[ERROR] New Map Magic ID mismatch: 0x%08X (expected 0x12ABE380)\n",
@@ -762,6 +782,12 @@ free_video_ring:
                               sizeof(*vch->thin_ring_virt) * RING_BUFFER_SIZE,
                               vch->thin_ring_virt, vch->thin_ring_dma);
             vch->thin_ring_virt = NULL;
+        }
+        if (vch->thin_ring1_virt) {
+            dma_free_coherent(&pdev->dev,
+                              sizeof(*vch->thin_ring1_virt) * RING_BUFFER_SIZE,
+                              vch->thin_ring1_virt, vch->thin_ring1_dma);
+            vch->thin_ring1_virt = NULL;
         }
     }
     qdev->thin_ring_virt = NULL;
@@ -827,6 +853,12 @@ static void qpcie_remove(struct pci_dev *pdev)
                               sizeof(*vch->thin_ring_virt) * RING_BUFFER_SIZE,
                               vch->thin_ring_virt, vch->thin_ring_dma);
             vch->thin_ring_virt = NULL;
+        }
+        if (vch->thin_ring1_virt) {
+            dma_free_coherent(&pdev->dev,
+                              sizeof(*vch->thin_ring1_virt) * RING_BUFFER_SIZE,
+                              vch->thin_ring1_virt, vch->thin_ring1_dma);
+            vch->thin_ring1_virt = NULL;
         }
     }
     qdev->thin_ring_virt = NULL;

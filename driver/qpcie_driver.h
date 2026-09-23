@@ -335,17 +335,23 @@ struct qpcie_v4l2_channel {
     u32 width;
     u32 height;
     u32 stride;
+    u32 stride1;
     u32 pixelformat;
     u32 current_slice_idx;
     u32 error_count_start;
     bool pacer_enable;
     enum v4l2_buf_type buf_type;
-    /* Phase 5: Per-channel register block & thin descriptor ring */
+    /* Phase 5 / Phase 6: Per-channel register block & thin descriptor rings */
     u32 ch_reg_base;
     struct qpcie_dma_desc_16b *thin_ring_virt;
     dma_addr_t thin_ring_dma;
     u32 thin_ring_tail;
     u32 thin_ring_head;
+    /* RING1 for UV plane in multi-plane mode */
+    struct qpcie_dma_desc_16b *thin_ring1_virt;
+    dma_addr_t thin_ring1_dma;
+    u32 thin_ring1_tail;
+    u32 thin_ring1_head;
 };
 
 struct qpcie_alsa_channel {
