@@ -1231,6 +1231,8 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
     }
 
     qpcie_dma_soft_reset(qdev);
+    qpcie_reprogram_rings(qdev);
+
 
     /* Cancel descriptors that were queued for frames the stopped TPG will
      * never produce. Rebase both producer pointers to the hardware consumer. */

@@ -20,6 +20,45 @@ void qpcie_dma_soft_reset(struct qpcie_dev *qdev)
     usleep_range(1000, 2000);
 }
 
+/* After REG_NEW_GLOBAL_RESET the RTL (axil_reg_space) resets ALL registers to 0,
+ * including Ring0/Ring1 base addresses for CH0 (thin) and CH1 (loopback).
+ * This helper MUST be called after every soft reset to restore those ring bases.
+ * Otherwise desc_fetch_engine tries to MRd from address 0 → ARM-SMMU fault.     */
+void qpcie_reprogram_rings(struct qpcie_dev *qdev)
+{
+    struct qpcie_v4l2_channel *vch0 = &qdev->v4l2_ch[0];
+
+    /* CH0: Restore thin RING0 base & tail */
+    if (vch0->thin_ring_virt) {
+        iowrite32(lower_32_bits(vch0->thin_ring_dma),
+                  qdev->bar0_mmio + REG_VCH0_RING0_BASE_L);
+        iowrite32(upper_32_bits(vch0->thin_ring_dma),
+                  qdev->bar0_mmio + REG_VCH0_RING0_BASE_H);
+        iowrite32((vch0->thin_ring_tail << 16) | RING_BUFFER_SIZE,
+                  qdev->bar0_mmio + REG_VCH0_RING0_CFG);
+    }
+    if (vch0->thin_ring1_virt) {
+        iowrite32(lower_32_bits(vch0->thin_ring1_dma),
+                  qdev->bar0_mmio + REG_VCH0_RING1_BASE_L);
+        iowrite32(upper_32_bits(vch0->thin_ring1_dma),
+                  qdev->bar0_mmio + REG_VCH0_RING1_BASE_H);
+        iowrite32((vch0->thin_ring1_tail << 16) | RING_BUFFER_SIZE,
+                  qdev->bar0_mmio + REG_VCH0_RING1_CFG);
+    }
+
+    /* CH1: Restore loopback descriptor ring base & tail */
+    if (qdev->h2c_ring_virt) {
+        iowrite32(lower_32_bits(qdev->h2c_ring_dma),
+                  qdev->bar0_mmio + REG_VCH_BASE(1) + REG_VCH_OFFSET_RING0_BASE_L);
+        iowrite32(upper_32_bits(qdev->h2c_ring_dma),
+                  qdev->bar0_mmio + REG_VCH_BASE(1) + REG_VCH_OFFSET_RING0_BASE_H);
+        iowrite32((qdev->h2c_tail << 16) | RING_BUFFER_SIZE,
+                  qdev->bar0_mmio + REG_VCH_BASE(1) + REG_VCH_OFFSET_RING0_CFG);
+    }
+
+    ioread32(qdev->bar0_mmio + REG_VCH0_RING0_CFG); /* Flush posted writes */
+}
+
 static irqreturn_t qpcie_irq_handler(int irq, void *data)
 {
     struct qpcie_dev *qdev = data;

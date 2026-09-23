@@ -446,6 +446,8 @@ void qpcie_v4l2_remove(struct qpcie_dev *qdev);
 void qpcie_v4l2_irq_handler(struct qpcie_dev *qdev);
 void qpcie_v4l2_node_done(struct qpcie_dev *qdev, int node_idx);
 void qpcie_dma_soft_reset(struct qpcie_dev *qdev);
+void qpcie_reprogram_rings(struct qpcie_dev *qdev);
+
 
 int qpcie_alsa_init(struct qpcie_dev *qdev);
 void qpcie_alsa_remove(struct qpcie_dev *qdev);
