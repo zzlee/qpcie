@@ -89,3 +89,4 @@ compile_commands.json
 *.bak
 *.tmp
 .pi/
+release/
