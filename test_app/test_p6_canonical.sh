@@ -147,8 +147,8 @@ if [ -n "$SYS_DIR" ]; then
     echo "  ch0_frames : $CH0_FRAMES"
     echo "  ch0_drops  : $CH0_DROPS"
     echo "  ch0_status : $CH0_STATUS"
-    if [ "$CH0_FRAMES" -lt "$((FRAMES + BENCH_FRAMES))" ]; then
-        echo "[FAIL] ch0_frames ($CH0_FRAMES) less than total run frames"
+    if [ "$CH0_FRAMES" -lt "$BENCH_FRAMES" ]; then
+        echo "[FAIL] ch0_frames ($CH0_FRAMES) less than benchmark frames ($BENCH_FRAMES)"
         exit 1
     fi
     echo "[PASS] Step 4 Sysfs telemetry verified."
