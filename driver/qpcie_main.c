@@ -28,13 +28,22 @@ void qpcie_reprogram_rings(struct qpcie_dev *qdev)
 {
     struct qpcie_v4l2_channel *vch0 = &qdev->v4l2_ch[0];
 
+    /* After global reset, hardware head pointer is 0.
+     * Re-anchor software tail pointers to 0 so head == tail == 0. */
+    vch0->thin_ring_tail = 0;
+    vch0->thin_ring_head = 0;
+    vch0->thin_ring1_tail = 0;
+    vch0->thin_ring1_head = 0;
+    qdev->h2c_tail = 0;
+    qdev->c2h_tail = 0;
+
     /* CH0: Restore thin RING0 base & tail */
     if (vch0->thin_ring_virt) {
         iowrite32(lower_32_bits(vch0->thin_ring_dma),
                   qdev->bar0_mmio + REG_VCH0_RING0_BASE_L);
         iowrite32(upper_32_bits(vch0->thin_ring_dma),
                   qdev->bar0_mmio + REG_VCH0_RING0_BASE_H);
-        iowrite32((vch0->thin_ring_tail << 16) | RING_BUFFER_SIZE,
+        iowrite32((0 << 16) | RING_BUFFER_SIZE,
                   qdev->bar0_mmio + REG_VCH0_RING0_CFG);
     }
     if (vch0->thin_ring1_virt) {
@@ -42,7 +51,7 @@ void qpcie_reprogram_rings(struct qpcie_dev *qdev)
                   qdev->bar0_mmio + REG_VCH0_RING1_BASE_L);
         iowrite32(upper_32_bits(vch0->thin_ring1_dma),
                   qdev->bar0_mmio + REG_VCH0_RING1_BASE_H);
-        iowrite32((vch0->thin_ring1_tail << 16) | RING_BUFFER_SIZE,
+        iowrite32((0 << 16) | RING_BUFFER_SIZE,
                   qdev->bar0_mmio + REG_VCH0_RING1_CFG);
     }
 
@@ -52,7 +61,7 @@ void qpcie_reprogram_rings(struct qpcie_dev *qdev)
                   qdev->bar0_mmio + REG_VCH_BASE(1) + REG_VCH_OFFSET_RING0_BASE_L);
         iowrite32(upper_32_bits(qdev->h2c_ring_dma),
                   qdev->bar0_mmio + REG_VCH_BASE(1) + REG_VCH_OFFSET_RING0_BASE_H);
-        iowrite32((qdev->h2c_tail << 16) | RING_BUFFER_SIZE,
+        iowrite32((0 << 16) | RING_BUFFER_SIZE,
                   qdev->bar0_mmio + REG_VCH_BASE(1) + REG_VCH_OFFSET_RING0_CFG);
     }
 
@@ -500,13 +509,16 @@ static void qpcie_remove(struct pci_dev *pdev)
     if (qdev->bar0_mmio) {
         /* Stop Video CH0 in new map */
         iowrite32(0, qdev->bar0_mmio + REG_VCH0_CTRL);
+        /* Stop Video CH1 (Loopback) in new map */
+        iowrite32(0, qdev->bar0_mmio + REG_VCH_BASE(1) + REG_VCH_OFFSET_CTRL);
         /* Stop Audio DEV0 in new map */
         iowrite32(0, qdev->bar0_mmio + REG_ADEV0_CTRL);
-        /* Stop legacy DMA */
-        iowrite32(0, qdev->bar0_mmio + REG_DMA_CTRL);
         /* Disable interrupts */
         iowrite32(0, qdev->bar0_mmio + REG_IRQ_CTRL);
-        ioread32(qdev->bar0_mmio + REG_DMA_CTRL); /* Flush posted writes */
+        ioread32(qdev->bar0_mmio + REG_VCH0_CTRL); /* Flush posted writes */
+
+        /* Full DMA soft reset to flush hardware FIFOs */
+        qpcie_dma_soft_reset(qdev);
     }
 
     /* Drain in-flight PCIe TLPs to host memory */

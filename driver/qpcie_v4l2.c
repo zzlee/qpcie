@@ -1177,24 +1177,7 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
         spin_unlock_irqrestore(&vch->slock, flags);
     }
 
-    /* Only reset hardware and stop TPG if ALL active video channels have finished streaming */
-    if (atomic_dec_return(&qdev->streaming_count) > 0) {
-        dev_info(&qdev->pdev->dev,
-                 "NV12M STREAMOFF (Ch%u): stream stopped, remaining active streams: %d\n",
-                 vch->channel_id, atomic_read(&qdev->streaming_count));
-        return;
-    }
-
-    /* All streams idle: halt TPG pacing and stop TPG */
-    if (qdev->bar1_mmio) {
-        void __iomem *tpg = qdev->bar1_mmio + 0x000;
-        qpcie_tpg_pace_stop(qdev);
-        iowrite32(0x00, tpg + 0x00);
-    }
-
-    iowrite32(0, qdev->bar0_mmio + REG_PACER_CTRL);
-    /* Stop fetching descriptors. Queued descriptors are cancelled below;
-     * only already-buffered PCIe writes must drain before mappings return. */
+    /* Stop fetching descriptors for this channel immediately in hardware */
     iowrite32(0, qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_CTRL);
     ioread32(qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_CTRL);
     u32 stat_reg = vch->ch_reg_base + REG_VCH_OFFSET_STATUS;
@@ -1227,15 +1210,11 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
             usleep_range(1000, 2000);
         } while (time_before(jiffies, timeout));
     } else {
+        usleep_range(2000, 5000);
         drained = true;
     }
 
-    qpcie_dma_soft_reset(qdev);
-    qpcie_reprogram_rings(qdev);
-
-
-    /* Cancel descriptors that were queued for frames the stopped TPG will
-     * never produce. Rebase both producer pointers to the hardware consumer. */
+    /* Cancel descriptors and rebase this channel's producer pointers */
     if (vch->thin_ring_virt) {
         head = ioread32(qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING0_HEAD) & 0xffff;
         vch->thin_ring_tail = head;
@@ -1259,6 +1238,27 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
                   qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING0_CFG);
         ioread32(qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING0_CFG);
     }
+
+    /* Only reset global hardware and stop TPG if ALL active video channels have finished streaming */
+    if (atomic_dec_return(&qdev->streaming_count) > 0) {
+        dev_info(&qdev->pdev->dev,
+                 "NV12M STREAMOFF (Ch%u): stream stopped, remaining active streams: %d\n",
+                 vch->channel_id, atomic_read(&qdev->streaming_count));
+        return;
+    }
+
+    /* All streams idle: halt TPG pacing and stop TPG */
+    if (qdev->bar1_mmio) {
+        void __iomem *tpg = qdev->bar1_mmio + 0x000;
+        qpcie_tpg_pace_stop(qdev);
+        iowrite32(0x00, tpg + 0x00);
+    }
+
+    iowrite32(0, qdev->bar0_mmio + REG_PACER_CTRL);
+
+    qpcie_dma_soft_reset(qdev);
+    qpcie_reprogram_rings(qdev);
+
 
     /* Freeze counters after all channel-0 writes have retired. */
     iowrite32(0, qdev->bar0_mmio + REG_PERF_CTRL);
