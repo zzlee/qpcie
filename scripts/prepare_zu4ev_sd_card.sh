@@ -71,6 +71,10 @@ sudo mount "$PART1" "$MOUNT_DIR"
 sudo cp -v "$BOOTBIN" "$MOUNT_DIR/BOOT.BIN"
 sudo cp -v "$BOOTSCR" "$MOUNT_DIR/boot.scr"
 sudo cp -v "$IMAGEUB" "$MOUNT_DIR/image.ub"
+if [ -f "$SCRIPT_DIR/flash_emmc.sh" ]; then
+    sudo cp -v "$SCRIPT_DIR/flash_emmc.sh" "$MOUNT_DIR/flash_emmc.sh"
+    sudo chmod +x "$MOUNT_DIR/flash_emmc.sh"
+fi
 
 sync
 sudo umount "$MOUNT_DIR"
