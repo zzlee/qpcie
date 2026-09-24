@@ -239,21 +239,36 @@ for part in ${EMMC_DEV}*; do
     umount "$part" 2>/dev/null || true
 done
 
-echo "[Step 2/6] Wiping partition table header on $EMMC_DEV..."
-dd if=/dev/zero of="$EMMC_DEV" bs=1M count=10 status=none conv=fsync
-sync
+EMMC_P1="${EMMC_DEV}p1"
+EMMC_P2="${EMMC_DEV}p2"
+[ -b "$EMMC_P1" ] || EMMC_P1="${EMMC_DEV}1"
+[ -b "$EMMC_P2" ] || EMMC_P2="${EMMC_DEV}2"
 
-echo "[Step 3/6] Creating MBR partition table on $EMMC_DEV using fdisk..."
-# Create:
-# p1: Primary 1, +1024M, Type c (W95 FAT32 LBA), Bootable
-# p2: Primary 2, rest of device, Type 83 (Linux)
-fdisk "$EMMC_DEV" << 'FDISK_EOF' >/dev/null 2>&1
+DATA_PRESERVED=0
+FORCE_WIPE=0
+[ -f "$SD_MNT/WIPE_EMMC_DATA" ] && FORCE_WIPE=1
+
+if [ -b "$EMMC_P1" ] && [ -b "$EMMC_P2" ] && [ "$FORCE_WIPE" -eq 0 ]; then
+    echo "[Step 2/6] Existing eMMC partition table detected:"
+    echo "  - Boot Partition : $EMMC_P1 (will be updated)"
+    echo "  - Data Partition : $EMMC_P2 (WILL BE PRESERVED - NO DATA LOSS)"
+    DATA_PRESERVED=1
+else
+    echo "[Step 2/6] Initializing eMMC partitions for the first time..."
+    dd if=/dev/zero of="$EMMC_DEV" bs=1M count=10 status=none conv=fsync
+    sync
+
+    echo "[Step 3/6] Creating MBR partition table on $EMMC_DEV using fdisk..."
+    # Create:
+    # p1: Primary 1, +1536M (1.5GB), Type c (W95 FAT32 LBA), Bootable
+    # p2: Primary 2, rest of device (~6GB), Type 83 (Linux DATA)
+    fdisk "$EMMC_DEV" << 'FDISK_EOF' >/dev/null 2>&1
 o
 n
 p
 1
 2048
-+1024M
++1536M
 t
 c
 a
@@ -269,34 +284,45 @@ t
 w
 FDISK_EOF
 
-sync
-sleep 2
-if command -v udevadm >/dev/null 2>&1; then
-    udevadm settle --timeout=5 || true
-fi
-
-EMMC_P1="${EMMC_DEV}p1"
-EMMC_P2="${EMMC_DEV}p2"
-[ -b "$EMMC_P1" ] || EMMC_P1="${EMMC_DEV}1"
-[ -b "$EMMC_P2" ] || EMMC_P2="${EMMC_DEV}2"
-
-if [ ! -b "$EMMC_P1" ]; then
-    echo "ERROR: Partition $EMMC_P1 was not created!"
-    klog "ERROR: Partition $EMMC_P1 was not created!"
-    echo "Partitioning failed at $(date)" > "$SD_MNT/EMMC_FLASH_FAILED.txt"
-    rm -f "$SD_MNT/EMMC_FLASH_IN_PROGRESS.txt"
     sync
-    exit 1
+    sleep 2
+    if command -v udevadm >/dev/null 2>&1; then
+        udevadm settle --timeout=5 || true
+    fi
+
+    [ -b "${EMMC_DEV}p1" ] && EMMC_P1="${EMMC_DEV}p1"
+    [ -b "${EMMC_DEV}p2" ] && EMMC_P2="${EMMC_DEV}p2"
+    [ -b "${EMMC_DEV}1" ] && EMMC_P1="${EMMC_DEV}1"
+    [ -b "${EMMC_DEV}2" ] && EMMC_P2="${EMMC_DEV}2"
+
+    if [ ! -b "$EMMC_P1" ]; then
+        echo "ERROR: Partition $EMMC_P1 was not created!"
+        klog "ERROR: Partition $EMMC_P1 was not created!"
+        echo "Partitioning failed at $(date)" > "$SD_MNT/EMMC_FLASH_FAILED.txt"
+        rm -f "$SD_MNT/EMMC_FLASH_IN_PROGRESS.txt"
+        sync
+        exit 1
+    fi
+
+    echo "  Formatting $EMMC_P2 as EXT4 (Label: DATA)..."
+    mkfs.ext4 -F -L "DATA" "$EMMC_P2"
 fi
 
-echo "[Step 4/6] Formatting partitions..."
+echo "[Step 4/6] Formatting Boot Partition..."
 echo "  Formatting $EMMC_P1 as FAT32 (BOOT)..."
 mkfs.vfat -F 32 -n "BOOT" "$EMMC_P1"
-if [ -b "$EMMC_P2" ]; then
-    echo "  Formatting $EMMC_P2 as EXT4 (rootfs)..."
-    mkfs.ext4 -F -L "rootfs" "$EMMC_P2" >/dev/null 2>&1 || true
+
+if [ "$DATA_PRESERVED" -eq 1 ]; then
+    if blkid "$EMMC_P2" 2>/dev/null | grep -q 'TYPE="ext4"'; then
+        echo "  [OK] Successfully preserved existing DATA partition ($EMMC_P2)."
+        echo "       Existing files on DATA partition remain untouched."
+    else
+        echo "  Notice: Partition $EMMC_P2 missing filesystem. Formatting as EXT4 (DATA)..."
+        mkfs.ext4 -F -L "DATA" "$EMMC_P2"
+    fi
 fi
 sync
+
 
 echo "[Step 5/6] Copying boot artifacts to eMMC partition 1 ($EMMC_P1)..."
 EMMC_MNT="/tmp/emmc_boot_target"
@@ -493,7 +519,42 @@ RCLOCAL_EOF
 
 chmod 755 "$ROOTFS_UNPACK/etc/rc.local"
 
+# 4. Configure Persistent /data Mount Point
+mkdir -p "$ROOTFS_UNPACK/mnt/data"
+ln -sf /mnt/data "$ROOTFS_UNPACK/data"
+
+# Add /dev/disk/by-label/DATA to /etc/fstab if not already present
+if ! grep -q "by-label/DATA" "$ROOTFS_UNPACK/etc/fstab" 2>/dev/null; then
+    cat << 'FSTAB_DATA' >> "$ROOTFS_UNPACK/etc/fstab"
+/dev/disk/by-label/DATA  /mnt/data  ext4  defaults,noatime,nofail  0  2
+FSTAB_DATA
+fi
+
+# Also add dedicated systemd mount unit for high reliability
+cat << 'MOUNT_UNIT_EOF' > "$ROOTFS_UNPACK/lib/systemd/system/mnt-data.mount"
+[Unit]
+Description=Mount eMMC Persistent DATA Partition
+DefaultDependencies=no
+After=systemd-udev-settle.service local-fs-pre.target
+Before=local-fs.target
+
+[Mount]
+What=/dev/disk/by-label/DATA
+Where=/mnt/data
+Type=ext4
+Options=defaults,noatime,nofail
+
+[Install]
+WantedBy=local-fs.target
+MOUNT_UNIT_EOF
+
+chmod 644 "$ROOTFS_UNPACK/lib/systemd/system/mnt-data.mount"
+mkdir -p "$ROOTFS_UNPACK/etc/systemd/system/local-fs.target.wants"
+ln -sf /lib/systemd/system/mnt-data.mount \
+       "$ROOTFS_UNPACK/etc/systemd/system/local-fs.target.wants/mnt-data.mount"
+
 echo "[3/5] Packing modified rootfs into CPIO archive..."
+
 NEW_ROOTFS="$WORK_DIR/rootfs.cpio.gz"
 (
     cd "$ROOTFS_UNPACK"

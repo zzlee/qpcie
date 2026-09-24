@@ -124,17 +124,40 @@ for part in ${EMMC_DEV}*; do
     umount "$part" 2>/dev/null || true
 done
 
-# 5. Partition eMMC using fdisk (Part 1: 1024MB FAT32 Bootable, Part 2: Linux ext4)
-echo "[2/5] Creating MBR partition table on $EMMC_DEV using fdisk..."
-dd if=/dev/zero of="$EMMC_DEV" bs=1M count=10 status=none conv=fsync
+EMMC_P1="${EMMC_DEV}p1"
+EMMC_P2="${EMMC_DEV}p2"
+[ -b "$EMMC_P1" ] || EMMC_P1="${EMMC_DEV}1"
+[ -b "$EMMC_P2" ] || EMMC_P2="${EMMC_DEV}2"
 
-fdisk "$EMMC_DEV" << 'FDISK_EOF' >/dev/null 2>&1
+DATA_PRESERVED=0
+FORCE_WIPE=0
+for arg in "$@"; do
+    case "$arg" in
+        --wipe-data|--wipe-all) FORCE_WIPE=1 ;;
+    esac
+done
+
+if [ -b "$EMMC_P1" ] && [ -b "$EMMC_P2" ] && [ "$FORCE_WIPE" -eq 0 ]; then
+    echo "[2/5] Existing eMMC partition table detected:"
+    echo "  - Boot Partition : $EMMC_P1 (will be updated)"
+    echo "  - Data Partition : $EMMC_P2 (WILL BE PRESERVED - NO DATA LOSS)"
+    DATA_PRESERVED=1
+else
+    echo "[2/5] Initializing eMMC partitions for the first time..."
+    dd if=/dev/zero of="$EMMC_DEV" bs=1M count=10 status=none conv=fsync
+    sync
+
+    echo "  Creating MBR partition table using fdisk..."
+    # Create:
+    # p1: Primary 1, +1536M (1.5GB), Type c (W95 FAT32 LBA), Bootable
+    # p2: Primary 2, rest of device (~6GB), Type 83 (Linux DATA)
+    fdisk "$EMMC_DEV" << 'FDISK_EOF' >/dev/null 2>&1
 o
 n
 p
 1
 2048
-+1024M
++1536M
 t
 c
 a
@@ -150,31 +173,42 @@ t
 w
 FDISK_EOF
 
-sync
-sleep 2
-if command -v udevadm >/dev/null 2>&1; then
-    udevadm settle --timeout=5 || true
+    sync
+    sleep 2
+    if command -v udevadm >/dev/null 2>&1; then
+        udevadm settle --timeout=5 || true
+    fi
+
+    [ -b "${EMMC_DEV}p1" ] && EMMC_P1="${EMMC_DEV}p1"
+    [ -b "${EMMC_DEV}p2" ] && EMMC_P2="${EMMC_DEV}p2"
+    [ -b "${EMMC_DEV}1" ] && EMMC_P1="${EMMC_DEV}1"
+    [ -b "${EMMC_DEV}2" ] && EMMC_P2="${EMMC_DEV}2"
+
+    if [ ! -b "$EMMC_P1" ]; then
+        echo "ERROR: Partition $EMMC_P1 not created!"
+        exit 1
+    fi
+
+    echo "  Formatting $EMMC_P2 as EXT4 (Label: DATA)..."
+    mkfs.ext4 -F -L "DATA" "$EMMC_P2"
 fi
 
-EMMC_P1="${EMMC_DEV}p1"
-EMMC_P2="${EMMC_DEV}p2"
-[ -b "$EMMC_P1" ] || EMMC_P1="${EMMC_DEV}1"
-[ -b "$EMMC_P2" ] || EMMC_P2="${EMMC_DEV}2"
-
-if [ ! -b "$EMMC_P1" ]; then
-    echo "ERROR: Partition $EMMC_P1 not created!"
-    exit 1
-fi
-
-# 6. Format Partitions
-echo "[3/5] Formatting eMMC partitions..."
+# 6. Format Boot Partition
+echo "[3/5] Formatting Boot Partition..."
 echo "  Formatting $EMMC_P1 as FAT32 (BOOT)..."
 mkfs.vfat -F 32 -n "BOOT" "$EMMC_P1"
-if [ -b "$EMMC_P2" ]; then
-    echo "  Formatting $EMMC_P2 as EXT4 (rootfs)..."
-    mkfs.ext4 -F -L "rootfs" "$EMMC_P2" >/dev/null 2>&1 || true
+
+if [ "$DATA_PRESERVED" -eq 1 ]; then
+    if blkid "$EMMC_P2" 2>/dev/null | grep -q 'TYPE="ext4"'; then
+        echo "  [OK] Successfully preserved existing DATA partition ($EMMC_P2)."
+        echo "       Existing files on DATA partition remain untouched."
+    else
+        echo "  Notice: Partition $EMMC_P2 missing filesystem. Formatting as EXT4 (DATA)..."
+        mkfs.ext4 -F -L "DATA" "$EMMC_P2"
+    fi
 fi
 sync
+
 
 # 7. Copy Boot Artifacts to eMMC FAT32 partition
 echo "[4/5] Copying boot artifacts to eMMC partition 1 ($EMMC_P1)..."
