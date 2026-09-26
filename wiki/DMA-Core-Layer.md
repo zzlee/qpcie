@@ -1,29 +1,25 @@
 # DMA Core Layer：SG、128-byte MWr 與 NV12M Engine
 
-## 1. 64-byte descriptor
+## 1. 16-byte Thin SG Descriptor（Canonical v3.0）
 
-目前 descriptor wire format 為 16 DW：
+目前正式 descriptor wire format 為 4 DW（16 Bytes / 128-bit）：
 
 ```text
-DW0–1   plane0 source address
-DW2–3   plane0 destination address
-DW4–5   plane1 source address
-DW6–7   plane1 destination address
-DW8–9   plane2 source address
-DW10–11 plane2 destination address
-DW12    [15:0] line_width, [31:16] line_count
-DW13    [15:0] src_stride, [31:16] dst_stride
-DW14    [15:0] plane12_width, [31:16] plane12_count
-DW15    format / plane_count / control
+DW0–1   [63:0]   host_addr    sgl->dma_address 直行（實體基底位址）
+DW2     [95:64]  len_bytes    sgl->length 直行（連續傳輸長度）
+DW3     [127:96] flags        bit 0: chain_ptr, bit 1: last_seg
 ```
 
-`format=0x2` 為雙平面 NV12M。V4L2 capture descriptor 使用 Y/UV destination DMA addresses、`line_width=width`、`line_count=height`、`plane12_count=height/2`。
+- **Driver 零計算**：驅動只需直行遍歷 Linux `sg_table` 填入位址與長度，不分平面、不包幾何參數。
+- **幾何下放**：幀幾何（`WIDTH`、`HEIGHT`、`STRIDE0~3`）改由各通道獨立的 BAR0 暫存器（如 `0x0108`、`0x010C` 等）在 `STREAMON` 時統一配置一次。
+- **Per-plane 獨立 Ring**：NV12M 下 `RING0` 負責 Y 平面，`RING1` 負責 UV 平面；RGB24 僅使用 `RING0`。
 
-## 2. SG descriptor fetch
+## 2. Thin SG Descriptor Fetch
 
-`desc_fetch_engine.v` 使用 MRd 取得完整 64-byte descriptor。Tag 0 保留給 descriptor completion；pg054 bridge/RC decoder 會剝除 CplD header 並按 Tag 路由。
-
-Ring head 與 completion counter 是硬體 retained state。driver 每次 module probe 都從硬體 head 建立新 tail，並在 doorbell 前使用 `dma_wmb()`。
+`thin_desc_fetch_engine.v` 監聽各通道 Doorbell（`head != tail`），使用 MRd（Tag 0）直接抓取 16-byte descriptor：
+- 自動平行抓取雙環（RING0 與 RING1）。
+- Byte-count Framing：硬體累計傳輸長度達到幀目標大小時自動發出幀完成信號。
+- 剝除 CplD header 後，直推至 150MHz 視訊域 CDC FIFO，免去舊版中間層 linked-page 轉換開銷。
 
 ## 3. Diagnostic SG DMA
 

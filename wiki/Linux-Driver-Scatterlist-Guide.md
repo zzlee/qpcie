@@ -16,9 +16,11 @@
 
 ---
 
-## 2. 1D 線性 Scatter-Gather 驅動程式範例 C Code
+## 2. Canonical v3.0 16-Byte Thin SG 描述符結構
 
-### 2.1 C 語言 C 碼：`pcie_dma_fill_sg_descriptors()`
+在 Canonical v3.0 架構下，不再使用傳統的 32-Byte / 64-Byte 胖描述符（Fat Descriptors）。畫面寬度、高度、Stride 與格式皆解耦移至 BAR0 Per-Channel 暫存器（如 `CHx_WIDTH`, `CHx_HEIGHT`, `CHx_STRIDE`, `CHx_CTRL`），描述符統一精簡為 16-Byte Thin SG Entry。
+
+### 2.1 描述符結構體：`struct qpcie_sgl_entry`
 
 ```c
 #include <linux/module.h>
@@ -26,179 +28,86 @@
 #include <linux/dma-mapping.h>
 #include <linux/scatterlist.h>
 
-/* 32-Byte 1D Hardware Descriptor 結構體 (與 Verilog desc_fetch_engine 格式完全對應) */
-struct pcie_dma_desc_1d {
-    u64 src_addr;   /* DW0-DW1: 來源 PCIe DMA 位址 (Host RAM 或 FPGA RAM) */
-    u64 dst_addr;   /* DW2-DW3: 目的 PCIe DMA 位址 (FPGA RAM 或 Host RAM) */
-    u32 len;        /* DW4    : 傳輸位元組長度 (Bytes) */
-    u32 ctrl;       /* DW5    : 控制位元 (Bit 0: Valid, Bit 1: Direction 0=H2C/1=C2H, Bit 3: IRQ_EN) */
-    u32 reserved[2];/* DW6-DW7: 保留對齊 32-Byte */
-} __packed __aligned(32);
+/* 16-Byte Canonical v3.0 Hardware SG Descriptor 結構體 */
+struct qpcie_sgl_entry {
+    u64 pcie_addr;  /* [63:0]  Host 實體 DMA 位址 (IOVA) */
+    u32 len;        /* [95:64] 位元組長度 (Bytes) */
+    u32 flags;      /* [127:96] 控制標誌:
+                     *   bit 0: EOF (End of Frame)
+                     *   bit 1: IRQ_ENABLE
+                     *   bit 2: DIRECT (1=直接數據, 0=鏈接指標)
+                     *   bits 31:3: Reserved
+                     */
+} __packed __aligned(16);
 
-/* DMA 環形佇列結構 */
-struct pcie_dma_ring {
-    struct pcie_dma_desc_1d *ring_virt_addr; /* dma_alloc_coherent 分配之虛擬位址 */
-    dma_addr_t               ring_dma_handle;/* Ring Buffer 本身的 DMA 位址 */
-    u16                      head_ptr;
-    u16                      tail_ptr;
-    u16                      ring_size;
-    void __iomem            *bar0_mmio;      /* PCIe BAR0 MMIO 暫存器基底位址 */
+/* DMA 環形佇列結構 (Thin Ring) */
+struct qpcie_thin_ring {
+    struct qpcie_sgl_entry *ring_virt;      /* dma_alloc_coherent 分配之虛擬位址 */
+    dma_addr_t              ring_dma;       /* Ring Buffer 本身的 DMA 位址 */
+    u16                     head_ptr;       /* 硬體消費指針 (HEAD) */
+    u16                     tail_ptr;       /* 軟體發行指針 (TAIL) */
+    u16                     ring_size;      /* 環形大小 (例如 1024 槽位) */
+    void __iomem           *doorbell_reg;   /* BAR0 通道 Doorbell 暫存器 */
 };
-
-/**
- * pcie_dma_map_and_fill_sg() - 將 Linux sg_table 轉換並填入 PCIe DMA Ring Buffer
- * @pdev: PCI 裝置結構體
- * @ring: DMA 環形佇列
- * @sgt:  Linux scatterlist 表格
- * @fpga_dst_addr: FPGA 側 AXI4 MM 記憶體起始目的位址
- * @is_c2h: 傳輸方向 (0: Host->FPGA H2C, 1: FPGA->Host C2H)
- */
-int pcie_dma_map_and_fill_sg(struct pci_dev *pdev, struct pcie_dma_ring *ring,
-                            struct sg_table *sgt, u64 fpga_dst_addr, bool is_c2h)
-{
-    struct scatterlist *sg;
-    int i, count;
-    u64 current_fpga_addr = fpga_dst_addr;
-
-    /* 1. 呼叫 Linux DMA API 進行 Cache 同步與 IOMMU 映射 */
-    count = dma_map_sgtable(&pdev->dev, sgt, is_c2h ? DMA_FROM_DEVICE : DMA_TO_DEVICE, 0);
-    if (count <= 0) {
-        dev_err(&pdev->dev, "Failed to map scatterlist table!\n");
-        return -ENOMEM;
-    }
-
-    /* 2. 逐一遍歷每一個 DMA 散佈分段 (Scatter Segment) */
-    for_each_sgtable_sg(sgt, sg, i) {
-        dma_addr_t bus_addr = sg_dma_address(sg); /* 取得 mapped PCIe DMA 位址 */
-        u32 segment_len     = sg_dma_len(sg);     /* 取得該區段長度 */
-
-        struct pcie_dma_desc_1d *desc = &ring->ring_virt_addr[ring->tail_ptr];
-
-        /* 3. 填入 Descriptor 欄位 */
-        if (!is_c2h) {
-            /* H2C: Host Memory (bus_addr) -> FPGA Memory (current_fpga_addr) */
-            desc->src_addr = bus_addr;
-            desc->dst_addr = current_fpga_addr;
-        } else {
-            /* C2H: FPGA Memory (current_fpga_addr) -> Host Memory (bus_addr) */
-            desc->src_addr = current_fpga_addr;
-            desc->dst_addr = bus_addr;
-        }
-
-        desc->len  = segment_len;
-        desc->ctrl = 0x00000009; /* Bit 0: Valid=1, Bit 3: IRQ_Enable=1 */
-        if (is_c2h) desc->ctrl |= (1 << 1); /* Bit 1: Is_C2H */
-
-        /* 4. 推進指標與計算下一個區段之 FPGA 記憶體位址 */
-        current_fpga_addr += segment_len;
-        ring->tail_ptr = (ring->tail_ptr + 1) % ring->ring_size;
-    }
-
-    /* 5. 寫入 PCIe BAR0 暫存器 (H2C_RING_CFG 或 C2H_RING_CFG)，通知 FPGA 硬體開工 */
-    u32 ring_cfg_val = ((u32)ring->tail_ptr << 16) | (ring->ring_size & 0xFFFF);
-    iowrite32(ring_cfg_val, ring->bar0_mmio + (is_c2h ? 0x1C : 0x10));
-
-    /* 啟動 DMA Engine (DMA_CTRL 暫存器 Offset 0x00) */
-    iowrite32(is_c2h ? 0x02 : 0x01, ring->bar0_mmio + 0x00);
-
-    return 0;
-}
 ```
 
 ---
 
-## 3. 2D Multi-Planar Video Frame (帶 Stride) 驅動程式範例 C Code
+## 3. Scatter-Gather 驅動程式填表與發布範例
 
-對於視訊處理 (Video4Linux2 / V4L2 `vb2_dma_sg` / `dma_buf`)，畫面資料具備 **Y, U, V 多平面** 與 **跨行步長 (Stride / Pitch)**。
-
-### 3.1 64-Byte 2D Multi-Planar Descriptor C 結構體
-
-```c
-/* 64-Byte 2D/3D Multi-Planar Video Descriptor 結構體 */
-struct pcie_dma_desc_2d_video {
-    u64 plane0_src_addr; /* DW0-DW1 : Y / R / Mono 來源位址 */
-    u64 plane0_dst_addr; /* DW2-DW3 : Y / R / Mono 目的位址 */
-    u64 plane1_src_addr; /* DW4-DW5 : U / UV / G 來源位址 */
-    u64 plane1_dst_addr; /* DW6-DW7 : U / UV / G 目的位址 */
-    u64 plane2_src_addr; /* DW8-DW9 : V / B 來源位址 */
-    u64 plane2_dst_addr; /* DW10-DW11: V / B 目的位址 */
-
-    /* DW12: Line Width & Line Count (Plane 0) */
-    u16 plane0_line_width; /* 有效像素 Bytes (例如 1920 Bytes) */
-    u16 plane0_line_count; /* 畫面高度 Lines (例如 1080 行) */
-
-    /* DW13: Line Stride / Pitch */
-    u16 src_line_stride;   /* 來源跨行步長 (含 Padding, 例如 2048 Bytes) */
-    u16 dst_line_stride;   /* 目的跨行步長 */
-
-    /* DW14: Sub-sampled Plane 1/2 Dimension (for YUV420P) */
-    u16 plane12_line_width;/* 色度平面 Line Width (例如 960 Bytes) */
-    u16 plane12_line_count;/* 色度平面 Height (例如 540 行) */
-
-    /* DW15: Format & Control Flags */
-    u8  format;            /* 0x1: 2D Mono, 0x2: NV12, 0x3: YUV420P */
-    u8  plane_count;       /* 平面數量 (1, 2, 或 3) */
-    u16 control;           /* Bit 0: Valid, Bit 3: IRQ_Enable */
-} __packed __aligned(64);
-```
-
-### 3.2 C 語言範例：`pcie_dma_fill_video_descriptor()`
+### 3.1 填入 Thin SG Entry：`qpcie_fill_thin_sg()`
 
 ```c
 /**
- * pcie_dma_fill_video_descriptor() - 將 V4L2 YUV420P / NV12 畫面填入 64-Byte 2D Descriptor
+ * qpcie_fill_thin_sg() - 將 Linux scatterlist 分段轉換並填入 Thin Ring
  */
-int pcie_dma_fill_video_descriptor(struct pcie_dma_ring *ring,
-                                  dma_addr_t y_dma_addr,
-                                  dma_addr_t u_dma_addr,
-                                  dma_addr_t v_dma_addr,
-                                  u64 fpga_frame_buffer_addr,
-                                  u32 width, u32 height, u32 stride, u8 format)
+int qpcie_fill_thin_sg(struct qpcie_thin_ring *ring, struct sg_table *sgt, bool irq_on_last)
 {
-    struct pcie_dma_desc_2d_video *desc = (struct pcie_dma_desc_2d_video *)
-                                           &ring->ring_virt_addr[ring->tail_ptr];
+    struct scatterlist *sg;
+    int i, nents;
+    u16 tail = ring->tail_ptr;
 
-    memset(desc, 0, sizeof(*desc));
+    nents = sgt->nents;
+    for_each_sgtable_sg(sgt, sg, i) {
+        dma_addr_t bus_addr = sg_dma_address(sg);
+        u32 len             = sg_dma_len(sg);
+        bool is_last        = (i == nents - 1);
 
-    /* 1. 填入各 Plane 之 PCIe DMA 記憶體位址 */
-    desc->plane0_src_addr = y_dma_addr;
-    desc->plane0_dst_addr = fpga_frame_buffer_addr; /* FPGA 端連貫 Frame Buffer */
+        struct qpcie_sgl_entry *desc = &ring->ring_virt[tail];
+        desc->pcie_addr = bus_addr;
+        desc->len       = len;
+        desc->flags     = (1U << 2); /* DIRECT = 1 */
+        if (is_last) {
+            desc->flags |= (1U << 0); /* EOF = 1 */
+            if (irq_on_last)
+                desc->flags |= (1U << 1); /* IRQ_ENABLE = 1 */
+        }
 
-    if (format == 0x02) { /* NV12 (Semi-Planar: Y + UV) */
-        desc->plane1_src_addr = u_dma_addr; /* UV Plane Base */
-        desc->plane1_dst_addr = fpga_frame_buffer_addr + (width * height);
-        desc->plane_count     = 2;
-    } else if (format == 0x03) { /* YUV420P (Planar: Y + U + V) */
-        desc->plane1_src_addr = u_dma_addr;
-        desc->plane1_dst_addr = fpga_frame_buffer_addr + (width * height);
-        desc->plane2_src_addr = v_dma_addr;
-        desc->plane2_dst_addr = fpga_frame_buffer_addr + (width * height) + (width * height / 4);
-        desc->plane_count     = 3;
-    } else { /* 2D Single Plane / Mono */
-        desc->plane_count     = 1;
+        tail = (tail + 1) % ring->ring_size;
     }
 
-    /* 2. 填入 2D 尺寸與 Stride 步長 */
-    desc->plane0_line_width  = width;   /* 畫面寬度 Bytes */
-    desc->plane0_line_count  = height;  /* 畫面高度 Lines */
-    desc->src_line_stride    = stride;  /* 含 Padding 之 Line Stride */
-    desc->dst_line_stride    = width;   /* FPGA 側無 Padding 對齊寫入 */
-
-    desc->plane12_line_width = width / 2;
-    desc->plane12_line_count = height / 2;
-
-    /* 3. 填入控制與致能 Flags */
-    desc->format  = format;
-    desc->control = 0x0009; /* Valid = 1, IRQ_EN = 1 */
-
-    /* 4. 更新 Ring Tail Pointer 並通知 FPGA 啟動 DMA */
-    ring->tail_ptr = (ring->tail_ptr + 1) % ring->ring_size;
-    iowrite32(((u32)ring->tail_ptr << 16) | ring->ring_size, ring->bar0_mmio + 0x10);
-    iowrite32(0x01, ring->bar0_mmio + 0x00); /* Start H2C DMA */
+    ring->tail_ptr = tail;
+    /* 敲響 Doorbell，通知硬體 thin_desc_fetch_engine 抓取並啟動 DMA */
+    iowrite32(ring->tail_ptr, ring->doorbell_reg);
 
     return 0;
 }
 ```
+
+### 3.2 視訊幾何與通道控制暫存器設定 (Per-Channel Configuration)
+
+視訊幾何與格式不再由 descriptor 攜帶，改由 BAR0 暫存器設定：
+
+```c
+/* 配置視訊通道 0 幾何與格式 */
+iowrite32(1920,        bar0 + CH0_WIDTH);
+iowrite32(1080,        bar0 + CH0_HEIGHT);
+iowrite32(2048,        bar0 + CH0_STRIDE);   /* 支援對齊或 Padding Stride */
+iowrite32(FMT_NV12M,   bar0 + CH0_FMT);      /* 或 FMT_RGB24 */
+iowrite32(ENABLE_MASK, bar0 + CH0_CTRL);
+```
+
+NV12M 雙平面（Y 與 UV）分別由獨立的 `RING0` 與 `RING1` 透過平行 fetch 進行佇列管理，由硬體自動關聯合成。
 
 ---
 

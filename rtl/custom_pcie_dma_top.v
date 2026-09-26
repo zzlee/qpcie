@@ -918,27 +918,12 @@ module custom_pcie_dma_top #(
     wire        pcie_frame_done;
     reg         ch0_owner_busy;
 
-    // Fair arbiter between CH0 Thin Descriptors and CH1 64B Descriptors
-    reg desc_arb_grant; // 0 = CH0 thin, 1 = CH1 64B
-    wire thin_req_pending = thin_mrd_req_valid;
-    wire leg_req_pending  = legacy_desc_req_valid;
-
-    always @(posedge clk or negedge dma_rst_n) begin
-        if (!dma_rst_n) begin
-            desc_arb_grant <= 1'b0;
-        end else if (desc_req_ack) begin
-            desc_arb_grant <= ~desc_arb_grant;
-        end
-    end
-
-    wire choose_legacy = (desc_arb_grant && leg_req_pending) || (!thin_req_pending && leg_req_pending);
-
-    wire        desc_req_valid_mux  = choose_legacy ? legacy_desc_req_valid : thin_mrd_req_valid;
-    wire [63:0] desc_req_addr_mux   = choose_legacy ? legacy_desc_req_addr  : thin_mrd_req_addr;
-    wire [10:0] desc_req_dw_len_mux = choose_legacy ? legacy_desc_req_dw_len : thin_mrd_req_dw_len;
-    wire [7:0]  desc_req_tag_mux    = choose_legacy ? legacy_desc_req_tag   : thin_mrd_req_tag;
-    assign thin_mrd_req_ack         = desc_req_ack && !choose_legacy;
-    assign legacy_desc_req_ack      = desc_req_ack && choose_legacy;
+    // Canonical v3.0 Native: Pure Thin Descriptor Fetch Requests
+    wire        desc_req_valid_mux  = thin_mrd_req_valid;
+    wire [63:0] desc_req_addr_mux   = thin_mrd_req_addr;
+    wire [10:0] desc_req_dw_len_mux = thin_mrd_req_dw_len;
+    wire [7:0]  desc_req_tag_mux    = thin_mrd_req_tag;
+    assign thin_mrd_req_ack         = desc_req_ack;
 
     // 5. RQ TX Encoder
     rq_tx_encoder #(
@@ -1093,46 +1078,40 @@ module custom_pcie_dma_top #(
         .channel_uv_almost_full(channel_uv_almost_full)
     );
 
-    // 7. Descriptor Fetch Engine (CH1 Loopback 64-Byte)
-    desc_fetch_engine u_desc_fetch_engine (
-        .clk(clk),
-        .rst_n(dma_rst_n),
-        .dma_run(vch1_ctrl_w[0]),
-        .ring_base_addr(vch1_ring0_base_w),
-        .ring_size(vch1_ring0_size_w),
-        .tail_ptr(vch1_ring0_tail_w),
-        .head_ptr(vch1_ring0_head_w),
-        .idle(desc_fetch_idle),
-        .desc_req_valid(legacy_desc_req_valid),
-        .desc_req_addr(legacy_desc_req_addr),
-        .desc_req_dw_len(legacy_desc_req_dw_len),
-        .desc_req_tag(legacy_desc_req_tag),
-        .desc_req_ack(legacy_desc_req_ack),
-        .desc_cpl_valid(desc_cpl_valid),
-        .desc_cpl_data(desc_cpl_data),
-        .desc_cpl_last(desc_cpl_last),
-        .h2c_desc_valid(h2c_desc_valid),
-        .h2c_plane0_src(h2c_plane0_src), .h2c_plane0_dst(h2c_plane0_dst),
-        .h2c_plane1_src(h2c_plane1_src), .h2c_plane1_dst(h2c_plane1_dst),
-        .h2c_plane2_src(h2c_plane2_src), .h2c_plane2_dst(h2c_plane2_dst),
-        .h2c_line_width(h2c_line_width), .h2c_line_count(h2c_line_count),
-        .h2c_src_stride(h2c_src_stride), .h2c_dst_stride(h2c_dst_stride),
-        .h2c_plane12_width(h2c_plane12_width), .h2c_plane12_count(h2c_plane12_count),
-        .h2c_format(h2c_format), .h2c_plane_count(h2c_plane_count),
-        .h2c_desc_ctrl(h2c_desc_ctrl),
-        .h2c_desc_ready(sg_h2c_desc_ready),
-        .c2h_desc_valid(c2h_desc_valid),
-        .c2h_plane0_src(c2h_plane0_src), .c2h_plane0_dst(c2h_plane0_dst),
-        .c2h_plane1_src(c2h_plane1_src), .c2h_plane1_dst(c2h_plane1_dst),
-        .c2h_plane2_src(c2h_plane2_src), .c2h_plane2_dst(c2h_plane2_dst),
-        .c2h_line_width(c2h_line_width), .c2h_line_count(c2h_line_count),
-        .c2h_src_stride(c2h_src_stride), .c2h_dst_stride(c2h_dst_stride),
-        .c2h_plane12_width(c2h_plane12_width), .c2h_plane12_count(c2h_plane12_count),
-        .c2h_format(c2h_format), .c2h_plane_count(c2h_plane_count),
-        .c2h_desc_ctrl(c2h_desc_ctrl),
-        .c2h_desc_ready(c2h_desc_ready),
-        .sg_fetch_busy(sg_fetch_busy)
-    );
+    // 7. Canonical v3.0 Thin Descriptor Engine Ties (Legacy 64B Engine Removed)
+    assign desc_fetch_idle = !thin_busy;
+    assign h2c_desc_valid  = 1'b0;
+    assign c2h_desc_valid  = 1'b0;
+    assign h2c_plane0_src  = 64'd0;
+    assign h2c_plane0_dst  = 64'd0;
+    assign h2c_plane1_src  = 64'd0;
+    assign h2c_plane1_dst  = 64'd0;
+    assign h2c_plane2_src  = 64'd0;
+    assign h2c_plane2_dst  = 64'd0;
+    assign h2c_line_width  = 16'd0;
+    assign h2c_line_count  = 16'd0;
+    assign h2c_src_stride  = 16'd0;
+    assign h2c_dst_stride  = 16'd0;
+    assign h2c_plane12_width = 16'd0;
+    assign h2c_plane12_count = 16'd0;
+    assign h2c_format      = 4'd0;
+    assign h2c_plane_count = 4'd0;
+    assign h2c_desc_ctrl   = 8'd0;
+    assign c2h_plane0_src  = 64'd0;
+    assign c2h_plane0_dst  = 64'd0;
+    assign c2h_plane1_src  = 64'd0;
+    assign c2h_plane1_dst  = 64'd0;
+    assign c2h_plane2_src  = 64'd0;
+    assign c2h_plane2_dst  = 64'd0;
+    assign c2h_line_width  = 16'd0;
+    assign c2h_line_count  = 16'd0;
+    assign c2h_src_stride  = 16'd0;
+    assign c2h_dst_stride  = 16'd0;
+    assign c2h_plane12_width = 16'd0;
+    assign c2h_plane12_count = 16'd0;
+    assign c2h_format      = 4'd0;
+    assign c2h_plane_count = 4'd0;
+    assign c2h_desc_ctrl   = 8'd0;
 
     // 7.0b Thin Descriptor Fetch Engine (Phase 3 16-Byte)
     thin_desc_fetch_engine #(

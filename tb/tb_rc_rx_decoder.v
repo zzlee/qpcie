@@ -8,7 +8,7 @@
 module tb_rc_rx_decoder;
 
     parameter DATA_WIDTH = 256;
-    parameter KEEP_WIDTH = DATA_WIDTH / 32;
+    parameter KEEP_WIDTH = DATA_WIDTH / 8;
 
     reg                  clk;
     reg                  rst_n;
@@ -19,6 +19,10 @@ module tb_rc_rx_decoder;
     reg  [74:0]          s_axis_rc_tuser;
     reg  [KEEP_WIDTH-1:0] s_axis_rc_tkeep;
     wire                 s_axis_rc_tready;
+
+    wire                 thin_cpl_valid;
+    wire [127:0]         thin_cpl_data;
+    wire                 thin_cpl_last;
 
     wire                 desc_cpl_valid;
     wire [511:0]         desc_cpl_data;
@@ -43,6 +47,9 @@ module tb_rc_rx_decoder;
         .s_axis_rc_tuser(s_axis_rc_tuser),
         .s_axis_rc_tkeep(s_axis_rc_tkeep),
         .s_axis_rc_tready(s_axis_rc_tready),
+        .thin_cpl_valid(thin_cpl_valid),
+        .thin_cpl_data(thin_cpl_data),
+        .thin_cpl_last(thin_cpl_last),
         .desc_cpl_valid(desc_cpl_valid),
         .desc_cpl_data(desc_cpl_data),
         .desc_cpl_last(desc_cpl_last),
@@ -66,24 +73,24 @@ module tb_rc_rx_decoder;
         s_axis_rc_tvalid = 0;
         s_axis_rc_tlast = 0;
         s_axis_rc_tuser = 0;
-        s_axis_rc_tkeep = 8'hFF;
+        s_axis_rc_tkeep = {KEEP_WIDTH{1'b1}};
 
         #20;
         rst_n = 1;
         #10;
 
-        $display("[%0t] Test 1: Receive Desc Fetch CplD (Tag 0x00)...", $time);
+        $display("[%0t] Test 1: Receive Thin Desc Fetch CplD (Tag 0x00)...", $time);
         @(posedge clk);
         s_axis_rc_tvalid <= 1;
         s_axis_rc_tlast  <= 1;
-        // DW0: Byte Count=32, DW1: Tag=0x00, DW2: Completer ID=0x0100
-        s_axis_rc_tdata[31:0]   <= 32'h0020_0000;
+        // DW0: Byte Count=16, DW1: Tag=0x00, DW2: Completer ID=0x0100
+        s_axis_rc_tdata[31:0]   <= 32'h0010_0000;
         s_axis_rc_tdata[71:64]  <= 8'h00; // RC descriptor tag
         s_axis_rc_tdata[87:72]  <= 16'h0100;
-        s_axis_rc_tdata[255:96] <= 160'h11223344_55667788_99AABBCC_DDEEFF00;
+        s_axis_rc_tdata[223:96] <= 128'h11223344_55667788_99AABBCC_DDEEFF00;
 
-        wait(desc_cpl_valid);
-        $display("[%0t] RC Decoder routed CplD to Desc Fetch Engine! Data: 0x%h", $time, desc_cpl_data[159:0]);
+        wait(thin_cpl_valid);
+        $display("[%0t] RC Decoder routed CplD to Thin Desc Fetch Engine! Data: 0x%h", $time, thin_cpl_data);
         @(posedge clk);
         s_axis_rc_tvalid <= 0;
 

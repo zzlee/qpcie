@@ -15,16 +15,16 @@ dmesg | tail -n 180
 
 - `driver/qpcie_main.c`：PCI probe、BAR map、IRQ、SG diagnostic、retained ring state。
 - `driver/qpcie_v4l2.c`：V4L2/VB2、TPG controls、descriptors、STREAMON/OFF。
-- `driver/qpcie_driver.h`：register map 與 64-byte descriptor wire format。
+- `driver/qpcie_driver.h`：register map 與 16-byte Thin SG descriptor wire format。
 
 ## 2. Current V4L2 capabilities
 
 - Device：`/dev/video0`。
 - Type：`V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE`。
-- Pixel format：`V4L2_PIX_FMT_NV12M` (`NM12`)。
+- Pixel format：`V4L2_PIX_FMT_NV12M` (`NM12`) 與 `V4L2_PIX_FMT_RGB24`。
 - Memory：`V4L2_MEMORY_MMAP`。
 - Memory ops：`vb2_dma_contig_memops`。
-- Planes：2。
+- Planes：2 (NV12M) 或 1 (RGB24)。
 - Modes：1920×1080@60、3840×2160@60。
 
 ```bash
@@ -39,14 +39,14 @@ Driver 實作 `ENUM_FRAMESIZES`、`ENUM_FRAMEINTERVALS`、`TRY_FMT`、`S_FMT`、
 
 ## 4. VB2 buffer 與 descriptor
 
-每個 MMAP buffer 有兩個 DMA-contiguous planes：
+每個 MMAP buffer 依格式配置 DMA-contiguous planes：
 
 ```text
-1080p: Y=2,073,600, UV=1,036,800
-4K:    Y=8,294,400, UV=4,147,200
+1080p NV12M: Y=2,073,600, UV=1,036,800
+4K NV12M:    Y=8,294,400, UV=4,147,200
 ```
 
-`buf_prepare` 檢查 plane allocation size 並設定 bytesused。`buf_queue` 取得兩個 DMA addresses、填入 NV12M 64-byte descriptor，再用 `dma_wmb()` 發布 tail doorbell。
+`buf_prepare` 檢查 plane allocation size 並設定 bytesused。`buf_queue` 取得 DMA addresses、填入 16-byte Thin SG Descriptors（分別填入 `thin_ring` 與 `thin_ring1`），再用 `dma_wmb()` 發布 tail doorbell（`CH0_RING0_DOORBELL` / `CH0_RING1_DOORBELL`）。
 
 Linux API compatibility：
 

@@ -34,8 +34,6 @@ void qpcie_reprogram_rings(struct qpcie_dev *qdev)
     vch0->thin_ring_head = 0;
     vch0->thin_ring1_tail = 0;
     vch0->thin_ring1_head = 0;
-    qdev->h2c_tail = 0;
-    qdev->c2h_tail = 0;
 
     /* CH0: Restore thin RING0 base & tail */
     if (vch0->thin_ring_virt) {
@@ -53,16 +51,6 @@ void qpcie_reprogram_rings(struct qpcie_dev *qdev)
                   qdev->bar0_mmio + REG_VCH0_RING1_BASE_H);
         iowrite32((0 << 16) | RING_BUFFER_SIZE,
                   qdev->bar0_mmio + REG_VCH0_RING1_CFG);
-    }
-
-    /* CH1: Restore loopback descriptor ring base & tail */
-    if (qdev->h2c_ring_virt) {
-        iowrite32(lower_32_bits(qdev->h2c_ring_dma),
-                  qdev->bar0_mmio + REG_VCH_BASE(1) + REG_VCH_OFFSET_RING0_BASE_L);
-        iowrite32(upper_32_bits(qdev->h2c_ring_dma),
-                  qdev->bar0_mmio + REG_VCH_BASE(1) + REG_VCH_OFFSET_RING0_BASE_H);
-        iowrite32((0 << 16) | RING_BUFFER_SIZE,
-                  qdev->bar0_mmio + REG_VCH_BASE(1) + REG_VCH_OFFSET_RING0_CFG);
     }
 
     ioread32(qdev->bar0_mmio + REG_VCH0_RING0_CFG); /* Flush posted writes */
@@ -347,84 +335,62 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
     ctrl = ioread32(qdev->bar0_mmio + REG_DMA_CTRL);
     iowrite32(ctrl | BIT(3), qdev->bar0_mmio + REG_DMA_CTRL);
 
-    {
-        struct qpcie_v4l2_channel *vch0 = &qdev->v4l2_ch[0];
-        vch0->ch_reg_base = REG_VCH_BASE(0);
-        vch0->thin_ring_virt = dma_alloc_coherent(&pdev->dev,
-                                sizeof(*vch0->thin_ring_virt) * RING_BUFFER_SIZE,
-                                &vch0->thin_ring_dma, GFP_KERNEL);
-        if (!vch0->thin_ring_virt) {
-            dev_err(&pdev->dev, "[ERROR] Cannot allocate thin descriptor ring 0 for CH0\n");
+    for (i = 0; i < NUM_VIDEO_NODES; i++) {
+        struct qpcie_v4l2_channel *vch = &qdev->v4l2_ch[i];
+        vch->ch_reg_base = REG_VCH_BASE(i);
+        vch->thin_ring_virt = dma_alloc_coherent(&pdev->dev,
+                                sizeof(*vch->thin_ring_virt) * RING_BUFFER_SIZE,
+                                &vch->thin_ring_dma, GFP_KERNEL);
+        if (!vch->thin_ring_virt) {
+            dev_err(&pdev->dev, "[ERROR] Cannot allocate thin descriptor ring 0 for CH%d\n", i);
             ret = -ENOMEM;
-            goto free_irq;
+            if (i == 0)
+                goto free_irq;
+            goto free_video_ring;
         }
-        memset(vch0->thin_ring_virt, 0,
-               sizeof(*vch0->thin_ring_virt) * RING_BUFFER_SIZE);
-        vch0->thin_ring_tail = 0;
-        vch0->thin_ring_head = 0;
+        memset(vch->thin_ring_virt, 0,
+               sizeof(*vch->thin_ring_virt) * RING_BUFFER_SIZE);
+        vch->thin_ring_tail = 0;
+        vch->thin_ring_head = 0;
 
-        vch0->thin_ring1_virt = dma_alloc_coherent(&pdev->dev,
-                                sizeof(*vch0->thin_ring1_virt) * RING_BUFFER_SIZE,
-                                &vch0->thin_ring1_dma, GFP_KERNEL);
-        if (!vch0->thin_ring1_virt) {
-            dev_err(&pdev->dev, "[ERROR] Cannot allocate thin descriptor ring 1 for CH0\n");
+        vch->thin_ring1_virt = dma_alloc_coherent(&pdev->dev,
+                                sizeof(*vch->thin_ring1_virt) * RING_BUFFER_SIZE,
+                                &vch->thin_ring1_dma, GFP_KERNEL);
+        if (!vch->thin_ring1_virt) {
+            dev_err(&pdev->dev, "[ERROR] Cannot allocate thin descriptor ring 1 for CH%d\n", i);
             ret = -ENOMEM;
             goto free_video_ring;
         }
-        memset(vch0->thin_ring1_virt, 0,
-               sizeof(*vch0->thin_ring1_virt) * RING_BUFFER_SIZE);
-        vch0->thin_ring1_tail = 0;
-        vch0->thin_ring1_head = 0;
+        memset(vch->thin_ring1_virt, 0,
+               sizeof(*vch->thin_ring1_virt) * RING_BUFFER_SIZE);
+        vch->thin_ring1_tail = 0;
+        vch->thin_ring1_head = 0;
 
-        qdev->thin_ring_virt = (struct qpcie_sgl_entry *)vch0->thin_ring_virt;
-        qdev->thin_ring_dma  = vch0->thin_ring_dma;
-        qdev->thin_ring_tail = 0;
-        qdev->thin_ring_head = 0;
+        /* Initialize RING0 Base and initial CFG */
+        iowrite32(lower_32_bits(vch->thin_ring_dma),
+                  qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING0_BASE_L);
+        iowrite32(upper_32_bits(vch->thin_ring_dma),
+                  qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING0_BASE_H);
+        iowrite32(RING_BUFFER_SIZE,
+                  qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING0_CFG);
+
+        /* Initialize RING1 Base and initial CFG */
+        iowrite32(lower_32_bits(vch->thin_ring1_dma),
+                  qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING1_BASE_L);
+        iowrite32(upper_32_bits(vch->thin_ring1_dma),
+                  qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING1_BASE_H);
+        iowrite32(RING_BUFFER_SIZE,
+                  qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING1_CFG);
 
         dev_info(&pdev->dev,
-                 "CH0 Thin Ring: RING0=0x%llX, RING1=0x%llX, Size=%u, RegBase=0x%03X\n",
-                 (u64)vch0->thin_ring_dma, (u64)vch0->thin_ring1_dma, RING_BUFFER_SIZE, vch0->ch_reg_base);
-        /* Initialize RING0 Base and initial CFG */
-        iowrite32(lower_32_bits(vch0->thin_ring_dma),
-                  qdev->bar0_mmio + REG_VCH0_RING0_BASE_L);
-        iowrite32(upper_32_bits(vch0->thin_ring_dma),
-                  qdev->bar0_mmio + REG_VCH0_RING0_BASE_H);
-        iowrite32(RING_BUFFER_SIZE,
-                  qdev->bar0_mmio + REG_VCH0_RING0_CFG);
-        /* Initialize RING1 Base and initial CFG */
-        iowrite32(lower_32_bits(vch0->thin_ring1_dma),
-                  qdev->bar0_mmio + REG_VCH0_RING1_BASE_L);
-        iowrite32(upper_32_bits(vch0->thin_ring1_dma),
-                  qdev->bar0_mmio + REG_VCH0_RING1_BASE_H);
-        iowrite32(RING_BUFFER_SIZE,
-                  qdev->bar0_mmio + REG_VCH0_RING1_CFG);
+                 "CH%d Thin Ring: RING0=0x%llX, RING1=0x%llX, Size=%u, RegBase=0x%03X\n",
+                 i, (u64)vch->thin_ring_dma, (u64)vch->thin_ring1_dma, RING_BUFFER_SIZE, vch->ch_reg_base);
     }
 
-    /* ------------------------------------------------------------------------
-     * Allocate & Initialize CH1 Loopback Descriptor Ring
-     * ------------------------------------------------------------------------ */
-    qdev->h2c_ring_virt = dma_alloc_coherent(&pdev->dev,
-                            sizeof(*qdev->h2c_ring_virt) * RING_BUFFER_SIZE,
-                            &qdev->h2c_ring_dma, GFP_KERNEL);
-    if (!qdev->h2c_ring_virt) {
-        dev_err(&pdev->dev, "[ERROR] Cannot allocate CH1 descriptor ring\n");
-        ret = -ENOMEM;
-        goto free_video_ring;
-    }
-    memset(qdev->h2c_ring_virt, 0,
-           sizeof(*qdev->h2c_ring_virt) * RING_BUFFER_SIZE);
-    qdev->h2c_tail = 0;
-    qdev->c2h_tail = 0;
-
-    iowrite32(lower_32_bits(qdev->h2c_ring_dma),
-              qdev->bar0_mmio + REG_VCH_BASE(1) + REG_VCH_OFFSET_RING0_BASE_L);
-    iowrite32(upper_32_bits(qdev->h2c_ring_dma),
-              qdev->bar0_mmio + REG_VCH_BASE(1) + REG_VCH_OFFSET_RING0_BASE_H);
-    iowrite32(RING_BUFFER_SIZE,
-              qdev->bar0_mmio + REG_VCH_BASE(1) + REG_VCH_OFFSET_RING0_CFG);
-    dev_info(&pdev->dev,
-             "CH1 Loopback Ring: RingBase=0x%llX, Size=%u, RegBase=0x%03X\n",
-             (u64)qdev->h2c_ring_dma, RING_BUFFER_SIZE, REG_VCH_BASE(1));
+    qdev->thin_ring_virt = (struct qpcie_sgl_entry *)qdev->v4l2_ch[0].thin_ring_virt;
+    qdev->thin_ring_dma  = qdev->v4l2_ch[0].thin_ring_dma;
+    qdev->thin_ring_tail = 0;
+    qdev->thin_ring_head = 0;
 
     ret = qpcie_v4l2_init(qdev);
     if (ret) {
@@ -474,13 +440,6 @@ free_video_ring:
         }
     }
     qdev->thin_ring_virt = NULL;
-    if (qdev->h2c_ring_virt) {
-        dma_free_coherent(&pdev->dev,
-                          sizeof(*qdev->h2c_ring_virt) * RING_BUFFER_SIZE,
-                          qdev->h2c_ring_virt, qdev->h2c_ring_dma);
-        qdev->h2c_ring_virt = NULL;
-    }
-    qdev->c2h_ring_virt = NULL;
 free_irq:
     iowrite32(0, qdev->bar0_mmio + REG_IRQ_CTRL);
     free_irq(qdev->irq, qdev);
@@ -548,13 +507,6 @@ static void qpcie_remove(struct pci_dev *pdev)
         }
     }
     qdev->thin_ring_virt = NULL;
-    if (qdev->h2c_ring_virt) {
-        dma_free_coherent(&pdev->dev,
-                          sizeof(*qdev->h2c_ring_virt) * RING_BUFFER_SIZE,
-                          qdev->h2c_ring_virt, qdev->h2c_ring_dma);
-        qdev->h2c_ring_virt = NULL;
-        qdev->c2h_ring_virt = NULL;
-    }
 
     /* Restore the pre-probe MPS values (decrease downstream first). */
     if (qdev->mps_modified) {

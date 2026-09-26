@@ -260,19 +260,10 @@
 #define REG_SG_PT_DATA_HI           0xE8 /* Physical Address [63:32] (Bit 31: 0=Y, 1=UV) */
 #define REG_SG_STATUS               0xEC /* Current Page Indexes [31:16]=UV, [15:0]=Y */
 
-#define QPCIE_SG_MODE_MMIO          1    /* Mode 1: CPU writes REG_SG_PT_DATA_LO/HI into BRAM */
-#define QPCIE_SG_MODE_HOST_FETCH    2    /* Mode 2: FPGA Active PCIe MRd Linked Page Table Fetch */
+#define QPCIE_SG_MODE_MMIO          1    /* Legacy MMIO BRAM mode */
+#define QPCIE_SG_MODE_HOST_FETCH    2    /* Active Host MRd Fetch mode */
 
-#define DESC_CTRL_SG_MODE           0x10 /* Bit 4: Scatter-Gather Multi-Page Table Mode (MMIO BRAM) */
-#define DESC_CTRL_SG_MMIO_MODE      0x10 /* Bit 4: SG Mode with MMIO BRAM Page Table */
-#define DESC_CTRL_SG_FETCH_MODE     0x20 /* Bit 5: SG Mode with FPGA Host MRd Linked Page Table Fetch */
-#define DESC_CTRL_CHANNEL_SHIFT     6    /* Bits 7:6: video channel, independent of IRQ enable */
-#define DESC_CTRL_CHANNEL_MASK      GENMASK(7, 6)
-
-#define QPCIE_MAX_PAGE_SLOTS_Y      32   /* Up to 8160 SGL segments; supports 4096x2160 RGB24 */
-#define QPCIE_MAX_PAGE_SLOTS_UV     4    /* Up to 1020 SGL segments (Gigabytes) */
-
-/* 128-Bit Variable-Length SGL Entry Structure (16 Bytes Wire Format) */
+/* 128-Bit Variable-Length SGL Entry Structure (16 Bytes Canonical Wire Format) */
 struct __packed qpcie_sgl_entry {
     u64 phys_addr;   /* Bytes 0..7   : DW0-DW1 (Physical base address) */
     u32 len_bytes;   /* Bytes 8..11  : DW2     (Contiguous length in bytes) */
@@ -284,43 +275,11 @@ struct __packed qpcie_sgl_entry {
 #define SGL_FLAG_CHAIN_PTR          BIT(0) /* Points to next 4KB SGL slot */
 #define SGL_FLAG_LAST_SEG           BIT(1) /* End of current planar payload */
 
-/* 64-Byte 2D Multi-Planar Extended Descriptor Structure (Hardware Wire Format) */
-struct __packed qpcie_dma_desc_64b {
-    u64 plane0_src_addr; /* Bytes 0..7   : DW0-DW1 (Src Buffer Phys Addr) */
-    u64 plane0_dst_addr; /* Bytes 8..15  : DW2-DW3 (Dst Buffer Phys Addr) */
-    u64 plane1_src_addr; /* Bytes 16..23 : DW4-DW5 */
-    u64 plane1_dst_addr; /* Bytes 24..31 : DW6-DW7 */
-    u64 plane2_src_addr; /* Bytes 32..39 : DW8-DW9 */
-    u64 plane2_dst_addr; /* Bytes 40..47 : DW10-DW11 */
-    u16 line_width;      /* Bytes 48..49 : DW12[15:0] (Line Width Bytes, e.g. 4096) */
-    u16 line_count;      /* Bytes 50..51 : DW12[31:16] (Total Lines, e.g. 1) */
-    u16 src_stride;      /* Bytes 52..53 : DW13[15:0] (Src Line Stride Bytes) */
-    u16 dst_stride;      /* Bytes 54..55 : DW13[31:16] (Dst Line Stride Bytes) */
-    u16 plane12_width;   /* Bytes 56..57 : DW14[15:0] */
-    u16 plane12_count;   /* Bytes 58..59 : DW14[31:16] */
-    union {
-        struct {
-            u8 format : 4;
-            u8 plane_count : 4;
-            u8 control;
-            u16 reserved;
-        };
-        u32 dw15_raw;
-    };
-};
-
-/* Compatibility Typedef */
-#define qpcie_dma_desc_2d qpcie_dma_desc_64b
-
 struct qpcie_dev;
 
 struct qpcie_v4l2_buffer {
     struct vb2_v4l2_buffer vb;
     struct list_head list;
-    void *y_slots_virt;
-    dma_addr_t y_slots_dma;
-    void *uv_slots_virt;
-    dma_addr_t uv_slots_dma;
     bool sgl_logged;
 };
 
@@ -346,7 +305,7 @@ struct qpcie_v4l2_channel {
     bool pacer_enable;
     bool overlay_enable;
     enum v4l2_buf_type buf_type;
-    /* Phase 5 / Phase 6: Per-channel register block & thin descriptor rings */
+    /* Canonical v3.0: Per-channel register block & thin descriptor rings */
     u32 ch_reg_base;
     struct qpcie_dma_desc_16b *thin_ring_virt;
     dma_addr_t thin_ring_dma;
@@ -392,14 +351,6 @@ struct qpcie_dev {
     int ep_mps_saved;
     int rp_mps_saved;
 
-    /* Descriptor Ring Buffer Handles */
-    struct qpcie_dma_desc_2d *h2c_ring_virt;
-    dma_addr_t h2c_ring_dma;
-    u32 h2c_tail;
-
-    struct qpcie_dma_desc_2d *c2h_ring_virt;
-    dma_addr_t c2h_ring_dma;
-    u32 c2h_tail;
     spinlock_t ring_lock;
     atomic_t streaming_count;
 

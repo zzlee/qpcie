@@ -276,29 +276,30 @@ module tb_axil_reg_space;
         end
 
         // =====================================================================
-        // Test 2: Backward-Compatibility Mirrors (0x030 - 0x03C)
+        // Test 2: Verify Legacy Addresses (0x030 - 0x03C) are unmapped in Canonical v3.0
         // =====================================================================
-        $display("[%0t] Test 2: Backward-Compatibility Mirrors (0x030 - 0x03C)...", $time);
+        $display("[%0t] Test 2: Verify Legacy Addresses (0x030 - 0x03C) are unmapped in Canonical v3.0...", $time);
         axil_read(32'h030, read_val);
-        if (read_val !== EXP_VERSION) begin
-            $display("FAIL: Mirror 0x030 Version mismatch: 0x%h", read_val);
+        if (read_val !== 32'h0000_0000) begin
+            $display("FAIL: Legacy 0x030 should be unmapped (0x0), got: 0x%h", read_val);
             $fatal(1);
         end
         axil_read(32'h034, read_val);
-        if (read_val !== 32'h01D6_A9C5) begin
-            $display("FAIL: Mirror 0x034 Git Hash mismatch: 0x%h", read_val);
+        if (read_val !== 32'h0000_0000) begin
+            $display("FAIL: Legacy 0x034 should be unmapped (0x0), got: 0x%h", read_val);
             $fatal(1);
         end
         axil_read(32'h038, read_val);
-        if (read_val !== 32'h2026_0821) begin
-            $display("FAIL: Mirror 0x038 Timestamp mismatch: 0x%h", read_val);
+        if (read_val !== 32'h0000_0000) begin
+            $display("FAIL: Legacy 0x038 should be unmapped (0x0), got: 0x%h", read_val);
             $fatal(1);
         end
         axil_read(32'h03C, read_val);
-        if (read_val !== EXP_CAPS) begin
-            $display("FAIL: Mirror 0x03C Caps mismatch: 0x%h", read_val);
+        if (read_val !== 32'h0000_0000) begin
+            $display("FAIL: Legacy 0x03C should be unmapped (0x0), got: 0x%h", read_val);
             $fatal(1);
         end
+        $display("  ✅ PASS: Legacy 0x030-0x03C correctly return 0x0 in Canonical v3.0");
 
         // =====================================================================
         // Test 3: Write to DMA_CTRL at 0x000 & Video Ctrl at 0x080

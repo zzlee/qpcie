@@ -25,7 +25,7 @@ This document outlines the plan to migrate the existing custom PCIe RTL modules 
 
 ## Phase 3: Software / Driver Adaptation
 
-1.  **Descriptor Format:** Modify the Linux driver (`driver/custom_pcie_av.c`, etc.) to generate Scatter-Gather descriptors that match the format expected by the `verilog-pcie` DMA engines.
+1.  **Descriptor Format:** Modify the Linux driver (`driver/qpcie_*.c`, etc.) to align with Canonical v3.0 16-byte Thin SG descriptors or the format expected by the `verilog-pcie` DMA engines.
 2.  **Register Map:** Update any driver register offsets or status bits if the `verilog-pcie` DMA introduces its own control registers (e.g., DMA start, stop, status).
 
 ## Phase 4: Verification & Hardware Testing

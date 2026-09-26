@@ -58,7 +58,7 @@
 | 串流類型 (Stream Type) | 頻寬需求 (Bandwidth) | 延遲敏感度 (Latency Sensitivity) | 描述符類型 (Descriptor) | 仲裁優先權 (Arbitration Priority) |
 | :--- | :--- | :--- | :--- | :--- |
 | **多路 Audio (PCM)** | 低 (例如 48kHz 24-bit 8ch ≈ 9.2 Mbps/ch) | **極高** (Buffer Underrun 會導致爆音) | 1D Continuous Ring | **High Priority (絕對優先)** |
-| **多路 Video (2D)** | **極高** (4K60 YUV420P ≈ 6 Gbps/ch) | 中 (容忍 1~2 Frame 緩衝) | 2D Multi-Planar (64B) | Weighted Round-Robin (頻寬配額) |
+| **多路 Video (2D)** | **極高** (4K60 YUV420P ≈ 6 Gbps/ch) | 中 (容忍 1~2 Frame 緩衝) | 16B Thin SG Ring (Dual-Ring NV12M / Single-Ring RGB24) | Weighted Round-Robin (頻寬配額) |
 
 #### 仲裁邏輯 (`rq_tx_encoder.v` 擴充邏輯)：
 - **Audio DMA Request** 採用 **Strict Priority (嚴格優先權)**，只要 Audio Buffer 有資料即立即插入 PCIe MWr/MRd TLP。

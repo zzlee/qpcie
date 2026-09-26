@@ -17,7 +17,7 @@ cd /home/zzlee/qpcie
 | `tb_axil_reg_space.v` | BAR0 registers、retained pointers、VIDEO_CTRL `0x80` |
 | `tb_rq_tx_encoder.v` | MRd/MWr/Msg、multi-beat payload、random backpressure |
 | `tb_rc_rx_decoder.v` | pg054 CplD fields、Tag routing |
-| `tb_desc_fetch_engine.v` | 64-byte descriptor fetch/parse |
+| `tb_thin_desc_fetch_engine.v` | 16-byte Thin SG descriptor fetch/parse |
 | `tb_h2c_dma_engine.v` | H2C data path |
 | `tb_c2h_dma_engine.v` | C2H data path |
 | `tb_interrupt_ctrl.v` | MSI request/mask/ack |

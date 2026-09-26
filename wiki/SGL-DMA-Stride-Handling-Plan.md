@@ -41,17 +41,16 @@
   - 保存用戶端傳入或協商後的 `vch->stride = f->fmt.pix_mp.plane_fmt[0].bytesperline`。
   - 驗證 `vch->stride >= vch->width` 且 `(vch->stride % 128) == 0`。
 
-### 3.2 2D Extended Descriptor 欄位填充 (`qpcie_publish_buffer`)
-在發送 64-byte 2D Descriptor 至 H2C/C2H Ring 時，精確設定：
-- `desc->line_width = vch->width;` （實際有效像素位元組數，如 1920 或 3840）
-- `desc->dst_stride = vch->stride;` （記憶體每行跨距，如 2048 或 4096）
-- `desc->plane12_width = vch->width;`
-- `desc->line_count = vch->height;`
-- `desc->plane12_count = vch->height / 2;`
+### 3.2 BAR0 通道幾何暫存器設定 (`CH0_STRIDE` 等)
+在 Canonical v3.0 架構下，幾何參數不再由 descriptor 逐幀攜帶，而是寫入 BAR0 通道暫存器：
+- `CH0_WIDTH = vch->width;` （實際有效像素位元組數，如 1920 或 3840）
+- `CH0_STRIDE = vch->stride;` （記憶體每行跨距，如 2048 或 4096）
+- `CH0_HEIGHT = vch->height;`
 
-### 3.3 SGL Table 構建與 4KB 頁面邊界保護 (`qpcie_build_variable_sgl`)
-- `sg_table` 透過 `vb2_dma_sg_plane_desc()` 取得。因分配時已包含 `sizeimage`（即包含每行 stride padding 的總容量），SGL Table 完整覆蓋該記憶體區塊。
-- 驅動程式繼續執行 4KiB IOVA boundary 截斷，保證任何單一 SGL entry 絕不跨越 4KB 邊界，避免發送 PCIe MalfTLP。
+### 3.3 16-Byte Thin SG 描述符發布 (`qpcie_publish_buffer`)
+- 驅動程式將 buffer plane 的 DMA IOVA 分段轉換為 16-Byte `struct qpcie_sgl_entry`，寫入對應的 `thin_ring` (Y) 或 `thin_ring1` (UV)。
+- 每一段保證 4KiB IOVA boundary 截斷，絕不跨越 4KB 邊界，避免發送 PCIe MalfTLP。
+- 寫入 Tail Doorbell 通知硬體 `thin_desc_fetch_engine` 進行雙環平行抓取。
 
 ### 3.4 FPGA 硬體配合確認 (`rtl/nv12_capture_engine.v`)
 - 硬體在換行時：

@@ -539,53 +539,13 @@ static int qpcie_buf_init(struct vb2_buffer *vb)
 {
     struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
     struct qpcie_v4l2_buffer *buf = container_of(vbuf, struct qpcie_v4l2_buffer, vb);
-    struct qpcie_v4l2_channel *vch = vb2_get_drv_priv(vb->vb2_queue);
-    struct qpcie_dev *qdev = vch->qdev;
 
     buf->sgl_logged = false;
-
-    buf->y_slots_virt = dma_alloc_coherent(&qdev->pdev->dev,
-                                           QPCIE_MAX_PAGE_SLOTS_Y * 4096,
-                                           &buf->y_slots_dma, GFP_KERNEL);
-    if (!buf->y_slots_virt)
-        return -ENOMEM;
-
-    buf->uv_slots_virt = dma_alloc_coherent(&qdev->pdev->dev,
-                                            QPCIE_MAX_PAGE_SLOTS_UV * 4096,
-                                            &buf->uv_slots_dma, GFP_KERNEL);
-    if (!buf->uv_slots_virt) {
-        dma_free_coherent(&qdev->pdev->dev, QPCIE_MAX_PAGE_SLOTS_Y * 4096,
-                          buf->y_slots_virt, buf->y_slots_dma);
-        buf->y_slots_virt = NULL;
-        return -ENOMEM;
-    }
-    dev_dbg(&qdev->pdev->dev,
-             "SGL alloc ch%u %s: y=%pad/%uK uv=%pad/%uK\n",
-             vch->channel_id,
-             vch->buf_type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE ?
-             "H2C" : "C2H",
-             &buf->y_slots_dma, QPCIE_MAX_PAGE_SLOTS_Y * 4,
-             &buf->uv_slots_dma, QPCIE_MAX_PAGE_SLOTS_UV * 4);
     return 0;
 }
 
 static void qpcie_buf_cleanup(struct vb2_buffer *vb)
 {
-    struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
-    struct qpcie_v4l2_buffer *buf = container_of(vbuf, struct qpcie_v4l2_buffer, vb);
-    struct qpcie_v4l2_channel *vch = vb2_get_drv_priv(vb->vb2_queue);
-    struct qpcie_dev *qdev = vch->qdev;
-
-    if (buf->y_slots_virt) {
-        dma_free_coherent(&qdev->pdev->dev, QPCIE_MAX_PAGE_SLOTS_Y * 4096,
-                          buf->y_slots_virt, buf->y_slots_dma);
-        buf->y_slots_virt = NULL;
-    }
-    if (buf->uv_slots_virt) {
-        dma_free_coherent(&qdev->pdev->dev, QPCIE_MAX_PAGE_SLOTS_UV * 4096,
-                          buf->uv_slots_virt, buf->uv_slots_dma);
-        buf->uv_slots_virt = NULL;
-    }
 }
 
 /*
@@ -601,290 +561,82 @@ static void qpcie_buf_cleanup(struct vb2_buffer *vb)
  * negative error when the plane cannot fit within @max_slots; on error the
  * table contents are undefined and must not be published.
  */
-static int qpcie_build_variable_sgl(struct device *dev, struct scatterlist *sgl,
-                                    unsigned int nents,
-                                    struct qpcie_sgl_entry *slots_virt,
-                                    dma_addr_t slots_dma, unsigned int max_slots,
-                                    unsigned int *data_entries_out,
-                                    unsigned int *chain_count_out)
-{
-    struct scatterlist *sg;
-    struct qpcie_sgl_entry *slot_ptr = slots_virt;
-    unsigned int i;
-    unsigned int cur_slot = 0;
-    unsigned int cur_entry = 0;
-    unsigned int data_entries = 0;
-    unsigned int chain_count = 0;
-
-    *data_entries_out = 0;
-    *chain_count_out = 0;
-
-    memset(slots_virt, 0, max_slots * 4096);
-
-    for_each_sg(sgl, sg, nents, i) {
-        u64 chunk_addr = sg_dma_address(sg);
-        u64 chunk_len = sg_dma_len(sg);
-
-        if (cur_entry == 255) {
-            /* Slot full: link to the next slot via entry index 255. */
-            if (cur_slot + 1 >= max_slots) {
-                dev_err(dev,
-                        "SGL table overflow: plane needs more than %u entries (%u data, %u chains)\n",
-                        max_slots * 255, data_entries, chain_count);
-                return -ENOSPC;
-            }
-            slot_ptr[255].phys_addr = (u64)(slots_dma + (cur_slot + 1) * 4096);
-            slot_ptr[255].len_bytes = 0;
-            slot_ptr[255].flags     = SGL_FLAG_CHAIN_PTR;
-            chain_count++;
-            cur_slot++;
-            slot_ptr = (struct qpcie_sgl_entry *)((u8 *)slots_virt + cur_slot * 4096);
-            cur_entry = 0;
-        }
-
-        slot_ptr[cur_entry].phys_addr = chunk_addr;
-        slot_ptr[cur_entry].len_bytes = chunk_len;
-        slot_ptr[cur_entry].flags     = 0;
-        cur_entry++;
-        data_entries++;
-    }
-
-    if (data_entries == 0) {
-        dev_err(dev, "SGL table build: empty plane (nents=%u)\n", nents);
-        return -EINVAL;
-    }
-
-    /* Mark the final data entry of the plane as the last segment. */
-    slot_ptr[cur_entry - 1].flags |= SGL_FLAG_LAST_SEG;
-
-    *data_entries_out = data_entries;
-    *chain_count_out = chain_count;
-    return 0;
-}
-
 static int qpcie_publish_buffer(struct qpcie_v4l2_channel *vch,
                                 struct qpcie_v4l2_buffer *buf)
 {
     struct vb2_buffer *vb = &buf->vb.vb2_buf;
     struct qpcie_dev *qdev = vch->qdev;
-    struct qpcie_dma_desc_2d *desc;
+    struct scatterlist *sg;
     struct sg_table *sgt0, *sgt1;
-    dma_addr_t plane0_dma, plane1_dma;
-    const char *dir = vch->buf_type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE ?
-                      "H2C" : "C2H";
-    unsigned int y_entries = 0, y_chains = 0;
-    unsigned int uv_entries = 0, uv_chains = 0;
-    bool host_sgl;
-    u32 control;
-    u32 tail;
-    int ret;
-    if (vch->thin_ring_virt) {
-        struct scatterlist *sg;
-        unsigned int i;
-        u32 thin_tail = vch->thin_ring_tail;
-        u32 entries_added = 0;
-        bool is_rgb = (vch->pixelformat == V4L2_PIX_FMT_RGB24);
+    unsigned int i;
+    u32 thin_tail;
+    u32 entries_added = 0;
+    bool is_rgb;
 
-        sgt0 = vb2_dma_sg_plane_desc(vb, 0);
-        if (WARN_ON(!sgt0))
-            return -EINVAL;
-
-        for_each_sg(sgt0->sgl, sg, sgt0->nents, i) {
-            u32 slot = (thin_tail + entries_added) % RING_BUFFER_SIZE;
-            vch->thin_ring_virt[slot].phys_addr = sg_dma_address(sg);
-            vch->thin_ring_virt[slot].len_bytes = sg_dma_len(sg);
-            vch->thin_ring_virt[slot].flags     = 0;
-            entries_added++;
-        }
-
-        if (!is_rgb && vch->thin_ring1_virt) {
-            u32 thin_tail1 = vch->thin_ring1_tail;
-            u32 entries_added1 = 0;
-
-            sgt1 = vb2_dma_sg_plane_desc(vb, 1);
-            if (WARN_ON(!sgt1))
-                return -EINVAL;
-
-            for_each_sg(sgt1->sgl, sg, sgt1->nents, i) {
-                u32 slot = (thin_tail1 + entries_added1) % RING_BUFFER_SIZE;
-                vch->thin_ring1_virt[slot].phys_addr = sg_dma_address(sg);
-                vch->thin_ring1_virt[slot].len_bytes = sg_dma_len(sg);
-                vch->thin_ring1_virt[slot].flags     = 0;
-                entries_added1++;
-            }
-
-            vch->thin_ring1_tail = (thin_tail1 + entries_added1) % RING_BUFFER_SIZE;
-        }
-
-        spin_lock(&vch->slock);
-        list_add_tail(&buf->list, &vch->active_buffers);
-        spin_unlock(&vch->slock);
-
-        /* Descriptor data must be globally visible before ringing doorbell */
-        dma_wmb();
-        vch->thin_ring_tail = (thin_tail + entries_added) % RING_BUFFER_SIZE;
-        iowrite32((vch->thin_ring_tail << 16) | RING_BUFFER_SIZE,
-                  qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING0_CFG);
-        ioread32(qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING0_CFG);
-
-        if (!is_rgb && vch->thin_ring1_virt) {
-            iowrite32((vch->thin_ring1_tail << 16) | RING_BUFFER_SIZE,
-                      qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING1_CFG);
-            ioread32(qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING1_CFG);
-        }
-        qdev->ring_published++;
-
-        if (!buf->sgl_logged) {
-            dev_info(&qdev->pdev->dev,
-                     "Thin-SGL ch%d %s buf%u: %u descriptors queued (tail: %u -> %u, size=%u)\n",
-                     vch->channel_id, is_rgb ? "RGB24" : "NV12M", vb->index, entries_added,
-                     thin_tail, vch->thin_ring_tail, RING_BUFFER_SIZE);
-            buf->sgl_logged = true;
-        }
-        return 0;
+    if (!vch->thin_ring_virt) {
+        dev_err(&qdev->pdev->dev, "V4L2 ch%d: thin ring not configured\n", vch->channel_id);
+        return -EINVAL;
     }
 
-    tail = qdev->h2c_tail;
-    {
-        u32 in_flight = qdev->ring_published - qdev->ring_completed;
-
-        if (in_flight >= RING_BUFFER_SIZE - 1) {
-            qdev->ring_rejects++;
-            if (qdev->ring_rejects <= 4 || (qdev->ring_rejects % 1000) == 0)
-                dev_err(&qdev->pdev->dev,
-                        "V4L2 ring busy: in-flight=%u tail=%u size=%u rejects=%u; descriptor dropped\n",
-                        in_flight, tail, RING_BUFFER_SIZE, qdev->ring_rejects);
-            return -EBUSY;
-        }
-    }
-    desc = &qdev->h2c_ring_virt[tail];
-    memset(desc, 0, sizeof(*desc));
-
-    bool is_rgb = (vch->pixelformat == V4L2_PIX_FMT_RGB24);
-
-    desc->line_width      = is_rgb ? (vch->width * 3) : vch->width;
-    desc->line_count      = vch->height;
-    desc->src_stride      = is_rgb ? (vch->width * 3) : vch->width;
-    desc->dst_stride      = vch->stride;
-    desc->plane12_width   = is_rgb ? 0 : vch->width;
-    desc->plane12_count   = is_rgb ? 0 : (vch->height / 2);
-    desc->format          = is_rgb ? 0x1 : 0x2; /* 0x1: RGB/Raw, 0x2: NV12M */
-    desc->plane_count     = is_rgb ? 1 : 2;
+    thin_tail = vch->thin_ring_tail;
+    is_rgb = (vch->pixelformat == V4L2_PIX_FMT_RGB24);
 
     sgt0 = vb2_dma_sg_plane_desc(vb, 0);
-    sgt1 = is_rgb ? NULL : vb2_dma_sg_plane_desc(vb, 1);
-    if (WARN_ON(!sgt0 || (!is_rgb && !sgt1)))
+    if (WARN_ON(!sgt0))
         return -EINVAL;
 
-    plane0_dma = sg_dma_address(sgt0->sgl);
-    plane1_dma = is_rgb ? 0 : sg_dma_address(sgt1->sgl);
-
-    host_sgl = force_sgl_fetch || sgt0->nents > 1 || (!is_rgb && sgt1->nents > 1);
-    if (host_sgl) {
-        ret = qpcie_build_variable_sgl(&qdev->pdev->dev, sgt0->sgl, sgt0->nents,
-                                       (struct qpcie_sgl_entry *)buf->y_slots_virt,
-                                       buf->y_slots_dma, QPCIE_MAX_PAGE_SLOTS_Y,
-                                       &y_entries, &y_chains);
-        if (ret) {
-            dev_err(&qdev->pdev->dev,
-                    "SGL ch%u %s buf%u: %s plane table build failed (%d); buffer rejected\n",
-                    vch->channel_id, dir, vb->index, is_rgb ? "RGB" : "Y", ret);
-            return ret;
-        }
-        if (!is_rgb) {
-            ret = qpcie_build_variable_sgl(&qdev->pdev->dev, sgt1->sgl, sgt1->nents,
-                                           (struct qpcie_sgl_entry *)buf->uv_slots_virt,
-                                           buf->uv_slots_dma, QPCIE_MAX_PAGE_SLOTS_UV,
-                                           &uv_entries, &uv_chains);
-            if (ret) {
-                dev_err(&qdev->pdev->dev,
-                        "SGL ch%u %s buf%u: UV plane table build failed (%d); buffer rejected\n",
-                        vch->channel_id, dir, vb->index, ret);
-                return ret;
-            }
-        }
-
-        if (vch->buf_type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
-            control = 0x09 | (vch->channel_id << DESC_CTRL_CHANNEL_SHIFT) |
-                      DESC_CTRL_SG_FETCH_MODE;
-            desc->plane0_src_addr = buf->y_slots_dma;
-            desc->plane1_src_addr = is_rgb ? 0 : buf->uv_slots_dma;
-        } else {
-            control = 0x0B | (vch->channel_id << DESC_CTRL_CHANNEL_SHIFT) |
-                      DESC_CTRL_SG_FETCH_MODE;
-            desc->plane0_dst_addr = buf->y_slots_dma;
-            desc->plane1_dst_addr = is_rgb ? 0 : buf->uv_slots_dma;
-        }
-        desc->control = control;
-
-        if (!buf->sgl_logged) {
-            struct qpcie_sgl_entry *y_entries_p = buf->y_slots_virt;
-            struct qpcie_sgl_entry *uv_entries_p = buf->uv_slots_virt;
-            unsigned int y_log_nents = min_t(unsigned int, y_entries, 8);
-            unsigned int uv_log_nents = min_t(unsigned int, uv_entries, 8);
-            unsigned int i;
-
-            dev_info(&qdev->pdev->dev,
-                     "SGL ch%u %s buf%u: host SGL fetch enabled (force=%d) %s nents=%u/%u entries=%u chains=%u slot=%pad | UV nents=%u/%u entries=%u chains=%u slot=%pad ctrl=0x%02x\n",
-                     vch->channel_id, dir, vb->index, force_sgl_fetch,
-                     is_rgb ? "RGB" : "Y",
-                     sgt0->nents, sgt0->orig_nents, y_entries, y_chains,
-                     &buf->y_slots_dma,
-                     is_rgb ? 0 : sgt1->nents, is_rgb ? 0 : sgt1->orig_nents, uv_entries, uv_chains,
-                     &buf->uv_slots_dma, control);
-            for (i = 0; i < y_log_nents; i++)
-                dev_info(&qdev->pdev->dev,
-                         "  %s[%u] addr=0x%016llx len=%u flags=0x%x\n",
-                         is_rgb ? "RGB" : "Y",
-                         i, y_entries_p[i].phys_addr,
-                         y_entries_p[i].len_bytes, y_entries_p[i].flags);
-            if (!is_rgb) {
-                for (i = 0; i < uv_log_nents; i++)
-                    dev_info(&qdev->pdev->dev,
-                             " UV[%u] addr=0x%016llx len=%u flags=0x%x\n",
-                             i, uv_entries_p[i].phys_addr,
-                             uv_entries_p[i].len_bytes, uv_entries_p[i].flags);
-            }
-            buf->sgl_logged = true;
-        }
-    } else {
-        if (vch->buf_type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
-            control = 0x09 | (vch->channel_id << DESC_CTRL_CHANNEL_SHIFT);
-            desc->plane0_src_addr = plane0_dma;
-            desc->plane1_src_addr = is_rgb ? 0 : plane1_dma;
-        } else {
-            control = 0x0B | (vch->channel_id << DESC_CTRL_CHANNEL_SHIFT);
-            desc->plane0_dst_addr = plane0_dma;
-            desc->plane1_dst_addr = is_rgb ? 0 : plane1_dma;
-        }
-        desc->control = control;
-
-        if (!buf->sgl_logged) {
-            dev_info(&qdev->pdev->dev,
-                     "DMA ch%u %s buf%u: direct DMA (%s nents=%u IOVA=%pad, UV nents=%u IOVA=%pad); host SGL fetch disabled\n",
-                     vch->channel_id, dir, vb->index,
-                     is_rgb ? "RGB" : "Y",
-                     sgt0->nents, &plane0_dma, is_rgb ? 0 : sgt1->nents, &plane1_dma);
-            buf->sgl_logged = true;
-        }
+    for_each_sg(sgt0->sgl, sg, sgt0->nents, i) {
+        u32 slot = (thin_tail + entries_added) % RING_BUFFER_SIZE;
+        vch->thin_ring_virt[slot].phys_addr = sg_dma_address(sg);
+        vch->thin_ring_virt[slot].len_bytes = sg_dma_len(sg);
+        vch->thin_ring_virt[slot].flags     = 0;
+        entries_added++;
     }
 
-    /* The completion IRQ can arrive immediately after the doorbell, so make
-     * the matching VB2 buffer visible before publishing the descriptor. */
+    if (!is_rgb && vch->thin_ring1_virt) {
+        u32 thin_tail1 = vch->thin_ring1_tail;
+        u32 entries_added1 = 0;
+
+        sgt1 = vb2_dma_sg_plane_desc(vb, 1);
+        if (WARN_ON(!sgt1))
+            return -EINVAL;
+
+        for_each_sg(sgt1->sgl, sg, sgt1->nents, i) {
+            u32 slot = (thin_tail1 + entries_added1) % RING_BUFFER_SIZE;
+            vch->thin_ring1_virt[slot].phys_addr = sg_dma_address(sg);
+            vch->thin_ring1_virt[slot].len_bytes = sg_dma_len(sg);
+            vch->thin_ring1_virt[slot].flags     = 0;
+            entries_added1++;
+        }
+
+        vch->thin_ring1_tail = (thin_tail1 + entries_added1) % RING_BUFFER_SIZE;
+    }
+
     spin_lock(&vch->slock);
     list_add_tail(&buf->list, &vch->active_buffers);
     spin_unlock(&vch->slock);
 
-    /* Descriptor data must be globally visible before publishing the shared
-     * hardware-ring tail doorbell. */
+    /* Descriptor data must be globally visible before ringing doorbell */
     dma_wmb();
-    qdev->h2c_tail = (tail + 1) % RING_BUFFER_SIZE;
-    qdev->c2h_tail = qdev->h2c_tail;
-    iowrite32((qdev->h2c_tail << 16) | RING_BUFFER_SIZE,
+    vch->thin_ring_tail = (thin_tail + entries_added) % RING_BUFFER_SIZE;
+    iowrite32((vch->thin_ring_tail << 16) | RING_BUFFER_SIZE,
               qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING0_CFG);
     ioread32(qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING0_CFG);
+
+    if (!is_rgb && vch->thin_ring1_virt) {
+        iowrite32((vch->thin_ring1_tail << 16) | RING_BUFFER_SIZE,
+                  qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING1_CFG);
+        ioread32(qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING1_CFG);
+    }
     qdev->ring_published++;
 
+    if (!buf->sgl_logged) {
+        dev_info(&qdev->pdev->dev,
+                 "Thin-SGL ch%d %s buf%u: %u descriptors queued (tail: %u -> %u, size=%u)\n",
+                 vch->channel_id, is_rgb ? "RGB24" : "NV12M", vb->index, entries_added,
+                 thin_tail, vch->thin_ring_tail, RING_BUFFER_SIZE);
+        buf->sgl_logged = true;
+    }
     return 0;
 }
 
@@ -1109,17 +861,6 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
         /* Enable CH */
         iowrite32(ch_ctrl, qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_CTRL);
         ioread32(qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_CTRL);
-    } else {
-        u32 ch_ctrl = BIT(0) | BIT(8); /* enable=1, irq_en=1 */
-        iowrite32(lower_32_bits(qdev->h2c_ring_dma),
-                  qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING0_BASE_L);
-        iowrite32(upper_32_bits(qdev->h2c_ring_dma),
-                  qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING0_BASE_H);
-        dma_wmb();
-        iowrite32((qdev->h2c_tail << 16) | RING_BUFFER_SIZE,
-                  qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING0_CFG);
-        iowrite32(ch_ctrl, qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_CTRL);
-        ioread32(qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_CTRL);
     }
 
     /* Start TPG AFTER DMA is enabled so frame 1 starts cleanly without FIFO backpressure */
@@ -1129,10 +870,7 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
             if (ret) {
                 dev_err(&qdev->pdev->dev,
                         "Cannot start TPG pacing kthread: %d\n", ret);
-                if (vch->thin_ring_virt)
-                    iowrite32(0, qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_CTRL);
-                else
-                    iowrite32(BIT(3), qdev->bar0_mmio + REG_DMA_CTRL);
+                iowrite32(0, qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_CTRL);
                 qpcie_return_all_buffers(vch, VB2_BUF_STATE_QUEUED);
                 return ret;
             }
@@ -1147,7 +885,7 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
              "NV12M STREAMON (Ch%u %s): %u buffers, ring tail=%u, mode=%ux%u %s (pacer=0x%08x, active_streams=%d)\n",
              vch->channel_id,
              (vch->buf_type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) ? "Output" : "Capture",
-             count, qdev->h2c_tail, vch->width, vch->height,
+             count, vch->thin_ring_tail, vch->width, vch->height,
              vch->pacer_enable ? "60 FPS paced" :
                                  "uncapped DMA benchmark",
              pacer_ctrl, atomic_read(&qdev->streaming_count));
@@ -1230,13 +968,6 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
                       qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING1_CFG);
             ioread32(qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING1_CFG);
         }
-    } else {
-        head = ioread32(qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING0_HEAD) & 0xffff;
-        qdev->h2c_tail = head;
-        qdev->c2h_tail = head;
-        iowrite32((head << 16) | RING_BUFFER_SIZE,
-                  qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING0_CFG);
-        ioread32(qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING0_CFG);
     }
 
     /* Only reset global hardware and stop TPG if ALL active video channels have finished streaming */
