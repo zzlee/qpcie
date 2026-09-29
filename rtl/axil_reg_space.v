@@ -277,6 +277,19 @@ module axil_reg_space #(
     reg  [31:0] dbg_pattern_gen;
     reg  [31:0] reg_overlay_ctrl;
 
+    // Firmware In-System Update Block (New Map: 0x0700 - 0x07FF)
+    reg  [31:0] reg_fw_update_cmd;
+    reg  [31:0] reg_fw_update_type;
+    reg  [31:0] reg_fw_update_size;
+    reg  [31:0] reg_fw_page_index;
+    reg  [31:0] reg_fw_page_size;
+    reg  [31:0] reg_fw_page_crc;
+    reg  [31:0] reg_fw_total_crc;
+    reg  [31:0] reg_fw_status;
+    reg  [31:0] reg_fw_progress;
+    reg  [31:0] reg_fw_err_code;
+
+
     assign out_vch0_ctrl          = vch0_ctrl;
     assign out_vch0_width         = vch0_width;
     assign out_vch0_height        = vch0_height;
@@ -384,7 +397,18 @@ module axil_reg_space #(
             out_adev0_xrun_inject   <= 1'b0;
             dbg_pattern_gen         <= 32'd0;
             reg_overlay_ctrl        <= 32'd0;
+            reg_fw_update_cmd       <= 32'd0;
+            reg_fw_update_type      <= 32'd0;
+            reg_fw_update_size      <= 32'd0;
+            reg_fw_page_index       <= 32'd0;
+            reg_fw_page_size        <= 32'd0;
+            reg_fw_page_crc         <= 32'd0;
+            reg_fw_total_crc        <= 32'd0;
+            reg_fw_status           <= 32'd0;
+            reg_fw_progress         <= 32'd0;
+            reg_fw_err_code         <= 32'd0;
             s_axil_awready          <= 1'b0;
+
             s_axil_wready           <= 1'b0;
             s_axil_bvalid           <= 1'b0;
             s_axil_bresp            <= 2'b00; // OKAY
@@ -492,7 +516,23 @@ module axil_reg_space #(
                             default: ;
                         endcase
                     end
+                    4'h7: begin // FIRMWARE UPDATE Block (0x0700 - 0x07FF)
+                        case (s_axil_awaddr[7:0])
+                            8'h00: reg_fw_update_cmd   <= s_axil_wdata;
+                            8'h04: reg_fw_update_type  <= s_axil_wdata;
+                            8'h08: reg_fw_update_size  <= s_axil_wdata;
+                            8'h0C: reg_fw_page_index   <= s_axil_wdata;
+                            8'h10: reg_fw_page_size    <= s_axil_wdata;
+                            8'h14: reg_fw_page_crc     <= s_axil_wdata;
+                            8'h18: reg_fw_total_crc    <= s_axil_wdata;
+                            8'h20: reg_fw_status       <= s_axil_wdata;
+                            8'h24: reg_fw_progress     <= s_axil_wdata;
+                            8'h28: reg_fw_err_code     <= s_axil_wdata;
+                            default: ;
+                        endcase
+                    end
                     4'h9: begin // DEBUG Block (0x0900 - 0x09FF)
+
                         case (s_axil_awaddr[7:0])
                             8'h00: reg_audio_loopback_ctrl <= s_axil_wdata;
                             8'h04: dbg_pattern_gen         <= s_axil_wdata;
@@ -606,6 +646,21 @@ module axil_reg_space #(
                             8'h28: s_axil_rdata <= adev0_ring0_cfg;
                             8'hA4: s_axil_rdata <= in_adev0_position;
                             8'hA8: s_axil_rdata <= {30'd0, in_adev0_irq_status};
+                            default: s_axil_rdata <= 32'd0;
+                        endcase
+                    end
+                    4'h7: begin // FIRMWARE UPDATE Block (0x0700 - 0x07FF)
+                        case (s_axil_araddr[7:0])
+                            8'h00: s_axil_rdata <= reg_fw_update_cmd;
+                            8'h04: s_axil_rdata <= reg_fw_update_type;
+                            8'h08: s_axil_rdata <= reg_fw_update_size;
+                            8'h0C: s_axil_rdata <= reg_fw_page_index;
+                            8'h10: s_axil_rdata <= reg_fw_page_size;
+                            8'h14: s_axil_rdata <= reg_fw_page_crc;
+                            8'h18: s_axil_rdata <= reg_fw_total_crc;
+                            8'h20: s_axil_rdata <= reg_fw_status;
+                            8'h24: s_axil_rdata <= reg_fw_progress;
+                            8'h28: s_axil_rdata <= reg_fw_err_code;
                             default: s_axil_rdata <= 32'd0;
                         endcase
                     end

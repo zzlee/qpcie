@@ -553,6 +553,37 @@ mkdir -p "$ROOTFS_UNPACK/etc/systemd/system/local-fs.target.wants"
 ln -sf /lib/systemd/system/mnt-data.mount \
        "$ROOTFS_UNPACK/etc/systemd/system/local-fs.target.wants/mnt-data.mount"
 
+# 5. Inject qpcie_fw_daemon (PCIe In-System Firmware Update Daemon)
+echo "  Installing qpcie_fw_daemon and systemd service..."
+DAEMON_SRC="$REPO_ROOT/test_app/qpcie_fw_daemon"
+if [ ! -f "$DAEMON_SRC" ]; then
+    echo "  Compiling qpcie_fw_daemon for aarch64..."
+    make -C "$REPO_ROOT/test_app" qpcie_fw_daemon
+fi
+cp -v "$DAEMON_SRC" "$ROOTFS_UNPACK/usr/sbin/qpcie_fw_daemon"
+chmod 755 "$ROOTFS_UNPACK/usr/sbin/qpcie_fw_daemon"
+
+cat << 'FW_SERVICE_EOF' > "$ROOTFS_UNPACK/lib/systemd/system/qpcie-fw-daemon.service"
+[Unit]
+Description=SC7F0 QPCIe In-System Firmware Update Daemon over PCIe
+After=local-fs.target systemd-udev-settle.service
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/qpcie_fw_daemon
+Restart=always
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+FW_SERVICE_EOF
+
+chmod 644 "$ROOTFS_UNPACK/lib/systemd/system/qpcie-fw-daemon.service"
+ln -sf /lib/systemd/system/qpcie-fw-daemon.service \
+       "$ROOTFS_UNPACK/etc/systemd/system/multi-user.target.wants/qpcie-fw-daemon.service"
+
 echo "[3/5] Packing modified rootfs into CPIO archive..."
 
 NEW_ROOTFS="$WORK_DIR/rootfs.cpio.gz"

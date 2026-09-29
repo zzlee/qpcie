@@ -6,11 +6,21 @@ CC ?= gcc
 CFLAGS ?= -O2 -Wall -I.
 LDFLAGS ?= -lm -pthread
 
-TARGETS = qpcie_sanity_check v4l2_test_app v4l2_rgb24_test_app alsa_test_app alsa_loopback_test_app dmabuf_p2p_test_app loopback_test_app
+# Cross compiler for ZU4EV target daemon
+AARCH64_CC ?= $(shell which aarch64-linux-gnu-gcc 2>/dev/null || which /opt/Xilinx/Vitis/2023.2/gnu/aarch64/lin/aarch64-linux/bin/aarch64-linux-gnu-gcc 2>/dev/null || echo aarch64-linux-gnu-gcc)
+
+TARGETS = qpcie_sanity_check qpcie_flash v4l2_test_app v4l2_rgb24_test_app alsa_test_app alsa_loopback_test_app dmabuf_p2p_test_app loopback_test_app
 
 all: $(TARGETS)
 
+qpcie_fw_daemon: qpcie_fw_daemon.c
+	$(AARCH64_CC) -O2 -Wall -static -o $@ qpcie_fw_daemon.c
+
+qpcie_flash: qpcie_flash.c
+	$(CC) $(CFLAGS) -o $@ qpcie_flash.c $(LDFLAGS)
+
 qpcie_sanity_check: qpcie_sanity_check.c
+
 	$(CC) $(CFLAGS) -o $@ qpcie_sanity_check.c $(LDFLAGS)
 
 v4l2_test_app: v4l2_test_app.c qpcie_control.h
@@ -32,6 +42,7 @@ loopback_test_app: loopback_test_app.c qpcie_control.h
 	$(CC) $(CFLAGS) -o $@ loopback_test_app.c $(LDFLAGS)
 
 clean:
-	rm -f $(TARGETS) *.o *.yuv *.pcm *.raw
+	rm -f $(TARGETS) qpcie_fw_daemon *.o *.yuv *.pcm *.raw
 
-.PHONY: all clean
+.PHONY: all clean qpcie_fw_daemon
+
