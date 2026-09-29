@@ -18,9 +18,15 @@ set_property IOSTANDARD LVCMOS33 [get_ports user_led_pcie_link_up]
 set_property PACKAGE_PIN F16 [get_ports user_led_dma_active]
 set_property IOSTANDARD LVCMOS33 [get_ports user_led_dma_active]
 
-## 4. HDMI HPD Output (Bank 46 HD Bank, 3.3V)
-set_property PACKAGE_PIN B12 [get_ports hdmi_hpd_out]
-set_property IOSTANDARD LVCMOS33 [get_ports hdmi_hpd_out]
+## 4. HDMI Physical Interface (Bank 46 HD Bank, 3.3V)
+set_property PACKAGE_PIN A13 [get_ports hdmi_rx_hpd_out]
+set_property IOSTANDARD LVCMOS33 [get_ports hdmi_rx_hpd_out]
+set_property PACKAGE_PIN B12 [get_ports hdmi_rx_5v_det]
+set_property IOSTANDARD LVCMOS33 [get_ports hdmi_rx_5v_det]
+set_property PACKAGE_PIN E13 [get_ports hdmi_rx_ddc_scl]
+set_property IOSTANDARD LVCMOS33 [get_ports hdmi_rx_ddc_scl]
+set_property PACKAGE_PIN D14 [get_ports hdmi_rx_ddc_sda]
+set_property IOSTANDARD LVCMOS33 [get_ports hdmi_rx_ddc_sda]
 
 ## 5. PCIe Dedicated GTH Transceiver Quad 223 (Bank 223)
 ## Physical PCB Wiring on SC7F0:

@@ -182,7 +182,21 @@ module axil_reg_space #(
 
     // Global DMA reset pulse (BAR0 0x14) -- exported so the top level
     // can OR it into dma_rst_n to flush loopback CDC FIFOs between sessions.
-    output wire        out_global_reset_pulse
+    output wire        out_global_reset_pulse,
+
+    // HDMI RX & TX Status and Control Ports (BAR0 0x0600 - 0x063C)
+    input  wire [31:0] in_hdmi_rx_status,
+    input  wire [31:0] in_hdmi_rx_res,
+    input  wire [31:0] in_hdmi_rx_timing,
+    input  wire [31:0] in_hdmi_rx_audio,
+    input  wire [31:0] in_hdmi_tx_status,
+    output wire [31:0] out_hdmi_tx_ctrl,
+    output wire [31:0] out_hdmi_tx_res,
+    output wire [31:0] out_hdmi_tx_fps,
+    output wire [31:0] out_hdmi_ipc_cmd,
+    output wire [31:0] out_hdmi_ipc_arg,
+    output wire [31:0] out_hdmi_ipc_status,
+    output wire [31:0] out_hdmi_ipc_doorbell
 );
 
     // BAR0 Register Offset Definitions (12-bit decode aperture)
@@ -288,6 +302,23 @@ module axil_reg_space #(
     reg  [31:0] reg_fw_status;
     reg  [31:0] reg_fw_progress;
     reg  [31:0] reg_fw_err_code;
+
+    // HDMI RX & TX Block (New Map: 0x0600 - 0x06FF)
+    reg  [31:0] reg_hdmi_tx_ctrl;
+    reg  [31:0] reg_hdmi_tx_res;
+    reg  [31:0] reg_hdmi_tx_fps;
+    reg  [31:0] reg_hdmi_ipc_cmd;
+    reg  [31:0] reg_hdmi_ipc_arg;
+    reg  [31:0] reg_hdmi_ipc_status;
+    reg  [31:0] reg_hdmi_ipc_doorbell;
+
+    assign out_hdmi_tx_ctrl      = reg_hdmi_tx_ctrl;
+    assign out_hdmi_tx_res       = reg_hdmi_tx_res;
+    assign out_hdmi_tx_fps       = reg_hdmi_tx_fps;
+    assign out_hdmi_ipc_cmd      = reg_hdmi_ipc_cmd;
+    assign out_hdmi_ipc_arg      = reg_hdmi_ipc_arg;
+    assign out_hdmi_ipc_status   = reg_hdmi_ipc_status;
+    assign out_hdmi_ipc_doorbell = reg_hdmi_ipc_doorbell;
 
 
     assign out_vch0_ctrl          = vch0_ctrl;
@@ -407,6 +438,13 @@ module axil_reg_space #(
             reg_fw_status           <= 32'd0;
             reg_fw_progress         <= 32'd0;
             reg_fw_err_code         <= 32'd0;
+            reg_hdmi_tx_ctrl        <= 32'd0;
+            reg_hdmi_tx_res         <= 32'h0438_0780; // Default 1920x1080 (1080p60)
+            reg_hdmi_tx_fps         <= 32'd60;        // Default 60 fps
+            reg_hdmi_ipc_cmd        <= 32'd0;
+            reg_hdmi_ipc_arg        <= 32'd0;
+            reg_hdmi_ipc_status     <= 32'd0;
+            reg_hdmi_ipc_doorbell   <= 32'd0;
             s_axil_awready          <= 1'b0;
 
             s_axil_wready           <= 1'b0;
@@ -513,6 +551,18 @@ module axil_reg_space #(
                             8'h24: adev0_ring0_base[63:32]    <= s_axil_wdata;
                             8'h28: adev0_ring0_cfg            <= s_axil_wdata;
                             8'hA8: out_adev0_irq_status_w1c   <= s_axil_wdata[1:0];
+                            default: ;
+                        endcase
+                    end
+                    4'h6: begin // HDMI RX & TX Block (0x0600 - 0x06FF)
+                        case (s_axil_awaddr[7:0])
+                            8'h10: reg_hdmi_tx_ctrl      <= s_axil_wdata;
+                            8'h14: reg_hdmi_tx_res       <= s_axil_wdata;
+                            8'h18: reg_hdmi_tx_fps       <= s_axil_wdata;
+                            8'h30: reg_hdmi_ipc_cmd      <= s_axil_wdata;
+                            8'h34: reg_hdmi_ipc_arg      <= s_axil_wdata;
+                            8'h38: reg_hdmi_ipc_status   <= s_axil_wdata;
+                            8'h3C: reg_hdmi_ipc_doorbell <= s_axil_wdata;
                             default: ;
                         endcase
                     end
@@ -646,6 +696,23 @@ module axil_reg_space #(
                             8'h28: s_axil_rdata <= adev0_ring0_cfg;
                             8'hA4: s_axil_rdata <= in_adev0_position;
                             8'hA8: s_axil_rdata <= {30'd0, in_adev0_irq_status};
+                            default: s_axil_rdata <= 32'd0;
+                        endcase
+                    end
+                    4'h6: begin // HDMI RX & TX Block (0x0600 - 0x06FF)
+                        case (s_axil_araddr[7:0])
+                            8'h00: s_axil_rdata <= in_hdmi_rx_status;
+                            8'h04: s_axil_rdata <= in_hdmi_rx_res;
+                            8'h08: s_axil_rdata <= in_hdmi_rx_timing;
+                            8'h0C: s_axil_rdata <= in_hdmi_rx_audio;
+                            8'h10: s_axil_rdata <= reg_hdmi_tx_ctrl;
+                            8'h14: s_axil_rdata <= reg_hdmi_tx_res;
+                            8'h18: s_axil_rdata <= reg_hdmi_tx_fps;
+                            8'h20: s_axil_rdata <= in_hdmi_tx_status;
+                            8'h30: s_axil_rdata <= reg_hdmi_ipc_cmd;
+                            8'h34: s_axil_rdata <= reg_hdmi_ipc_arg;
+                            8'h38: s_axil_rdata <= reg_hdmi_ipc_status;
+                            8'h3C: s_axil_rdata <= reg_hdmi_ipc_doorbell;
                             default: s_axil_rdata <= 32'd0;
                         endcase
                     end

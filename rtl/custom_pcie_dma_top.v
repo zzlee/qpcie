@@ -117,7 +117,21 @@ module custom_pcie_dma_top #(
 
     // Interrupt Pins
     output wire                                             usr_irq_req,
-    input  wire                                             usr_irq_ack
+    input  wire                                             usr_irq_ack,
+
+    // HDMI RX & TX Status and Control Ports
+    input  wire [31:0]                                      in_hdmi_rx_status,
+    input  wire [31:0]                                      in_hdmi_rx_res,
+    input  wire [31:0]                                      in_hdmi_rx_timing,
+    input  wire [31:0]                                      in_hdmi_rx_audio,
+    input  wire [31:0]                                      in_hdmi_tx_status,
+    output wire [31:0]                                      out_hdmi_tx_ctrl,
+    output wire [31:0]                                      out_hdmi_tx_res,
+    output wire [31:0]                                      out_hdmi_tx_fps,
+    output wire [31:0]                                      out_hdmi_ipc_cmd,
+    output wire [31:0]                                      out_hdmi_ipc_arg,
+    output wire [31:0]                                      out_hdmi_ipc_status,
+    output wire [31:0]                                      out_hdmi_ipc_doorbell
 );
 
     // Internal Wires for BAR0 Inter-module Connection
@@ -804,7 +818,21 @@ module custom_pcie_dma_top #(
         .in_adev0_irq_status(adev0_irq_status_w),
         .out_adev0_irq_status_w1c(adev0_irq_status_w1c_w),
         .out_adev0_xrun_inject(adev0_xrun_inject_w),
-        .out_global_reset_pulse(global_reset_pulse_w)
+        .out_global_reset_pulse(global_reset_pulse_w),
+
+        // HDMI RX & TX Status and Control
+        .in_hdmi_rx_status(in_hdmi_rx_status),
+        .in_hdmi_rx_res(in_hdmi_rx_res),
+        .in_hdmi_rx_timing(in_hdmi_rx_timing),
+        .in_hdmi_rx_audio(in_hdmi_rx_audio),
+        .in_hdmi_tx_status(in_hdmi_tx_status),
+        .out_hdmi_tx_ctrl(out_hdmi_tx_ctrl),
+        .out_hdmi_tx_res(out_hdmi_tx_res),
+        .out_hdmi_tx_fps(out_hdmi_tx_fps),
+        .out_hdmi_ipc_cmd(out_hdmi_ipc_cmd),
+        .out_hdmi_ipc_arg(out_hdmi_ipc_arg),
+        .out_hdmi_ipc_status(out_hdmi_ipc_status),
+        .out_hdmi_ipc_doorbell(out_hdmi_ipc_doorbell)
     );
 
 

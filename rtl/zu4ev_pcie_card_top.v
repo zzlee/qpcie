@@ -19,8 +19,8 @@
 module zu4ev_pcie_card_top #(
     parameter PCIE_DATA_WIDTH  = 256,
     parameter PCIE_KEEP_WIDTH  = PCIE_DATA_WIDTH / 32, // 8 DW keep for 256-bit
-    parameter NUM_VIDEO_CH     = 2,
-    parameter NUM_AUDIO_CH     = 2,
+    parameter NUM_VIDEO_CH     = 4,
+    parameter NUM_AUDIO_CH     = 4,
     parameter VIDEO_DATA_WIDTH = 128,
     parameter AUDIO_DATA_WIDTH = 32
 )(
@@ -35,10 +35,15 @@ module zu4ev_pcie_card_top #(
     input  wire [3:0]                                       pci_exp_rxp,
     input  wire [3:0]                                       pci_exp_rxn,
 
-    // Status LEDs & HDMI HPD (Bank 45 / 46)
+    // Status LEDs (Bank 45)
     output wire                                             user_led_dma_active,
     output wire                                             user_led_pcie_link_up,
-    output wire                                             hdmi_hpd_out
+
+    // Physical HDMI RX Interface Pins (Bank 46 HDIO 3.3V)
+    input  wire                                             hdmi_rx_5v_det,       // Pin B12 (Cable 5V Detect)
+    output wire                                             hdmi_rx_hpd_out,      // Pin A13 (HPD Assert to Source)
+    inout  wire                                             hdmi_rx_ddc_scl,      // Pin E13 (DDC I2C SCL)
+    inout  wire                                             hdmi_rx_ddc_sda       // Pin D14 (DDC I2C SDA)
 );
 
     // =========================================================================
@@ -312,9 +317,9 @@ module zu4ev_pcie_card_top #(
         .axil_wdata(edid_wdata_q),
         .axil_rdata(edid_rdata_byte),
         .hpd_ctrl_en(1'b1),
-        .hdmi_hpd_out(hdmi_hpd_out),
-        .i2c_scl(),
-        .i2c_sda()
+        .hdmi_hpd_out(hdmi_rx_hpd_out),
+        .i2c_scl(hdmi_rx_ddc_scl),
+        .i2c_sda(hdmi_rx_ddc_sda)
     );
 
     assign edid_axi_awready = !edid_aw_pending && !edid_bvalid_q;
@@ -413,24 +418,134 @@ module zu4ev_pcie_card_top #(
         .m_axis_tready(tpg_capture_tready)
     );
 
-    // Channel 0 capture consumes TPG directly via video_ch0_t* ports inside u_dma_top.
-    assign s_video_tvalid[0] = 1'b0;
-    assign s_video_tlast[0]  = 1'b0;
-    assign s_video_tuser[0]  = 1'b0;
+    // =========================================================================
+    // HDMI RX & TX Wires & Bridge Instances (4-Channel Dedicated Streams)
+    // =========================================================================
+    // BAR0 0x0600 - 0x063C Registers
+    wire [31:0] hdmi_rx_status_w;
+    wire [31:0] hdmi_rx_res_w;
+    wire [31:0] hdmi_rx_timing_w;
+    wire [31:0] hdmi_rx_audio_w;
+    wire [31:0] hdmi_tx_status_w;
+    wire [31:0] hdmi_tx_ctrl_w;
+    wire [31:0] hdmi_tx_res_w;
+    wire [31:0] hdmi_tx_fps_w;
+    wire [31:0] hdmi_ipc_cmd_w;
+    wire [31:0] hdmi_ipc_arg_w;
+    wire [31:0] hdmi_ipc_status_w;
+    wire [31:0] hdmi_ipc_doorbell_w;
 
-    // Channel 1..NUM_VIDEO_CH-1: Internal DMA hardware loopback (H2C -> C2H)
-    assign s_video_tdata[(NUM_VIDEO_CH*VIDEO_DATA_WIDTH)-1:VIDEO_DATA_WIDTH] =
-        m_video_tdata[(NUM_VIDEO_CH*VIDEO_DATA_WIDTH)-1:VIDEO_DATA_WIDTH];
-    assign s_video_tvalid[NUM_VIDEO_CH-1:1]  = m_video_tvalid[NUM_VIDEO_CH-1:1];
-    assign s_video_tlast[NUM_VIDEO_CH-1:1]   = m_video_tlast[NUM_VIDEO_CH-1:1];
-    assign s_video_tuser[NUM_VIDEO_CH-1:1]   = m_video_tuser[NUM_VIDEO_CH-1:1];
-    assign m_video_tready[NUM_VIDEO_CH-1:1]  = s_video_tready[NUM_VIDEO_CH-1:1];
-    assign m_video_tready[0]                 = 1'b1;
+    // Ch 0: HDMI RX Video Bridge
+    wire [127:0] hdmi_rx_v_tdata;
+    wire         hdmi_rx_v_tvalid;
+    wire         hdmi_rx_v_tready;
+    wire         hdmi_rx_v_tlast;
+    wire         hdmi_rx_v_tuser;
+
+    hdmi_rx_video_bridge #(
+        .FIFO_DEPTH(1024)
+    ) u_hdmi_rx_video_bridge (
+        .rx_video_clk(pcie_user_clk),
+        .rx_video_rst_n(video_engine_rst_n),
+        .s_axis_video_tdata(96'd0),
+        .s_axis_video_tvalid(1'b0),
+        .s_axis_video_tready(),
+        .s_axis_video_tlast(1'b0),
+        .s_axis_video_tuser(1'b0),
+        .pcie_user_clk(pcie_user_clk),
+        .pcie_user_rst_n(pcie_user_rst_n),
+        .m_axis_video_tdata(hdmi_rx_v_tdata),
+        .m_axis_video_tvalid(hdmi_rx_v_tvalid),
+        .m_axis_video_tready(hdmi_rx_v_tready),
+        .m_axis_video_tlast(hdmi_rx_v_tlast),
+        .m_axis_video_tuser(hdmi_rx_v_tuser),
+        .rx_status_reg(hdmi_rx_status_w),
+        .rx_res_reg(hdmi_rx_res_w),
+        .rx_timing_reg(hdmi_rx_timing_w)
+    );
+
+    // Ch 0: HDMI RX Audio Bridge
+    wire [31:0] hdmi_rx_a_tdata;
+    wire        hdmi_rx_a_tvalid;
+    wire        hdmi_rx_a_tready;
+    wire        hdmi_rx_a_tlast;
+
+    hdmi_rx_audio_bridge #(
+        .FIFO_DEPTH(512)
+    ) u_hdmi_rx_audio_bridge (
+        .rx_audio_clk(pcie_user_clk),
+        .rx_audio_rst_n(pcie_user_rst_n),
+        .s_axis_audio_tdata(32'd0),
+        .s_axis_audio_tvalid(1'b0),
+        .s_axis_audio_tready(),
+        .pcie_user_clk(pcie_user_clk),
+        .pcie_user_rst_n(pcie_user_rst_n),
+        .m_axis_audio_tdata(hdmi_rx_a_tdata),
+        .m_axis_audio_tvalid(hdmi_rx_a_tvalid),
+        .m_axis_audio_tready(hdmi_rx_a_tready),
+        .m_axis_audio_tlast(hdmi_rx_a_tlast),
+        .rx_audio_reg(hdmi_rx_audio_w)
+    );
+
+    // Ch 1: HDMI TX Video Bridge
+    wire [95:0] hdmi_tx_v_tdata;
+    wire        hdmi_tx_v_tvalid;
+    wire        hdmi_tx_v_tready = 1'b1;
+    wire        hdmi_tx_v_tlast;
+    wire        hdmi_tx_v_tuser;
+
+    hdmi_tx_video_bridge #(
+        .FIFO_DEPTH(1024)
+    ) u_hdmi_tx_video_bridge (
+        .pcie_user_clk(pcie_user_clk),
+        .pcie_user_rst_n(pcie_user_rst_n),
+        .s_axis_video_tdata(m_video_tdata[255:128]),
+        .s_axis_video_tvalid(m_video_tvalid[1]),
+        .s_axis_video_tready(m_video_tready[1]),
+        .s_axis_video_tlast(m_video_tlast[1]),
+        .s_axis_video_tuser(m_video_tuser[1]),
+        .tx_ctrl_reg(hdmi_tx_ctrl_w),
+        .tx_video_clk(pcie_user_clk),
+        .tx_video_rst_n(video_engine_rst_n),
+        .m_axis_video_tdata(hdmi_tx_v_tdata),
+        .m_axis_video_tvalid(hdmi_tx_v_tvalid),
+        .m_axis_video_tready(hdmi_tx_v_tready),
+        .m_axis_video_tlast(hdmi_tx_v_tlast),
+        .m_axis_video_tuser(hdmi_tx_v_tuser),
+        .tx_hpd_in(1'b1),
+        .tx_status_reg(hdmi_tx_status_w)
+    );
+
+    // Ch 1: HDMI TX Audio Bridge
+    wire [31:0] hdmi_tx_a_tdata;
+    wire        hdmi_tx_a_tvalid;
+    wire        hdmi_tx_a_tready = 1'b1;
+    wire        hdmi_tx_a_tlast;
+
+    hdmi_tx_audio_bridge #(
+        .FIFO_DEPTH(512)
+    ) u_hdmi_tx_audio_bridge (
+        .pcie_user_clk(pcie_user_clk),
+        .pcie_user_rst_n(pcie_user_rst_n),
+        .s_axis_audio_tdata(m_audio_tdata[63:32]),
+        .s_axis_audio_tvalid(m_audio_tvalid[1]),
+        .s_axis_audio_tready(m_audio_tready[1]),
+        .s_axis_audio_tlast(m_audio_tlast[1]),
+        .tx_ctrl_reg(hdmi_tx_ctrl_w),
+        .tx_audio_clk(pcie_user_clk),
+        .tx_audio_rst_n(pcie_user_rst_n),
+        .m_axis_audio_tdata(hdmi_tx_a_tdata),
+        .m_axis_audio_tvalid(hdmi_tx_a_tvalid),
+        .m_axis_audio_tready(hdmi_tx_a_tready),
+        .m_axis_audio_tlast(hdmi_tx_a_tlast)
+    );
 
     // =========================================================================
     // Multi-Channel AXI4-Stream Audio Multiplexing:
-    // Channel 0: Connected directly to AES3 Audio Pattern Generator
-    // Channel 1..NUM_AUDIO_CH-1: Connected in internal loopback mode (H2C -> C2H)
+    // Ch 0: HDMI RX (C2H)
+    // Ch 1: HDMI TX (H2C)
+    // Ch 2: Internal hardware loopback (H2C -> C2H)
+    // Ch 3: Audio Pattern Generator -> C2H
     // =========================================================================
     wire [(NUM_AUDIO_CH*AUDIO_DATA_WIDTH)-1:0] s_audio_tdata;
     wire [NUM_AUDIO_CH-1:0]                    s_audio_tvalid;
@@ -442,19 +557,58 @@ module zu4ev_pcie_card_top #(
     wire [NUM_AUDIO_CH-1:0]                    m_audio_tlast;
     wire [NUM_AUDIO_CH-1:0]                    m_audio_tready;
 
-    // Channel 0: Audio Pattern Generator -> PCIe DMA C2H Audio Input
-    assign s_audio_tdata[31:0] = aud_pat_axis_tdata;
-    assign s_audio_tvalid[0]   = aud_pat_axis_tvalid;
-    assign s_audio_tlast[0]    = aud_pat_axis_tlast;
-    assign aud_pat_axis_tready = s_audio_tready[0];
+    // =========================================================================
+    // 4-Channel Dedicated Datapath Wiring:
+    // =========================================================================
+    // Channel 0 (HDMI RX):
+    assign s_video_tdata[127:0] = hdmi_rx_v_tdata;
+    assign s_video_tvalid[0]    = hdmi_rx_v_tvalid;
+    assign s_video_tlast[0]     = hdmi_rx_v_tlast;
+    assign s_video_tuser[0]     = hdmi_rx_v_tuser;
+    assign hdmi_rx_v_tready     = s_video_tready[0];
+    assign m_video_tready[0]    = 1'b1;
 
-    // Channel 1..NUM_AUDIO_CH-1: Internal DMA hardware loopback (H2C -> C2H)
-    assign s_audio_tdata[(NUM_AUDIO_CH*AUDIO_DATA_WIDTH)-1:AUDIO_DATA_WIDTH] =
-        m_audio_tdata[(NUM_AUDIO_CH*AUDIO_DATA_WIDTH)-1:AUDIO_DATA_WIDTH];
-    assign s_audio_tvalid[NUM_AUDIO_CH-1:1]  = m_audio_tvalid[NUM_AUDIO_CH-1:1];
-    assign s_audio_tlast[NUM_AUDIO_CH-1:1]   = m_audio_tlast[NUM_AUDIO_CH-1:1];
-    assign m_audio_tready[NUM_AUDIO_CH-1:1]  = s_audio_tready[NUM_AUDIO_CH-1:1];
-    assign m_audio_tready[0]                 = 1'b1;
+    assign s_audio_tdata[31:0]  = hdmi_rx_a_tdata;
+    assign s_audio_tvalid[0]    = hdmi_rx_a_tvalid;
+    assign s_audio_tlast[0]     = hdmi_rx_a_tlast;
+    assign hdmi_rx_a_tready     = s_audio_tready[0];
+    assign m_audio_tready[0]    = 1'b1;
+
+    // Channel 1 (HDMI TX):
+    assign s_video_tdata[255:128] = 128'd0;
+    assign s_video_tvalid[1]      = 1'b0;
+    assign s_video_tlast[1]       = 1'b0;
+    assign s_video_tuser[1]       = 1'b0;
+
+    assign s_audio_tdata[63:32]   = 32'd0;
+    assign s_audio_tvalid[1]      = 1'b0;
+    assign s_audio_tlast[1]       = 1'b0;
+
+    // Channel 2 (Internal Hardware Loopback):
+    assign s_video_tdata[383:256] = m_video_tdata[383:256];
+    assign s_video_tvalid[2]      = m_video_tvalid[2];
+    assign s_video_tlast[2]       = m_video_tlast[2];
+    assign s_video_tuser[2]       = m_video_tuser[2];
+    assign m_video_tready[2]      = s_video_tready[2];
+
+    assign s_audio_tdata[95:64]   = m_audio_tdata[95:64];
+    assign s_audio_tvalid[2]      = m_audio_tvalid[2];
+    assign s_audio_tlast[2]       = m_audio_tlast[2];
+    assign m_audio_tready[2]      = s_audio_tready[2];
+
+    // Channel 3 (Internal TPG & Audio Pattern Generator):
+    assign s_video_tdata[511:384] = tpg_capture_tdata;
+    assign s_video_tvalid[3]      = tpg_capture_tvalid;
+    assign s_video_tlast[3]       = tpg_capture_tlast;
+    assign s_video_tuser[3]       = tpg_capture_tuser;
+    assign tpg_capture_tready     = s_video_tready[3];
+    assign m_video_tready[3]      = 1'b1;
+
+    assign s_audio_tdata[127:96]  = aud_pat_axis_tdata;
+    assign s_audio_tvalid[3]      = aud_pat_axis_tvalid;
+    assign s_audio_tlast[3]       = aud_pat_axis_tlast;
+    assign aud_pat_axis_tready    = s_audio_tready[3];
+    assign m_audio_tready[3]      = 1'b1;
 
     // =========================================================================
     // PCIe AXI-Stream CQ / CC / RQ / RC Wires (256-bit)
@@ -809,11 +963,11 @@ module zu4ev_pcie_card_top #(
 
         .video_clk(pcie_user_clk),
         .video_rst_n(video_engine_rst_n),
-        .video_ch0_tdata(tpg_capture_tdata),
-        .video_ch0_tvalid(tpg_capture_tvalid),
-        .video_ch0_tlast(tpg_capture_tlast),
-        .video_ch0_tuser(tpg_capture_tuser),
-        .video_ch0_tready(tpg_capture_tready),
+        .video_ch0_tdata(hdmi_rx_v_tdata),
+        .video_ch0_tvalid(hdmi_rx_v_tvalid),
+        .video_ch0_tlast(hdmi_rx_v_tlast),
+        .video_ch0_tuser(hdmi_rx_v_tuser),
+        .video_ch0_tready(hdmi_rx_v_tready),
 
         .m_axis_video_tdata(m_video_tdata),
         .m_axis_video_tvalid(m_video_tvalid),
@@ -842,7 +996,21 @@ module zu4ev_pcie_card_top #(
 
         // Interrupts
         .usr_irq_req(usr_irq_req),
-        .usr_irq_ack(usr_irq_ack)
+        .usr_irq_ack(usr_irq_ack),
+
+        // HDMI RX & TX Status and Control Ports (BAR0 0x0600 - 0x063C)
+        .in_hdmi_rx_status(hdmi_rx_status_w),
+        .in_hdmi_rx_res(hdmi_rx_res_w),
+        .in_hdmi_rx_timing(hdmi_rx_timing_w),
+        .in_hdmi_rx_audio(hdmi_rx_audio_w),
+        .in_hdmi_tx_status(hdmi_tx_status_w),
+        .out_hdmi_tx_ctrl(hdmi_tx_ctrl_w),
+        .out_hdmi_tx_res(hdmi_tx_res_w),
+        .out_hdmi_tx_fps(hdmi_tx_fps_w),
+        .out_hdmi_ipc_cmd(hdmi_ipc_cmd_w),
+        .out_hdmi_ipc_arg(hdmi_ipc_arg_w),
+        .out_hdmi_ipc_status(hdmi_ipc_status_w),
+        .out_hdmi_ipc_doorbell(hdmi_ipc_doorbell_w)
     );
 
     // Heartbeat / DMA activity indicator
