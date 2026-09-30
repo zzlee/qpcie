@@ -98,3 +98,32 @@ dmesg | tail -n 25
 
 3. **CQ RX Decoder State Machine**:
    - `cq_rx_decoder.v` must transition back to `IDLE` state as soon as AXI `rvalid` or `bvalid` is asserted, resetting `s_axis_cq_tready = 1` for continuous, back-to-back MMIO requests.
+
+---
+
+## 🏷️ Vivado Design Modification Rules & Hardware Versioning (`C_VERSION`)
+
+> [!IMPORTANT]
+> **Mandatory Rule for any Vivado Modification**:
+> Whenever Vivado Block Design (BD), RTL, or IP configurations are modified, **ALWAYS verify and increment/update the `C_VERSION` parameter before regenerating targets and re-exporting the XSA / bitstream.**
+
+1. **`C_VERSION` Format Specification (`0xYYMMDDpp`)**:
+   - Format: `32'hYYMMDDpp`
+   - `YY`: 2-digit Year (e.g., `26` for 2026).
+   - `MM`: 2-digit Month (e.g., `09` for September).
+   - `DD`: 2-digit Day (e.g., `30` for 30th).
+   - `pp`: 2-digit Patch / revision count for that date (e.g., `01`, `02`, `03`...).
+   - Example: `32'h26093001`
+
+2. **Standard Parameters (`zzlab_env.v` / `zzlab_env_0`)**:
+   - `C_VERSION`: Current date + patch number (`32'hYYMMDDpp`).
+   - `C_PLATFORM`: `"PCIE"`.
+   - `C_BOARD_VERSION`: Maintain target board hardware revision (e.g., `32'h00000101`).
+
+3. **Mandatory Post-Modification Workflow**:
+   1. Check & bump `C_VERSION` in `zzlab_env.v` (or corresponding top/wrapper).
+   2. Reset and regenerate BD targets (`reset_target all`, `generate_target all`).
+   3. Export updated XSA (`write_hw_platform -fixed -force <path>.xsa`).
+   4. Update PetaLinux hardware description (`petalinux-config --get-hw-description=<xsa> --silentconfig`).
+   5. Recompile PetaLinux images / repackage `BOOT.BIN` and update release artifacts.
+
