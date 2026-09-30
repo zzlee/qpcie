@@ -19,6 +19,7 @@
 #include <linux/spinlock.h>
 #include <linux/sched.h>
 #include <linux/delay.h>
+#include <linux/workqueue.h>
 #include <uapi/linux/sched/types.h>
 
 #include <media/v4l2-device.h>
@@ -254,6 +255,41 @@
 #define IRQ_TOP_AUD                 BIT(4) /* Audio DEV0 event (period done or xrun) */
 #define IRQ_TOP_ERR                 BIT(5) /* Any error event */
 
+/* HDMI RX Status / Primary Registers (0x0600 - 0x060C) */
+#define REG_HDMI_RX_STATUS          0x0600
+#define REG_HDMI_RX_WIDTH           0x0604
+#define REG_HDMI_RX_HEIGHT          0x0608
+#define REG_HDMI_RX_PIXEL_CLK       0x060C
+
+#define HDMI_RX_STATUS_5V_DET       BIT(0)
+#define HDMI_RX_STATUS_HPD          BIT(1)
+#define HDMI_RX_STATUS_LNK_LOCK     BIT(2)
+#define HDMI_RX_STATUS_STREAM_UP    BIT(3)
+
+/* HDMI TX Status / Control Registers (0x0610 - 0x0620) */
+#define REG_HDMI_TX_CTRL            0x0610
+#define REG_HDMI_TX_RES             0x0614
+#define REG_HDMI_TX_FPS             0x0618
+#define REG_HDMI_TX_STATUS          0x0620
+
+/* HDMI Inter-Processor Mailbox Registers (0x0630 - 0x063C) */
+#define REG_HDMI_IPC_CMD            0x0630
+#define REG_HDMI_IPC_ARG            0x0634
+#define REG_HDMI_IPC_STATUS         0x0638
+#define REG_HDMI_IPC_DOORBELL       0x063C
+
+/* Detailed DV Timings & InfoFrames from xilinx-hdmirxss (0x0640 - 0x0664) */
+#define REG_HDMI_RX_HFP             0x0640 /* Horizontal Front Porch */
+#define REG_HDMI_RX_HSW             0x0644 /* Horizontal Sync Width */
+#define REG_HDMI_RX_HBP             0x0648 /* Horizontal Back Porch */
+#define REG_HDMI_RX_VFP             0x064C /* Vertical Front Porch */
+#define REG_HDMI_RX_VSW             0x0650 /* Vertical Sync Width */
+#define REG_HDMI_RX_VBP             0x0654 /* Vertical Back Porch */
+#define REG_HDMI_RX_POLARITIES      0x0658 /* Bit 0: VSync Pos, Bit 1: HSync Pos */
+#define REG_HDMI_RX_STANDARDS       0x065C /* Standards (e.g. V4L2_DV_BT_STD_CEA861) */
+#define REG_HDMI_RX_COLOR_FMT       0x0660 /* Colorspace, Quantization, YCbCr Enc */
+#define REG_HDMI_RX_AUDIO_FMT       0x0664 /* [15:0]=SampleRateHz, [23:16]=Channels, [31:24]=BitDepth */
+
 /* Scatter-Gather Page Table & Status Registers (BAR0 Offsets 0xE0..0xEC) */
 #define REG_SG_PT_CTRL              0xE0 /* Page Table Target Address [10:0] */
 #define REG_SG_PT_DATA_LO           0xE4 /* Physical Address [31:0] */
@@ -316,6 +352,11 @@ struct qpcie_v4l2_channel {
     dma_addr_t thin_ring1_dma;
     u32 thin_ring1_tail;
     u32 thin_ring1_head;
+    /* HDMI RX Telemetry Tracking & Polling Worker (Channel 0) */
+    u32 last_rx_status;
+    u32 last_rx_res;
+    struct delayed_work hdmi_monitor_work;
+    bool hdmi_monitor_running;
 };
 
 struct qpcie_alsa_channel {
@@ -396,6 +437,7 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev);
 void qpcie_v4l2_remove(struct qpcie_dev *qdev);
 void qpcie_v4l2_irq_handler(struct qpcie_dev *qdev);
 void qpcie_v4l2_node_done(struct qpcie_dev *qdev, int node_idx);
+void qpcie_v4l2_check_source_change(struct qpcie_v4l2_channel *vch);
 void qpcie_dma_soft_reset(struct qpcie_dev *qdev);
 void qpcie_reprogram_rings(struct qpcie_dev *qdev);
 

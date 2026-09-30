@@ -105,7 +105,70 @@ set_property -dict [list \
 
 generate_target all [get_ips axi_crossbar_0]
 
-# 6. Update Compile Order
+# 6. Generate Video PHY Controller IP Core (vid_phy_controller_0 - Quad 226 HDMI RX/TX)
+puts "Generating Video PHY Controller IP Core (vid_phy_controller_0)..."
+create_ip -name vid_phy_controller -vendor xilinx.com -library ip -version 2.2 -module_name vid_phy_controller_0
+
+set_property -dict [list \
+  CONFIG.Adv_Clk_Mode {true} \
+  CONFIG.CHANNEL_ENABLE {X0Y12 X0Y13 X0Y14} \
+  CONFIG.CHANNEL_SITE {X0Y12} \
+  CONFIG.C_INPUT_PIXELS_PER_CLOCK {4} \
+  CONFIG.C_INT_HDMI_VER_CMPTBLE {3} \
+  CONFIG.C_NIDRU {true} \
+  CONFIG.C_NIDRU_REFCLK_SEL {3} \
+  CONFIG.C_RX_PLL_SELECTION {0} \
+  CONFIG.C_RX_REFCLK_SEL {1} \
+  CONFIG.C_Rx_Protocol {HDMI} \
+  CONFIG.C_TX_PLL_SELECTION {6} \
+  CONFIG.C_TX_REFCLK_SEL {0} \
+  CONFIG.C_Tx_Protocol {HDMI} \
+  CONFIG.C_Txrefclk_Rdy_Invert {true} \
+  CONFIG.C_Use_Oddr_for_Tmds_Clkout {true} \
+  CONFIG.Rx_GT_Line_Rate {5.94} \
+  CONFIG.Rx_GT_Ref_Clock_Freq {297} \
+  CONFIG.Tx_GT_Line_Rate {5.94} \
+  CONFIG.Tx_GT_Ref_Clock_Freq {297} \
+] [get_ips vid_phy_controller_0]
+
+generate_target all [get_ips vid_phy_controller_0]
+
+# 7. Generate HDMI RX Subsystem IP Core (v_hdmi_rx_ss_0 - 4 PPC)
+puts "Generating HDMI RX Subsystem IP Core (v_hdmi_rx_ss_0 - 4 PPC)..."
+create_ip -name v_hdmi_rx_ss -vendor xilinx.com -library ip -version 3.2 -module_name v_hdmi_rx_ss_0
+
+set_property -dict [list \
+  CONFIG.C_INPUT_PIXELS_PER_CLOCK {4} \
+  CONFIG.C_MAX_BITS_PER_COMPONENT {8} \
+  CONFIG.C_VID_INTERFACE {0} \
+  CONFIG.C_INCLUDE_LOW_RESO_VID {true} \
+  CONFIG.C_INCLUDE_YUV420_SUP {true} \
+  CONFIG.C_HDMI_FAST_SWITCH {true} \
+  CONFIG.C_EXDES_TX_PLL_SELECTION {6} \
+  CONFIG.C_EXDES_RX_PLL_SELECTION {0} \
+  CONFIG.C_EXDES_NIDRU {true} \
+] [get_ips v_hdmi_rx_ss_0]
+
+generate_target all [get_ips v_hdmi_rx_ss_0]
+
+# 8. Generate HDMI TX Subsystem IP Core (v_hdmi_tx_ss_0 - 4 PPC)
+puts "Generating HDMI TX Subsystem IP Core (v_hdmi_tx_ss_0 - 4 PPC)..."
+create_ip -name v_hdmi_tx_ss -vendor xilinx.com -library ip -version 3.2 -module_name v_hdmi_tx_ss_0
+
+set_property -dict [list \
+  CONFIG.C_INPUT_PIXELS_PER_CLOCK {4} \
+  CONFIG.C_MAX_BITS_PER_COMPONENT {8} \
+  CONFIG.C_VID_INTERFACE {0} \
+  CONFIG.C_INCLUDE_LOW_RESO_VID {true} \
+  CONFIG.C_INCLUDE_YUV420_SUP {true} \
+  CONFIG.C_HDMI_FAST_SWITCH {true} \
+  CONFIG.C_EXDES_TX_PLL_SELECTION {6} \
+  CONFIG.C_EXDES_RX_PLL_SELECTION {0} \
+] [get_ips v_hdmi_tx_ss_0]
+
+generate_target all [get_ips v_hdmi_tx_ss_0]
+
+# 9. Update Compile Order
 update_compile_order -fileset sources_1
 
 # IP cache disable
@@ -122,6 +185,8 @@ if {[get_property PROGRESS [get_runs synth_1]] != "100%" ||
 }
 
 puts "Starting Implementation & Tandem Bitstream Generation (impl_1)..."
+set_property STEPS.OPT_DESIGN.TCL.PRE [file normalize scripts/zu4ev_impl_pre.tcl] [get_runs impl_1]
+set_property STEPS.PLACE_DESIGN.TCL.PRE [file normalize scripts/zu4ev_impl_pre.tcl] [get_runs impl_1]
 launch_runs impl_1 -to_step write_bitstream -jobs 8
 wait_on_run impl_1
 

@@ -23,3 +23,11 @@
 #include "vcu.dtsi"
 
 #include "sc6f0-mcu.dtsi"
+
+/ {
+	qpcie_v4l2_bridge {
+		compatible = "yuan,qpcie-v4l2-bridge";
+		hdmirx = <&hdmi_ss_v_hdmi_rx_ss_0>;
+		status = "okay";
+	};
+};

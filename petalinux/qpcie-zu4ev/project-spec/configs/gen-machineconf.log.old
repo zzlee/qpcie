@@ -41,9 +41,8 @@ Subsystem AUTO Hardware Settings (SUBSYSTEM_HARDWARE_AUTO) [Y/?] y
   *
   Primary Memory
   > 1. psu_ddr_0 (SUBSYSTEM_MEMORY_PSU_DDR_0_BANKLESS_SELECT)
-    2. psu_ddr_1 (SUBSYSTEM_MEMORY_PSU_DDR_1_BANKLESS_SELECT)
-    3. manual (SUBSYSTEM_MEMORY_MANUAL_SELECT)
-  choice[1-3?]:   System memory base address (SUBSYSTEM_MEMORY_PSU_DDR_0_BANKLESS_BASEADDR) [0x0] 
+    2. manual (SUBSYSTEM_MEMORY_MANUAL_SELECT)
+  choice[1-2?]:   System memory base address (SUBSYSTEM_MEMORY_PSU_DDR_0_BANKLESS_BASEADDR) [0x0] 
   System memory size (SUBSYSTEM_MEMORY_PSU_DDR_0_BANKLESS_SIZE) [0x80000000] 
   kernel base address (SUBSYSTEM_MEMORY_PSU_DDR_0_BANKLESS_KERNEL_BASEADDR) [0x0] 
   u-boot text base address offset to memory base address (SUBSYSTEM_MEMORY_PSU_DDR_0_BANKLESS_U__BOOT_TEXTBASE_OFFSET) [0x8000000] 
@@ -3823,6 +3822,7 @@ choice[1-2]: *
 *
 gpio-demo (gpio-demo) [N/y/?] 
 peekpoke (peekpoke) [N/y/?] 
+qpcie-v4l2-bridge (qpcie-v4l2-bridge) [Y/n/?] 
 *
 * PetaLinux RootFS Settings
 *

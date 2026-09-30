@@ -435,12 +435,116 @@ static int qpcie_vidioc_enum_frameintervals(struct file *file, void *priv, struc
     return 0;
 }
 
+static int qpcie_vidioc_query_dv_timings(struct file *file, void *_fh,
+                                         struct v4l2_dv_timings *timings)
+{
+    struct qpcie_v4l2_channel *vch = video_drvdata(file);
+    struct qpcie_dev *qdev = vch->qdev;
+    u32 status, width, height, clk_hz;
+    u32 hfp, hsw, hbp, vfp, vsw, vbp, pol, std;
+
+    if (vch->channel_id != 0)
+        return -ENODATA;
+
+    if (!qdev || !qdev->bar0_mmio)
+        return -ENODEV;
+
+    status = ioread32(qdev->bar0_mmio + REG_HDMI_RX_STATUS);
+    if (!(status & HDMI_RX_STATUS_5V_DET))
+        return -ENOLINK;
+
+    width  = ioread32(qdev->bar0_mmio + REG_HDMI_RX_WIDTH);
+    height = ioread32(qdev->bar0_mmio + REG_HDMI_RX_HEIGHT);
+    clk_hz = ioread32(qdev->bar0_mmio + REG_HDMI_RX_PIXEL_CLK);
+
+    if (!width || !height) {
+        /* Default fallback if uninitialized */
+        width  = 1920;
+        height = 1080;
+        clk_hz = 148500000;
+    }
+
+    hfp = ioread32(qdev->bar0_mmio + REG_HDMI_RX_HFP);
+    hsw = ioread32(qdev->bar0_mmio + REG_HDMI_RX_HSW);
+    hbp = ioread32(qdev->bar0_mmio + REG_HDMI_RX_HBP);
+    vfp = ioread32(qdev->bar0_mmio + REG_HDMI_RX_VFP);
+    vsw = ioread32(qdev->bar0_mmio + REG_HDMI_RX_VSW);
+    vbp = ioread32(qdev->bar0_mmio + REG_HDMI_RX_VBP);
+    pol = ioread32(qdev->bar0_mmio + REG_HDMI_RX_POLARITIES);
+    std = ioread32(qdev->bar0_mmio + REG_HDMI_RX_STANDARDS);
+
+    memset(timings, 0, sizeof(*timings));
+    timings->type = V4L2_DV_BT_656_1120;
+    timings->bt.width = width;
+    timings->bt.height = height;
+    timings->bt.interlaced = V4L2_DV_PROGRESSIVE;
+    timings->bt.pixelclock = clk_hz ? (u64)clk_hz : 148500000ULL;
+    timings->bt.hfrontporch = hfp ? hfp : 88;
+    timings->bt.hsync = hsw ? hsw : 44;
+    timings->bt.hbackporch = hbp ? hbp : 148;
+    timings->bt.vfrontporch = vfp ? vfp : 4;
+    timings->bt.vsync = vsw ? vsw : 5;
+    timings->bt.vbackporch = vbp ? vbp : 36;
+    timings->bt.polarities = pol ? pol : (V4L2_DV_VSYNC_POS_POL | V4L2_DV_HSYNC_POS_POL);
+    timings->bt.standards = std ? std : V4L2_DV_BT_STD_CEA861;
+    timings->bt.flags = V4L2_DV_FL_IS_CE_VIDEO;
+    return 0;
+}
+
+static int qpcie_vidioc_g_dv_timings(struct file *file, void *_fh,
+                                     struct v4l2_dv_timings *timings)
+{
+    struct qpcie_v4l2_channel *vch = video_drvdata(file);
+    if (vch->channel_id != 0)
+        return -ENODATA;
+    return qpcie_vidioc_query_dv_timings(file, _fh, timings);
+}
+
+static int qpcie_vidioc_s_dv_timings(struct file *file, void *_fh,
+                                     struct v4l2_dv_timings *timings)
+{
+    struct qpcie_v4l2_channel *vch = video_drvdata(file);
+    if (vch->channel_id != 0)
+        return -ENODATA;
+    if (vb2_is_busy(&vch->queue))
+        return -EBUSY;
+    if (timings->type != V4L2_DV_BT_656_1120)
+        return -EINVAL;
+    vch->width = timings->bt.width;
+    vch->height = timings->bt.height;
+    vch->stride = (vch->pixelformat == V4L2_PIX_FMT_RGB24) ?
+                  ALIGN(vch->width * 3, 128) : ALIGN(vch->width, 128);
+    return 0;
+}
+
+static int qpcie_vidioc_dv_timings_cap(struct file *file, void *_fh,
+                                       struct v4l2_dv_timings_cap *cap)
+{
+    struct qpcie_v4l2_channel *vch = video_drvdata(file);
+    if (vch->channel_id != 0)
+        return -ENODATA;
+
+    memset(cap, 0, sizeof(*cap));
+    cap->type = V4L2_DV_BT_656_1120;
+    cap->bt.min_width = 640;
+    cap->bt.max_width = 4096;
+    cap->bt.min_height = 480;
+    cap->bt.max_height = 2160;
+    cap->bt.min_pixelclock = 25000000ULL;
+    cap->bt.max_pixelclock = 600000000ULL;
+    cap->bt.standards = V4L2_DV_BT_STD_CEA861 | V4L2_DV_BT_STD_DMT;
+    cap->bt.capabilities = V4L2_DV_BT_CAP_PROGRESSIVE;
+    return 0;
+}
+
 static int qpcie_vidioc_subscribe_event(struct v4l2_fh *fh,
                                         const struct v4l2_event_subscription *sub)
 {
     switch (sub->type) {
     case V4L2_EVENT_FRAME_SYNC:
         return v4l2_event_subscribe(fh, sub, 16, NULL);
+    case V4L2_EVENT_SOURCE_CHANGE:
+        return v4l2_src_change_event_subscribe(fh, sub);
     case V4L2_EVENT_CTRL:
         return v4l2_ctrl_subscribe_event(fh, sub);
     default:
@@ -466,6 +570,12 @@ static const struct v4l2_ioctl_ops qpcie_v4l2_ioctl_ops = {
     .vidioc_g_parm                  = qpcie_vidioc_g_parm,
     .vidioc_s_parm                  = qpcie_vidioc_s_parm,
 
+    /* Digital Video (DV) Timings IOCTLs (HDMI RX Ch0) */
+    .vidioc_query_dv_timings        = qpcie_vidioc_query_dv_timings,
+    .vidioc_g_dv_timings            = qpcie_vidioc_g_dv_timings,
+    .vidioc_s_dv_timings            = qpcie_vidioc_s_dv_timings,
+    .vidioc_dv_timings_cap          = qpcie_vidioc_dv_timings_cap,
+
     /* Videobuf2 Buffer Management IOCTLs (MMAP, USERPTR, DMABUF) */
     .vidioc_reqbufs                 = vb2_ioctl_reqbufs,
     .vidioc_querybuf                = vb2_ioctl_querybuf,
@@ -477,7 +587,7 @@ static const struct v4l2_ioctl_ops qpcie_v4l2_ioctl_ops = {
     /* DMA-BUF Export Buffer IOCTL */
     .vidioc_expbuf                  = vb2_ioctl_expbuf,
 
-    /* Sub-Frame Low-Latency Slice DMA V4L2 Event Subscription */
+    /* Sub-Frame Low-Latency Slice DMA & Source Change V4L2 Event Subscription */
     .vidioc_subscribe_event         = qpcie_vidioc_subscribe_event,
     .vidioc_unsubscribe_event       = v4l2_event_unsubscribe,
 
@@ -1141,6 +1251,52 @@ static const struct v4l2_ctrl_config qpcie_tpg_overlay_ctrl_config = {
     .def  = 0,
 };
 
+void qpcie_v4l2_check_source_change(struct qpcie_v4l2_channel *vch)
+{
+    struct qpcie_dev *qdev;
+    u32 cur_status, cur_width, cur_height, cur_res;
+
+    if (!vch || vch->channel_id != 0)
+        return;
+
+    qdev = vch->qdev;
+    if (!qdev || !qdev->bar0_mmio)
+        return;
+
+    cur_status = ioread32(qdev->bar0_mmio + REG_HDMI_RX_STATUS);
+    cur_width  = ioread32(qdev->bar0_mmio + REG_HDMI_RX_WIDTH);
+    cur_height = ioread32(qdev->bar0_mmio + REG_HDMI_RX_HEIGHT);
+    cur_res    = (cur_width << 16) | (cur_height & 0xFFFF);
+
+    if (cur_status != vch->last_rx_status || cur_res != vch->last_rx_res) {
+        static const struct v4l2_event ev = {
+            .type = V4L2_EVENT_SOURCE_CHANGE,
+            .u.src_change.changes = V4L2_EVENT_SRC_CH_RESOLUTION,
+        };
+        dev_info(&qdev->pdev->dev,
+                 "[V4L2 HDMI RX] Source change detected! status: 0x%08x -> 0x%08x, res: 0x%08x -> 0x%08x\n",
+                 vch->last_rx_status, cur_status, vch->last_rx_res, cur_res);
+        vch->last_rx_status = cur_status;
+        vch->last_rx_res = cur_res;
+        v4l2_event_queue(&vch->vdev, &ev);
+    }
+}
+
+static void qpcie_v4l2_hdmi_monitor_work_fn(struct work_struct *work)
+{
+    struct delayed_work *dwork = to_delayed_work(work);
+    struct qpcie_v4l2_channel *vch =
+        container_of(dwork, struct qpcie_v4l2_channel, hdmi_monitor_work);
+
+    if (!vch || !vch->hdmi_monitor_running)
+        return;
+
+    qpcie_v4l2_check_source_change(vch);
+
+    if (vch->hdmi_monitor_running)
+        schedule_delayed_work(&vch->hdmi_monitor_work, msecs_to_jiffies(100));
+}
+
 int qpcie_v4l2_init(struct qpcie_dev *qdev)
 {
     u32 hw_caps;
@@ -1344,6 +1500,22 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
 
     qdev->v4l2_node_count = node_count;
     qdev->v4l2_registered = true;
+
+    /* Start HDMI RX Telemetry & Plug/Unplug Background Monitor on Node 0 (Channel 0) */
+    if (node_count > 0 && qdev->bar0_mmio) {
+        struct qpcie_v4l2_channel *vch0 = &qdev->v4l2_ch[0];
+        u32 init_w = ioread32(qdev->bar0_mmio + REG_HDMI_RX_WIDTH);
+        u32 init_h = ioread32(qdev->bar0_mmio + REG_HDMI_RX_HEIGHT);
+        vch0->last_rx_status = ioread32(qdev->bar0_mmio + REG_HDMI_RX_STATUS);
+        vch0->last_rx_res = (init_w << 16) | (init_h & 0xFFFF);
+        vch0->hdmi_monitor_running = true;
+        INIT_DELAYED_WORK(&vch0->hdmi_monitor_work, qpcie_v4l2_hdmi_monitor_work_fn);
+        schedule_delayed_work(&vch0->hdmi_monitor_work, msecs_to_jiffies(100));
+        dev_info(&qdev->pdev->dev,
+                 "[V4L2 HDMI RX] Background telemetry monitor started (100ms interval, initial status=0x%08x, res=%ux%u)\n",
+                 vch0->last_rx_status, init_w, init_h);
+    }
+
     if (node_count == 1)
         dev_info(&qdev->pdev->dev,
                  "[V4L2] single-path node initialized: /dev/video0 (TPG0 RGB24 capture)\n");
@@ -1353,6 +1525,13 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
     return 0;
 
 unreg_v4l2:
+    if (node_count > 0) {
+        struct qpcie_v4l2_channel *vch0 = &qdev->v4l2_ch[0];
+        if (vch0->hdmi_monitor_running) {
+            vch0->hdmi_monitor_running = false;
+            cancel_delayed_work_sync(&vch0->hdmi_monitor_work);
+        }
+    }
     for (i = 0; i < node_count; i++) {
         struct qpcie_v4l2_channel *vch = &qdev->v4l2_ch[i];
         if (video_is_registered(&vch->vdev))
@@ -1368,6 +1547,15 @@ void qpcie_v4l2_remove(struct qpcie_dev *qdev)
     int i;
     if (!qdev->v4l2_registered)
         return;
+
+    /* Stop HDMI RX Telemetry Background Monitor */
+    if (qdev->v4l2_node_count > 0) {
+        struct qpcie_v4l2_channel *vch0 = &qdev->v4l2_ch[0];
+        if (vch0->hdmi_monitor_running) {
+            vch0->hdmi_monitor_running = false;
+            cancel_delayed_work_sync(&vch0->hdmi_monitor_work);
+        }
+    }
 
     qdev->v4l2_registered = false;
     for (i = 0; i < qdev->v4l2_node_count; i++) {
@@ -1398,6 +1586,9 @@ void qpcie_v4l2_node_done(struct qpcie_dev *qdev, int node_idx)
         vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
     }
     spin_unlock(&vch->slock);
+
+    if (node_idx == 0)
+        qpcie_v4l2_check_source_change(vch);
 }
 
 void qpcie_v4l2_irq_handler(struct qpcie_dev *qdev)

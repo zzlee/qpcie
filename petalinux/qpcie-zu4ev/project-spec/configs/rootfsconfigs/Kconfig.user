@@ -7,4 +7,8 @@ config peekpoke
 	 bool "peekpoke"
 	 help
 	
+config qpcie-v4l2-bridge  
+	 bool "qpcie-v4l2-bridge"
+	 help
+	
 endmenu

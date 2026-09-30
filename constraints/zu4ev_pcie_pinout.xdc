@@ -18,15 +18,47 @@ set_property IOSTANDARD LVCMOS33 [get_ports user_led_pcie_link_up]
 set_property PACKAGE_PIN F16 [get_ports user_led_dma_active]
 set_property IOSTANDARD LVCMOS33 [get_ports user_led_dma_active]
 
-## 4. HDMI Physical Interface (Bank 46 HD Bank, 3.3V)
-set_property PACKAGE_PIN A13 [get_ports hdmi_rx_hpd_out]
+## 4. HDMI Physical Interface & Clocks (Bank 225/226 MGT & Bank 46 HD Bank)
+# RX Reference Clock (Bank 226 MGTREFCLK1: B10/B9)
+set_property PACKAGE_PIN B10 [get_ports hdmi_rx_clk_p]
+set_property PACKAGE_PIN B9  [get_ports hdmi_rx_clk_n]
+create_clock -period 3.367 -name hdmi_rx_clk_p [get_ports hdmi_rx_clk_p]
+
+# DRU Reference Clock (Bank 225 MGTREFCLK0: F10/F9)
+set_property PACKAGE_PIN F10 [get_ports hdmi_dru_clk_p]
+set_property PACKAGE_PIN F9  [get_ports hdmi_dru_clk_n]
+create_clock -period 6.400 -name hdmi_dru_clk_p [get_ports hdmi_dru_clk_p]
+
+# TX Reference Clock (Bank 226 MGTREFCLK0: D10/D9)
+set_property PACKAGE_PIN D10 [get_ports hdmi_tx_clk_p]
+set_property PACKAGE_PIN D9  [get_ports hdmi_tx_clk_n]
+create_clock -period 3.367 -name hdmi_tx_clk_p [get_ports hdmi_tx_clk_p]
+
+# TX TMDS Clock Out (Pins AH6/AJ6)
+set_property PACKAGE_PIN AH6 [get_ports hdmi_tx_tmds_clk_p]
+set_property PACKAGE_PIN AJ6 [get_ports hdmi_tx_tmds_clk_n]
+set_property IOSTANDARD LVDS [get_ports hdmi_tx_tmds_clk_p]
+set_property IOSTANDARD LVDS [get_ports hdmi_tx_tmds_clk_n]
+
+# HDMI RX Control (Bank 46 HD Bank, 3.3V)
+set_property PACKAGE_PIN B12 [get_ports hdmi_rx_hpd_out]
 set_property IOSTANDARD LVCMOS33 [get_ports hdmi_rx_hpd_out]
-set_property PACKAGE_PIN B12 [get_ports hdmi_rx_5v_det]
+set_property PACKAGE_PIN A12 [get_ports hdmi_rx_5v_det]
 set_property IOSTANDARD LVCMOS33 [get_ports hdmi_rx_5v_det]
-set_property PACKAGE_PIN E13 [get_ports hdmi_rx_ddc_scl]
+set_property PACKAGE_PIN D14 [get_ports hdmi_rx_ddc_scl]
 set_property IOSTANDARD LVCMOS33 [get_ports hdmi_rx_ddc_scl]
-set_property PACKAGE_PIN D14 [get_ports hdmi_rx_ddc_sda]
+set_property PACKAGE_PIN C13 [get_ports hdmi_rx_ddc_sda]
 set_property IOSTANDARD LVCMOS33 [get_ports hdmi_rx_ddc_sda]
+
+# HDMI TX Control (Bank 46 HD Bank, 3.3V)
+set_property PACKAGE_PIN G14 [get_ports hdmi_tx_hpd_in]
+set_property IOSTANDARD LVCMOS33 [get_ports hdmi_tx_hpd_in]
+set_property PACKAGE_PIN G13 [get_ports hdmi_tx_refclk_rdy]
+set_property IOSTANDARD LVCMOS33 [get_ports hdmi_tx_refclk_rdy]
+set_property PACKAGE_PIN F12 [get_ports hdmi_tx_ddc_scl]
+set_property IOSTANDARD LVCMOS33 [get_ports hdmi_tx_ddc_scl]
+set_property PACKAGE_PIN E12 [get_ports hdmi_tx_ddc_sda]
+set_property IOSTANDARD LVCMOS33 [get_ports hdmi_tx_ddc_sda]
 
 ## 5. PCIe Dedicated GTH Transceiver Quad 223 (Bank 223)
 ## Physical PCB Wiring on SC7F0:
@@ -41,6 +73,13 @@ set_property LOC PCIE40E4_X0Y1 [get_cells -hierarchical -filter {NAME =~ *pcie_4
 ## 6. Timing Constraints
 create_clock -period 10.000 -name sys_clk [get_ports sys_clk_p]
 set_false_path -from [get_ports sys_rst_n]
+
+# Clock Groups (Asynchronous Domains)
+set_clock_groups -asynchronous \
+    -group [get_clocks -quiet -include_generated_clocks sys_clk] \
+    -group [get_clocks -quiet -include_generated_clocks hdmi_rx_clk_p] \
+    -group [get_clocks -quiet -include_generated_clocks hdmi_dru_clk_p] \
+    -group [get_clocks -quiet -include_generated_clocks hdmi_tx_clk_p]
 
 ## 7. Tandem PCIe Stage 1 Pblock Constraints
 ## UltraScale+ Tandem Stage 1 requires PCIe refclk IBUFDS_GTE4 to be in Stage1_Main

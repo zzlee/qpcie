@@ -13,6 +13,40 @@
 	disable-wp;
 };
 
+/ {
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		cma_video: cma,video@40000000 {
+			compatible = "shared-dma-pool";
+			reusable;
+			reg = <0x0 0x40000000 0x0 0x10000000>;
+			label = "cma,video";
+		};
+
+		cma_qdmabuf: cma,qdmabuf@50000000 {
+			compatible = "shared-dma-pool";
+			reusable;
+			reg = <0x0 0x50000000 0x0 0x04000000>;
+			label = "cma,qdmabuf";
+		};
+
+		cma_vcu: cma,vcu@54000000 {
+			compatible = "shared-dma-pool";
+			reusable;
+			reg = <0x0 0x54000000 0x0 0x2A000000>;
+			label = "cma,vcu";
+		};
+
+		dau_fpga: dau_fpga@30000000 {
+			reg = <0x0 0x30000000 0x0 0x10000000>;
+			no-map;
+		};
+	};
+};
+
 // &watchdog0 {
 // 	status = "okay";
 // 	reset-on-timeout;
@@ -175,7 +209,7 @@
 	};
 };
 
-&zzlab_env_ctrl_0 {
+&zzlab_env_0 {
 	compatible = "yuan,zzlab-env";
 
 	// assigned-clocks =

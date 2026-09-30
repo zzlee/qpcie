@@ -303,6 +303,22 @@ module axil_reg_space #(
     reg  [31:0] reg_fw_progress;
     reg  [31:0] reg_fw_err_code;
 
+    // HDMI RX Detailed Telemetry Registers (Mirroring Xilinx xilinx-hdmirxss v4l2_dv_timings)
+    reg  [31:0] reg_hdmi_rx_width;
+    reg  [31:0] reg_hdmi_rx_height;
+    reg  [31:0] reg_hdmi_rx_pixelclk_lo;
+    reg  [31:0] reg_hdmi_rx_pixelclk_hi;
+    reg  [31:0] reg_hdmi_rx_hfrontporch;
+    reg  [31:0] reg_hdmi_rx_hsync;
+    reg  [31:0] reg_hdmi_rx_hbackporch;
+    reg  [31:0] reg_hdmi_rx_vfrontporch;
+    reg  [31:0] reg_hdmi_rx_vsync;
+    reg  [31:0] reg_hdmi_rx_vbackporch;
+    reg  [31:0] reg_hdmi_rx_polarities;
+    reg  [31:0] reg_hdmi_rx_standards;
+    reg  [31:0] reg_hdmi_rx_colorspace;
+    reg  [31:0] reg_hdmi_rx_audio_info;
+
     // HDMI RX & TX Block (New Map: 0x0600 - 0x06FF)
     reg  [31:0] reg_hdmi_tx_ctrl;
     reg  [31:0] reg_hdmi_tx_res;
@@ -437,7 +453,20 @@ module axil_reg_space #(
             reg_fw_total_crc        <= 32'd0;
             reg_fw_status           <= 32'd0;
             reg_fw_progress         <= 32'd0;
-            reg_fw_err_code         <= 32'd0;
+            reg_hdmi_rx_width       <= 32'd1920;
+            reg_hdmi_rx_height      <= 32'd1080;
+            reg_hdmi_rx_pixelclk_lo <= 32'd148500000;
+            reg_hdmi_rx_pixelclk_hi <= 32'd0;
+            reg_hdmi_rx_hfrontporch <= 32'd88;
+            reg_hdmi_rx_hsync       <= 32'd44;
+            reg_hdmi_rx_hbackporch  <= 32'd148;
+            reg_hdmi_rx_vfrontporch <= 32'd4;
+            reg_hdmi_rx_vsync       <= 32'd5;
+            reg_hdmi_rx_vbackporch  <= 32'd36;
+            reg_hdmi_rx_polarities  <= 32'd3;
+            reg_hdmi_rx_standards   <= 32'h01;
+            reg_hdmi_rx_colorspace  <= 32'd0;
+            reg_hdmi_rx_audio_info  <= 32'h0002_BB80;
             reg_hdmi_tx_ctrl        <= 32'd0;
             reg_hdmi_tx_res         <= 32'h0438_0780; // Default 1920x1080 (1080p60)
             reg_hdmi_tx_fps         <= 32'd60;        // Default 60 fps
@@ -556,13 +585,26 @@ module axil_reg_space #(
                     end
                     4'h6: begin // HDMI RX & TX Block (0x0600 - 0x06FF)
                         case (s_axil_awaddr[7:0])
-                            8'h10: reg_hdmi_tx_ctrl      <= s_axil_wdata;
-                            8'h14: reg_hdmi_tx_res       <= s_axil_wdata;
-                            8'h18: reg_hdmi_tx_fps       <= s_axil_wdata;
-                            8'h30: reg_hdmi_ipc_cmd      <= s_axil_wdata;
-                            8'h34: reg_hdmi_ipc_arg      <= s_axil_wdata;
-                            8'h38: reg_hdmi_ipc_status   <= s_axil_wdata;
-                            8'h3C: reg_hdmi_ipc_doorbell <= s_axil_wdata;
+                            8'h04: reg_hdmi_rx_width       <= s_axil_wdata;
+                            8'h08: reg_hdmi_rx_height      <= s_axil_wdata;
+                            8'h0C: reg_hdmi_rx_pixelclk_lo <= s_axil_wdata;
+                            8'h10: reg_hdmi_tx_ctrl        <= s_axil_wdata;
+                            8'h14: reg_hdmi_tx_res         <= s_axil_wdata;
+                            8'h18: reg_hdmi_tx_fps         <= s_axil_wdata;
+                            8'h30: reg_hdmi_ipc_cmd        <= s_axil_wdata;
+                            8'h34: reg_hdmi_ipc_arg        <= s_axil_wdata;
+                            8'h38: reg_hdmi_ipc_status     <= s_axil_wdata;
+                            8'h3C: reg_hdmi_ipc_doorbell   <= s_axil_wdata;
+                            8'h40: reg_hdmi_rx_hfrontporch <= s_axil_wdata;
+                            8'h44: reg_hdmi_rx_hsync       <= s_axil_wdata;
+                            8'h48: reg_hdmi_rx_hbackporch  <= s_axil_wdata;
+                            8'h4C: reg_hdmi_rx_vfrontporch <= s_axil_wdata;
+                            8'h50: reg_hdmi_rx_vsync       <= s_axil_wdata;
+                            8'h54: reg_hdmi_rx_vbackporch  <= s_axil_wdata;
+                            8'h58: reg_hdmi_rx_polarities  <= s_axil_wdata;
+                            8'h5C: reg_hdmi_rx_standards   <= s_axil_wdata;
+                            8'h60: reg_hdmi_rx_colorspace  <= s_axil_wdata;
+                            8'h64: reg_hdmi_rx_audio_info  <= s_axil_wdata;
                             default: ;
                         endcase
                     end
@@ -702,9 +744,9 @@ module axil_reg_space #(
                     4'h6: begin // HDMI RX & TX Block (0x0600 - 0x06FF)
                         case (s_axil_araddr[7:0])
                             8'h00: s_axil_rdata <= in_hdmi_rx_status;
-                            8'h04: s_axil_rdata <= in_hdmi_rx_res;
-                            8'h08: s_axil_rdata <= in_hdmi_rx_timing;
-                            8'h0C: s_axil_rdata <= in_hdmi_rx_audio;
+                            8'h04: s_axil_rdata <= reg_hdmi_rx_width;
+                            8'h08: s_axil_rdata <= reg_hdmi_rx_height;
+                            8'h0C: s_axil_rdata <= reg_hdmi_rx_pixelclk_lo;
                             8'h10: s_axil_rdata <= reg_hdmi_tx_ctrl;
                             8'h14: s_axil_rdata <= reg_hdmi_tx_res;
                             8'h18: s_axil_rdata <= reg_hdmi_tx_fps;
@@ -713,6 +755,16 @@ module axil_reg_space #(
                             8'h34: s_axil_rdata <= reg_hdmi_ipc_arg;
                             8'h38: s_axil_rdata <= reg_hdmi_ipc_status;
                             8'h3C: s_axil_rdata <= reg_hdmi_ipc_doorbell;
+                            8'h40: s_axil_rdata <= reg_hdmi_rx_hfrontporch;
+                            8'h44: s_axil_rdata <= reg_hdmi_rx_hsync;
+                            8'h48: s_axil_rdata <= reg_hdmi_rx_hbackporch;
+                            8'h4C: s_axil_rdata <= reg_hdmi_rx_vfrontporch;
+                            8'h50: s_axil_rdata <= reg_hdmi_rx_vsync;
+                            8'h54: s_axil_rdata <= reg_hdmi_rx_vbackporch;
+                            8'h58: s_axil_rdata <= reg_hdmi_rx_polarities;
+                            8'h5C: s_axil_rdata <= reg_hdmi_rx_standards;
+                            8'h60: s_axil_rdata <= reg_hdmi_rx_colorspace;
+                            8'h64: s_axil_rdata <= reg_hdmi_rx_audio_info;
                             default: s_axil_rdata <= 32'd0;
                         endcase
                     end

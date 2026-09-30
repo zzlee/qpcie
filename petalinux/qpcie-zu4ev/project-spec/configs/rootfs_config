@@ -4081,6 +4081,7 @@ CONFIG_Init-manager-systemd=y
 #
 # CONFIG_gpio-demo is not set
 # CONFIG_peekpoke is not set
+CONFIG_qpcie-v4l2-bridge=y
 
 #
 # PetaLinux RootFS Settings

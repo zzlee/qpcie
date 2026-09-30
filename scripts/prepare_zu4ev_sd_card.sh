@@ -98,6 +98,12 @@ if [ -f "$FLASHEMMC" ]; then
     sudo chmod +x "$MOUNT_DIR/flash_emmc.sh"
 fi
 
+if [ -f "$SRC_DIR/qpcie_hdmi_daemon" ]; then
+    echo "  Copying qpcie_hdmi_daemon ($(ls -lh "$SRC_DIR/qpcie_hdmi_daemon" | awk '{print $5}'))"
+    sudo cp -v "$SRC_DIR/qpcie_hdmi_daemon" "$MOUNT_DIR/qpcie_hdmi_daemon"
+    sudo chmod +x "$MOUNT_DIR/qpcie_hdmi_daemon"
+fi
+
 # Clean up any leftover status files from previous runs
 sudo rm -f "$MOUNT_DIR/EMMC_FLASH_SUCCESS.txt" \
            "$MOUNT_DIR/EMMC_FLASH_FAILED.txt" \

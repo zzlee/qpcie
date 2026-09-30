@@ -39,11 +39,33 @@ module zu4ev_pcie_card_top #(
     output wire                                             user_led_dma_active,
     output wire                                             user_led_pcie_link_up,
 
+    // Physical HDMI Reference Clocks (Bank 225/226 MGT)
+    input  wire                                             hdmi_rx_clk_p,        // Pin B10 (Bank 226 MGTREFCLK1)
+    input  wire                                             hdmi_rx_clk_n,        // Pin B9
+    input  wire                                             hdmi_dru_clk_p,       // Pin F10 (Bank 225 MGTREFCLK0)
+    input  wire                                             hdmi_dru_clk_n,       // Pin F9
+    input  wire                                             hdmi_tx_clk_p,        // Pin D10 (Bank 226 MGTREFCLK0)
+    input  wire                                             hdmi_tx_clk_n,        // Pin D9
+
+    // Physical HDMI Transceiver Serial Data Lanes (Bank 226 Quad 226)
+    input  wire [2:0]                                       hdmi_rx_p,            // GTHE4_CHANNEL_X0Y12..14 RX
+    input  wire [2:0]                                       hdmi_rx_n,
+    output wire [2:0]                                       hdmi_tx_p,            // GTHE4_CHANNEL_X0Y12..14 TX
+    output wire [2:0]                                       hdmi_tx_n,
+    output wire                                             hdmi_tx_tmds_clk_p,   // Pin AH6 (ODDR TMDS Clk Out)
+    output wire                                             hdmi_tx_tmds_clk_n,   // Pin AJ6
+
     // Physical HDMI RX Interface Pins (Bank 46 HDIO 3.3V)
-    input  wire                                             hdmi_rx_5v_det,       // Pin B12 (Cable 5V Detect)
-    output wire                                             hdmi_rx_hpd_out,      // Pin A13 (HPD Assert to Source)
-    inout  wire                                             hdmi_rx_ddc_scl,      // Pin E13 (DDC I2C SCL)
-    inout  wire                                             hdmi_rx_ddc_sda       // Pin D14 (DDC I2C SDA)
+    input  wire                                             hdmi_rx_5v_det,       // Pin A12 (Cable 5V Detect)
+    output wire                                             hdmi_rx_hpd_out,      // Pin B12 (HPD Assert to Source)
+    inout  wire                                             hdmi_rx_ddc_scl,      // Pin D14 (DDC I2C SCL)
+    inout  wire                                             hdmi_rx_ddc_sda,      // Pin C13 (DDC I2C SDA)
+
+    // Physical HDMI TX Interface Pins (Bank 46 HDIO 3.3V)
+    input  wire                                             hdmi_tx_hpd_in,       // Pin G14 (Sink HPD Input)
+    input  wire                                             hdmi_tx_refclk_rdy,   // Pin G13 (TX RefClk Ready)
+    inout  wire                                             hdmi_tx_ddc_scl,      // Pin F12 (Sink DDC SCL)
+    inout  wire                                             hdmi_tx_ddc_sda       // Pin E12 (Sink DDC SDA)
 );
 
     // =========================================================================
@@ -435,34 +457,335 @@ module zu4ev_pcie_card_top #(
     wire [31:0] hdmi_ipc_status_w;
     wire [31:0] hdmi_ipc_doorbell_w;
 
-    // Ch 0: HDMI RX Video Bridge
+    // =========================================================================
+    // HDMI Transceiver Physical Clock Buffers (Bank 225/226 MGT)
+    // =========================================================================
+    wire rx_mgtrefclk1, rx_mgtrefclk1_odiv2, rx_mgtrefclk1_odiv2_bufg;
+    IBUFDS_GTE4 #(.REFCLK_HROW_CK_SEL(2'b00)) u_ibufds_rx_clk (
+        .I(hdmi_rx_clk_p),
+        .IB(hdmi_rx_clk_n),
+        .CEB(1'b0),
+        .O(rx_mgtrefclk1),
+        .ODIV2(rx_mgtrefclk1_odiv2)
+    );
+    BUFG_GT u_bufg_gt_rx_clk (
+        .I(rx_mgtrefclk1_odiv2),
+        .CE(1'b1),
+        .CEMASK(1'b0),
+        .CLR(1'b0),
+        .CLRMASK(1'b0),
+        .DIV(3'b000),
+        .O(rx_mgtrefclk1_odiv2_bufg)
+    );
+
+    wire dru_gtnorthrefclk1, dru_gtnorthrefclk1_odiv2, dru_gtnorthrefclk1_odiv2_bufg;
+    IBUFDS_GTE4 #(.REFCLK_HROW_CK_SEL(2'b00)) u_ibufds_dru_clk (
+        .I(hdmi_dru_clk_p),
+        .IB(hdmi_dru_clk_n),
+        .CEB(1'b0),
+        .O(dru_gtnorthrefclk1),
+        .ODIV2(dru_gtnorthrefclk1_odiv2)
+    );
+    BUFG_GT u_bufg_gt_dru_clk (
+        .I(dru_gtnorthrefclk1_odiv2),
+        .CE(1'b1),
+        .CEMASK(1'b0),
+        .CLR(1'b0),
+        .CLRMASK(1'b0),
+        .DIV(3'b000),
+        .O(dru_gtnorthrefclk1_odiv2_bufg)
+    );
+
+    wire tx_mgtrefclk0, tx_mgtrefclk0_odiv2, tx_mgtrefclk0_odiv2_bufg;
+    IBUFDS_GTE4 #(.REFCLK_HROW_CK_SEL(2'b00)) u_ibufds_tx_clk (
+        .I(hdmi_tx_clk_p),
+        .IB(hdmi_tx_clk_n),
+        .CEB(1'b0),
+        .O(tx_mgtrefclk0),
+        .ODIV2(tx_mgtrefclk0_odiv2)
+    );
+    BUFG_GT u_bufg_gt_tx_clk (
+        .I(tx_mgtrefclk0_odiv2),
+        .CE(1'b1),
+        .CEMASK(1'b0),
+        .CLR(1'b0),
+        .CLRMASK(1'b0),
+        .DIV(3'b000),
+        .O(tx_mgtrefclk0_odiv2_bufg)
+    );
+
+    // =========================================================================
+    // Video PHY Controller (vid_phy_controller_0)
+    // Full-Duplex Quad 226 Transceiver (RX + TX)
+    // =========================================================================
+    wire        phy_rx_video_clk;
+    wire        phy_tx_video_clk;
+    wire        phy_rxoutclk;
+    wire        phy_txoutclk;
+
+    wire [39:0] phy_rx_axi4s_ch0_tdata;
+    wire        phy_rx_axi4s_ch0_tvalid;
+    wire [39:0] phy_rx_axi4s_ch1_tdata;
+    wire        phy_rx_axi4s_ch1_tvalid;
+    wire [39:0] phy_rx_axi4s_ch2_tdata;
+    wire        phy_rx_axi4s_ch2_tvalid;
+
+    wire [39:0] phy_tx_axi4s_ch0_tdata;
+    wire        phy_tx_axi4s_ch0_tvalid;
+    wire [39:0] phy_tx_axi4s_ch1_tdata;
+    wire        phy_tx_axi4s_ch1_tvalid;
+    wire [39:0] phy_tx_axi4s_ch2_tdata;
+    wire        phy_tx_axi4s_ch2_tvalid;
+
+    wire [7:0]  phy_status_sb_rx_tdata;
+    wire        phy_status_sb_rx_tvalid;
+    wire [7:0]  phy_status_sb_tx_tdata;
+    wire        phy_status_sb_tx_tvalid;
+
+    vid_phy_controller_0 u_vid_phy_controller (
+        .tx_refclk_rdy                (hdmi_tx_refclk_rdy),
+        .tx_tmds_clk                  (),
+        .tx_video_clk                 (phy_tx_video_clk),
+        .tx_tmds_clk_p                (hdmi_tx_tmds_clk_p),
+        .tx_tmds_clk_n                (hdmi_tx_tmds_clk_n),
+        .rx_tmds_clk                  (),
+        .rx_video_clk                 (phy_rx_video_clk),
+        .rx_tmds_clk_p                (),
+        .rx_tmds_clk_n                (),
+        .mgtrefclk0_in                (tx_mgtrefclk0),
+        .mgtrefclk1_in                (rx_mgtrefclk1),
+        .mgtrefclk0_odiv2_in          (tx_mgtrefclk0_odiv2_bufg),
+        .mgtrefclk1_odiv2_in          (rx_mgtrefclk1_odiv2_bufg),
+        .gtnorthrefclk1_in            (dru_gtnorthrefclk1),
+        .gtnorthrefclk1_odiv2_in      (dru_gtnorthrefclk1_odiv2_bufg),
+        .phy_rxn_in                   (hdmi_rx_n),
+        .phy_rxp_in                   (hdmi_rx_p),
+        .phy_txn_out                  (hdmi_tx_n),
+        .phy_txp_out                  (hdmi_tx_p),
+        .rxoutclk                     (phy_rxoutclk),
+        .txoutclk                     (phy_txoutclk),
+        .vid_phy_tx_axi4s_aclk        (phy_txoutclk),
+        .vid_phy_tx_axi4s_aresetn     (video_engine_rst_n),
+        .vid_phy_tx_axi4s_ch0_tdata   (phy_tx_axi4s_ch0_tdata),
+        .vid_phy_tx_axi4s_ch0_tuser   (1'b0),
+        .vid_phy_tx_axi4s_ch0_tvalid  (phy_tx_axi4s_ch0_tvalid),
+        .vid_phy_tx_axi4s_ch0_tready  (),
+        .vid_phy_tx_axi4s_ch1_tdata   (phy_tx_axi4s_ch1_tdata),
+        .vid_phy_tx_axi4s_ch1_tuser   (1'b0),
+        .vid_phy_tx_axi4s_ch1_tvalid  (phy_tx_axi4s_ch1_tvalid),
+        .vid_phy_tx_axi4s_ch1_tready  (),
+        .vid_phy_tx_axi4s_ch2_tdata   (phy_tx_axi4s_ch2_tdata),
+        .vid_phy_tx_axi4s_ch2_tuser   (1'b0),
+        .vid_phy_tx_axi4s_ch2_tvalid  (phy_tx_axi4s_ch2_tvalid),
+        .vid_phy_tx_axi4s_ch2_tready  (),
+        .vid_phy_rx_axi4s_ch0_tdata   (phy_rx_axi4s_ch0_tdata),
+        .vid_phy_rx_axi4s_ch0_tuser   (),
+        .vid_phy_rx_axi4s_ch0_tvalid  (phy_rx_axi4s_ch0_tvalid),
+        .vid_phy_rx_axi4s_ch0_tready  (1'b1),
+        .vid_phy_rx_axi4s_aclk        (phy_rxoutclk),
+        .vid_phy_rx_axi4s_aresetn     (video_engine_rst_n),
+        .vid_phy_rx_axi4s_ch1_tdata   (phy_rx_axi4s_ch1_tdata),
+        .vid_phy_rx_axi4s_ch1_tuser   (),
+        .vid_phy_rx_axi4s_ch1_tvalid  (phy_rx_axi4s_ch1_tvalid),
+        .vid_phy_rx_axi4s_ch1_tready  (1'b1),
+        .vid_phy_rx_axi4s_ch2_tdata   (phy_rx_axi4s_ch2_tdata),
+        .vid_phy_rx_axi4s_ch2_tuser   (),
+        .vid_phy_rx_axi4s_ch2_tvalid  (phy_rx_axi4s_ch2_tvalid),
+        .vid_phy_rx_axi4s_ch2_tready  (1'b1),
+        .irq                          (),
+        .vid_phy_sb_aclk              (pcie_user_clk),
+        .vid_phy_sb_aresetn           (pcie_user_rst_n),
+        .vid_phy_status_sb_tx_tdata   (phy_status_sb_tx_tdata),
+        .vid_phy_status_sb_tx_tvalid  (phy_status_sb_tx_tvalid),
+        .vid_phy_status_sb_tx_tready  (1'b1),
+        .vid_phy_status_sb_rx_tdata   (phy_status_sb_rx_tdata),
+        .vid_phy_status_sb_rx_tvalid  (phy_status_sb_rx_tvalid),
+        .vid_phy_status_sb_rx_tready  (1'b1),
+        .vid_phy_axi4lite_awaddr      (10'd0),
+        .vid_phy_axi4lite_awprot      (3'd0),
+        .vid_phy_axi4lite_awvalid     (1'b0),
+        .vid_phy_axi4lite_awready     (),
+        .vid_phy_axi4lite_wdata       (32'd0),
+        .vid_phy_axi4lite_wstrb       (4'h0),
+        .vid_phy_axi4lite_wvalid      (1'b0),
+        .vid_phy_axi4lite_wready      (),
+        .vid_phy_axi4lite_bresp       (),
+        .vid_phy_axi4lite_bvalid      (),
+        .vid_phy_axi4lite_bready      (1'b1),
+        .vid_phy_axi4lite_araddr      (10'd0),
+        .vid_phy_axi4lite_arprot      (3'd0),
+        .vid_phy_axi4lite_arvalid     (1'b0),
+        .vid_phy_axi4lite_arready     (),
+        .vid_phy_axi4lite_rdata       (),
+        .vid_phy_axi4lite_rresp       (),
+        .vid_phy_axi4lite_rvalid      (),
+        .vid_phy_axi4lite_rready      (1'b1),
+        .vid_phy_axi4lite_aclk        (pcie_user_clk),
+        .vid_phy_axi4lite_aresetn     (pcie_user_rst_n),
+        .drpclk                       (pcie_user_clk)
+    );
+
+    // =========================================================================
+    // HDMI RX Subsystem (v_hdmi_rx_ss_0)
+    // =========================================================================
+    wire [95:0] rx_ss_video_tdata;
+    wire        rx_ss_video_tvalid;
+    wire        rx_ss_video_tready;
+    wire        rx_ss_video_tlast;
+    wire        rx_ss_video_tuser;
+
+    wire [31:0] rx_ss_audio_tdata;
+    wire        rx_ss_audio_tvalid;
+    wire        rx_ss_audio_tready;
+
+    v_hdmi_rx_ss_0 u_hdmi_rx_ss (
+        .s_axi_cpu_aclk        (pcie_user_clk),
+        .s_axi_cpu_aresetn     (pcie_user_rst_n),
+        .cable_detect          (hdmi_rx_5v_det),
+        .link_clk              (phy_rxoutclk),
+        .s_axis_audio_aclk     (pcie_user_clk),
+        .s_axis_audio_aresetn  (pcie_user_rst_n),
+        .acr_cts               (),
+        .acr_n                 (),
+        .acr_valid             (),
+        .hpd                   (),
+        .irq                   (),
+        .video_clk             (phy_rx_video_clk),
+        .fid                   (),
+        .s_axis_video_aresetn  (video_engine_rst_n),
+        .s_axis_video_aclk     (phy_rx_video_clk),
+        .LINK_DATA0_IN_tdata   (phy_rx_axi4s_ch0_tdata),
+        .LINK_DATA0_IN_tvalid  (phy_rx_axi4s_ch0_tvalid),
+        .LINK_DATA1_IN_tdata   (phy_rx_axi4s_ch1_tdata),
+        .LINK_DATA1_IN_tvalid  (phy_rx_axi4s_ch1_tvalid),
+        .LINK_DATA2_IN_tdata   (phy_rx_axi4s_ch2_tdata),
+        .LINK_DATA2_IN_tvalid  (phy_rx_axi4s_ch2_tvalid),
+        .SB_STATUS_IN_tdata    (phy_status_sb_rx_tdata),
+        .SB_STATUS_IN_tvalid   (phy_status_sb_rx_tvalid),
+        .S_AXI_CPU_IN_araddr   (9'd0),
+        .S_AXI_CPU_IN_arprot   (3'd0),
+        .S_AXI_CPU_IN_arready  (),
+        .S_AXI_CPU_IN_arvalid  (1'b0),
+        .S_AXI_CPU_IN_awaddr   (9'd0),
+        .S_AXI_CPU_IN_awprot   (3'd0),
+        .S_AXI_CPU_IN_awready  (),
+        .S_AXI_CPU_IN_awvalid  (1'b0),
+        .S_AXI_CPU_IN_bready   (1'b1),
+        .S_AXI_CPU_IN_bresp    (),
+        .S_AXI_CPU_IN_bvalid   (),
+        .S_AXI_CPU_IN_rdata    (),
+        .S_AXI_CPU_IN_rready   (1'b1),
+        .S_AXI_CPU_IN_rresp    (),
+        .S_AXI_CPU_IN_rvalid   (),
+        .S_AXI_CPU_IN_wdata    (32'd0),
+        .S_AXI_CPU_IN_wready   (),
+        .S_AXI_CPU_IN_wstrb    (4'h0),
+        .S_AXI_CPU_IN_wvalid   (1'b0),
+        .AUDIO_OUT_tdata       (rx_ss_audio_tdata),
+        .AUDIO_OUT_tid         (),
+        .AUDIO_OUT_tready      (rx_ss_audio_tready),
+        .AUDIO_OUT_tvalid      (rx_ss_audio_tvalid),
+        .DDC_OUT_scl_i         (1'b1),
+        .DDC_OUT_scl_o         (),
+        .DDC_OUT_scl_t         (),
+        .DDC_OUT_sda_i         (1'b1),
+        .DDC_OUT_sda_o         (),
+        .DDC_OUT_sda_t         (),
+        .VIDEO_OUT_tdata       (rx_ss_video_tdata),
+        .VIDEO_OUT_tlast       (rx_ss_video_tlast),
+        .VIDEO_OUT_tready      (rx_ss_video_tready),
+        .VIDEO_OUT_tuser       (rx_ss_video_tuser),
+        .VIDEO_OUT_tvalid      (rx_ss_video_tvalid)
+    );
+
+    // Ch 0: Native HDMI RX Video Stream CDC FIFO (phy_rx_video_clk -> pcie_user_clk)
     wire [127:0] hdmi_rx_v_tdata;
     wire         hdmi_rx_v_tvalid;
     wire         hdmi_rx_v_tready;
     wire         hdmi_rx_v_tlast;
     wire         hdmi_rx_v_tuser;
 
-    hdmi_rx_video_bridge #(
-        .FIFO_DEPTH(1024)
-    ) u_hdmi_rx_video_bridge (
-        .rx_video_clk(pcie_user_clk),
-        .rx_video_rst_n(video_engine_rst_n),
-        .s_axis_video_tdata(96'd0),
-        .s_axis_video_tvalid(1'b0),
-        .s_axis_video_tready(),
-        .s_axis_video_tlast(1'b0),
-        .s_axis_video_tuser(1'b0),
-        .pcie_user_clk(pcie_user_clk),
-        .pcie_user_rst_n(pcie_user_rst_n),
-        .m_axis_video_tdata(hdmi_rx_v_tdata),
-        .m_axis_video_tvalid(hdmi_rx_v_tvalid),
-        .m_axis_video_tready(hdmi_rx_v_tready),
-        .m_axis_video_tlast(hdmi_rx_v_tlast),
-        .m_axis_video_tuser(hdmi_rx_v_tuser),
-        .rx_status_reg(hdmi_rx_status_w),
-        .rx_res_reg(hdmi_rx_res_w),
-        .rx_timing_reg(hdmi_rx_timing_w)
+    // Pack 4 PPC native video: 96-bit {P3, P2, P1, P0} -> 128-bit little-endian
+    wire [127:0] rx_video_packed_tdata = {
+        8'hFF, rx_ss_video_tdata[95:88], rx_ss_video_tdata[87:80], rx_ss_video_tdata[79:72], // P3
+        8'hFF, rx_ss_video_tdata[71:64], rx_ss_video_tdata[63:56], rx_ss_video_tdata[55:48], // P2
+        8'hFF, rx_ss_video_tdata[47:40], rx_ss_video_tdata[39:32], rx_ss_video_tdata[31:24], // P1
+        8'hFF, rx_ss_video_tdata[23:16], rx_ss_video_tdata[15:8],  rx_ss_video_tdata[7:0]    // P0
+    };
+
+    wire rx_fifo_full, rx_fifo_empty;
+    assign rx_ss_video_tready = !rx_fifo_full;
+    wire rx_fifo_wr_en = rx_ss_video_tvalid && rx_ss_video_tready;
+    wire rx_fifo_rd_en = hdmi_rx_v_tready && !rx_fifo_empty;
+
+    wire [129:0] rx_fifo_din = {rx_ss_video_tuser, rx_ss_video_tlast, rx_video_packed_tdata};
+    wire [129:0] rx_fifo_dout;
+
+    assign hdmi_rx_v_tvalid = !rx_fifo_empty;
+    assign hdmi_rx_v_tuser  = rx_fifo_dout[129];
+    assign hdmi_rx_v_tlast  = rx_fifo_dout[128];
+    assign hdmi_rx_v_tdata  = rx_fifo_dout[127:0];
+
+    xpm_fifo_async #(
+        .CDC_SYNC_STAGES     (4),
+        .DOUT_RESET_VALUE    ("0"),
+        .ECC_MODE            ("no_ecc"),
+        .FIFO_MEMORY_TYPE    ("block"),
+        .FIFO_READ_LATENCY   (0),
+        .FIFO_WRITE_DEPTH    (1024),
+        .READ_DATA_WIDTH     (130),
+        .READ_MODE           ("fwft"),
+        .RELATED_CLOCKS      (0),
+        .SIM_ASSERT_CHK      (0),
+        .USE_ADV_FEATURES    ("0707"),
+        .WAKEUP_TIME         (0),
+        .WRITE_DATA_WIDTH    (130),
+        .WR_DATA_COUNT_WIDTH (11),
+        .RD_DATA_COUNT_WIDTH (11)
+    ) u_hdmi_rx_video_cdc_fifo (
+        .sleep         (1'b0),
+        .rst           (!video_engine_rst_n || !pcie_user_rst_n),
+        .wr_clk        (phy_rx_video_clk),
+        .wr_en         (rx_fifo_wr_en),
+        .din           (rx_fifo_din),
+        .full          (rx_fifo_full),
+        .prog_full     (),
+        .wr_data_count (),
+        .overflow      (),
+        .wr_rst_busy   (),
+        .almost_full   (),
+        .wr_ack        (),
+        .rd_clk        (pcie_user_clk),
+        .rd_en         (rx_fifo_rd_en),
+        .dout          (rx_fifo_dout),
+        .empty         (rx_fifo_empty),
+        .prog_empty    (),
+        .rd_data_count (),
+        .underflow     (),
+        .rd_rst_busy   (),
+        .almost_empty  (),
+        .data_valid    (),
+        .dbiterr       (),
+        .sbiterr       ()
     );
+
+    // Synchronize 5V Cable Detect & HPD status to pcie_user_clk
+    (* ASYNC_REG = "TRUE" *) reg [1:0] sync_5v_det_q;
+    (* ASYNC_REG = "TRUE" *) reg [1:0] sync_hpd_out_q;
+    always @(posedge pcie_user_clk or negedge pcie_user_rst_n) begin
+        if (!pcie_user_rst_n) begin
+            sync_5v_det_q  <= 2'b00;
+            sync_hpd_out_q <= 2'b00;
+        end else begin
+            sync_5v_det_q  <= {sync_5v_det_q[0], hdmi_rx_5v_det};
+            sync_hpd_out_q <= {sync_hpd_out_q[0], hdmi_rx_hpd_out};
+        end
+    end
+
+    // Direct hardware status: [0]=5V Detect, [1]=HPD Out
+    assign hdmi_rx_status_w = {30'd0, sync_hpd_out_q[1], sync_5v_det_q[1]};
+    assign hdmi_rx_res_w    = 32'd0;
+    assign hdmi_rx_timing_w = 32'd0;
 
     // Ch 0: HDMI RX Audio Bridge
     wire [31:0] hdmi_rx_a_tdata;
@@ -475,9 +798,9 @@ module zu4ev_pcie_card_top #(
     ) u_hdmi_rx_audio_bridge (
         .rx_audio_clk(pcie_user_clk),
         .rx_audio_rst_n(pcie_user_rst_n),
-        .s_axis_audio_tdata(32'd0),
-        .s_axis_audio_tvalid(1'b0),
-        .s_axis_audio_tready(),
+        .s_axis_audio_tdata(rx_ss_audio_tdata),
+        .s_axis_audio_tvalid(rx_ss_audio_tvalid),
+        .s_axis_audio_tready(rx_ss_audio_tready),
         .pcie_user_clk(pcie_user_clk),
         .pcie_user_rst_n(pcie_user_rst_n),
         .m_axis_audio_tdata(hdmi_rx_a_tdata),
@@ -487,13 +810,81 @@ module zu4ev_pcie_card_top #(
         .rx_audio_reg(hdmi_rx_audio_w)
     );
 
-    // Ch 1: HDMI TX Video Bridge
-    wire [95:0] hdmi_tx_v_tdata;
-    wire        hdmi_tx_v_tvalid;
-    wire        hdmi_tx_v_tready = 1'b1;
-    wire        hdmi_tx_v_tlast;
-    wire        hdmi_tx_v_tuser;
+    // =========================================================================
+    // HDMI TX Subsystem (v_hdmi_tx_ss_0)
+    // =========================================================================
+    wire [95:0] tx_ss_video_tdata;
+    wire        tx_ss_video_tvalid;
+    wire        tx_ss_video_tready;
+    wire        tx_ss_video_tlast;
+    wire        tx_ss_video_tuser;
 
+    wire [31:0] tx_ss_audio_tdata;
+    wire        tx_ss_audio_tvalid;
+    wire        tx_ss_audio_tready;
+    wire        tx_ss_locked;
+
+    v_hdmi_tx_ss_0 u_hdmi_tx_ss (
+        .s_axi_cpu_aclk        (pcie_user_clk),
+        .s_axi_cpu_aresetn     (pcie_user_rst_n),
+        .link_clk              (phy_txoutclk),
+        .s_axis_audio_aclk     (pcie_user_clk),
+        .s_axis_audio_aresetn  (pcie_user_rst_n),
+        .acr_cts               (20'd148500),
+        .acr_n                 (20'd6144),
+        .acr_valid             (1'b1),
+        .hpd                   (hdmi_tx_hpd_in),
+        .irq                   (),
+        .video_clk             (phy_tx_video_clk),
+        .fid                   (1'b0),
+        .locked                (tx_ss_locked),
+        .s_axis_video_aclk     (phy_tx_video_clk),
+        .s_axis_video_aresetn  (video_engine_rst_n),
+        .VIDEO_IN_tdata        (tx_ss_video_tdata),
+        .VIDEO_IN_tlast        (tx_ss_video_tlast),
+        .VIDEO_IN_tready       (tx_ss_video_tready),
+        .VIDEO_IN_tuser        (tx_ss_video_tuser),
+        .VIDEO_IN_tvalid       (tx_ss_video_tvalid),
+        .SB_STATUS_IN_tdata    (phy_status_sb_tx_tdata),
+        .SB_STATUS_IN_tvalid   (phy_status_sb_tx_tvalid),
+        .AUDIO_IN_tdata        (tx_ss_audio_tdata),
+        .AUDIO_IN_tid          (8'd0),
+        .AUDIO_IN_tready       (tx_ss_audio_tready),
+        .AUDIO_IN_tvalid       (tx_ss_audio_tvalid),
+        .S_AXI_CPU_IN_araddr   (17'd0),
+        .S_AXI_CPU_IN_arprot   (3'd0),
+        .S_AXI_CPU_IN_arready  (),
+        .S_AXI_CPU_IN_arvalid  (1'b0),
+        .S_AXI_CPU_IN_awaddr   (17'd0),
+        .S_AXI_CPU_IN_awprot   (3'd0),
+        .S_AXI_CPU_IN_awready  (),
+        .S_AXI_CPU_IN_awvalid  (1'b0),
+        .S_AXI_CPU_IN_bready   (1'b1),
+        .S_AXI_CPU_IN_bresp    (),
+        .S_AXI_CPU_IN_bvalid   (),
+        .S_AXI_CPU_IN_rdata    (),
+        .S_AXI_CPU_IN_rready   (1'b1),
+        .S_AXI_CPU_IN_rresp    (),
+        .S_AXI_CPU_IN_rvalid   (),
+        .S_AXI_CPU_IN_wdata    (32'd0),
+        .S_AXI_CPU_IN_wready   (),
+        .S_AXI_CPU_IN_wstrb    (4'h0),
+        .S_AXI_CPU_IN_wvalid   (1'b0),
+        .DDC_OUT_scl_i         (hdmi_tx_ddc_scl),
+        .DDC_OUT_scl_o         (),
+        .DDC_OUT_scl_t         (),
+        .DDC_OUT_sda_i         (hdmi_tx_ddc_sda),
+        .DDC_OUT_sda_o         (),
+        .DDC_OUT_sda_t         (),
+        .LINK_DATA0_OUT_tdata  (phy_tx_axi4s_ch0_tdata),
+        .LINK_DATA0_OUT_tvalid (phy_tx_axi4s_ch0_tvalid),
+        .LINK_DATA1_OUT_tdata  (phy_tx_axi4s_ch1_tdata),
+        .LINK_DATA1_OUT_tvalid (phy_tx_axi4s_ch1_tvalid),
+        .LINK_DATA2_OUT_tdata  (phy_tx_axi4s_ch2_tdata),
+        .LINK_DATA2_OUT_tvalid (phy_tx_axi4s_ch2_tvalid)
+    );
+
+    // Ch 1: HDMI TX Video Bridge
     hdmi_tx_video_bridge #(
         .FIFO_DEPTH(1024)
     ) u_hdmi_tx_video_bridge (
@@ -505,23 +896,18 @@ module zu4ev_pcie_card_top #(
         .s_axis_video_tlast(m_video_tlast[1]),
         .s_axis_video_tuser(m_video_tuser[1]),
         .tx_ctrl_reg(hdmi_tx_ctrl_w),
-        .tx_video_clk(pcie_user_clk),
+        .tx_video_clk(phy_tx_video_clk),
         .tx_video_rst_n(video_engine_rst_n),
-        .m_axis_video_tdata(hdmi_tx_v_tdata),
-        .m_axis_video_tvalid(hdmi_tx_v_tvalid),
-        .m_axis_video_tready(hdmi_tx_v_tready),
-        .m_axis_video_tlast(hdmi_tx_v_tlast),
-        .m_axis_video_tuser(hdmi_tx_v_tuser),
-        .tx_hpd_in(1'b1),
+        .m_axis_video_tdata(tx_ss_video_tdata),
+        .m_axis_video_tvalid(tx_ss_video_tvalid),
+        .m_axis_video_tready(tx_ss_video_tready),
+        .m_axis_video_tlast(tx_ss_video_tlast),
+        .m_axis_video_tuser(tx_ss_video_tuser),
+        .tx_hpd_in(hdmi_tx_hpd_in),
         .tx_status_reg(hdmi_tx_status_w)
     );
 
     // Ch 1: HDMI TX Audio Bridge
-    wire [31:0] hdmi_tx_a_tdata;
-    wire        hdmi_tx_a_tvalid;
-    wire        hdmi_tx_a_tready = 1'b1;
-    wire        hdmi_tx_a_tlast;
-
     hdmi_tx_audio_bridge #(
         .FIFO_DEPTH(512)
     ) u_hdmi_tx_audio_bridge (
@@ -534,10 +920,10 @@ module zu4ev_pcie_card_top #(
         .tx_ctrl_reg(hdmi_tx_ctrl_w),
         .tx_audio_clk(pcie_user_clk),
         .tx_audio_rst_n(pcie_user_rst_n),
-        .m_axis_audio_tdata(hdmi_tx_a_tdata),
-        .m_axis_audio_tvalid(hdmi_tx_a_tvalid),
-        .m_axis_audio_tready(hdmi_tx_a_tready),
-        .m_axis_audio_tlast(hdmi_tx_a_tlast)
+        .m_axis_audio_tdata(tx_ss_audio_tdata),
+        .m_axis_audio_tvalid(tx_ss_audio_tvalid),
+        .m_axis_audio_tready(tx_ss_audio_tready),
+        .m_axis_audio_tlast(tx_ss_audio_tlast)
     );
 
     // =========================================================================
