@@ -1,5 +1,12 @@
 [DEBUG] Using xsct from : /opt/Xilinx/petalinux/2023.2/tools/xsct/bin/xsct
 [DEBUG] Using conf/mconf from : /opt/Xilinx/petalinux/2023.2/components/yocto/buildtools/sysroots/x86_64-petalinux-linux/usr/bin/mconf
+[INFO] Generating Kconfig for project
+[DEBUG] Running CMD: xsct -sdx -nodisp /home/zzlee/qpcie/petalinux/qpcie-zu4ev/components/yocto/layers/meta-xilinx/meta-xilinx-core/gen-machine-conf/gen-machine-scripts/hw-description.tcl plnx_gen_hwsysconf /home/zzlee/qpcie/petalinux/qpcie-zu4ev/project-spec/hw-description/system.xsa /home/zzlee/qpcie/petalinux/qpcie-zu4ev/project-spec/configs/configs/Kconfig.syshw
+[DEBUG] WARNING: sdtgen package cannot be loaded. System Device tree commands will not 
+ be available
+INFO: [Hsi 55-2053] elapsed time for repository (/opt/Xilinx/petalinux/2023.2/tools/xsct/data/embeddedsw) loading 0 seconds
+hsi::open_hw_design: Time (s): cpu = 00:00:07 ; elapsed = 00:00:07 . Memory (MB): peak = 746.371 ; gain = 158.344 ; free physical = 15616 ; free virtual = 41873
+
 [INFO] Silentconfig project
 [DEBUG] Running CMD: yes "" | env KCONFIG_CONFIG=/home/zzlee/qpcie/petalinux/qpcie-zu4ev/project-spec/configs/config conf /home/zzlee/qpcie/petalinux/qpcie-zu4ev/project-spec/configs/configs/Kconfig
 [DEBUG] *
