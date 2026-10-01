@@ -77,7 +77,7 @@ cd ./driver && make clean && make
 
 ### 2. Load Driver & Check Diagnostics
 ```bash
-sudo insmod custom_pcie_av.ko
+sudo insmod qpcie.ko
 dmesg | tail -n 25
 ```
 

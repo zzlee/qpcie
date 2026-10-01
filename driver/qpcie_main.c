@@ -411,6 +411,13 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
     ret = qpcie_sysfs_init(qdev);
     if (ret)
         goto alsa_remove;
+
+    /* Initialize Front-End I2C Adapter (IT68051, TLV320ADC3101) */
+    qpcie_i2c_init(qdev);
+
+    /* Initialize SPI Flash & ICAPE2 Programming Interface */
+    qpcie_flash_init(qdev);
+
     return 0;
 
 alsa_remove:
@@ -462,6 +469,8 @@ static void qpcie_remove(struct pci_dev *pdev)
 
     dev_info(&pdev->dev, "Removing QPCIe Driver (Minimal Diagnostic Mode)...\n");
 
+    qpcie_flash_remove(qdev);
+    qpcie_i2c_remove(qdev);
     qpcie_sysfs_remove(qdev);
 
     /* 1. Halt all DMA engines and interrupt controller before freeing memory */

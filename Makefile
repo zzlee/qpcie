@@ -21,7 +21,7 @@ help:
 	@echo "================================================================="
 	@echo " Host Software Targets:"
 	@echo "   make all                   Build Linux driver and test apps"
-	@echo "   make driver                Compile custom_pcie_av.ko"
+	@echo "   make driver                Compile qpcie.ko"
 	@echo "   make test_app              Compile all test applications"
 	@echo "   make clean                 Clean driver and test app binaries"
 	@echo ""

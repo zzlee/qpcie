@@ -224,7 +224,7 @@ module axil_reg_space #(
     `endif
 
     `ifndef BUILD_TIMESTAMP_DEF
-        `define BUILD_TIMESTAMP_DEF 32'h2026_0821
+        `define BUILD_TIMESTAMP_DEF 32'h2026_1001
     `endif
 
     // Hardware Debug Write Capture Registers

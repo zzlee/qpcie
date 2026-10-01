@@ -773,6 +773,32 @@ static ssize_t ch1_status_show(struct device *dev, struct device_attribute *attr
 }
 static DEVICE_ATTR_RO(ch1_status);
 
+static ssize_t hdmi_status_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+    struct pci_dev *pdev = to_pci_dev(dev);
+    struct qpcie_dev *qdev = pci_get_drvdata(pdev);
+    u32 width = 0, height = 0, fps = 0;
+    bool locked = false;
+
+    if (!qdev)
+        return -ENODEV;
+
+    qpcie_it68051_get_status(qdev, &width, &height, &fps, &locked);
+
+    if (locked) {
+        return sysfs_emit(buf,
+                          "Status: Signal Locked\n"
+                          "Receiver: ITE IT68051 (I2C 0x48)\n"
+                          "Resolution: %ux%up%u\n",
+                          width, height, fps);
+    } else {
+        return sysfs_emit(buf,
+                          "Status: No Signal / Cable Disconnected\n"
+                          "Receiver: ITE IT68051 (I2C 0x48)\n");
+    }
+}
+static DEVICE_ATTR_RO(hdmi_status);
+
 /* Sysfs Attribute Group Table */
 static struct attribute *qpcie_sysfs_attrs[] = {
     &dev_attr_tpg_pattern.attr,
@@ -795,6 +821,7 @@ static struct attribute *qpcie_sysfs_attrs[] = {
     &dev_attr_aud_volume.attr,
     &dev_attr_aud_sample_cnt.attr,
     &dev_attr_version.attr,
+    &dev_attr_hdmi_status.attr,
     /* Phase 5 per-channel sysfs */
     &dev_attr_ch0_frames.attr,
     &dev_attr_ch0_drops.attr,

@@ -83,7 +83,31 @@ set_clock_groups -name async_video_vs_pcie -asynchronous \
     -group [get_clocks -include_generated_clocks userclk2]
 
 # ------------------------------------------------------------------------------
-# 6. Bitstream Configuration Properties
+# 6. Front-End I2C Bus (IT68051 @ 0x48, TLV320ADC3101 @ 0x18)
+# ------------------------------------------------------------------------------
+set_property PACKAGE_PIN U12 [get_ports scl_front]
+set_property IOSTANDARD LVCMOS33 [get_ports scl_front]
+set_property PULLUP true [get_ports scl_front]
+
+set_property PACKAGE_PIN T12 [get_ports sda_front]
+set_property IOSTANDARD LVCMOS33 [get_ports sda_front]
+set_property PULLUP true [get_ports sda_front]
+
+# ------------------------------------------------------------------------------
+# 7. Macronix MX25L12835F SPI Flash (Bank 14 User Runtime Access)
+# Note: SCLK is driven via internal STARTUPE2 primitive to CCLK_0 (Pin E8).
+# ------------------------------------------------------------------------------
+set_property PACKAGE_PIN T18 [get_ports spi_fcs_b]
+set_property IOSTANDARD LVCMOS33 [get_ports spi_fcs_b]
+
+set_property PACKAGE_PIN K16 [get_ports spi_d00_mosi]
+set_property IOSTANDARD LVCMOS33 [get_ports spi_d00_mosi]
+
+set_property PACKAGE_PIN L17 [get_ports spi_d01_din]
+set_property IOSTANDARD LVCMOS33 [get_ports spi_d01_din]
+
+# ------------------------------------------------------------------------------
+# 8. Bitstream Configuration Properties
 # ------------------------------------------------------------------------------
 set_property CFGBVS VCCO [current_design]
 set_property CONFIG_VOLTAGE 3.3 [current_design]
@@ -92,3 +116,4 @@ set_property BITSTREAM.CONFIG.SPI_BUSWIDTH 4 [current_design]
 
 set_property SEVERITY {Warning} [get_drc_checks NSTD-1]
 set_property SEVERITY {Warning} [get_drc_checks UCIO-1]
+

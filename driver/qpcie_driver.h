@@ -20,6 +20,8 @@
 #include <linux/sched.h>
 #include <linux/delay.h>
 #include <linux/workqueue.h>
+#include <linux/i2c.h>
+#include <linux/mutex.h>
 #include <uapi/linux/sched/types.h>
 
 #include <media/v4l2-device.h>
@@ -81,6 +83,47 @@
 #define BAR1_OFFSET_TPG             0x0000
 #define BAR1_OFFSET_AUDIO_GEN       0x1000
 #define BAR1_OFFSET_EDID            0x2000
+#define BAR1_OFFSET_I2C             0x3000
+#define BAR1_OFFSET_SPI_FLASH       0x4000
+
+/* I2C Master Registers (BAR1 Offset 0x3000) */
+#define REG_I2C_PRER_LO             0x00
+#define REG_I2C_PRER_HI             0x04
+#define REG_I2C_CTR                 0x08
+#define REG_I2C_TXR                 0x0C
+#define REG_I2C_RXR                 0x0C
+#define REG_I2C_CR                  0x10
+#define REG_I2C_SR                  0x14
+
+#define I2C_CTR_EN                  BIT(7)
+#define I2C_CTR_IEN                 BIT(6)
+
+#define I2C_CR_STA                  BIT(7)
+#define I2C_CR_STO                  BIT(6)
+#define I2C_CR_RD                   BIT(5)
+#define I2C_CR_WR                   BIT(4)
+#define I2C_CR_ACK                  BIT(3)
+#define I2C_CR_IACK                 BIT(0)
+
+#define I2C_SR_RXACK                BIT(7)
+#define I2C_SR_BUSY                 BIT(6)
+#define I2C_SR_AL                   BIT(5)
+#define I2C_SR_TIP                  BIT(1)
+#define I2C_SR_IF                   BIT(0)
+
+/* SPI Flash & ICAP Registers (BAR1 Offset 0x4000) */
+#define REG_SPI_CR                  0x00
+#define REG_SPI_SR                  0x04
+#define REG_SPI_TXD                 0x08
+#define REG_SPI_RXD                 0x0C
+#define REG_ICAP_CMD                0x20
+#define REG_ICAP_STATUS             0x24
+
+#define SPI_CR_CS_N                 BIT(0)
+#define SPI_CR_SPI_EN               BIT(1)
+#define SPI_SR_BUSY                 BIT(0)
+#define SPI_SR_RX_VALID             BIT(1)
+#define ICAP_MAGIC_RELOAD           0x52454C4F
 
 /* Private V4L2 controls for QPCIe TPG capture diagnostics. */
 #define V4L2_CID_QPCIE_PACER_ENABLE     (V4L2_CID_USER_BASE + 0x1000)
@@ -430,6 +473,14 @@ struct qpcie_dev {
     bool tpg_pace_run;
     u32 tpg_fps;
     spinlock_t tpg_lock;
+
+    /* I2C Adapter for Front-End I2C (IT68051, TLV320ADC3101) */
+    struct i2c_adapter i2c_adap;
+    struct mutex i2c_lock;
+    bool i2c_registered;
+
+    /* SPI Flash Lock */
+    struct mutex flash_lock;
 };
 
 /* Submodule Function Declarations */
@@ -441,10 +492,16 @@ void qpcie_v4l2_check_source_change(struct qpcie_v4l2_channel *vch);
 void qpcie_dma_soft_reset(struct qpcie_dev *qdev);
 void qpcie_reprogram_rings(struct qpcie_dev *qdev);
 
-
 int qpcie_alsa_init(struct qpcie_dev *qdev);
 void qpcie_alsa_remove(struct qpcie_dev *qdev);
 void qpcie_alsa_irq_handler(struct qpcie_dev *qdev, u32 status);
+
+int qpcie_i2c_init(struct qpcie_dev *qdev);
+void qpcie_i2c_remove(struct qpcie_dev *qdev);
+int qpcie_it68051_get_status(struct qpcie_dev *qdev, u32 *width, u32 *height, u32 *fps, bool *locked);
+
+int qpcie_flash_init(struct qpcie_dev *qdev);
+void qpcie_flash_remove(struct qpcie_dev *qdev);
 
 int qpcie_sysfs_init(struct qpcie_dev *qdev);
 void qpcie_sysfs_remove(struct qpcie_dev *qdev);

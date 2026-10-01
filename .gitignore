@@ -68,6 +68,7 @@ driver/Module.markers
 test_app/*.o
 test_app/qpcie_sanity_check
 test_app/qpcie_flash
+test_app/qpcie_a50t_tool
 test_app/qpcie_fw_daemon
 test_app/qpcie_hdmi_ctl
 test_app/qpcie_hdmi_daemon

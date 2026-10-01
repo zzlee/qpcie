@@ -104,7 +104,7 @@ create_ip -name axi_crossbar -vendor xilinx.com -library ip -version 2.1 -module
 
 set_property -dict [list \
   CONFIG.NUM_SI {1} \
-  CONFIG.NUM_MI {3} \
+  CONFIG.NUM_MI {5} \
   CONFIG.PROTOCOL {AXI4LITE} \
   CONFIG.DATA_WIDTH {32} \
   CONFIG.ADDR_WIDTH {32} \
@@ -114,6 +114,10 @@ set_property -dict [list \
   CONFIG.M01_A00_ADDR_WIDTH {12} \
   CONFIG.M02_A00_BASE_ADDR {0x0000000000002000} \
   CONFIG.M02_A00_ADDR_WIDTH {12} \
+  CONFIG.M03_A00_BASE_ADDR {0x0000000000003000} \
+  CONFIG.M03_A00_ADDR_WIDTH {12} \
+  CONFIG.M04_A00_BASE_ADDR {0x0000000000004000} \
+  CONFIG.M04_A00_ADDR_WIDTH {12} \
 ] [get_ips axi_crossbar_0]
 
 generate_target all [get_ips axi_crossbar_0]
