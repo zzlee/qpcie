@@ -33,38 +33,18 @@ static void qpcie_spi_set_cs(struct qpcie_dev *qdev, bool assert)
 {
     /* CS_N=0 when asserted, CS_N=1 when deasserted. Use divider=6 for safe ~10MHz SPI clock */
     u32 cr = (6 << 4) | SPI_CR_SPI_EN | (assert ? 0 : SPI_CR_CS_N);
-    int retry = 100;
 
     qpcie_spi_write(qdev, REG_SPI_CR, cr);
-    while (retry-- > 0) {
-        if ((qpcie_spi_read(qdev, REG_SPI_CR) & SPI_CR_CS_N) == (assert ? 0 : SPI_CR_CS_N))
-            break;
-        udelay(10);
-    }
+    udelay(10);
 }
 
 static u8 qpcie_spi_xfer_byte(struct qpcie_dev *qdev, u8 tx_byte)
 {
-    int timeout = 1000;
-    u32 sr_init, sr_final, rx_val;
+    u32 rx_val;
 
-    sr_init = qpcie_spi_read(qdev, REG_SPI_SR);
     qpcie_spi_write(qdev, REG_SPI_TXD, tx_byte);
-
-    /* 8 bits at 10 MHz takes ~800ns, but PCIe write propagation on ARM64 host takes 1-2us.
-     * Wait 50us to guarantee write has retired and byte transfer is finished. */
-    udelay(50);
-    while (timeout-- > 0) {
-        u32 sr = qpcie_spi_read(qdev, REG_SPI_SR);
-        if (!(sr & SPI_SR_BUSY))
-            break;
-        udelay(10);
-    }
-    sr_final = qpcie_spi_read(qdev, REG_SPI_SR);
+    udelay(20);
     rx_val = qpcie_spi_read(qdev, REG_SPI_RXD);
-
-    dev_info(&qdev->pdev->dev, "SPI_XFER: tx=0x%02X -> rx=0x%02X (sr_init=0x%X, sr_final=0x%X, timeout_left=%d)\n",
-             tx_byte, rx_val & 0xFF, sr_init, sr_final, timeout);
 
     return (u8)(rx_val & 0xFF);
 }
@@ -102,11 +82,7 @@ static int qpcie_flash_read_id(struct qpcie_dev *qdev, u32 *id)
     u8 b0, b1, b2;
 
     mutex_lock(&qdev->flash_lock);
-    dev_info(&qdev->pdev->dev, "SPI_READ_ID: Asserting CS (CR_pre=0x%X)\n",
-             qpcie_spi_read(qdev, REG_SPI_CR));
     qpcie_spi_set_cs(qdev, true);
-    dev_info(&qdev->pdev->dev, "SPI_READ_ID: CS asserted (CR_post=0x%X)\n",
-             qpcie_spi_read(qdev, REG_SPI_CR));
 
     qpcie_spi_xfer_byte(qdev, CMD_READ_ID);
     b0 = qpcie_spi_xfer_byte(qdev, 0xFF);
