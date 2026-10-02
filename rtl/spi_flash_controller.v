@@ -54,8 +54,13 @@ module spi_flash_controller (
 );
 
     // =========================================================================
-    // Registers
+    // Registers & States
     // =========================================================================
+    localparam SPI_IDLE   = 2'd0;
+    localparam SPI_SETUP  = 2'd1;
+    localparam SPI_SAMPLE = 2'd2;
+
+    reg [1:0] spi_state;
     reg [3:0] reg_clk_div;
     reg       reg_spi_en;
     reg       spi_busy;
@@ -201,12 +206,6 @@ module spi_flash_controller (
     reg       spi_sclk_reg;
     wire      spi_sclk_out = spi_sclk_reg;
 
-    localparam SPI_IDLE  = 2'd0;
-    localparam SPI_SETUP = 2'd1;
-    localparam SPI_SAMPLE= 2'd2;
-
-    reg [1:0] spi_state;
-
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             spi_state     <= SPI_IDLE;
@@ -248,15 +247,18 @@ module spi_flash_controller (
                 end
 
                 SPI_SAMPLE: begin
-                    // Half-period high: SCLK=1, sample MISO
+                    // Half-period high: SCLK=1. Sample MISO at midpoint of high pulse.
+                    if (div_cnt == {2'b00, reg_clk_div[3:1]}) begin
+                        shift_reg_rx <= {shift_reg_rx[6:0], spi_miso};
+                    end
+
                     if (div_cnt >= {1'b0, reg_clk_div}) begin
                         div_cnt      <= 5'd0;
                         spi_sclk_reg <= 1'b0; // Falling edge
-                        shift_reg_rx <= {shift_reg_rx[6:0], spi_miso};
 
                         if (bit_cnt == 4'd7) begin
                             // Finished 8 bits
-                            reg_rx_data <= {shift_reg_rx[6:0], spi_miso};
+                            reg_rx_data <= shift_reg_rx;
                             rx_valid    <= 1'b1;
                             spi_busy    <= 1'b0;
                             spi_mosi    <= 1'b1;
@@ -281,33 +283,28 @@ module spi_flash_controller (
     // STARTUPE2 Primitive to Drive Dedicated CCLK_0 (Pin E8)
     // =========================================================================
     // Xilinx 7-Series STARTUPE2 requires 3-4 clock cycles on USRCCLKO after EOS
-    // to switch internal multiplexer to user clock. We run a 4-cycle toggle
-    // while CS_N is deasserted when reg_spi_en is first asserted.
-    reg [2:0] startup_sync_cnt;
-    reg       startup_sync_active;
-    reg       reg_spi_en_prev;
+    // to switch internal multiplexer to user clock. We run a 64-cycle toggle
+    // while CS_N is deasserted when EOS is asserted and reg_spi_en is enabled.
+    wire startup_eos;
+    reg [5:0] startup_sync_cnt;
+    reg       startup_sync_done;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            reg_spi_en_prev     <= 1'b0;
-            startup_sync_active <= 1'b0;
-            startup_sync_cnt    <= 3'd0;
+            startup_sync_cnt  <= 6'd0;
+            startup_sync_done <= 1'b0;
         end else begin
-            reg_spi_en_prev <= reg_spi_en;
-            if (reg_spi_en && !reg_spi_en_prev) begin
-                startup_sync_active <= 1'b1;
-                startup_sync_cnt    <= 3'd0;
-            end else if (startup_sync_active) begin
-                if (startup_sync_cnt == 3'd7) begin
-                    startup_sync_active <= 1'b0;
+            if (!startup_sync_done && (startup_eos || reg_spi_en)) begin
+                if (startup_sync_cnt == 6'd63) begin
+                    startup_sync_done <= 1'b1;
                 end else begin
-                    startup_sync_cnt <= startup_sync_cnt + 1'b1;
+                    startup_sync_cnt <= startup_sync_cnt + 6'd1;
                 end
             end
         end
     end
 
-    wire sync_clk   = startup_sync_active ? startup_sync_cnt[0] : spi_sclk_reg;
+    wire sync_clk   = (!startup_sync_done) ? startup_sync_cnt[1] : spi_sclk_reg;
     wire cclk_drive = sync_clk;
     wire cclk_ts    = reg_spi_en ? 1'b0 : 1'b1;
 
@@ -317,9 +314,9 @@ module spi_flash_controller (
     ) u_startup (
         .CFGCLK     (),
         .CFGMCLK    (),
-        .EOS        (),
+        .EOS        (startup_eos),
         .PREQ       (),
-        .CLK        (1'b0),
+        .CLK        (clk),
         .GSR        (1'b0),
         .GTS        (1'b0),
         .KEYCLEARB  (1'b1),

@@ -54,6 +54,7 @@ module cc_tx_encoder #(
     reg [6:0]  req_lower_addr_q;
     reg        req_bar_sel_q;
     reg [31:0] rdata_captured;
+    reg [11:0] watch_dog_cnt;
 
     assign cc_busy          = (state != IDLE);
     assign bar0_axil_rready = (state == WAIT_RDATA) && !req_bar_sel_q;
@@ -73,11 +74,13 @@ module cc_tx_encoder #(
             req_lower_addr_q <= 7'd0;
             req_bar_sel_q    <= 1'b0;
             rdata_captured   <= 32'd0;
+            watch_dog_cnt    <= 12'd0;
         end else begin
             case (state)
                 IDLE: begin
                     m_axis_cc_tvalid <= 1'b0;
                     read_req_ack     <= 1'b0;
+                    watch_dog_cnt    <= 12'd0;
 
                     if (read_req_valid) begin
                         req_tag_q        <= read_req_tag;
@@ -90,9 +93,12 @@ module cc_tx_encoder #(
                 end
 
                 WAIT_RDATA: begin
-                    read_req_ack <= 1'b0;
-                    if (req_bar_sel_q ? bar1_axil_rvalid : bar0_axil_rvalid) begin
-                        rdata_captured <= req_bar_sel_q ? bar1_axil_rdata : bar0_axil_rdata;
+                    read_req_ack  <= 1'b0;
+                    watch_dog_cnt <= watch_dog_cnt + 12'd1;
+
+                    if ((req_bar_sel_q ? bar1_axil_rvalid : bar0_axil_rvalid) || (watch_dog_cnt >= 12'd1024)) begin
+                        rdata_captured <= (watch_dog_cnt >= 12'd1024) ? 32'hFFFFFFFF :
+                                          (req_bar_sel_q ? bar1_axil_rdata : bar0_axil_rdata);
 
                         // Build CC TLP Frame per PG213 Table 52 (UltraScale+)
                         m_axis_cc_tdata         <= {DATA_WIDTH{1'b0}};
@@ -106,17 +112,20 @@ module cc_tx_encoder #(
                         m_axis_cc_tdata[79:72]  <= 8'd0;              // Target Function / Completer ID
                         m_axis_cc_tdata[80]     <= 1'b0;              // Completer ID Enable (0 = Core automatically inserts BDF)
                         m_axis_cc_tdata[95:81]  <= 15'd0;             // TC, Attr, Reserved
-                        m_axis_cc_tdata[127:96] <= req_bar_sel_q ? bar1_axil_rdata : bar0_axil_rdata; // CplD Data DW0
+                        m_axis_cc_tdata[127:96] <= (watch_dog_cnt >= 12'd1024) ? 32'hFFFFFFFF :
+                                                   (req_bar_sel_q ? bar1_axil_rdata : bar0_axil_rdata); // CplD Data DW0
 
                         m_axis_cc_tkeep         <= 8'h0F;             // First 4 DWs valid
                         m_axis_cc_tlast         <= 1'b1;
                         m_axis_cc_tvalid        <= 1'b1;
+                        watch_dog_cnt           <= 12'd0;
                         state                   <= SEND_CC;
                     end
                 end
 
                 SEND_CC: begin
-                    if (m_axis_cc_tready) begin
+                    watch_dog_cnt <= watch_dog_cnt + 12'd1;
+                    if (m_axis_cc_tready || (watch_dog_cnt >= 12'd1024)) begin
                         m_axis_cc_tvalid <= 1'b0;
                         state            <= IDLE;
                     end

@@ -87,6 +87,7 @@ module cq_rx_decoder #(
     wire [2:0]  bar_id     = (DATA_WIDTH >= 256) ? s_axis_cq_tdata[114:112] : s_axis_cq_tuser[2:0]; // 3'b000: BAR0, 3'b001: BAR1
 
     reg         rdata_seen;
+    reg [11:0]  watch_dog_cnt;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -117,6 +118,7 @@ module cq_rx_decoder #(
             read_req_tc         <= 11'd0;
             read_req_bar_sel    <= 1'b0;
             rdata_seen          <= 1'b0;
+            watch_dog_cnt       <= 12'd0;
         end else begin
             case (state)
                 IDLE: begin
@@ -128,6 +130,7 @@ module cq_rx_decoder #(
                     m_axil_bar1_wvalid  <= 1'b0;
                     m_axil_bar1_arvalid <= 1'b0;
                     rdata_seen          <= 1'b0;
+                    watch_dog_cnt       <= 12'd0;
 
                     if (s_axis_cq_tvalid && s_axis_cq_tready) begin
                         if (req_type == 4'b0001) begin // Memory Write (MWr)
@@ -172,6 +175,7 @@ module cq_rx_decoder #(
                 end
 
                 WRITE_AXIL: begin
+                    watch_dog_cnt <= watch_dog_cnt + 12'd1;
                     if (m_axil_bar0_awready || m_axil_bar1_awready) begin
                         m_axil_bar0_awvalid <= 1'b0;
                         m_axil_bar1_awvalid <= 1'b0;
@@ -180,13 +184,18 @@ module cq_rx_decoder #(
                         m_axil_bar0_wvalid <= 1'b0;
                         m_axil_bar1_wvalid <= 1'b0;
                     end
-                    if (m_axil_bar0_bvalid || m_axil_bar1_bvalid) begin
-                        s_axis_cq_tready <= 1'b1;
-                        state            <= IDLE;
+                    if (m_axil_bar0_bvalid || m_axil_bar1_bvalid || (watch_dog_cnt >= 12'd1024)) begin
+                        m_axil_bar0_awvalid <= 1'b0;
+                        m_axil_bar1_awvalid <= 1'b0;
+                        m_axil_bar0_wvalid  <= 1'b0;
+                        m_axil_bar1_wvalid  <= 1'b0;
+                        s_axis_cq_tready    <= 1'b1;
+                        state               <= IDLE;
                     end
                 end
 
                 READ_AXIL: begin
+                    watch_dog_cnt <= watch_dog_cnt + 12'd1;
                     if (read_req_ack) read_req_valid <= 1'b0;
 
                     if (m_axil_bar0_arready || m_axil_bar1_arready) begin
@@ -200,6 +209,13 @@ module cq_rx_decoder #(
                         s_axis_cq_tready <= 1'b1;
                         rdata_seen       <= 1'b0;
                         state            <= IDLE;
+                    end else if (watch_dog_cnt >= 12'd1024) begin
+                        m_axil_bar0_arvalid <= 1'b0;
+                        m_axil_bar1_arvalid <= 1'b0;
+                        read_req_valid      <= 1'b0;
+                        s_axis_cq_tready    <= 1'b1;
+                        rdata_seen          <= 1'b0;
+                        state               <= IDLE;
                     end
                 end
 
