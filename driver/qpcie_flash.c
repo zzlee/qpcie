@@ -19,6 +19,7 @@
 
 static inline u32 qpcie_spi_read(struct qpcie_dev *qdev, u32 reg)
 {
+    (void)ioread32(qdev->bar1_mmio + BAR1_OFFSET_SPI_FLASH + reg);
     return ioread32(qdev->bar1_mmio + BAR1_OFFSET_SPI_FLASH + reg);
 }
 

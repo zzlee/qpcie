@@ -68,6 +68,7 @@ static inline void write32(volatile uint32_t *bar1, uint32_t offset, uint32_t va
 
 static inline uint32_t read32(volatile uint32_t *bar1, uint32_t offset)
 {
+    (void)*(volatile uint32_t *)((volatile uint8_t *)bar1 + offset);
     return *(volatile uint32_t *)((volatile uint8_t *)bar1 + offset);
 }
 

@@ -86,6 +86,10 @@ module cq_rx_decoder #(
     wire [7:0]  req_tag    = s_axis_cq_tdata[103:96];
     wire [2:0]  bar_id     = (DATA_WIDTH >= 256) ? s_axis_cq_tdata[114:112] : s_axis_cq_tuser[2:0]; // 3'b000: BAR0, 3'b001: BAR1
 
+    reg         write_req_bar_sel; // 0: BAR0, 1: BAR1
+    reg         aw_done;
+    reg         w_done;
+    reg         ar_done;
     reg         rdata_seen;
     reg [11:0]  watch_dog_cnt;
 
@@ -117,6 +121,10 @@ module cq_rx_decoder #(
             read_req_lower_addr <= 7'd0;
             read_req_tc         <= 11'd0;
             read_req_bar_sel    <= 1'b0;
+            write_req_bar_sel   <= 1'b0;
+            aw_done             <= 1'b0;
+            w_done              <= 1'b0;
+            ar_done             <= 1'b0;
             rdata_seen          <= 1'b0;
             watch_dog_cnt       <= 12'd0;
         end else begin
@@ -129,6 +137,9 @@ module cq_rx_decoder #(
                     m_axil_bar1_awvalid <= 1'b0;
                     m_axil_bar1_wvalid  <= 1'b0;
                     m_axil_bar1_arvalid <= 1'b0;
+                    aw_done             <= 1'b0;
+                    w_done              <= 1'b0;
+                    ar_done             <= 1'b0;
                     rdata_seen          <= 1'b0;
                     watch_dog_cnt       <= 12'd0;
 
@@ -139,12 +150,14 @@ module cq_rx_decoder #(
                                  * address. BAR1 is a 64-KiB aperture, so pass
                                  * only its BAR-relative offset to the AXI
                                  * crossbar. */
+                                write_req_bar_sel   <= 1'b1;
                                 m_axil_bar1_awaddr  <= {16'd0, req_addr[15:0]};
                                 m_axil_bar1_awvalid <= 1'b1;
                                 m_axil_bar1_wdata   <= (DATA_WIDTH >= 256) ? s_axis_cq_tdata[159:128] : s_axis_cq_tdata[127:96];
                                 m_axil_bar1_wstrb   <= 4'hF;
                                 m_axil_bar1_wvalid  <= 1'b1;
                             end else begin // BAR0
+                                write_req_bar_sel   <= 1'b0;
                                 m_axil_bar0_awaddr  <= req_addr[31:0];
                                 m_axil_bar0_awvalid <= 1'b1;
                                 m_axil_bar0_wdata   <= (DATA_WIDTH >= 256) ? s_axis_cq_tdata[159:128] : s_axis_cq_tdata[127:96];
@@ -176,21 +189,44 @@ module cq_rx_decoder #(
 
                 WRITE_AXIL: begin
                     watch_dog_cnt <= watch_dog_cnt + 12'd1;
-                    if (m_axil_bar0_awready || m_axil_bar1_awready) begin
-                        m_axil_bar0_awvalid <= 1'b0;
-                        m_axil_bar1_awvalid <= 1'b0;
-                    end
-                    if (m_axil_bar0_wready || m_axil_bar1_wready) begin
-                        m_axil_bar0_wvalid <= 1'b0;
-                        m_axil_bar1_wvalid <= 1'b0;
-                    end
-                    if (m_axil_bar0_bvalid || m_axil_bar1_bvalid || (watch_dog_cnt >= 12'd1024)) begin
-                        m_axil_bar0_awvalid <= 1'b0;
-                        m_axil_bar1_awvalid <= 1'b0;
-                        m_axil_bar0_wvalid  <= 1'b0;
-                        m_axil_bar1_wvalid  <= 1'b0;
-                        s_axis_cq_tready    <= 1'b1;
-                        state               <= IDLE;
+                    if (write_req_bar_sel) begin // BAR1
+                        if (m_axil_bar1_awvalid && m_axil_bar1_awready) begin
+                            m_axil_bar1_awvalid <= 1'b0;
+                            aw_done             <= 1'b1;
+                        end
+                        if (m_axil_bar1_wvalid && m_axil_bar1_wready) begin
+                            m_axil_bar1_wvalid  <= 1'b0;
+                            w_done              <= 1'b1;
+                        end
+                        if (((aw_done || (m_axil_bar1_awvalid && m_axil_bar1_awready)) &&
+                             (w_done  || (m_axil_bar1_wvalid  && m_axil_bar1_wready)) &&
+                             m_axil_bar1_bvalid) || (watch_dog_cnt >= 12'd1024)) begin
+                            m_axil_bar1_awvalid <= 1'b0;
+                            m_axil_bar1_wvalid  <= 1'b0;
+                            s_axis_cq_tready    <= 1'b1;
+                            aw_done             <= 1'b0;
+                            w_done              <= 1'b0;
+                            state               <= IDLE;
+                        end
+                    end else begin // BAR0
+                        if (m_axil_bar0_awvalid && m_axil_bar0_awready) begin
+                            m_axil_bar0_awvalid <= 1'b0;
+                            aw_done             <= 1'b1;
+                        end
+                        if (m_axil_bar0_wvalid && m_axil_bar0_wready) begin
+                            m_axil_bar0_wvalid  <= 1'b0;
+                            w_done              <= 1'b1;
+                        end
+                        if (((aw_done || (m_axil_bar0_awvalid && m_axil_bar0_awready)) &&
+                             (w_done  || (m_axil_bar0_wvalid  && m_axil_bar0_wready)) &&
+                             m_axil_bar0_bvalid) || (watch_dog_cnt >= 12'd1024)) begin
+                            m_axil_bar0_awvalid <= 1'b0;
+                            m_axil_bar0_wvalid  <= 1'b0;
+                            s_axis_cq_tready    <= 1'b1;
+                            aw_done             <= 1'b0;
+                            w_done              <= 1'b0;
+                            state               <= IDLE;
+                        end
                     end
                 end
 
@@ -198,24 +234,48 @@ module cq_rx_decoder #(
                     watch_dog_cnt <= watch_dog_cnt + 12'd1;
                     if (read_req_ack) read_req_valid <= 1'b0;
 
-                    if (m_axil_bar0_arready || m_axil_bar1_arready) begin
-                        m_axil_bar0_arvalid <= 1'b0;
-                        m_axil_bar1_arvalid <= 1'b0;
-                    end
-                    if (m_axil_bar0_rvalid || m_axil_bar1_rvalid) begin
-                        rdata_seen <= 1'b1;
-                    end
-                    if ((rdata_seen || m_axil_bar0_rvalid || m_axil_bar1_rvalid) && !cc_busy) begin
-                        s_axis_cq_tready <= 1'b1;
-                        rdata_seen       <= 1'b0;
-                        state            <= IDLE;
-                    end else if (watch_dog_cnt >= 12'd1024) begin
-                        m_axil_bar0_arvalid <= 1'b0;
-                        m_axil_bar1_arvalid <= 1'b0;
-                        read_req_valid      <= 1'b0;
-                        s_axis_cq_tready    <= 1'b1;
-                        rdata_seen          <= 1'b0;
-                        state               <= IDLE;
+                    if (read_req_bar_sel) begin // BAR1
+                        if (m_axil_bar1_arvalid && m_axil_bar1_arready) begin
+                            m_axil_bar1_arvalid <= 1'b0;
+                            ar_done             <= 1'b1;
+                        end
+                        if ((ar_done || (m_axil_bar1_arvalid && m_axil_bar1_arready)) && m_axil_bar1_rvalid) begin
+                            rdata_seen <= 1'b1;
+                        end
+                        if ((rdata_seen || ((ar_done || (m_axil_bar1_arvalid && m_axil_bar1_arready)) && m_axil_bar1_rvalid)) && !cc_busy) begin
+                            s_axis_cq_tready <= 1'b1;
+                            rdata_seen       <= 1'b0;
+                            ar_done          <= 1'b0;
+                            state            <= IDLE;
+                        end else if (watch_dog_cnt >= 12'd1024) begin
+                            m_axil_bar1_arvalid <= 1'b0;
+                            read_req_valid      <= 1'b0;
+                            s_axis_cq_tready    <= 1'b1;
+                            rdata_seen          <= 1'b0;
+                            ar_done             <= 1'b0;
+                            state               <= IDLE;
+                        end
+                    end else begin // BAR0
+                        if (m_axil_bar0_arvalid && m_axil_bar0_arready) begin
+                            m_axil_bar0_arvalid <= 1'b0;
+                            ar_done             <= 1'b1;
+                        end
+                        if ((ar_done || (m_axil_bar0_arvalid && m_axil_bar0_arready)) && m_axil_bar0_rvalid) begin
+                            rdata_seen <= 1'b1;
+                        end
+                        if ((rdata_seen || ((ar_done || (m_axil_bar0_arvalid && m_axil_bar0_arready)) && m_axil_bar0_rvalid)) && !cc_busy) begin
+                            s_axis_cq_tready <= 1'b1;
+                            rdata_seen       <= 1'b0;
+                            ar_done          <= 1'b0;
+                            state            <= IDLE;
+                        end else if (watch_dog_cnt >= 12'd1024) begin
+                            m_axil_bar0_arvalid <= 1'b0;
+                            read_req_valid      <= 1'b0;
+                            s_axis_cq_tready    <= 1'b1;
+                            rdata_seen          <= 1'b0;
+                            ar_done             <= 1'b0;
+                            state               <= IDLE;
+                        end
                     end
                 end
 

@@ -57,8 +57,8 @@ module cc_tx_encoder #(
     reg [11:0] watch_dog_cnt;
 
     assign cc_busy          = (state != IDLE);
-    assign bar0_axil_rready = (state == WAIT_RDATA) && !req_bar_sel_q;
-    assign bar1_axil_rready = (state == WAIT_RDATA) && req_bar_sel_q;
+    assign bar0_axil_rready = 1'b1;
+    assign bar1_axil_rready = 1'b1;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
