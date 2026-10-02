@@ -263,9 +263,36 @@ module spi_flash_controller (
     // =========================================================================
     // STARTUPE2 Primitive to Drive Dedicated CCLK_0 (Pin E8)
     // =========================================================================
-    // When SPI_EN is active and CS_N is asserted (0), USRCCLKO drives CCLK.
-    wire cclk_drive = (reg_spi_en && !spi_cs_n) ? spi_sclk_out : 1'b0;
-    wire cclk_ts    = (reg_spi_en && !spi_cs_n) ? 1'b0 : 1'b1;
+    // Xilinx 7-Series STARTUPE2 requires 3-4 clock cycles on USRCCLKO after EOS
+    // to switch internal multiplexer to user clock. We run a 4-cycle toggle
+    // while CS_N is deasserted when reg_spi_en is first asserted.
+    reg [2:0] startup_sync_cnt;
+    reg       startup_sync_active;
+    reg       reg_spi_en_prev;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            reg_spi_en_prev     <= 1'b0;
+            startup_sync_active <= 1'b0;
+            startup_sync_cnt    <= 3'd0;
+        end else begin
+            reg_spi_en_prev <= reg_spi_en;
+            if (reg_spi_en && !reg_spi_en_prev) begin
+                startup_sync_active <= 1'b1;
+                startup_sync_cnt    <= 3'd0;
+            end else if (startup_sync_active) begin
+                if (startup_sync_cnt == 3'd7) begin
+                    startup_sync_active <= 1'b0;
+                end else begin
+                    startup_sync_cnt <= startup_sync_cnt + 1'b1;
+                end
+            end
+        end
+    end
+
+    wire sync_clk   = startup_sync_active ? startup_sync_cnt[0] : spi_sclk_reg;
+    wire cclk_drive = sync_clk;
+    wire cclk_ts    = reg_spi_en ? 1'b0 : 1'b1;
 
     STARTUPE2 #(
         .PROG_USR("FALSE"),

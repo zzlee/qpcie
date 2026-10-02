@@ -97,7 +97,7 @@ set_property PULLUP true [get_ports sda_front]
 # 7. Macronix MX25L12835F SPI Flash (Bank 14 User Runtime Access)
 # Note: SCLK is driven via internal STARTUPE2 primitive to CCLK_0 (Pin E8).
 # ------------------------------------------------------------------------------
-set_property PACKAGE_PIN T18 [get_ports spi_fcs_b]
+set_property PACKAGE_PIN L15 [get_ports spi_fcs_b]
 set_property IOSTANDARD LVCMOS33 [get_ports spi_fcs_b]
 
 set_property PACKAGE_PIN K16 [get_ports spi_d00_mosi]
