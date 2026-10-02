@@ -85,8 +85,12 @@ static int qpcie_i2c_xfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int nu
         bool is_last_msg = (i == num - 1);
         u8 addr_byte = (msg->addr << 1) | (is_read ? 1 : 0);
 
-        /* Send START + Address */
-        ret = qpcie_i2c_send_byte(qdev, addr_byte, I2C_CR_STA);
+        /* Send START + Address. If length is 0 (quick command), send STOP as well. */
+        u32 sta_flags = I2C_CR_STA;
+        if (msg->len == 0)
+            sta_flags |= I2C_CR_STO;
+
+        ret = qpcie_i2c_send_byte(qdev, addr_byte, sta_flags);
         if (ret) {
             /* Address NACK or bus error: Send STOP */
             qpcie_i2c_write(qdev, REG_I2C_CR, I2C_CR_STO);
@@ -97,7 +101,7 @@ static int qpcie_i2c_xfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int nu
         if (is_read) {
             for (j = 0; j < msg->len; j++) {
                 bool is_last_byte = (j == msg->len - 1);
-                bool send_stop = is_last_byte && is_last_msg;
+                bool send_stop = is_last_byte;
 
                 ret = qpcie_i2c_recv_byte(qdev, &msg->buf[j], is_last_byte, send_stop);
                 if (ret)
@@ -108,7 +112,7 @@ static int qpcie_i2c_xfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int nu
                 bool is_last_byte = (j == msg->len - 1);
                 u32 cr = 0;
 
-                if (is_last_byte && is_last_msg)
+                if (is_last_byte)
                     cr |= I2C_CR_STO;
 
                 ret = qpcie_i2c_send_byte(qdev, msg->buf[j], cr);

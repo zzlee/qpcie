@@ -29,8 +29,8 @@ static inline void qpcie_spi_write(struct qpcie_dev *qdev, u32 reg, u32 val)
 
 static void qpcie_spi_set_cs(struct qpcie_dev *qdev, bool assert)
 {
-    /* CS_N=0 when asserted, CS_N=1 when deasserted */
-    u32 cr = SPI_CR_SPI_EN | (assert ? 0 : SPI_CR_CS_N);
+    /* CS_N=0 when asserted, CS_N=1 when deasserted. Use divider=6 for safe ~10MHz SPI clock */
+    u32 cr = (6 << 4) | SPI_CR_SPI_EN | (assert ? 0 : SPI_CR_CS_N);
     qpcie_spi_write(qdev, REG_SPI_CR, cr);
 }
 
