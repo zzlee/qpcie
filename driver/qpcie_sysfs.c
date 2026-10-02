@@ -413,10 +413,10 @@ static ssize_t version_show(struct device *dev, struct device_attribute *attr, c
     u32 ver = 0, git = 0, date = 0, caps = 0;
 
     if (qdev && qdev->bar0_mmio) {
-        ver  = ioread32(qdev->bar0_mmio + REG_VERSION_ID);
-        git  = ioread32(qdev->bar0_mmio + REG_GIT_COMMIT_HASH);
-        date = ioread32(qdev->bar0_mmio + REG_BUILD_TIMESTAMP);
-        caps = ioread32(qdev->bar0_mmio + REG_HARDWARE_CAPS);
+        ver  = ioread32(qdev->bar0_mmio + REG_NEW_GLOBAL_VERSION);
+        git  = ioread32(qdev->bar0_mmio + REG_NEW_GLOBAL_GITHASH);
+        date = ioread32(qdev->bar0_mmio + REG_NEW_GLOBAL_BUILDTIME);
+        caps = ioread32(qdev->bar0_mmio + REG_NEW_GLOBAL_CAPS);
     }
 
     return sysfs_emit(buf, "v%d.%d.%d-variant%d (Git: %08X, Date: %08X, Caps: 0x%08X)\n",
