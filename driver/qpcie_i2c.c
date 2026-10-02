@@ -154,18 +154,27 @@ int qpcie_it68051_get_status(struct qpcie_dev *qdev, u32 *width, u32 *height, u3
     if (!qdev->i2c_registered)
         return -ENODEV;
 
-    /* 1. Check Cable & Clock Lock on IT68051 (0x48) */
-    msgs[0].addr = 0x48;
+    /* 1. Check Cable & Clock Lock on IT68051 (0x49 or 0x48) */
+    u8 it68051_addr = 0x49;
+    msgs[0].addr = it68051_addr;
     msgs[0].flags = 0;
     msgs[0].len = 1;
     msgs[0].buf = &reg_addr;
 
-    msgs[1].addr = 0x48;
+    msgs[1].addr = it68051_addr;
     msgs[1].flags = I2C_M_RD;
     msgs[1].len = 1;
     msgs[1].buf = &status_val;
 
     ret = i2c_transfer(&qdev->i2c_adap, msgs, 2);
+    if (ret != 2) {
+        /* Try fallback 0x48 */
+        it68051_addr = 0x48;
+        msgs[0].addr = it68051_addr;
+        msgs[1].addr = it68051_addr;
+        ret = i2c_transfer(&qdev->i2c_adap, msgs, 2);
+    }
+
     if (ret != 2) {
         *locked = false;
         *width = 0;
