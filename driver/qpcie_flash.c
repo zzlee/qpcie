@@ -51,8 +51,8 @@ static u8 qpcie_spi_xfer_byte(struct qpcie_dev *qdev, u8 tx_byte)
     sr_final = qpcie_spi_read(qdev, REG_SPI_SR);
     rx_val = qpcie_spi_read(qdev, REG_SPI_RXD);
 
-    dev_info(&qdev->pdev->dev, "SPI_XFER: tx=0x%02X -> rx=0x%02X (sr_init=0x%X, sr_final=0x%X, timeout_left=%d)\n",
-             tx_byte, rx_val & 0xFF, sr_init, sr_final, timeout);
+    dev_dbg(&qdev->pdev->dev, "SPI_XFER: tx=0x%02X -> rx=0x%02X (sr_init=0x%X, sr_final=0x%X, timeout_left=%d)\n",
+            tx_byte, rx_val & 0xFF, sr_init, sr_final, timeout);
 
     return (u8)(rx_val & 0xFF);
 }
@@ -104,6 +104,8 @@ static int qpcie_flash_read_id(struct qpcie_dev *qdev, u32 *id)
     mutex_unlock(&qdev->flash_lock);
 
     *id = ((u32)b0 << 16) | ((u32)b1 << 8) | b2;
+    dev_info(&qdev->pdev->dev, "SPI_READ_ID: Result=0x%06X (Manufacturer=0x%02X, Type=0x%02X, Capacity=0x%02X)\n",
+             *id, b0, b1, b2);
     return 0;
 }
 

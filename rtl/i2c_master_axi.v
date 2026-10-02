@@ -109,9 +109,13 @@ module i2c_master_axi #(
     // =========================================================================
     // AXI-Lite Write Channels
     // =========================================================================
-    reg [7:0] awaddr_q;
-    reg       aw_done;
-    reg       w_done;
+    reg [7:0]  awaddr_q;
+    reg [31:0] wdata_q;
+    reg        aw_done;
+    reg        w_done;
+
+    wire [7:0]  wr_addr = aw_done ? awaddr_q : s_axil_awaddr;
+    wire [31:0] wr_data = w_done  ? wdata_q  : s_axil_wdata;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -122,6 +126,7 @@ module i2c_master_axi #(
             aw_done         <= 1'b0;
             w_done          <= 1'b0;
             awaddr_q        <= 8'h00;
+            wdata_q         <= 32'h00000000;
             reg_prer        <= DEFAULT_PRESCALER;
             reg_ctr_en      <= 1'b0;
             reg_ctr_ien     <= 1'b0;
@@ -149,6 +154,7 @@ module i2c_master_axi #(
             // Data write handshake
             if (!w_done && s_axil_wvalid && (!s_axil_bvalid || s_axil_bready)) begin
                 s_axil_wready <= 1'b1;
+                wdata_q       <= s_axil_wdata;
                 w_done        <= 1'b1;
             end else begin
                 s_axil_wready <= 1'b0;
@@ -163,23 +169,23 @@ module i2c_master_axi #(
                 aw_done       <= 1'b0;
                 w_done        <= 1'b0;
 
-                case (aw_done ? awaddr_q[4:2] : s_axil_awaddr[4:2])
-                    3'b000: reg_prer[7:0]  <= s_axil_wdata[7:0];   // 0x00
-                    3'b001: reg_prer[15:8] <= s_axil_wdata[7:0];   // 0x04
-                    3'b010: begin                                  // 0x08 (CTR)
-                        reg_ctr_en  <= s_axil_wdata[7];
-                        reg_ctr_ien <= s_axil_wdata[6];
+                case (wr_addr[4:2])
+                    3'b000: reg_prer[7:0]  <= wr_data[7:0];   // 0x00
+                    3'b001: reg_prer[15:8] <= wr_data[7:0];   // 0x04
+                    3'b010: begin                             // 0x08 (CTR)
+                        reg_ctr_en  <= wr_data[7];
+                        reg_ctr_ien <= wr_data[6];
                     end
-                    3'b011: reg_txr <= s_axil_wdata[7:0];          // 0x0C (TXR)
-                    3'b100: begin                                  // 0x10 (CR)
-                        cmd_sta         <= s_axil_wdata[7];
-                        cmd_sto         <= s_axil_wdata[6];
-                        cmd_rd          <= s_axil_wdata[5];
-                        cmd_wr          <= s_axil_wdata[4];
-                        cmd_ack         <= s_axil_wdata[3];
-                        cmd_iack_pulse  <= s_axil_wdata[0];
-                        cmd_start_pulse <= (s_axil_wdata[7] | s_axil_wdata[6] | 
-                                            s_axil_wdata[5] | s_axil_wdata[4]);
+                    3'b011: reg_txr <= wr_data[7:0];          // 0x0C (TXR)
+                    3'b100: begin                             // 0x10 (CR)
+                        cmd_sta         <= wr_data[7];
+                        cmd_sto         <= wr_data[6];
+                        cmd_rd          <= wr_data[5];
+                        cmd_wr          <= wr_data[4];
+                        cmd_ack         <= wr_data[3];
+                        cmd_iack_pulse  <= wr_data[0];
+                        cmd_start_pulse <= (wr_data[7] | wr_data[6] | 
+                                            wr_data[5] | wr_data[4]);
                     end
                     default: ;
                 endcase

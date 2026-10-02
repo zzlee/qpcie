@@ -70,11 +70,15 @@ module spi_flash_controller (
     // =========================================================================
     // AXI-Lite Write Channels
     // =========================================================================
-    reg [7:0] awaddr_q;
-    reg       aw_done;
-    reg       w_done;
-    reg       start_tx_pulse;
-    reg [7:0] tx_data_latch;
+    reg [7:0]  awaddr_q;
+    reg [31:0] wdata_q;
+    reg        aw_done;
+    reg        w_done;
+    reg        start_tx_pulse;
+    reg [7:0]  tx_data_latch;
+
+    wire [7:0]  wr_addr = aw_done ? awaddr_q : s_axil_awaddr;
+    wire [31:0] wr_data = w_done  ? wdata_q  : s_axil_wdata;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -85,6 +89,7 @@ module spi_flash_controller (
             aw_done        <= 1'b0;
             w_done         <= 1'b0;
             awaddr_q       <= 8'h00;
+            wdata_q        <= 32'h00000000;
             spi_cs_n       <= 1'b1; // Default deasserted
             reg_spi_en     <= 1'b1;
             reg_clk_div    <= 4'd6; // ~10 MHz @ 125 MHz
@@ -106,15 +111,16 @@ module spi_flash_controller (
                 s_axil_awready <= 1'b1;
                 awaddr_q       <= s_axil_awaddr;
                 aw_done        <= 1'b1;
-            end else if (aw_done && (w_done || s_axil_wvalid) && !s_axil_bvalid) begin
+            end else begin
                 s_axil_awready <= 1'b0;
             end
 
             // Data write handshake
             if (!w_done && s_axil_wvalid && (!s_axil_bvalid || s_axil_bready)) begin
                 s_axil_wready <= 1'b1;
+                wdata_q       <= s_axil_wdata;
                 w_done        <= 1'b1;
-            end else if (w_done && (aw_done || s_axil_awvalid) && !s_axil_bvalid) begin
+            end else begin
                 s_axil_wready <= 1'b0;
             end
 
@@ -129,20 +135,20 @@ module spi_flash_controller (
                 aw_done        <= 1'b0;
                 w_done         <= 1'b0;
 
-                case (aw_done ? awaddr_q[5:2] : s_axil_awaddr[5:2])
+                case (wr_addr[5:2])
                     4'h0: begin // 0x00: SPICR
-                        spi_cs_n    <= s_axil_wdata[0];
-                        reg_spi_en  <= s_axil_wdata[1];
-                        reg_clk_div <= s_axil_wdata[7:4];
+                        spi_cs_n    <= wr_data[0];
+                        reg_spi_en  <= wr_data[1];
+                        reg_clk_div <= wr_data[7:4];
                     end
                     4'h2: begin // 0x08: SPIDTR
                         if (!spi_busy) begin
-                            tx_data_latch  <= s_axil_wdata[7:0];
+                            tx_data_latch  <= wr_data[7:0];
                             start_tx_pulse <= 1'b1;
                         end
                     end
                     4'h8: begin // 0x20: ICAP_CMD
-                        if (s_axil_wdata == 32'h52454C4F) begin // "RELO"
+                        if (wr_data == 32'h52454C4F) begin // "RELO"
                             icap_trigger <= 1'b1;
                         end
                     end
