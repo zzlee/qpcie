@@ -106,6 +106,12 @@ set_property IOSTANDARD LVCMOS33 [get_ports spi_d00_mosi]
 set_property PACKAGE_PIN L17 [get_ports spi_d01_din]
 set_property IOSTANDARD LVCMOS33 [get_ports spi_d01_din]
 
+set_property PACKAGE_PIN J15 [get_ports spi_d02_wp_n]
+set_property IOSTANDARD LVCMOS33 [get_ports spi_d02_wp_n]
+
+set_property PACKAGE_PIN J16 [get_ports spi_d03_hld_n]
+set_property IOSTANDARD LVCMOS33 [get_ports spi_d03_hld_n]
+
 # ------------------------------------------------------------------------------
 # 8. Front-End Reset Output (IT68051 active-low reset via SU8 AND gate)
 # ------------------------------------------------------------------------------
@@ -119,6 +125,7 @@ set_property CFGBVS VCCO [current_design]
 set_property CONFIG_VOLTAGE 3.3 [current_design]
 set_property BITSTREAM.CONFIG.CONFIGRATE 40 [current_design]
 set_property BITSTREAM.CONFIG.SPI_BUSWIDTH 4 [current_design]
+set_property BITSTREAM.CONFIG.UNUSEDPIN Pullup [current_design]
 
 set_property SEVERITY {Warning} [get_drc_checks NSTD-1]
 set_property SEVERITY {Warning} [get_drc_checks UCIO-1]

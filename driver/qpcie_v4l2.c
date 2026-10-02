@@ -1264,6 +1264,9 @@ void qpcie_v4l2_check_source_change(struct qpcie_v4l2_channel *vch)
         return;
 
     cur_status = ioread32(qdev->bar0_mmio + REG_HDMI_RX_STATUS);
+    if (cur_status == 0xFFFFFFFF)
+        return; /* PCIe link offline or unmapped: bail out immediately to prevent Tegra CBB error storm */
+
     cur_width  = ioread32(qdev->bar0_mmio + REG_HDMI_RX_WIDTH);
     cur_height = ioread32(qdev->bar0_mmio + REG_HDMI_RX_HEIGHT);
     cur_res    = (cur_width << 16) | (cur_height & 0xFFFF);
@@ -1291,10 +1294,13 @@ static void qpcie_v4l2_hdmi_monitor_work_fn(struct work_struct *work)
     if (!vch || !vch->hdmi_monitor_running)
         return;
 
+    if (vch->qdev && vch->qdev->pdev && pci_channel_offline(vch->qdev->pdev))
+        return;
+
     qpcie_v4l2_check_source_change(vch);
 
     if (vch->hdmi_monitor_running)
-        schedule_delayed_work(&vch->hdmi_monitor_work, msecs_to_jiffies(100));
+        schedule_delayed_work(&vch->hdmi_monitor_work, msecs_to_jiffies(250));
 }
 
 int qpcie_v4l2_init(struct qpcie_dev *qdev)
