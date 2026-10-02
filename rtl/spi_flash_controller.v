@@ -316,7 +316,7 @@ module spi_flash_controller (
         .CFGMCLK    (),
         .EOS        (startup_eos),
         .PREQ       (),
-        .CLK        (clk),
+        .CLK        (1'b0),
         .GSR        (1'b0),
         .GTS        (1'b0),
         .KEYCLEARB  (1'b1),
