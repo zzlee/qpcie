@@ -27,10 +27,14 @@ static int qpcie_i2c_wait_tip(struct qpcie_dev *qdev)
         u32 sr = qpcie_i2c_read(qdev, REG_I2C_SR);
         if (!(sr & I2C_SR_TIP))
             return 0;
-        usleep_range(50, 100);
+        usleep_range(20, 50);
     }
 
-    dev_err(&qdev->pdev->dev, "I2C timeout waiting for TIP to clear\n");
+    dev_err_ratelimited(&qdev->pdev->dev, "I2C timeout waiting for TIP to clear\n");
+    /* Core recovery: disable and re-enable to reset state machine to IDLE */
+    qpcie_i2c_write(qdev, REG_I2C_CTR, 0);
+    udelay(10);
+    qpcie_i2c_write(qdev, REG_I2C_CTR, I2C_CTR_EN);
     return -ETIMEDOUT;
 }
 
@@ -82,7 +86,6 @@ static int qpcie_i2c_xfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int nu
     for (i = 0; i < num; i++) {
         struct i2c_msg *msg = &msgs[i];
         bool is_read = (msg->flags & I2C_M_RD) != 0;
-        bool is_last_msg = (i == num - 1);
         u8 addr_byte = (msg->addr << 1) | (is_read ? 1 : 0);
 
         /* Send START + Address. If length is 0 (quick command), send STOP as well. */
@@ -92,9 +95,11 @@ static int qpcie_i2c_xfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int nu
 
         ret = qpcie_i2c_send_byte(qdev, addr_byte, sta_flags);
         if (ret) {
-            /* Address NACK or bus error: Send STOP */
-            qpcie_i2c_write(qdev, REG_I2C_CR, I2C_CR_STO);
-            qpcie_i2c_wait_tip(qdev);
+            /* Address NACK or bus error: Send STOP if not already sent */
+            if (!(sta_flags & I2C_CR_STO)) {
+                qpcie_i2c_write(qdev, REG_I2C_CR, I2C_CR_STO);
+                qpcie_i2c_wait_tip(qdev);
+            }
             goto out;
         }
 

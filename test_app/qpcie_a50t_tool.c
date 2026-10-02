@@ -299,20 +299,55 @@ static void show_hdmi_status(void)
 
 static void show_flash_id(void)
 {
+    /* If driver is loaded, check driver sysfs flash_id first */
+    char sysfs_id_path[600];
+    snprintf(sysfs_id_path, sizeof(sysfs_id_path), "%s/flash_id", g_device_path);
+    int sfd = open(sysfs_id_path, O_RDONLY);
+    if (sfd >= 0) {
+        char sbuf[256] = {0};
+        if (read(sfd, sbuf, sizeof(sbuf) - 1) > 0) {
+            printf("========================================\n");
+            printf("💾 QPCIe A50T SPI Flash Identification (via Driver)\n");
+            printf("========================================\n");
+            printf("JEDEC ID: %s", sbuf);
+            close(sfd);
+            return;
+        }
+        close(sfd);
+    }
+
+    bool driver_was_loaded = is_driver_loaded();
+    if (driver_was_loaded) {
+        printf("ℹ️  Temporarily releasing driver for direct BAR1 MMIO access...\n");
+        run_cmd("rmmod qpcie 2>/dev/null");
+        usleep(200000);
+    }
+
     int fd = -1;
     volatile uint32_t *bar1 = map_bar1(&fd);
-    if (!bar1) return;
+    if (!bar1) {
+        if (driver_was_loaded) {
+            run_cmd("modprobe videobuf2-dma-sg 2>/dev/null");
+            run_cmd("insmod /home/nvidia/qpcie/driver/qpcie.ko 2>/dev/null || modprobe qpcie 2>/dev/null");
+        }
+        return;
+    }
 
     uint32_t id = 0;
     flash_read_id(bar1, &id);
     unmap_bar1(bar1, fd);
+
+    if (driver_was_loaded) {
+        run_cmd("modprobe videobuf2-dma-sg 2>/dev/null");
+        run_cmd("insmod /home/nvidia/qpcie/driver/qpcie.ko 2>/dev/null || modprobe qpcie 2>/dev/null");
+    }
 
     uint8_t mfr = (id >> 16) & 0xFF;
     uint8_t type = (id >> 8) & 0xFF;
     uint8_t cap = id & 0xFF;
 
     printf("========================================\n");
-    printf("💾 QPCIe A50T SPI Flash Identification\n");
+    printf("💾 QPCIe A50T SPI Flash Identification (via Direct MMIO)\n");
     printf("========================================\n");
     printf("JEDEC ID: 0x%06X (Manufacturer: 0x%02X, Memory Type: 0x%02X, Capacity: 0x%02X)\n",
            id, mfr, type, cap);
@@ -372,15 +407,21 @@ static int program_flash_direct(const char *bin_filename)
         printf("    Proceeding anyway...\n");
     }
 
-    /* Check if driver is loaded - warn user */
-    if (is_driver_loaded()) {
-        printf("ℹ️  Note: Driver 'qpcie' is currently loaded.\n");
-        printf("   Temporarily pausing to avoid concurrent BAR1 access...\n");
+    /* Check if driver is loaded - unload temporarily to ensure exclusive BAR1 access */
+    bool driver_was_loaded = is_driver_loaded();
+    if (driver_was_loaded) {
+        printf("ℹ️  Note: Temporarily unloading 'qpcie' driver for Flash programming...\n");
+        run_cmd("rmmod qpcie 2>/dev/null");
+        usleep(200000);
     }
 
     int bar1_fd = -1;
     volatile uint32_t *bar1 = map_bar1(&bar1_fd);
     if (!bar1) {
+        if (driver_was_loaded) {
+            run_cmd("modprobe videobuf2-dma-sg 2>/dev/null");
+            run_cmd("insmod /home/nvidia/qpcie/driver/qpcie.ko 2>/dev/null || modprobe qpcie 2>/dev/null");
+        }
         free(bin_data);
         return -1;
     }
@@ -503,7 +544,35 @@ static int program_flash_direct(const char *bin_filename)
     printf("To boot this new bitstream, run: %s -r\n", "qpcie_a50t_tool");
     printf("=======================================================\n");
 
+    if (driver_was_loaded) {
+        printf("Restoring 'qpcie' driver...\n");
+        run_cmd("modprobe videobuf2-dma-sg 2>/dev/null");
+        run_cmd("insmod /home/nvidia/qpcie/driver/qpcie.ko 2>/dev/null || modprobe qpcie 2>/dev/null");
+    }
+
     return 0;
+}
+
+static void retrain_parent_root_port(void)
+{
+    /* Find parent bridge, typically 0004:00:00.0 for 0004:01:00.0 */
+    char parent_bdf[128] = "0004:00:00.0";
+    char cmd[512];
+
+    /* 1. Assert Secondary Bus Reset (SBR) */
+    snprintf(cmd, sizeof(cmd), "setpci -s %s 3e.b=42 2>/dev/null", parent_bdf);
+    run_cmd(cmd);
+    usleep(100000); // 100ms
+
+    /* 2. Deassert Secondary Bus Reset */
+    snprintf(cmd, sizeof(cmd), "setpci -s %s 3e.b=02 2>/dev/null", parent_bdf);
+    run_cmd(cmd);
+    usleep(200000); // 200ms
+
+    /* 3. Force Link Retraining */
+    snprintf(cmd, sizeof(cmd), "setpci -s %s 80.w=0460 2>/dev/null", parent_bdf);
+    run_cmd(cmd);
+    usleep(500000); // 500ms
 }
 
 static int trigger_reload(void)
@@ -530,18 +599,23 @@ static int trigger_reload(void)
     printf("[3/5] Waiting 1.0s for FPGA to reconfigure from SPI Flash...\n");
     sleep(1);
 
-    printf("[4/5] Rescanning PCIe bus for reloaded Artix-7 endpoint...\n");
+    printf("[4/5] Retraining PCIe Root Port and rescanning bus...\n");
     char remove_cmd[512];
     snprintf(remove_cmd, sizeof(remove_cmd), "echo 1 > /sys/bus/pci/devices/%s/remove 2>/dev/null", g_bdf);
     run_cmd(remove_cmd);
     usleep(200000);
+
+    /* Assert SBR and retrain link on root port */
+    retrain_parent_root_port();
+
     run_cmd("echo 1 > /sys/bus/pci/rescan");
     usleep(500000);
 
     /* Check if device re-appeared */
     if (find_qpcie_device() < 0) {
         printf("⚠️  Warning: QPCIe device not immediately detected after rescan.\n");
-        printf("   Retrying secondary bus rescan...\n");
+        printf("   Retrying secondary bus retrain & rescan...\n");
+        retrain_parent_root_port();
         run_cmd("echo 1 > /sys/bus/pci/rescan");
         sleep(1);
     }
