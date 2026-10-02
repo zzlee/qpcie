@@ -25,13 +25,22 @@ static inline u32 qpcie_spi_read(struct qpcie_dev *qdev, u32 reg)
 static inline void qpcie_spi_write(struct qpcie_dev *qdev, u32 reg, u32 val)
 {
     iowrite32(val, qdev->bar1_mmio + BAR1_OFFSET_SPI_FLASH + reg);
+    wmb();
+    udelay(10);
 }
 
 static void qpcie_spi_set_cs(struct qpcie_dev *qdev, bool assert)
 {
     /* CS_N=0 when asserted, CS_N=1 when deasserted. Use divider=6 for safe ~10MHz SPI clock */
     u32 cr = (6 << 4) | SPI_CR_SPI_EN | (assert ? 0 : SPI_CR_CS_N);
+    int retry = 100;
+
     qpcie_spi_write(qdev, REG_SPI_CR, cr);
+    while (retry-- > 0) {
+        if ((qpcie_spi_read(qdev, REG_SPI_CR) & SPI_CR_CS_N) == (assert ? 0 : SPI_CR_CS_N))
+            break;
+        udelay(10);
+    }
 }
 
 static u8 qpcie_spi_xfer_byte(struct qpcie_dev *qdev, u8 tx_byte)
