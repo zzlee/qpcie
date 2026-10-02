@@ -80,6 +80,8 @@ module spi_flash_controller (
     wire [7:0]  wr_addr = aw_done ? awaddr_q : s_axil_awaddr;
     wire [31:0] wr_data = w_done  ? wdata_q  : s_axil_wdata;
 
+    wire spi_engine_busy = (spi_state != SPI_IDLE) || start_tx_pulse;
+
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             s_axil_awready <= 1'b0;
@@ -142,7 +144,7 @@ module spi_flash_controller (
                         reg_clk_div <= wr_data[7:4];
                     end
                     4'h2: begin // 0x08: SPIDTR
-                        if (!spi_busy) begin
+                        if (!spi_engine_busy) begin
                             tx_data_latch  <= wr_data[7:0];
                             start_tx_pulse <= 1'b1;
                         end
@@ -175,7 +177,7 @@ module spi_flash_controller (
 
                 case (s_axil_araddr[5:2])
                     4'h0: s_axil_rdata <= {24'h0, reg_clk_div, 2'b00, reg_spi_en, spi_cs_n};
-                    4'h1: s_axil_rdata <= {30'h0, rx_valid, spi_busy};
+                    4'h1: s_axil_rdata <= {30'h0, rx_valid, spi_engine_busy};
                     4'h3: s_axil_rdata <= {24'h0, reg_rx_data};
                     4'h9: s_axil_rdata <= {30'h0, reload_started, icap_busy};
                     default: s_axil_rdata <= 32'h0;

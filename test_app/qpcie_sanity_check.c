@@ -19,20 +19,17 @@
 #include <sys/mman.h>
 #include <errno.h>
 
-#define REG_DMA_CTRL         0x00
-#define REG_DMA_STATUS       0x04
-#define REG_H2C_RING_CFG     0x10
-#define REG_IRQ_CTRL         0x20
-#define REG_IRQ_STATUS       0x24
-#define REG_COMPLETED_H2C    0x28
-#define REG_COMPLETED_C2H    0x2C
-#define REG_VERSION_ID       0x30
-#define REG_GIT_COMMIT_HASH  0x34
-#define REG_BUILD_TIMESTAMP  0x38
-#define REG_HARDWARE_CAPS    0x3C
-#define REG_H2C_RING_PTR     0x40
-#define REG_GLOBAL_TIMER_L   0x50
-#define REG_GLOBAL_TIMER_H   0x54
+#define REG_MAGIC_ID         0x00
+#define REG_VERSION_ID       0x04
+#define REG_HARDWARE_CAPS    0x08
+#define REG_GIT_COMMIT_HASH  0x0C
+#define REG_BUILD_TIMESTAMP  0x10
+#define REG_GLOBAL_RESET     0x14
+#define REG_GLOBAL_IRQ_TOP   0x18
+#define REG_GLOBAL_TIMER_L   0x1C
+#define REG_GLOBAL_TIMER_H   0x20
+#define REG_GLOBAL_IRQ_STAT  0x24
+#define REG_GLOBAL_DMA_STAT  0x28
 
 int main(int argc, char **argv) {
     printf("=================================================================\n");
@@ -91,49 +88,40 @@ int main(int argc, char **argv) {
     volatile uint32_t *regs = (volatile uint32_t *)bar0_ptr;
 
     // 3. Read BAR0 Registers
-    uint32_t dma_ctrl   = regs[REG_DMA_CTRL / 4];
-    uint32_t dma_status = regs[REG_DMA_STATUS / 4];
-    uint32_t ring_cfg   = regs[REG_H2C_RING_CFG / 4];
-    uint32_t irq_ctrl   = regs[REG_IRQ_CTRL / 4];
-    uint32_t irq_status = regs[REG_IRQ_STATUS / 4];
-    uint32_t h2c_done   = regs[REG_COMPLETED_H2C / 4];
-    uint32_t c2h_done   = regs[REG_COMPLETED_C2H / 4];
-    uint32_t ring_ptr   = regs[REG_H2C_RING_PTR / 4];
+    uint32_t magic      = regs[REG_MAGIC_ID / 4];
     uint32_t ver        = regs[REG_VERSION_ID / 4];
+    uint32_t caps       = regs[REG_HARDWARE_CAPS / 4];
     uint32_t git        = regs[REG_GIT_COMMIT_HASH / 4];
     uint32_t date       = regs[REG_BUILD_TIMESTAMP / 4];
-    uint32_t caps       = regs[REG_HARDWARE_CAPS / 4];
+    uint32_t irq_top    = regs[REG_GLOBAL_IRQ_TOP / 4];
     uint32_t timer_lo   = regs[REG_GLOBAL_TIMER_L / 4];
     uint32_t timer_hi   = regs[REG_GLOBAL_TIMER_H / 4];
+    uint32_t irq_stat   = regs[REG_GLOBAL_IRQ_STAT / 4];
+    uint32_t dma_stat   = regs[REG_GLOBAL_DMA_STAT / 4];
     uint64_t timer      = ((uint64_t)timer_hi << 32) | timer_lo;
 
     printf("\n[1/3] BAR0 Register Verification:\n");
+    printf("   • Magic Device ID  : 0x%08X  (%s)\n",
+           magic, (magic == 0x12ABE380) ? "VALID" : "INVALID");
     printf("   • Version ID       : 0x%08X  -->  v%u.%u.%u (Variant %u)\n",
            ver, (ver >> 24) & 0xFF, (ver >> 16) & 0xFF, (ver >> 8) & 0xFF, ver & 0xFF);
     printf("   • Git Commit Hash  : 0x%08X\n", git);
     printf("   • Build Date       : %08X (YYYY-MM-DD)\n", date);
-    printf("   • Hardware Caps    : 0x%08X  -->  %u Video Ch, %u Audio Ch\n",
-           caps, (caps >> 8) & 0xFF, (caps >> 16) & 0xFF);
+    printf("   • Hardware Caps    : 0x%08X  -->  %u Video Ch, %u Audio Ch (Flags 0x%02X)\n",
+           caps, (caps >> 8) & 0xFF, (caps >> 16) & 0xFF, caps & 0xFF);
 
     printf("\n[2/3] Hardware Telemetry Check:\n");
-    printf("   • DMA Ctrl Reg     : 0x%08X\n", dma_ctrl);
-    printf("   • DMA Status Reg   : 0x%08X\n", dma_status);
-    printf("     Descriptor FSM   : %s\n",
-           (dma_status & (1U << 9)) ? "IDLE" : "BUSY");
-    printf("   • Ring Config      : size=%u tail=%u\n",
-           ring_cfg & 0xFFFF, ring_cfg >> 16);
-    printf("   • Ring Pointers    : head=%u tail=%u\n",
-           ring_ptr & 0xFFFF, ring_ptr >> 16);
-    printf("   • Completion Count : H2C=%u C2H=%u\n", h2c_done, c2h_done);
-    printf("   • IRQ Ctrl/Status  : 0x%08X / 0x%08X\n", irq_ctrl, irq_status);
-    printf("   • 125MHz HW Timer  : %lu ticks (%f ms uptime)\n",
+    printf("   • Global IRQ Top   : 0x%08X\n", irq_top);
+    printf("   • Global IRQ Stat  : 0x%08X\n", irq_stat);
+    printf("   • Global DMA Stat  : 0x%08X\n", dma_stat);
+    printf("   • 125MHz HW Timer  : %lu ticks (%.3f ms uptime)\n",
            timer, timer * 0.000008); // 125MHz = 8ns per tick
 
     printf("\n[3/3] Sanity Status:\n");
-    if (ver != 0xFFFFFFFF && ver != 0x00000000 && (date & 0xFFFF0000) != 0) {
+    if (magic == 0x12ABE380 && ver != 0xFFFFFFFF && ver != 0x00000000) {
         printf(" 🎉 SUCCESS: BAR0 Register Read & Bitstream Board ID verified 100%% clean!\n");
     } else {
-        printf(" ❌ WARNING: BAR0 Register returned invalid data (0x%08X)!\n", ver);
+        printf(" ❌ WARNING: BAR0 Register returned invalid data (Magic 0x%08X, Ver 0x%08X)!\n", magic, ver);
     }
 
     printf("=================================================================\n");
