@@ -87,7 +87,7 @@ module spi_flash_controller (
             awaddr_q       <= 8'h00;
             spi_cs_n       <= 1'b1; // Default deasserted
             reg_spi_en     <= 1'b1;
-            reg_clk_div    <= 4'd3; // 15.625 MHz
+            reg_clk_div    <= 4'd6; // ~10 MHz @ 125 MHz
             start_tx_pulse <= 1'b0;
             tx_data_latch  <= 8'h00;
             icap_trigger   <= 1'b0;
@@ -95,30 +95,41 @@ module spi_flash_controller (
             start_tx_pulse <= 1'b0;
             icap_trigger   <= 1'b0;
 
+            if (s_axil_bvalid && s_axil_bready) begin
+                s_axil_bvalid  <= 1'b0;
+                s_axil_awready <= 1'b0;
+                s_axil_wready  <= 1'b0;
+            end
+
+            // Address write handshake
             if (!aw_done && s_axil_awvalid && (!s_axil_bvalid || s_axil_bready)) begin
                 s_axil_awready <= 1'b1;
                 awaddr_q       <= s_axil_awaddr;
                 aw_done        <= 1'b1;
-            end else begin
+            end else if (aw_done && (w_done || s_axil_wvalid) && !s_axil_bvalid) begin
                 s_axil_awready <= 1'b0;
             end
 
+            // Data write handshake
             if (!w_done && s_axil_wvalid && (!s_axil_bvalid || s_axil_bready)) begin
                 s_axil_wready <= 1'b1;
                 w_done        <= 1'b1;
-            end else begin
+            end else if (w_done && (aw_done || s_axil_awvalid) && !s_axil_bvalid) begin
                 s_axil_wready <= 1'b0;
             end
 
+            // Execute Register Write when both ADDR & DATA are present
             if ((aw_done || (s_axil_awvalid && s_axil_awready)) &&
                 (w_done  || (s_axil_wvalid && s_axil_wready)) &&
                 !s_axil_bvalid) begin
-                s_axil_bvalid <= 1'b1;
-                s_axil_bresp  <= 2'b00;
-                aw_done       <= 1'b0;
-                w_done        <= 1'b0;
+                s_axil_bvalid  <= 1'b1;
+                s_axil_bresp   <= 2'b00;
+                s_axil_awready <= 1'b0;
+                s_axil_wready  <= 1'b0;
+                aw_done        <= 1'b0;
+                w_done         <= 1'b0;
 
-                case (awaddr_q[5:2])
+                case (aw_done ? awaddr_q[5:2] : s_axil_awaddr[5:2])
                     4'h0: begin // 0x00: SPICR
                         spi_cs_n    <= s_axil_wdata[0];
                         reg_spi_en  <= s_axil_wdata[1];
@@ -137,8 +148,6 @@ module spi_flash_controller (
                     end
                     default: ;
                 endcase
-            end else if (s_axil_bvalid && s_axil_bready) begin
-                s_axil_bvalid <= 1'b0;
             end
         end
     end

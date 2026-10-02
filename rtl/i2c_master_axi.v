@@ -163,7 +163,7 @@ module i2c_master_axi #(
                 aw_done       <= 1'b0;
                 w_done        <= 1'b0;
 
-                case (awaddr_q[4:2])
+                case (aw_done ? awaddr_q[4:2] : s_axil_awaddr[4:2])
                     3'b000: reg_prer[7:0]  <= s_axil_wdata[7:0];   // 0x00
                     3'b001: reg_prer[15:8] <= s_axil_wdata[7:0];   // 0x04
                     3'b010: begin                                  // 0x08 (CTR)
