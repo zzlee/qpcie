@@ -37,7 +37,9 @@ static void qpcie_spi_set_cs(struct qpcie_dev *qdev, bool assert)
 static u8 qpcie_spi_xfer_byte(struct qpcie_dev *qdev, u8 tx_byte)
 {
     int timeout = 1000;
+    u32 sr_init, sr_final, rx_val;
 
+    sr_init = qpcie_spi_read(qdev, REG_SPI_SR);
     qpcie_spi_write(qdev, REG_SPI_TXD, tx_byte);
 
     while (timeout-- > 0) {
@@ -46,8 +48,13 @@ static u8 qpcie_spi_xfer_byte(struct qpcie_dev *qdev, u8 tx_byte)
             break;
         udelay(1);
     }
+    sr_final = qpcie_spi_read(qdev, REG_SPI_SR);
+    rx_val = qpcie_spi_read(qdev, REG_SPI_RXD);
 
-    return (u8)(qpcie_spi_read(qdev, REG_SPI_RXD) & 0xFF);
+    dev_info(&qdev->pdev->dev, "SPI_XFER: tx=0x%02X -> rx=0x%02X (sr_init=0x%X, sr_final=0x%X, timeout_left=%d)\n",
+             tx_byte, rx_val & 0xFF, sr_init, sr_final, timeout);
+
+    return (u8)(rx_val & 0xFF);
 }
 
 static int qpcie_flash_wait_busy(struct qpcie_dev *qdev, unsigned int timeout_ms)
@@ -83,7 +90,12 @@ static int qpcie_flash_read_id(struct qpcie_dev *qdev, u32 *id)
     u8 b0, b1, b2;
 
     mutex_lock(&qdev->flash_lock);
+    dev_info(&qdev->pdev->dev, "SPI_READ_ID: Asserting CS (CR_pre=0x%X)\n",
+             qpcie_spi_read(qdev, REG_SPI_CR));
     qpcie_spi_set_cs(qdev, true);
+    dev_info(&qdev->pdev->dev, "SPI_READ_ID: CS asserted (CR_post=0x%X)\n",
+             qpcie_spi_read(qdev, REG_SPI_CR));
+
     qpcie_spi_xfer_byte(qdev, CMD_READ_ID);
     b0 = qpcie_spi_xfer_byte(qdev, 0xFF);
     b1 = qpcie_spi_xfer_byte(qdev, 0xFF);
