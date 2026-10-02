@@ -77,15 +77,14 @@ static void spi_set_cs(volatile uint32_t *bar1, bool assert)
     /* CS_N=0 when asserted, CS_N=1 when deasserted. Divider=6 (~10.4MHz) */
     uint32_t cr = (6 << 4) | 0x02 | (assert ? 0 : 0x01);
     write32(bar1, BAR1_OFFSET_SPI_FLASH + REG_SPI_CR, cr);
-    struct timespec ts = {0, 10000}; // 10us
-    nanosleep(&ts, NULL);
+    (void)read32(bar1, BAR1_OFFSET_SPI_FLASH + REG_SPI_CR); // Flush PCIe write
+    usleep(20);
 }
 
 static uint8_t spi_xfer(volatile uint32_t *bar1, uint8_t tx)
 {
     write32(bar1, BAR1_OFFSET_SPI_FLASH + REG_SPI_TXD, tx);
-    struct timespec ts = {0, 12000}; // 12us (~120 clock cycles @ 10.4MHz)
-    nanosleep(&ts, NULL);
+    usleep(35);
     return (uint8_t)(read32(bar1, BAR1_OFFSET_SPI_FLASH + REG_SPI_RXD) & 0xFF);
 }
 
