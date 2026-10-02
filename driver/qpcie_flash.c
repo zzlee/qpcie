@@ -63,8 +63,8 @@ static u8 qpcie_spi_xfer_byte(struct qpcie_dev *qdev, u8 tx_byte)
     sr_final = qpcie_spi_read(qdev, REG_SPI_SR);
     rx_val = qpcie_spi_read(qdev, REG_SPI_RXD);
 
-    dev_dbg(&qdev->pdev->dev, "SPI_XFER: tx=0x%02X -> rx=0x%02X (sr_init=0x%X, sr_final=0x%X, timeout_left=%d)\n",
-            tx_byte, rx_val & 0xFF, sr_init, sr_final, timeout);
+    dev_info(&qdev->pdev->dev, "SPI_XFER: tx=0x%02X -> rx=0x%02X (sr_init=0x%X, sr_final=0x%X, timeout_left=%d)\n",
+             tx_byte, rx_val & 0xFF, sr_init, sr_final, timeout);
 
     return (u8)(rx_val & 0xFF);
 }
