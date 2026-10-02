@@ -29,18 +29,19 @@ module cc_tx_encoder #(
     input  wire [10:0]           read_req_tc,
     input  wire                  read_req_bar_sel, // 0: BAR0, 1: BAR1
     output reg                   read_req_ack,
+    output wire                  cc_busy,
 
     // BAR0 AXI4-Lite Read Data Channel
     input  wire [31:0]           bar0_axil_rdata,
     input  wire [1:0]            bar0_axil_rresp,
     input  wire                  bar0_axil_rvalid,
-    output reg                   bar0_axil_rready,
+    output wire                  bar0_axil_rready,
 
     // BAR1 AXI4-Lite Read Data Channel (User IP Cores Interconnect)
     input  wire [31:0]           bar1_axil_rdata,
     input  wire [1:0]            bar1_axil_rresp,
     input  wire                  bar1_axil_rvalid,
-    output reg                   bar1_axil_rready
+    output wire                  bar1_axil_rready
 );
 
     localparam IDLE      = 2'b00;
@@ -54,6 +55,10 @@ module cc_tx_encoder #(
     reg        req_bar_sel_q;
     reg [31:0] rdata_captured;
 
+    assign cc_busy          = (state != IDLE);
+    assign bar0_axil_rready = (state == WAIT_RDATA) && !req_bar_sel_q;
+    assign bar1_axil_rready = (state == WAIT_RDATA) && req_bar_sel_q;
+
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state            <= IDLE;
@@ -63,8 +68,6 @@ module cc_tx_encoder #(
             m_axis_cc_tuser  <= 33'd0;
             m_axis_cc_tkeep  <= 8'h0F; // 4 DWs (Header 3 DWs + Data 1 DW)
             read_req_ack     <= 1'b0;
-            bar0_axil_rready <= 1'b1;
-            bar1_axil_rready <= 1'b1;
             req_tag_q        <= 8'd0;
             req_id_q         <= 16'd0;
             req_lower_addr_q <= 7'd0;

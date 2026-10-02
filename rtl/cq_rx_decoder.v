@@ -41,7 +41,6 @@ module cq_rx_decoder #(
     input  wire [31:0]           m_axil_bar0_rdata,
     input  wire [1:0]            m_axil_bar0_rresp,
     input  wire                  m_axil_bar0_rvalid,
-    output reg                   m_axil_bar0_rready,
 
     // BAR1 AXI4-Lite Master Interface (User IP Cores Interconnect: I2C, UART, etc.)
     output reg  [31:0]           m_axil_bar1_awaddr,
@@ -61,7 +60,6 @@ module cq_rx_decoder #(
     input  wire [31:0]           m_axil_bar1_rdata,
     input  wire [1:0]            m_axil_bar1_rresp,
     input  wire                  m_axil_bar1_rvalid,
-    output reg                   m_axil_bar1_rready,
 
     // Read Request Tracking to CC TX Encoder
     output reg                   read_req_valid,
@@ -70,7 +68,8 @@ module cq_rx_decoder #(
     output reg  [6:0]            read_req_lower_addr,
     output reg  [10:0]           read_req_tc,
     output reg                   read_req_bar_sel, // 0: BAR0, 1: BAR1
-    input  wire                  read_req_ack
+    input  wire                  read_req_ack,
+    input  wire                  cc_busy
 );
 
     localparam IDLE       = 2'b00;
@@ -87,6 +86,8 @@ module cq_rx_decoder #(
     wire [7:0]  req_tag    = s_axis_cq_tdata[103:96];
     wire [2:0]  bar_id     = (DATA_WIDTH >= 256) ? s_axis_cq_tdata[114:112] : s_axis_cq_tuser[2:0]; // 3'b000: BAR0, 3'b001: BAR1
 
+    reg         rdata_seen;
+
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state               <= IDLE;
@@ -99,7 +100,6 @@ module cq_rx_decoder #(
             m_axil_bar0_bready  <= 1'b1;
             m_axil_bar0_araddr  <= 32'd0;
             m_axil_bar0_arvalid <= 1'b0;
-            m_axil_bar0_rready  <= 1'b1;
 
             m_axil_bar1_awaddr  <= 32'd0;
             m_axil_bar1_awvalid <= 1'b0;
@@ -109,7 +109,6 @@ module cq_rx_decoder #(
             m_axil_bar1_bready  <= 1'b1;
             m_axil_bar1_araddr  <= 32'd0;
             m_axil_bar1_arvalid <= 1'b0;
-            m_axil_bar1_rready  <= 1'b1;
 
             read_req_valid      <= 1'b0;
             read_req_tag        <= 8'd0;
@@ -117,6 +116,7 @@ module cq_rx_decoder #(
             read_req_lower_addr <= 7'd0;
             read_req_tc         <= 11'd0;
             read_req_bar_sel    <= 1'b0;
+            rdata_seen          <= 1'b0;
         end else begin
             case (state)
                 IDLE: begin
@@ -127,6 +127,7 @@ module cq_rx_decoder #(
                     m_axil_bar1_awvalid <= 1'b0;
                     m_axil_bar1_wvalid  <= 1'b0;
                     m_axil_bar1_arvalid <= 1'b0;
+                    rdata_seen          <= 1'b0;
 
                     if (s_axis_cq_tvalid && s_axis_cq_tready) begin
                         if (req_type == 4'b0001) begin // Memory Write (MWr)
@@ -193,7 +194,11 @@ module cq_rx_decoder #(
                         m_axil_bar1_arvalid <= 1'b0;
                     end
                     if (m_axil_bar0_rvalid || m_axil_bar1_rvalid) begin
+                        rdata_seen <= 1'b1;
+                    end
+                    if ((rdata_seen || m_axil_bar0_rvalid || m_axil_bar1_rvalid) && !cc_busy) begin
                         s_axis_cq_tready <= 1'b1;
+                        rdata_seen       <= 1'b0;
                         state            <= IDLE;
                     end
                 end

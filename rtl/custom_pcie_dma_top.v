@@ -493,7 +493,6 @@ module custom_pcie_dma_top #(
         .m_axil_bar0_rdata(bar0_axil_rdata),
         .m_axil_bar0_rresp(bar0_axil_rresp),
         .m_axil_bar0_rvalid(bar0_axil_rvalid),
-        .m_axil_bar0_rready(bar0_axil_rready),
         .m_axil_bar1_awaddr(m_axil_bar1_awaddr),
         .m_axil_bar1_awvalid(m_axil_bar1_awvalid),
         .m_axil_bar1_awready(m_axil_bar1_awready),
@@ -510,15 +509,17 @@ module custom_pcie_dma_top #(
         .m_axil_bar1_rdata(m_axil_bar1_rdata),
         .m_axil_bar1_rresp(m_axil_bar1_rresp),
         .m_axil_bar1_rvalid(m_axil_bar1_rvalid),
-        .m_axil_bar1_rready(m_axil_bar1_rready),
         .read_req_valid(read_req_valid),
         .read_req_tag(read_req_tag),
         .read_req_id(read_req_id),
         .read_req_lower_addr(read_req_lower_addr),
         .read_req_tc(read_req_tc),
         .read_req_bar_sel(read_req_bar_sel),
-        .read_req_ack(read_req_ack)
+        .read_req_ack(read_req_ack),
+        .cc_busy(cc_busy)
     );
+
+    wire cc_busy;
 
     // 2. CC TX Encoder
     cc_tx_encoder #(
@@ -540,6 +541,7 @@ module custom_pcie_dma_top #(
         .read_req_tc(read_req_tc),
         .read_req_bar_sel(read_req_bar_sel),
         .read_req_ack(read_req_ack),
+        .cc_busy(cc_busy),
         .bar0_axil_rdata(bar0_axil_rdata),
         .bar0_axil_rresp(bar0_axil_rresp),
         .bar0_axil_rvalid(bar0_axil_rvalid),
