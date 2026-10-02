@@ -25,34 +25,26 @@ static inline u32 qpcie_spi_read(struct qpcie_dev *qdev, u32 reg)
 static inline void qpcie_spi_write(struct qpcie_dev *qdev, u32 reg, u32 val)
 {
     iowrite32(val, qdev->bar1_mmio + BAR1_OFFSET_SPI_FLASH + reg);
-    (void)ioread32(qdev->bar1_mmio + BAR1_OFFSET_SPI_FLASH + reg); /* Flush PCIe write */
-    udelay(5);
+    wmb();
+    udelay(10);
 }
 
 static void qpcie_spi_set_cs(struct qpcie_dev *qdev, bool assert)
 {
-    /* CS_N=0 when asserted, CS_N=1 when deasserted. Use divider=6 for safe ~10MHz SPI clock */
+    /* CS_N=0 when asserted, CS_N=1 when deasserted. Divider=6 (~10.4MHz) */
     u32 cr = (6 << 4) | SPI_CR_SPI_EN | (assert ? 0 : SPI_CR_CS_N);
 
     qpcie_spi_write(qdev, REG_SPI_CR, cr);
-    udelay(10);
+    (void)qpcie_spi_read(qdev, REG_SPI_CR); /* Flush PCIe write */
+    udelay(20);
 }
 
 static u8 qpcie_spi_xfer_byte(struct qpcie_dev *qdev, u8 tx_byte)
 {
     u32 rx_val;
-    int timeout = 500;
 
     qpcie_spi_write(qdev, REG_SPI_TXD, tx_byte);
-
-    /* Wait for SPI engine to finish shifting byte (SPISR busy bit 0 cleared) */
-    while (timeout-- > 0) {
-        u32 sr = qpcie_spi_read(qdev, REG_SPI_SR);
-        if (!(sr & 0x01))
-            break;
-        udelay(2);
-    }
-
+    udelay(35);
     rx_val = qpcie_spi_read(qdev, REG_SPI_RXD);
     return (u8)(rx_val & 0xFF);
 }
