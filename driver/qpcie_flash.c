@@ -51,13 +51,14 @@ static u8 qpcie_spi_xfer_byte(struct qpcie_dev *qdev, u8 tx_byte)
     sr_init = qpcie_spi_read(qdev, REG_SPI_SR);
     qpcie_spi_write(qdev, REG_SPI_TXD, tx_byte);
 
-    /* 8 bits at 10 MHz SPI clock takes ~800ns. Wait 2us then poll until BUSY clears */
-    udelay(2);
+    /* 8 bits at 10 MHz takes ~800ns, but PCIe write propagation on ARM64 host takes 1-2us.
+     * Wait 50us to guarantee write has retired and byte transfer is finished. */
+    udelay(50);
     while (timeout-- > 0) {
         u32 sr = qpcie_spi_read(qdev, REG_SPI_SR);
         if (!(sr & SPI_SR_BUSY))
             break;
-        udelay(1);
+        udelay(10);
     }
     sr_final = qpcie_spi_read(qdev, REG_SPI_SR);
     rx_val = qpcie_spi_read(qdev, REG_SPI_RXD);
