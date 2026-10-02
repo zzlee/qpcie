@@ -81,7 +81,12 @@ program_hw_cfgmem -hw_cfgmem [get_property PROGRAM.HW_CFGMEM $dev]
 endgroup
 
 puts "================================================="
-puts " 🎉 SUCCESS: SPI Flash Programmed Successfully!"
+puts " 5. Booting FPGA from Configuration Flash"
+puts "================================================="
+catch { boot_hw_device $dev }
+
+puts "================================================="
+puts " 🎉 SUCCESS: SPI Flash Programmed & FPGA Booted!"
 puts "================================================="
 
 close_hw_target

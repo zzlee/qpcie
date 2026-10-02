@@ -107,7 +107,13 @@ set_property PACKAGE_PIN L17 [get_ports spi_d01_din]
 set_property IOSTANDARD LVCMOS33 [get_ports spi_d01_din]
 
 # ------------------------------------------------------------------------------
-# 8. Bitstream Configuration Properties
+# 8. Front-End Reset Output (IT68051 active-low reset via SU8 AND gate)
+# ------------------------------------------------------------------------------
+set_property PACKAGE_PIN V12 [get_ports rstn_gpio_f]
+set_property IOSTANDARD LVCMOS33 [get_ports rstn_gpio_f]
+
+# ------------------------------------------------------------------------------
+# 9. Bitstream Configuration Properties
 # ------------------------------------------------------------------------------
 set_property CFGBVS VCCO [current_design]
 set_property CONFIG_VOLTAGE 3.3 [current_design]

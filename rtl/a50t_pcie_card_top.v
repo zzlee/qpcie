@@ -35,8 +35,14 @@ module a50t_pcie_card_top #(
     // SPI Flash Interface (Macronix MX25L12835F)
     output wire                                             spi_fcs_b,
     output wire                                             spi_d00_mosi,
-    input  wire                                             spi_d01_din
+    input  wire                                             spi_d01_din,
+
+    // Front-end Peripheral Reset (IT68051 HDMI Receiver via SU8 AND gate)
+    output wire                                             rstn_gpio_f
 );
+
+    // Keep IT68051 frontend out of reset
+    assign rstn_gpio_f = 1'b1;
 
     // =========================================================================
     // Internal Clocks and Resets
