@@ -51,6 +51,8 @@ static u8 qpcie_spi_xfer_byte(struct qpcie_dev *qdev, u8 tx_byte)
     sr_init = qpcie_spi_read(qdev, REG_SPI_SR);
     qpcie_spi_write(qdev, REG_SPI_TXD, tx_byte);
 
+    /* 8 bits at 10 MHz SPI clock takes ~800ns. Wait 2us then poll until BUSY clears */
+    udelay(2);
     while (timeout-- > 0) {
         u32 sr = qpcie_spi_read(qdev, REG_SPI_SR);
         if (!(sr & SPI_SR_BUSY))
