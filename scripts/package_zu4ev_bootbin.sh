@@ -58,6 +58,7 @@ the_ROM_image:
 	[destination_device=pl] images/linux/zu4ev_pcie_card_top_tandem1.bit
 	[destination_device=pl] images/linux/zu4ev_pcie_card_top_tandem2.bit
 	[destination_cpu=a53-0, exception_level=el-3, trustzone] images/linux/bl31.elf
+	[destination_cpu=a53-0, load=0x00100000] images/linux/system.dtb
 	[destination_cpu=a53-0, exception_level=el-2] images/linux/u-boot.elf
 }
 EOF
