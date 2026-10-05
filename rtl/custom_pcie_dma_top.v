@@ -114,6 +114,7 @@ module custom_pcie_dma_top #(
     output wire                                             overlay_en,
     output wire [15:0]                                      overlay_width,
     output wire [15:0]                                      overlay_height,
+    output wire [31:0]                                      out_vch0_ctrl,
 
     // Interrupt Pins
     output wire                                             usr_irq_req,
@@ -622,6 +623,7 @@ module custom_pcie_dma_top #(
     wire [15:0] thin_ring1_head;
     wire        thin_active = vch0_ctrl_w[0];
     wire        overlay_en_w;
+    assign out_vch0_ctrl = vch0_ctrl_w;
 
     wire [31:0] vch1_ctrl_w;
     wire [31:0] vch1_width_w;

@@ -943,6 +943,26 @@ module zu4ev_pcie_card_top #(
     wire [NUM_AUDIO_CH-1:0]                    m_audio_tready;
 
     // =========================================================================
+    // Channel 0 Video Source Multiplexer (TPG vs HDMI RX)
+    // vch0_ctrl_w[21:20]:
+    //   2'b00 = Auto mode: fallback to TPG if no HDMI 5V detected; use HDMI RX if 5V detected.
+    //   2'b01 = Force TPG.
+    //   2'b10 = Force HDMI RX.
+    // =========================================================================
+    wire [31:0] vch0_ctrl_w;
+    wire ch0_use_tpg = (vch0_ctrl_w[21:20] == 2'b01) ||
+                       (!sync_5v_det_q[1] && (vch0_ctrl_w[21:20] != 2'b10));
+
+    wire [127:0] video_ch0_mux_tdata  = ch0_use_tpg ? tpg_capture_tdata  : hdmi_rx_v_tdata;
+    wire         video_ch0_mux_tvalid = ch0_use_tpg ? tpg_capture_tvalid : hdmi_rx_v_tvalid;
+    wire         video_ch0_mux_tlast  = ch0_use_tpg ? tpg_capture_tlast  : hdmi_rx_v_tlast;
+    wire         video_ch0_mux_tuser  = ch0_use_tpg ? tpg_capture_tuser  : hdmi_rx_v_tuser;
+    wire         video_ch0_mux_tready;
+
+    assign tpg_capture_tready = ch0_use_tpg ? video_ch0_mux_tready : 1'b0;
+    assign hdmi_rx_v_tready   = ch0_use_tpg ? 1'b1                  : video_ch0_mux_tready;
+
+    // =========================================================================
     // 4-Channel Dedicated Datapath Wiring:
     // =========================================================================
     // Channel 0 (HDMI RX):
@@ -950,7 +970,6 @@ module zu4ev_pcie_card_top #(
     assign s_video_tvalid[0]    = hdmi_rx_v_tvalid;
     assign s_video_tlast[0]     = hdmi_rx_v_tlast;
     assign s_video_tuser[0]     = hdmi_rx_v_tuser;
-    assign hdmi_rx_v_tready     = s_video_tready[0];
     assign m_video_tready[0]    = 1'b1;
 
     assign s_audio_tdata[31:0]  = hdmi_rx_a_tdata;
@@ -986,7 +1005,6 @@ module zu4ev_pcie_card_top #(
     assign s_video_tvalid[3]      = tpg_capture_tvalid;
     assign s_video_tlast[3]       = tpg_capture_tlast;
     assign s_video_tuser[3]       = tpg_capture_tuser;
-    assign tpg_capture_tready     = s_video_tready[3];
     assign m_video_tready[3]      = 1'b1;
 
     assign s_audio_tdata[127:96]  = aud_pat_axis_tdata;
@@ -1342,11 +1360,11 @@ module zu4ev_pcie_card_top #(
 
         .video_clk(pcie_user_clk),
         .video_rst_n(video_engine_rst_n),
-        .video_ch0_tdata(hdmi_rx_v_tdata),
-        .video_ch0_tvalid(hdmi_rx_v_tvalid),
-        .video_ch0_tlast(hdmi_rx_v_tlast),
-        .video_ch0_tuser(hdmi_rx_v_tuser),
-        .video_ch0_tready(hdmi_rx_v_tready),
+        .video_ch0_tdata(video_ch0_mux_tdata),
+        .video_ch0_tvalid(video_ch0_mux_tvalid),
+        .video_ch0_tlast(video_ch0_mux_tlast),
+        .video_ch0_tuser(video_ch0_mux_tuser),
+        .video_ch0_tready(video_ch0_mux_tready),
 
         .m_axis_video_tdata(m_video_tdata),
         .m_axis_video_tvalid(m_video_tvalid),
@@ -1372,6 +1390,7 @@ module zu4ev_pcie_card_top #(
         .overlay_en(dma_overlay_en),
         .overlay_width(dma_overlay_width),
         .overlay_height(dma_overlay_height),
+        .out_vch0_ctrl(vch0_ctrl_w),
 
         // Interrupts
         .usr_irq_req(usr_irq_req),
