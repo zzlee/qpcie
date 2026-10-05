@@ -158,7 +158,7 @@ module cq_rx_decoder #(
                                 m_axil_bar1_wvalid  <= 1'b1;
                             end else begin // BAR0
                                 write_req_bar_sel   <= 1'b0;
-                                m_axil_bar0_awaddr  <= req_addr[31:0];
+                                m_axil_bar0_awaddr  <= {12'd0, req_addr[19:0]};
                                 m_axil_bar0_awvalid <= 1'b1;
                                 m_axil_bar0_wdata   <= (DATA_WIDTH >= 256) ? s_axis_cq_tdata[159:128] : s_axis_cq_tdata[127:96];
                                 m_axil_bar0_wstrb   <= 4'hF;
@@ -172,7 +172,7 @@ module cq_rx_decoder #(
                                 m_axil_bar1_arvalid <= 1'b1;
                                 read_req_bar_sel    <= 1'b1;
                             end else begin // BAR0
-                                m_axil_bar0_araddr  <= req_addr[31:0];
+                                m_axil_bar0_araddr  <= {12'd0, req_addr[19:0]};
                                 m_axil_bar0_arvalid <= 1'b1;
                                 read_req_bar_sel    <= 1'b0;
                             end

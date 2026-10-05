@@ -75,7 +75,6 @@ module zu4ev_pcie_card_top #(
     wire pcie_user_reset;
     wire pcie_user_lnk_up;
     wire phy_ready;
-    wire mcap_design_switch;
 
     wire pcie_user_rst_n;
     assign pcie_user_rst_n       = pcie_user_lnk_up && ~pcie_user_reset;
@@ -1263,13 +1262,7 @@ module zu4ev_pcie_card_top #(
 
         .cfg_ds_port_number                        (8'b0),
         .cfg_ds_bus_number                         (8'b0),
-        .cfg_ds_device_number                      (5'b0),
-
-        // Tandem Configuration Handshake
-        .cap_req                                   (),
-        .cap_gnt                                   (1'b1),
-        .cap_rel                                   (1'b0),
-        .mcap_design_switch                        (mcap_design_switch)
+        .cfg_ds_device_number                      (5'b0)
     );
 
     // =========================================================================

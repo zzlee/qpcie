@@ -49,7 +49,7 @@ set_property -dict [list \
   CONFIG.en_gt_selection {true} \
   CONFIG.select_quad {GTH_Quad_223} \
   CONFIG.pcie_blk_locn {X0Y1} \
-  CONFIG.mcap_enablement {Tandem_PCIe} \
+  CONFIG.mcap_enablement {None} \
   CONFIG.PL_LINK_CAP_MAX_LINK_SPEED {8.0_GT/s} \
   CONFIG.PL_LINK_CAP_MAX_LINK_WIDTH {X4} \
   CONFIG.axisten_if_width {256_bit} \
@@ -184,9 +184,7 @@ if {[get_property PROGRESS [get_runs synth_1]] != "100%" ||
     exit 1
 }
 
-puts "Starting Implementation & Tandem Bitstream Generation (impl_1)..."
-set_property STEPS.OPT_DESIGN.TCL.PRE [file normalize scripts/zu4ev_impl_pre.tcl] [get_runs impl_1]
-set_property STEPS.PLACE_DESIGN.TCL.PRE [file normalize scripts/zu4ev_impl_pre.tcl] [get_runs impl_1]
+puts "Starting Implementation & Bitstream Generation (impl_1)..."
 launch_runs impl_1 -to_step write_bitstream -jobs 8
 wait_on_run impl_1
 

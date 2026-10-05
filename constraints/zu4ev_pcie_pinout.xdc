@@ -81,14 +81,4 @@ set_clock_groups -asynchronous \
     -group [get_clocks -quiet -include_generated_clocks hdmi_dru_clk_p] \
     -group [get_clocks -quiet -include_generated_clocks hdmi_tx_clk_p]
 
-## 7. Tandem PCIe Stage 1 Pblock Constraints
-## UltraScale+ Tandem Stage 1 requires PCIe refclk IBUFDS_GTE4 to be in Stage1_Main
-set_property HD.TANDEM_IP_PBLOCK Stage1_Main [get_cells u_ibufds_gte4]
-
-## sys_rst_n (PERST#) is located in Bank 46 HDIO (Site IOB_X0Y157)
-## We define the dedicated Stage1_IO Pblock to house the PERST# reset buffer
-create_pblock pblock_sys_rst
-set_property HD.TANDEM_IP_PBLOCK Stage1_IO [get_pblocks pblock_sys_rst]
-add_cells_to_pblock [get_pblocks pblock_sys_rst] [get_cells -hierarchical -filter {NAME =~ *sys_rst_n_IBUF_inst* || NAME =~ *sys_reset_n_ibuf*}]
-resize_pblock [get_pblocks pblock_sys_rst] -add {IOB_X0Y156:IOB_X0Y167}
 

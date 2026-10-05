@@ -5,10 +5,10 @@
 open_project ./build/qpcie_zu4ev_proj/qpcie_zu4ev_card.xpr
 
 reset_run impl_1
-set_property STEPS.OPT_DESIGN.TCL.PRE [file normalize scripts/zu4ev_impl_pre.tcl] [get_runs impl_1]
-set_property STEPS.PLACE_DESIGN.TCL.PRE [file normalize scripts/zu4ev_impl_pre.tcl] [get_runs impl_1]
+set_property STEPS.OPT_DESIGN.TCL.PRE "" [get_runs impl_1]
+set_property STEPS.PLACE_DESIGN.TCL.PRE "" [get_runs impl_1]
 
-puts "Starting Implementation & Tandem Bitstream Generation (impl_1)..."
+puts "Starting Implementation & Bitstream Generation (impl_1)..."
 launch_runs impl_1 -to_step write_bitstream -jobs 8
 wait_on_run impl_1
 
