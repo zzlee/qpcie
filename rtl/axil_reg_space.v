@@ -8,7 +8,7 @@
 `timescale 1ns / 1ps
 
 module axil_reg_space #(
-    parameter [31:0]   C_VERSION    = 32'h2610_0502, // Mandatory hardware version YYMMDDpp
+    parameter [31:0]   C_VERSION    = 32'h2610_0503, // Mandatory hardware version YYMMDDpp
     parameter integer NUM_VIDEO_CH = 4,
     parameter integer NUM_AUDIO_CH = 4
 )(
@@ -304,6 +304,15 @@ module axil_reg_space #(
     reg  [31:0] reg_fw_progress;
     reg  [31:0] reg_fw_err_code;
 
+    // SC7F0 PCIe H2C DMA Fast-Push Upgrade Registers (BAR0 0x0780 - 0x079C)
+    reg  [31:0] reg_dma_upg_ctrl;      // 0x0780: Bit 0=START_TRANSFER, Bit 1=DMA_COMPLETE, Bit 2=ABORT
+    reg  [31:0] reg_dma_upg_size;      // 0x0784: upgrade.tar.gz size in bytes
+    reg  [31:0] reg_dma_upg_crc32;     // 0x0788: Expected CRC32 of upgrade.tar.gz
+    reg  [63:0] reg_dma_upg_ps_addr;   // 0x078C/0x0790: PS DDR4 physical buffer address (low/high 32b)
+    reg  [31:0] reg_dma_upg_status;    // 0x0794: 0x0=IDLE, 0x1=RECEIVING, 0x2=VERIFYING, 0x3=FLASHING, 0x4=SUCCESS
+    reg  [31:0] reg_dma_upg_progress;  // 0x0798: 0..100% progress
+    reg  [31:0] reg_dma_upg_doorbell;  // 0x079C: Doorbell notification
+
     // HDMI RX Detailed Telemetry Registers (Mirroring Xilinx xilinx-hdmirxss v4l2_dv_timings)
     reg  [31:0] reg_hdmi_rx_width;
     reg  [31:0] reg_hdmi_rx_height;
@@ -454,6 +463,13 @@ module axil_reg_space #(
             reg_fw_total_crc        <= 32'd0;
             reg_fw_status           <= 32'd0;
             reg_fw_progress         <= 32'd0;
+            reg_dma_upg_ctrl        <= 32'd0;
+            reg_dma_upg_size        <= 32'd0;
+            reg_dma_upg_crc32       <= 32'd0;
+            reg_dma_upg_ps_addr     <= 64'd0;
+            reg_dma_upg_status      <= 32'd0;
+            reg_dma_upg_progress    <= 32'd0;
+            reg_dma_upg_doorbell    <= 32'd0;
             reg_hdmi_rx_width       <= 32'd1920;
             reg_hdmi_rx_height      <= 32'd1080;
             reg_hdmi_rx_pixelclk_lo <= 32'd148500000;
@@ -621,6 +637,14 @@ module axil_reg_space #(
                             8'h20: reg_fw_status       <= s_axil_wdata;
                             8'h24: reg_fw_progress     <= s_axil_wdata;
                             8'h28: reg_fw_err_code     <= s_axil_wdata;
+                            8'h80: reg_dma_upg_ctrl    <= s_axil_wdata;
+                            8'h84: reg_dma_upg_size    <= s_axil_wdata;
+                            8'h88: reg_dma_upg_crc32   <= s_axil_wdata;
+                            8'h8C: reg_dma_upg_ps_addr[31:0]  <= s_axil_wdata;
+                            8'h90: reg_dma_upg_ps_addr[63:32] <= s_axil_wdata;
+                            8'h94: reg_dma_upg_status  <= s_axil_wdata;
+                            8'h98: reg_dma_upg_progress<= s_axil_wdata;
+                            8'h9C: reg_dma_upg_doorbell<= s_axil_wdata;
                             default: ;
                         endcase
                     end
@@ -781,6 +805,14 @@ module axil_reg_space #(
                             8'h20: s_axil_rdata <= reg_fw_status;
                             8'h24: s_axil_rdata <= reg_fw_progress;
                             8'h28: s_axil_rdata <= reg_fw_err_code;
+                            8'h80: s_axil_rdata <= reg_dma_upg_ctrl;
+                            8'h84: s_axil_rdata <= reg_dma_upg_size;
+                            8'h88: s_axil_rdata <= reg_dma_upg_crc32;
+                            8'h8C: s_axil_rdata <= reg_dma_upg_ps_addr[31:0];
+                            8'h90: s_axil_rdata <= reg_dma_upg_ps_addr[63:32];
+                            8'h94: s_axil_rdata <= reg_dma_upg_status;
+                            8'h98: s_axil_rdata <= reg_dma_upg_progress;
+                            8'h9C: s_axil_rdata <= reg_dma_upg_doorbell;
                             default: s_axil_rdata <= 32'd0;
                         endcase
                     end
