@@ -97,3 +97,8 @@ compile_commands.json
 *.tmp
 .pi/
 release/
+
+# MCU firmware build artifacts
+test_mcu_minimal/*.elf
+test_mcu_minimal/*.bin
+raw/NUC100BSP/
