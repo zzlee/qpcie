@@ -199,7 +199,8 @@ int main(int argc, char **argv) {
     syslog(LOG_NOTICE, "Daemon initialized. Ready for Host PCIe DMA (Buffer @ 0x%08lX)", DEFAULT_DDR4_DMA_PHYS);
 
     while (g_running) {
-        uint32_t ctrl = pl_regs[REG_DMA_UPG_CTRL / 4];
+        uint32_t ctrl     = pl_regs[REG_DMA_UPG_CTRL / 4];
+        uint32_t doorbell = pl_regs[REG_DMA_UPG_DOORBELL / 4];
 
         // Check for Warm Reboot request
         if (ctrl & DMA_UPG_CMD_REBOOT) {
@@ -207,26 +208,16 @@ int main(int argc, char **argv) {
             break;
         }
 
-        // Check for Start Transfer
-        if (ctrl & DMA_UPG_CMD_START) {
+        // Check for Doorbell notification or Start Transfer with DMA_DONE
+        bool trigger_active = (doorbell & 0x01) ||
+                              ((ctrl & DMA_UPG_CMD_START) && (ctrl & DMA_UPG_CMD_DMA_DONE));
+
+        if (trigger_active) {
+            pl_regs[REG_DMA_UPG_DOORBELL / 4] = 0x00; // Acknowledge doorbell
             uint32_t expected_size  = pl_regs[REG_DMA_UPG_SIZE / 4];
             uint32_t expected_crc32 = pl_regs[REG_DMA_UPG_CRC32 / 4];
 
-            if (pl_regs[REG_DMA_UPG_STATUS / 4] != STATUS_UPG_RECEIVING &&
-                pl_regs[REG_DMA_UPG_STATUS / 4] != STATUS_UPG_VERIFYING &&
-                pl_regs[REG_DMA_UPG_STATUS / 4] != STATUS_UPG_FLASHING) {
-                syslog(LOG_NOTICE, "Received upgrade request: size=%u bytes, crc32=0x%08X. Ingesting DMA transfer...", expected_size, expected_crc32);
-                pl_regs[REG_DMA_UPG_STATUS / 4] = STATUS_UPG_RECEIVING;
-                pl_regs[REG_DMA_UPG_PROGRESS / 4] = 10;
-            }
-
-            // Wait for FPGA PL hardware to signal DMA write completion
-            if (!(ctrl & DMA_UPG_CMD_DMA_DONE)) {
-                usleep(5000); // 5ms poll while DMA in flight
-                continue;
-            }
-
-            syslog(LOG_NOTICE, "DMA transfer complete in PS DDR4. Verifying package integrity...");
+            syslog(LOG_NOTICE, "Received upgrade trigger: size=%u bytes, crc32=0x%08X. Verifying package integrity...", expected_size, expected_crc32);
 
             if (expected_size == 0 || expected_size > DDR4_DMA_BUF_SIZE) {
                 syslog(LOG_ERR, "Invalid package size: %u bytes", expected_size);

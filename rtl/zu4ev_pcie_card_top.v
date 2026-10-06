@@ -1359,6 +1359,9 @@ module zu4ev_pcie_card_top #(
         .s_axis_rc_tkeep(m_axis_rc_tkeep),
         .s_axis_rc_tready(m_axis_rc_tready),
 
+        // Dynamic Requester ID ({cfg_bus_number, 5'b00000, 3'b000})
+        .requester_id({cfg_bus_number, 8'h00}),
+
         // BAR1 AXI4-Lite Master Interface -> Connected to axi_crossbar_0 S00
         .m_axil_bar1_awaddr(bar1_m_awaddr),
         .m_axil_bar1_awvalid(bar1_m_awvalid),

@@ -187,7 +187,7 @@ done
 
 # 4. Partition eMMC using fdisk (p1: 1.5GB FAT32 boot, p2: remainder EXT4)
 log_msg "  [1/4] Partitioning eMMC ($EMMC_DEV)..."
-dd if=/dev/zero of="$EMMC_DEV" bs=1M count=10 status=none conv=fsync
+dd if=/dev/zero of="$EMMC_DEV" bs=1M count=10 2>/dev/null || true
 sync
 
 fdisk "$EMMC_DEV" << 'FDISK_EOF' >/dev/null 2>&1
@@ -248,7 +248,7 @@ EMMC_BNAME=$(basename "$EMMC_DEV")
 if [ -b "/dev/${EMMC_BNAME}boot0" ]; then
     log_msg "  Writing backup to /dev/${EMMC_BNAME}boot0..."
     echo 0 > "/sys/block/${EMMC_BNAME}boot0/force_ro" 2>/dev/null || true
-    dd if="$TARGET_DIR/BOOT.BIN" of="/dev/${EMMC_BNAME}boot0" bs=64k status=none conv=fsync 2>/dev/null || true
+    dd if="$TARGET_DIR/BOOT.BIN" of="/dev/${EMMC_BNAME}boot0" bs=64k 2>/dev/null || true
     sync
     echo 1 > "/sys/block/${EMMC_BNAME}boot0/force_ro" 2>/dev/null || true
 fi

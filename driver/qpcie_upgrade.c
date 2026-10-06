@@ -51,6 +51,15 @@ static ssize_t firmware_upgrade_write(struct file *filp, struct kobject *kobj,
     /* Copy user payload to DMA buffer */
     memcpy(cpu_addr, buf, count);
 
+    u64 ps_phys_addr = 0x70000000ULL + (u64)off;
+
+    /* Program destination PS DDR4 physical address */
+    iowrite32(lower_32_bits(ps_phys_addr), qdev->bar0_mmio + REG_DMA_UPG_PS_ADDR_L);
+    iowrite32(upper_32_bits(ps_phys_addr), qdev->bar0_mmio + REG_DMA_UPG_PS_ADDR_H);
+
+    /* Program chunk transfer size */
+    iowrite32((u32)count, qdev->bar0_mmio + REG_DMA_UPG_SIZE);
+
     /* Program Host physical DMA bus address */
     iowrite32(lower_32_bits(dma_handle), qdev->bar0_mmio + REG_DMA_UPG_HOST_ADDR_L);
     iowrite32(upper_32_bits(dma_handle), qdev->bar0_mmio + REG_DMA_UPG_HOST_ADDR_H);
@@ -67,8 +76,12 @@ static ssize_t firmware_upgrade_write(struct file *filp, struct kobject *kobj,
         ctrl = ioread32(qdev->bar0_mmio + REG_DMA_UPG_CTRL);
         if (ctrl & DMA_UPG_CMD_DMA_DONE)
             break;
-        usleep_range(100, 250);
+        usleep_range(50, 150);
     }
+
+    /* Clear command to return hardware to S_IDLE */
+    iowrite32(DMA_UPG_CMD_NONE, qdev->bar0_mmio + REG_DMA_UPG_CTRL);
+    ioread32(qdev->bar0_mmio + REG_DMA_UPG_CTRL);
 
     dma_free_coherent(&qdev->pdev->dev, count, cpu_addr, dma_handle);
 

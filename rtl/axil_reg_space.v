@@ -8,12 +8,13 @@
 `timescale 1ns / 1ps
 
 module axil_reg_space #(
-    parameter [31:0]   C_VERSION    = 32'h2610_0602, // Mandatory hardware version YYMMDDpp
+    parameter [31:0]   C_VERSION    = 32'h2610_0604, // Mandatory hardware version YYMMDDpp
     parameter integer NUM_VIDEO_CH = 4,
     parameter integer NUM_AUDIO_CH = 4
 )(
     input  wire        clk,
     input  wire        rst_n,
+    input  wire [15:0] in_requester_id,
 
     // AXI4-Lite Slave Interface
     input  wire [31:0] s_axil_awaddr,
@@ -726,6 +727,7 @@ module axil_reg_space #(
                             8'h20: s_axil_rdata <= reg_global_timestamp[63:32];
                             8'h24: s_axil_rdata <= reg_irq_status;
                             8'h28: s_axil_rdata <= reg_dma_status;
+                            8'h2C: s_axil_rdata <= {16'd0, in_requester_id};
                             8'h74: s_axil_rdata <= reg_pacer_ctrl;
                             8'h78: s_axil_rdata <= reg_slice_height;
                             8'h7C: s_axil_rdata <= reg_frame_drop_count;

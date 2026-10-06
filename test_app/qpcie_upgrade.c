@@ -253,11 +253,14 @@ int main(int argc, char **argv) {
     uint32_t git_hash = bar0[REG_GIT_COMMIT_HASH / 4];
     uint32_t bld_date = bar0[REG_BUILD_TIMESTAMP / 4];
     uint32_t upg_stat = bar0[REG_DMA_UPG_STATUS / 4];
+    uint32_t req_id   = bar0[0x002C / 4];
     uint64_t ps_addr  = ((uint64_t)bar0[REG_DMA_UPG_PS_ADDR_H / 4] << 32) | bar0[REG_DMA_UPG_PS_ADDR_L / 4];
 
     printf(" -> Hardware Magic    : 0x%08X %s\n", magic, (magic == 0x12ABE380) ? "[VALID]" : "[INVALID]");
     printf(" -> Core Version      : v%d.%d.%d (Raw: 0x%08X)\n",
            (ver_id >> 24) & 0xFF, (ver_id >> 16) & 0xFF, (ver_id >> 8) & 0xFF, ver_id);
+    printf(" -> PCIe Requester ID : 0x%04X (Bus %02X, Dev %02X, Fn %02X)\n",
+           req_id & 0xFFFF, (req_id >> 8) & 0xFF, (req_id >> 3) & 0x1F, req_id & 0x07);
     printf(" -> Git Commit Hash   : 0x%08X, Build Date: 0x%08X\n", git_hash, bld_date);
     printf(" -> Hardware Caps     : 0x%08X (VideoCh=%u, AudioCh=%u)\n",
            hw_caps, (hw_caps >> 8) & 0xFF, (hw_caps >> 16) & 0xFF);
@@ -366,9 +369,14 @@ int main(int argc, char **argv) {
         printf("\n -> PCIe DMA transfer complete (took %.2f s, speed: %.1f MB/s)\n",
                get_time_sec() - t_start,
                (file_size / (1024.0 * 1024.0)) / (get_time_sec() - t_start));
+
+        // Publish total size, total CRC32, and Ring Doorbell to notify board daemon
+        bar0[REG_DMA_UPG_SIZE / 4]     = (uint32_t)file_size;
+        bar0[REG_DMA_UPG_CRC32 / 4]    = total_crc;
+        bar0[REG_DMA_UPG_DOORBELL / 4] = 0x01;
     } else {
         // Fallback: direct hardware trigger
-        bar0[REG_DMA_UPG_CTRL / 4]  = DMA_UPG_CMD_START;
+        bar0[REG_DMA_UPG_CTRL / 4]     = DMA_UPG_CMD_START;
         bar0[REG_DMA_UPG_DOORBELL / 4] = 0x01; // Ring doorbell to board daemon
     }
 

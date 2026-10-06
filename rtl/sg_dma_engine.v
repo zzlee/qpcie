@@ -128,6 +128,9 @@ module sg_dma_engine #(
     assign h2c_loopback_enable = h2c_loopback_enable_q;
     assign h2c_loopback_channel = h2c_desc_ctrl_q[7:6];
 
+    wire [127:0] rob_lb_tdata;
+    assign m_axis_loopback_tdata = (PCIE_DATA_WIDTH >= 256) ? {{PCIE_DATA_WIDTH-128{1'b0}}, rob_lb_tdata} : rob_lb_tdata;
+
     h2c_reorder_buffer #(
         .DEPTH(16)
     ) u_h2c_reorder_buffer (
@@ -137,8 +140,8 @@ module sg_dma_engine #(
         .alloc_frame_first(h2c_first_request),
         .alloc_frame_last(h2c_rem_bytes == (h2c_burst_dw << 2)),
         .cpl_valid(h2c_cpl_valid), .cpl_tag(h2c_cpl_tag),
-        .cpl_data(h2c_cpl_data), .cpl_dw_count(h2c_cpl_dw_count),
-        .m_axis_tdata(m_axis_loopback_tdata),
+        .cpl_data(h2c_cpl_data[127:0]), .cpl_dw_count(h2c_cpl_dw_count),
+        .m_axis_tdata(rob_lb_tdata),
         .m_axis_tvalid(m_axis_loopback_tvalid),
         .m_axis_tlast(m_axis_loopback_tlast),
         .m_axis_tuser(m_axis_loopback_tuser),

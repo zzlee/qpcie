@@ -15,6 +15,7 @@ module rq_tx_encoder #(
     parameter [15:0] REQUESTER_ID = 16'h0001
 )(
     input wire clk, input wire rst_n,
+    input wire [15:0] requester_id,
     output reg [DATA_WIDTH-1:0] m_axis_rq_tdata,
     output reg m_axis_rq_tvalid, output reg m_axis_rq_tlast,
     output reg [61:0] m_axis_rq_tuser,
@@ -53,6 +54,7 @@ module rq_tx_encoder #(
     wire [3:0] sg_last_be   = (sg_req_dw_len > 11'd1)   ? 4'hF : 4'h0;
     wire [3:0] h2c_last_be  = (h2c_req_dw_len > 11'd1)  ? 4'hF : 4'h0;
     wire [3:0] c2h_last_be  = (c2h_req_dw_len > 11'd1)  ? 4'hF : 4'h0;
+    wire [15:0] active_requester_id = (requester_id != 16'd0) ? requester_id : REQUESTER_ID;
 
     function [KEEP_WIDTH-1:0] payload_keep;
         input [10:0] valid_dw;
@@ -103,7 +105,7 @@ module rq_tx_encoder #(
                     if (irq_req_valid && !irq_req_ack) begin
                         m_axis_rq_tdata[74:64] <= 11'd0;
                         m_axis_rq_tdata[78:75] <= 4'b0010;
-                        m_axis_rq_tdata[95:80] <= REQUESTER_ID;
+                        m_axis_rq_tdata[95:80] <= active_requester_id;
                         m_axis_rq_tdata[127:120] <= irq_req_code;
                         m_axis_rq_tuser <= {54'd0, 4'h0, 4'hF}; // first_be = 4'hF, last_be = 4'h0
                         m_axis_rq_tkeep <= {KEEP_WIDTH{1'b1}};
@@ -114,7 +116,7 @@ module rq_tx_encoder #(
                         m_axis_rq_tdata[63:0] <= desc_req_addr;
                         m_axis_rq_tdata[74:64] <= desc_req_dw_len;
                         m_axis_rq_tdata[78:75] <= 4'b0000;
-                        m_axis_rq_tdata[95:80] <= REQUESTER_ID;
+                        m_axis_rq_tdata[95:80] <= active_requester_id;
                         m_axis_rq_tdata[103:96] <= desc_req_tag;
                         m_axis_rq_tuser <= {54'd0, desc_last_be, 4'hF}; // PG213 Table 55: first_be, last_be
                         m_axis_rq_tkeep <= {KEEP_WIDTH{1'b1}};
@@ -125,7 +127,7 @@ module rq_tx_encoder #(
                         m_axis_rq_tdata[63:0] <= sg_req_addr;
                         m_axis_rq_tdata[74:64] <= sg_req_dw_len;
                         m_axis_rq_tdata[78:75] <= 4'b0000;
-                        m_axis_rq_tdata[95:80] <= REQUESTER_ID;
+                        m_axis_rq_tdata[95:80] <= active_requester_id;
                         m_axis_rq_tdata[103:96] <= sg_req_tag;
                         m_axis_rq_tuser <= {54'd0, sg_last_be, 4'hF};
                         m_axis_rq_tkeep <= {KEEP_WIDTH{1'b1}};
@@ -136,7 +138,7 @@ module rq_tx_encoder #(
                         m_axis_rq_tdata[63:0] <= h2c_req_addr;
                         m_axis_rq_tdata[74:64] <= h2c_req_dw_len;
                         m_axis_rq_tdata[78:75] <= 4'b0000;
-                        m_axis_rq_tdata[95:80] <= REQUESTER_ID;
+                        m_axis_rq_tdata[95:80] <= active_requester_id;
                         m_axis_rq_tdata[103:96] <= h2c_req_tag;
                         m_axis_rq_tuser <= {54'd0, h2c_last_be, 4'hF};
                         m_axis_rq_tkeep <= {KEEP_WIDTH{1'b1}};
@@ -148,7 +150,7 @@ module rq_tx_encoder #(
                         m_axis_rq_tdata[63:0] <= c2h_req_addr;
                         m_axis_rq_tdata[74:64] <= c2h_req_dw_len;
                         m_axis_rq_tdata[78:75] <= 4'b0001;
-                        m_axis_rq_tdata[95:80] <= REQUESTER_ID;
+                        m_axis_rq_tdata[95:80] <= active_requester_id;
                         m_axis_rq_tdata[103:96] <= 8'd0;
                         m_axis_rq_tuser <= {54'd0, c2h_last_be, 4'hF};
                         m_axis_rq_tkeep <= {KEEP_WIDTH{1'b1}};

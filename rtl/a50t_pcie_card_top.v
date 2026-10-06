@@ -874,6 +874,7 @@ module a50t_pcie_card_top #(
         .s_axis_rc_tuser(m_axis_rc_tuser),
         .s_axis_rc_tkeep(m_axis_rc_tkeep),
         .s_axis_rc_tready(m_axis_rc_tready),
+        .requester_id({cfg_bus_number, cfg_device_number, cfg_function_number}),
 
         .m_axil_bar1_awaddr(bar1_m_awaddr),
         .m_axil_bar1_awvalid(bar1_m_awvalid),

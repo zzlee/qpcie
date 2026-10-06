@@ -682,6 +682,7 @@ module ku3p_pcie_card_top #(
         .s_axis_rc_tuser(m_axis_rc_tuser),
         .s_axis_rc_tkeep(m_axis_rc_tkeep),
         .s_axis_rc_tready(m_axis_rc_tready),
+        .requester_id({cfg_bus_number, 8'h00}),
 
         // BAR1 AXI4-Lite Master Interface -> Connected to axil_interconnect S00
         .m_axil_bar1_awaddr(bar1_m_awaddr),

@@ -53,6 +53,9 @@ module custom_pcie_dma_top #(
     input  wire [PCIE_KEEP_WIDTH-1:0]                       s_axis_rc_tkeep,
     output wire                                             s_axis_rc_tready,
 
+    // Dynamic PCIe Requester ID (Bus/Device/Function)
+    input  wire [15:0]                                      requester_id,
+
     // BAR1 AXI4-Lite Master Interface (Connects to Interconnect for User IP Cores: I2C, UART, etc.)
     output wire [31:0]                                      m_axil_bar1_awaddr,
     output wire                                             m_axil_bar1_awvalid,
@@ -799,6 +802,7 @@ module custom_pcie_dma_top #(
     ) u_axil_reg_space (
         .clk(clk),
         .rst_n(rst_n),
+        .in_requester_id(requester_id),
         .s_axil_awaddr(arb_axil_awaddr),
         .s_axil_awvalid(arb_axil_awvalid),
         .s_axil_awready(arb_axil_awready),
@@ -1128,6 +1132,7 @@ module custom_pcie_dma_top #(
     ) u_rq_tx_encoder (
         .clk(clk),
         .rst_n(dma_rst_n),
+        .requester_id(requester_id),
         .m_axis_rq_tdata(m_axis_rq_tdata),
         .m_axis_rq_tvalid(m_axis_rq_tvalid),
         .m_axis_rq_tlast(m_axis_rq_tlast),
