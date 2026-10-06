@@ -1289,6 +1289,33 @@ module zu4ev_pcie_card_top #(
     wire dma_active;
     assign user_led_dma_active = dma_active;
 
+    // PS Interconnect Signals (HPM0 AXI-Lite and HP0 AXI4 Write)
+    wire [39:0]  ps_hpm0_awaddr;
+    wire         ps_hpm0_awvalid, ps_hpm0_awready;
+    wire [31:0]  ps_hpm0_wdata;
+    wire [3:0]   ps_hpm0_wstrb;
+    wire         ps_hpm0_wvalid, ps_hpm0_wready;
+    wire [1:0]   ps_hpm0_bresp;
+    wire         ps_hpm0_bvalid, ps_hpm0_bready;
+    wire [39:0]  ps_hpm0_araddr;
+    wire         ps_hpm0_arvalid, ps_hpm0_arready;
+    wire [31:0]  ps_hpm0_rdata;
+    wire [1:0]   ps_hpm0_rresp;
+    wire         ps_hpm0_rvalid, ps_hpm0_rready;
+
+    wire [48:0]  hp0_awaddr_w;
+    wire [7:0]   hp0_awlen_w;
+    wire [2:0]   hp0_awsize_w;
+    wire [1:0]   hp0_awburst_w;
+    wire         hp0_awvalid_w, hp0_awready_w;
+    wire [127:0] hp0_wdata_w;
+    wire [15:0]  hp0_wstrb_w;
+    wire         hp0_wlast_w;
+    wire         hp0_wvalid_w, hp0_wready_w;
+    wire [1:0]   hp0_bresp_w;
+    wire         hp0_bvalid_w, hp0_bready_w;
+    wire         ps_irq_pulse_w;
+
     custom_pcie_dma_top #(
         .PCIE_DATA_WIDTH(PCIE_DATA_WIDTH),
         .PCIE_KEEP_WIDTH(PCIE_KEEP_WIDTH),
@@ -1408,7 +1435,135 @@ module zu4ev_pcie_card_top #(
         .out_hdmi_ipc_cmd(hdmi_ipc_cmd_w),
         .out_hdmi_ipc_arg(hdmi_ipc_arg_w),
         .out_hdmi_ipc_status(hdmi_ipc_status_w),
-        .out_hdmi_ipc_doorbell(hdmi_ipc_doorbell_w)
+        .out_hdmi_ipc_doorbell(hdmi_ipc_doorbell_w),
+
+        // PS ARM Linux AXI4-Lite Slave Interface (from PS M_AXI_HPM0_FPD)
+        .s_axil_ps_awaddr(ps_hpm0_awaddr[31:0]),
+        .s_axil_ps_awvalid(ps_hpm0_awvalid),
+        .s_axil_ps_awready(ps_hpm0_awready),
+        .s_axil_ps_wdata(ps_hpm0_wdata),
+        .s_axil_ps_wstrb(ps_hpm0_wstrb),
+        .s_axil_ps_wvalid(ps_hpm0_wvalid),
+        .s_axil_ps_wready(ps_hpm0_wready),
+        .s_axil_ps_bresp(ps_hpm0_bresp),
+        .s_axil_ps_bvalid(ps_hpm0_bvalid),
+        .s_axil_ps_bready(ps_hpm0_bready),
+        .s_axil_ps_araddr(ps_hpm0_araddr[31:0]),
+        .s_axil_ps_arvalid(ps_hpm0_arvalid),
+        .s_axil_ps_arready(ps_hpm0_arready),
+        .s_axil_ps_rdata(ps_hpm0_rdata),
+        .s_axil_ps_rresp(ps_hpm0_rresp),
+        .s_axil_ps_rvalid(ps_hpm0_rvalid),
+        .s_axil_ps_rready(ps_hpm0_rready),
+
+        // PS DDR4 AXI4 Master Write Interface (to PS S_AXI_HP0_FPD)
+        .m_axi_hp0_awaddr(hp0_awaddr_w),
+        .m_axi_hp0_awlen(hp0_awlen_w),
+        .m_axi_hp0_awsize(hp0_awsize_w),
+        .m_axi_hp0_awburst(hp0_awburst_w),
+        .m_axi_hp0_awvalid(hp0_awvalid_w),
+        .m_axi_hp0_awready(hp0_awready_w),
+        .m_axi_hp0_wdata(hp0_wdata_w),
+        .m_axi_hp0_wstrb(hp0_wstrb_w),
+        .m_axi_hp0_wlast(hp0_wlast_w),
+        .m_axi_hp0_wvalid(hp0_wvalid_w),
+        .m_axi_hp0_wready(hp0_wready_w),
+        .m_axi_hp0_bresp(hp0_bresp_w),
+        .m_axi_hp0_bvalid(hp0_bvalid_w),
+        .m_axi_hp0_bready(hp0_bready_w),
+
+        // PS Interrupt Notification Pulse (to PS pl_ps_irq0)
+        .out_ps_irq_pulse(ps_irq_pulse_w)
+    );
+
+    // =========================================================================
+    // Zynq UltraScale+ Processing System Subsystem (zu4ev_ps_bd_wrapper)
+    // =========================================================================
+    zu4ev_ps_bd_wrapper u_zu4ev_ps_bd (
+        .pcie_user_clk(pcie_user_clk),
+        .pl_ps_irq0(ps_irq_pulse_w),
+
+        // M_AXI_HPM0_FPD (PS AXI-Lite Master to PL axil_reg_space)
+        .M_AXI_HPM0_FPD_araddr(ps_hpm0_araddr),
+        .M_AXI_HPM0_FPD_arburst(),
+        .M_AXI_HPM0_FPD_arcache(),
+        .M_AXI_HPM0_FPD_arid(),
+        .M_AXI_HPM0_FPD_arlen(),
+        .M_AXI_HPM0_FPD_arlock(),
+        .M_AXI_HPM0_FPD_arprot(),
+        .M_AXI_HPM0_FPD_arqos(),
+        .M_AXI_HPM0_FPD_arready(ps_hpm0_arready),
+        .M_AXI_HPM0_FPD_arsize(),
+        .M_AXI_HPM0_FPD_aruser(),
+        .M_AXI_HPM0_FPD_arvalid(ps_hpm0_arvalid),
+        .M_AXI_HPM0_FPD_awaddr(ps_hpm0_awaddr),
+        .M_AXI_HPM0_FPD_awburst(),
+        .M_AXI_HPM0_FPD_awcache(),
+        .M_AXI_HPM0_FPD_awid(),
+        .M_AXI_HPM0_FPD_awlen(),
+        .M_AXI_HPM0_FPD_awlock(),
+        .M_AXI_HPM0_FPD_awprot(),
+        .M_AXI_HPM0_FPD_awqos(),
+        .M_AXI_HPM0_FPD_awready(ps_hpm0_awready),
+        .M_AXI_HPM0_FPD_awsize(),
+        .M_AXI_HPM0_FPD_awuser(),
+        .M_AXI_HPM0_FPD_awvalid(ps_hpm0_awvalid),
+        .M_AXI_HPM0_FPD_bid(16'd0),
+        .M_AXI_HPM0_FPD_bready(ps_hpm0_bready),
+        .M_AXI_HPM0_FPD_bresp(ps_hpm0_bresp),
+        .M_AXI_HPM0_FPD_bvalid(ps_hpm0_bvalid),
+        .M_AXI_HPM0_FPD_rdata(ps_hpm0_rdata),
+        .M_AXI_HPM0_FPD_rid(16'd0),
+        .M_AXI_HPM0_FPD_rlast(1'b1),
+        .M_AXI_HPM0_FPD_rready(ps_hpm0_rready),
+        .M_AXI_HPM0_FPD_rresp(ps_hpm0_rresp),
+        .M_AXI_HPM0_FPD_rvalid(ps_hpm0_rvalid),
+        .M_AXI_HPM0_FPD_wdata(ps_hpm0_wdata),
+        .M_AXI_HPM0_FPD_wlast(),
+        .M_AXI_HPM0_FPD_wready(ps_hpm0_wready),
+        .M_AXI_HPM0_FPD_wstrb(ps_hpm0_wstrb),
+        .M_AXI_HPM0_FPD_wvalid(ps_hpm0_wvalid),
+
+        // S_AXI_HP0_FPD (PL H2C DMA Master into PS DDR4)
+        .S_AXI_HP0_FPD_araddr(49'd0),
+        .S_AXI_HP0_FPD_arburst(2'b01),
+        .S_AXI_HP0_FPD_arcache(4'd0),
+        .S_AXI_HP0_FPD_arid(6'd0),
+        .S_AXI_HP0_FPD_arlen(8'd0),
+        .S_AXI_HP0_FPD_arlock(1'b0),
+        .S_AXI_HP0_FPD_arprot(3'd0),
+        .S_AXI_HP0_FPD_arqos(4'd0),
+        .S_AXI_HP0_FPD_arready(),
+        .S_AXI_HP0_FPD_arsize(3'b100),
+        .S_AXI_HP0_FPD_aruser(1'b0),
+        .S_AXI_HP0_FPD_arvalid(1'b0),
+        .S_AXI_HP0_FPD_awaddr(hp0_awaddr_w),
+        .S_AXI_HP0_FPD_awburst(hp0_awburst_w),
+        .S_AXI_HP0_FPD_awcache(4'd3),
+        .S_AXI_HP0_FPD_awid(6'd0),
+        .S_AXI_HP0_FPD_awlen(hp0_awlen_w),
+        .S_AXI_HP0_FPD_awlock(1'b0),
+        .S_AXI_HP0_FPD_awprot(3'd0),
+        .S_AXI_HP0_FPD_awqos(4'd0),
+        .S_AXI_HP0_FPD_awready(hp0_awready_w),
+        .S_AXI_HP0_FPD_awsize(hp0_awsize_w),
+        .S_AXI_HP0_FPD_awuser(1'b0),
+        .S_AXI_HP0_FPD_awvalid(hp0_awvalid_w),
+        .S_AXI_HP0_FPD_bid(),
+        .S_AXI_HP0_FPD_bready(hp0_bready_w),
+        .S_AXI_HP0_FPD_bresp(hp0_bresp_w),
+        .S_AXI_HP0_FPD_bvalid(hp0_bvalid_w),
+        .S_AXI_HP0_FPD_rdata(),
+        .S_AXI_HP0_FPD_rid(),
+        .S_AXI_HP0_FPD_rlast(),
+        .S_AXI_HP0_FPD_rready(1'b1),
+        .S_AXI_HP0_FPD_rresp(),
+        .S_AXI_HP0_FPD_rvalid(),
+        .S_AXI_HP0_FPD_wdata(hp0_wdata_w),
+        .S_AXI_HP0_FPD_wlast(hp0_wlast_w),
+        .S_AXI_HP0_FPD_wready(hp0_wready_w),
+        .S_AXI_HP0_FPD_wstrb(hp0_wstrb_w),
+        .S_AXI_HP0_FPD_wvalid(hp0_wvalid_w)
     );
 
     // Heartbeat / DMA activity indicator

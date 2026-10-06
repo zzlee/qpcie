@@ -3,7 +3,7 @@
 # ============================================================================
 
 obj-m += qpcie.o
-qpcie-objs := qpcie_main.o qpcie_v4l2.o qpcie_alsa.o qpcie_sysfs.o qpcie_dmabuf.o qpcie_i2c.o qpcie_flash.o
+qpcie-objs := qpcie_main.o qpcie_v4l2.o qpcie_alsa.o qpcie_sysfs.o qpcie_dmabuf.o qpcie_i2c.o qpcie_flash.o qpcie_upgrade.o
 
 KDIR ?= /lib/modules/$(shell uname -r)/build
 PWD  := $(shell pwd)

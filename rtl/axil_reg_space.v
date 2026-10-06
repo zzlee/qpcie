@@ -8,7 +8,7 @@
 `timescale 1ns / 1ps
 
 module axil_reg_space #(
-    parameter [31:0]   C_VERSION    = 32'h2610_0504, // Mandatory hardware version YYMMDDpp
+    parameter [31:0]   C_VERSION    = 32'h2610_0602, // Mandatory hardware version YYMMDDpp
     parameter integer NUM_VIDEO_CH = 4,
     parameter integer NUM_AUDIO_CH = 4
 )(
@@ -197,7 +197,19 @@ module axil_reg_space #(
     output wire [31:0] out_hdmi_ipc_cmd,
     output wire [31:0] out_hdmi_ipc_arg,
     output wire [31:0] out_hdmi_ipc_status,
-    output wire [31:0] out_hdmi_ipc_doorbell
+    output wire [31:0] out_hdmi_ipc_doorbell,
+
+    // Firmware Upgrade Ports (BAR0 0x0780 - 0x079C)
+    output wire [31:0] out_dma_upg_ctrl,
+    output wire [31:0] out_dma_upg_size,
+    output wire [31:0] out_dma_upg_crc32,
+    output wire [63:0] out_dma_upg_ps_addr,
+    output wire [63:0] out_dma_upg_host_addr,
+    output wire [31:0] out_dma_upg_status,
+    output wire [31:0] out_dma_upg_progress,
+    output wire [31:0] out_dma_upg_doorbell,
+    input  wire        in_dma_upg_write_done,
+    input  wire [31:0] in_dma_upg_bytes_written
 );
 
     // BAR0 Register Offset Definitions (12-bit decode aperture)
@@ -309,6 +321,7 @@ module axil_reg_space #(
     reg  [31:0] reg_dma_upg_size;      // 0x0784: upgrade.tar.gz size in bytes
     reg  [31:0] reg_dma_upg_crc32;     // 0x0788: Expected CRC32 of upgrade.tar.gz
     reg  [63:0] reg_dma_upg_ps_addr;   // 0x078C/0x0790: PS DDR4 physical buffer address (low/high 32b)
+    reg  [63:0] reg_dma_upg_host_addr; // 0x07A0/0x07A4: Host physical DMA buffer address (low/high 32b)
     reg  [31:0] reg_dma_upg_status;    // 0x0794: 0x0=IDLE, 0x1=RECEIVING, 0x2=VERIFYING, 0x3=FLASHING, 0x4=SUCCESS
     reg  [31:0] reg_dma_upg_progress;  // 0x0798: 0..100% progress
     reg  [31:0] reg_dma_upg_doorbell;  // 0x079C: Doorbell notification
@@ -385,6 +398,15 @@ module axil_reg_space #(
     assign out_adev0_ring0_cfg    = adev0_ring0_cfg;
 
     assign out_global_reset_pulse = global_reset_pulse;
+
+    assign out_dma_upg_ctrl     = reg_dma_upg_ctrl;
+    assign out_dma_upg_size     = reg_dma_upg_size;
+    assign out_dma_upg_crc32    = reg_dma_upg_crc32;
+    assign out_dma_upg_ps_addr   = reg_dma_upg_ps_addr;
+    assign out_dma_upg_host_addr = reg_dma_upg_host_addr;
+    assign out_dma_upg_status    = reg_dma_upg_status;
+    assign out_dma_upg_progress = reg_dma_upg_progress;
+    assign out_dma_upg_doorbell = reg_dma_upg_doorbell;
 
 
     // Write Logic
@@ -467,6 +489,7 @@ module axil_reg_space #(
             reg_dma_upg_size        <= 32'd0;
             reg_dma_upg_crc32       <= 32'd0;
             reg_dma_upg_ps_addr     <= 64'd0;
+            reg_dma_upg_host_addr   <= 64'd0;
             reg_dma_upg_status      <= 32'd0;
             reg_dma_upg_progress    <= 32'd0;
             reg_dma_upg_doorbell    <= 32'd0;
@@ -645,6 +668,8 @@ module axil_reg_space #(
                             8'h94: reg_dma_upg_status  <= s_axil_wdata;
                             8'h98: reg_dma_upg_progress<= s_axil_wdata;
                             8'h9C: reg_dma_upg_doorbell<= s_axil_wdata;
+                            8'hA0: reg_dma_upg_host_addr[31:0]  <= s_axil_wdata;
+                            8'hA4: reg_dma_upg_host_addr[63:32] <= s_axil_wdata;
                             default: ;
                         endcase
                     end
@@ -662,6 +687,10 @@ module axil_reg_space #(
                 reg_debug_last_wdata <= s_axil_wdata;
                 reg_debug_last_waddr <= {20'd0, s_axil_awaddr[11:0]};
             end else begin
+                if (in_dma_upg_write_done) begin
+                    reg_dma_upg_ctrl[1]  <= 1'b1;
+                    reg_dma_upg_progress <= 32'd20;
+                end
                 s_axil_awready <= 1'b0;
                 s_axil_wready  <= 1'b0;
                 if (s_axil_bready && s_axil_bvalid) begin
@@ -813,6 +842,8 @@ module axil_reg_space #(
                             8'h94: s_axil_rdata <= reg_dma_upg_status;
                             8'h98: s_axil_rdata <= reg_dma_upg_progress;
                             8'h9C: s_axil_rdata <= reg_dma_upg_doorbell;
+                            8'hA0: s_axil_rdata <= reg_dma_upg_host_addr[31:0];
+                            8'hA4: s_axil_rdata <= reg_dma_upg_host_addr[63:32];
                             default: s_axil_rdata <= 32'd0;
                         endcase
                     end

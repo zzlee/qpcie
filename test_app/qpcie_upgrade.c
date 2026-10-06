@@ -337,13 +337,42 @@ int main(int argc, char **argv) {
     // Handshake: Set Size, CRC32, and Start Transfer
     bar0[REG_DMA_UPG_SIZE / 4]  = (uint32_t)file_size;
     bar0[REG_DMA_UPG_CRC32 / 4] = total_crc;
-    bar0[REG_DMA_UPG_CTRL / 4]  = DMA_UPG_CMD_START;
-    bar0[REG_DMA_UPG_DOORBELL / 4] = 0x01; // Ring doorbell to board daemon
 
     double t_start = get_time_sec();
 
-    // In native operation, board daemon receives data directly in PS DDR4 via DMA
-    // Here we monitor the progress and status reported by the board daemon
+    // 5.1 Push payload to board PS DDR4 via kernel DMA Fast-Push channel
+    char upg_sysfs[256];
+    snprintf(upg_sysfs, sizeof(upg_sysfs), "/sys/bus/pci/devices/%s/firmware_upgrade", bdf);
+    int fd_upg = open(upg_sysfs, O_WRONLY);
+
+    if (fd_upg >= 0) {
+        printf(" -> Streaming %zu bytes over PCIe Gen3 x4 DMA to Board PS DDR4...\n", file_size);
+        size_t total_pushed = 0;
+        const size_t chunk_sz = 2 * 1024 * 1024; // 2 MB coherent chunks
+        while (total_pushed < file_size) {
+            size_t to_write = file_size - total_pushed;
+            if (to_write > chunk_sz) to_write = chunk_sz;
+            ssize_t nw = write(fd_upg, file_buf + total_pushed, to_write);
+            if (nw <= 0) {
+                perror("❌ ERROR: Failed writing to firmware_upgrade sysfs");
+                break;
+            }
+            total_pushed += nw;
+            double elapsed = get_time_sec() - t_start;
+            double mb_s = (elapsed > 0) ? (total_pushed / (1024.0 * 1024.0)) / elapsed : 0.0;
+            print_progress((int)(total_pushed * 25 / file_size), mb_s);
+        }
+        close(fd_upg);
+        printf("\n -> PCIe DMA transfer complete (took %.2f s, speed: %.1f MB/s)\n",
+               get_time_sec() - t_start,
+               (file_size / (1024.0 * 1024.0)) / (get_time_sec() - t_start));
+    } else {
+        // Fallback: direct hardware trigger
+        bar0[REG_DMA_UPG_CTRL / 4]  = DMA_UPG_CMD_START;
+        bar0[REG_DMA_UPG_DOORBELL / 4] = 0x01; // Ring doorbell to board daemon
+    }
+
+    // Monitor progress and status reported by board daemon (CRC verify + eMMC flash)
     int wait_sec = 120;
     bool success = false;
     uint32_t last_prog = 0xFF;

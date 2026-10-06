@@ -60,6 +60,12 @@
         } while (0)
 #endif
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
+    #define BIN_ATTR_ARG const struct bin_attribute *
+#else
+    #define BIN_ATTR_ARG struct bin_attribute *
+#endif
+
 #define QPCIE_VENDOR_ID   0x12AB /* Custom PCI Vendor ID */
 #define QPCIE_DEVICE_ID   0xE380 /* Custom PCIe DMA Device ID */
 
@@ -505,6 +511,9 @@ void qpcie_flash_remove(struct qpcie_dev *qdev);
 
 int qpcie_sysfs_init(struct qpcie_dev *qdev);
 void qpcie_sysfs_remove(struct qpcie_dev *qdev);
+
+int qpcie_upgrade_init(struct qpcie_dev *qdev);
+void qpcie_upgrade_remove(struct qpcie_dev *qdev);
 
 int qpcie_v4l2_export_dmabuf(struct qpcie_v4l2_channel *vch, struct v4l2_exportbuffer *exp);
 

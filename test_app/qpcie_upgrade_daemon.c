@@ -145,14 +145,37 @@ int main(int argc, char **argv) {
         return EXIT_FAILURE;
     }
 
-    // Map PL CSR space
-    volatile uint32_t *pl_regs = (volatile uint32_t *)mmap(NULL, PL_MMAP_SIZE,
+    // Map PL CSR space with automatic base address detection (0xA0000000 or 0xB0000000)
+    uint64_t candidate_bases[] = {0xA0000000UL, 0xB0000000UL};
+    volatile uint32_t *pl_regs = MAP_FAILED;
+    uint64_t pl_base_used = 0;
+
+    for (size_t i = 0; i < sizeof(candidate_bases)/sizeof(candidate_bases[0]); i++) {
+        volatile uint32_t *map = (volatile uint32_t *)mmap(NULL, PL_MMAP_SIZE,
                                                            PROT_READ | PROT_WRITE,
-                                                           MAP_SHARED, fd_mem, DEFAULT_PL_BASE_ADDR);
+                                                           MAP_SHARED, fd_mem, candidate_bases[i]);
+        if (map != MAP_FAILED) {
+            if (map[0] == 0x12ABE380) {
+                pl_regs = map;
+                pl_base_used = candidate_bases[i];
+                syslog(LOG_NOTICE, "Discovered SC7F0 PL CSR at physical base 0x%08lX (Magic: 0x12ABE380)", pl_base_used);
+                break;
+            }
+            munmap((void *)map, PL_MMAP_SIZE);
+        }
+    }
+
     if (pl_regs == MAP_FAILED) {
-        syslog(LOG_ERR, "Failed to mmap PL registers at 0x%08lX: %s", DEFAULT_PL_BASE_ADDR, strerror(errno));
-        close(fd_mem);
-        return EXIT_FAILURE;
+        // Fallback to primary 0xA0000000
+        pl_regs = (volatile uint32_t *)mmap(NULL, PL_MMAP_SIZE,
+                                           PROT_READ | PROT_WRITE,
+                                           MAP_SHARED, fd_mem, candidate_bases[0]);
+        if (pl_regs == MAP_FAILED) {
+            syslog(LOG_ERR, "Failed to mmap PL registers: %s", strerror(errno));
+            close(fd_mem);
+            return EXIT_FAILURE;
+        }
+        pl_base_used = candidate_bases[0];
     }
 
     // Map DDR4 DMA receive window
@@ -189,9 +212,21 @@ int main(int argc, char **argv) {
             uint32_t expected_size  = pl_regs[REG_DMA_UPG_SIZE / 4];
             uint32_t expected_crc32 = pl_regs[REG_DMA_UPG_CRC32 / 4];
 
-            syslog(LOG_NOTICE, "Received upgrade request: size=%u bytes, crc32=0x%08X", expected_size, expected_crc32);
-            pl_regs[REG_DMA_UPG_STATUS / 4] = STATUS_UPG_RECEIVING;
-            pl_regs[REG_DMA_UPG_PROGRESS / 4] = 10;
+            if (pl_regs[REG_DMA_UPG_STATUS / 4] != STATUS_UPG_RECEIVING &&
+                pl_regs[REG_DMA_UPG_STATUS / 4] != STATUS_UPG_VERIFYING &&
+                pl_regs[REG_DMA_UPG_STATUS / 4] != STATUS_UPG_FLASHING) {
+                syslog(LOG_NOTICE, "Received upgrade request: size=%u bytes, crc32=0x%08X. Ingesting DMA transfer...", expected_size, expected_crc32);
+                pl_regs[REG_DMA_UPG_STATUS / 4] = STATUS_UPG_RECEIVING;
+                pl_regs[REG_DMA_UPG_PROGRESS / 4] = 10;
+            }
+
+            // Wait for FPGA PL hardware to signal DMA write completion
+            if (!(ctrl & DMA_UPG_CMD_DMA_DONE)) {
+                usleep(5000); // 5ms poll while DMA in flight
+                continue;
+            }
+
+            syslog(LOG_NOTICE, "DMA transfer complete in PS DDR4. Verifying package integrity...");
 
             if (expected_size == 0 || expected_size > DDR4_DMA_BUF_SIZE) {
                 syslog(LOG_ERR, "Invalid package size: %u bytes", expected_size);

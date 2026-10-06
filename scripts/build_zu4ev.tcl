@@ -40,6 +40,14 @@ set_property verilog_define $verilog_defs [current_fileset]
 # 2. Add Constraints
 add_files -fileset constrs_1 ./constraints/zu4ev_pcie_pinout.xdc
 
+# 2.1 Generate ZU4EV Processing System Subsystem (zu4ev_ps_bd)
+puts "Generating ZU4EV Processing System Subsystem (zu4ev_ps_bd)..."
+source ./scripts/create_zu4ev_ps_bd.tcl
+create_zu4ev_ps_bd
+generate_target all [get_files zu4ev_ps_bd.bd]
+set bd_wrapper [make_wrapper -files [get_files zu4ev_ps_bd.bd] -top]
+add_files -norecurse $bd_wrapper
+
 # 3. Generate UltraScale+ PCIe Core with Tandem PCIe (Gen3 x4, 256-bit, Quad 223)
 puts "Generating UltraScale+ PCIe IP Core (pcie4_uscale_plus_0 - Gen3 x4, 256-bit, Tandem PCIe)..."
 create_ip -name pcie4_uscale_plus -vendor xilinx.com -library ip -version 1.3 -module_name pcie4_uscale_plus_0

@@ -132,7 +132,45 @@ module custom_pcie_dma_top #(
     output wire [31:0]                                      out_hdmi_ipc_cmd,
     output wire [31:0]                                      out_hdmi_ipc_arg,
     output wire [31:0]                                      out_hdmi_ipc_status,
-    output wire [31:0]                                      out_hdmi_ipc_doorbell
+    output wire [31:0]                                      out_hdmi_ipc_doorbell,
+
+    // PS ARM Linux AXI4-Lite Slave Interface (from PS M_AXI_HPM0_FPD)
+    input  wire [31:0]                                      s_axil_ps_awaddr,
+    input  wire                                             s_axil_ps_awvalid,
+    output wire                                             s_axil_ps_awready,
+    input  wire [31:0]                                      s_axil_ps_wdata,
+    input  wire [3:0]                                       s_axil_ps_wstrb,
+    input  wire                                             s_axil_ps_wvalid,
+    output wire                                             s_axil_ps_wready,
+    output wire [1:0]                                       s_axil_ps_bresp,
+    output wire                                             s_axil_ps_bvalid,
+    input  wire                                             s_axil_ps_bready,
+    input  wire [31:0]                                      s_axil_ps_araddr,
+    input  wire                                             s_axil_ps_arvalid,
+    output wire                                             s_axil_ps_arready,
+    output wire [31:0]                                      s_axil_ps_rdata,
+    output wire [1:0]                                       s_axil_ps_rresp,
+    output wire                                             s_axil_ps_rvalid,
+    input  wire                                             s_axil_ps_rready,
+
+    // PS DDR4 AXI4 Master Write Interface (to PS S_AXI_HP0_FPD)
+    output wire [48:0]                                      m_axi_hp0_awaddr,
+    output wire [7:0]                                       m_axi_hp0_awlen,
+    output wire [2:0]                                       m_axi_hp0_awsize,
+    output wire [1:0]                                       m_axi_hp0_awburst,
+    output wire                                             m_axi_hp0_awvalid,
+    input  wire                                             m_axi_hp0_awready,
+    output wire [127:0]                                     m_axi_hp0_wdata,
+    output wire [15:0]                                      m_axi_hp0_wstrb,
+    output wire                                             m_axi_hp0_wlast,
+    output wire                                             m_axi_hp0_wvalid,
+    input  wire                                             m_axi_hp0_wready,
+    input  wire [1:0]                                       m_axi_hp0_bresp,
+    input  wire                                             m_axi_hp0_bvalid,
+    output wire                                             m_axi_hp0_bready,
+
+    // PS Interrupt Notification Pulse (to PS pl_ps_irq0)
+    output wire                                             out_ps_irq_pulse
 );
 
     // Internal Wires for BAR0 Inter-module Connection
@@ -142,6 +180,72 @@ module custom_pcie_dma_top #(
     wire        bar0_axil_awvalid, bar0_axil_awready, bar0_axil_wvalid, bar0_axil_wready;
     wire        bar0_axil_bvalid, bar0_axil_bready, bar0_axil_arvalid, bar0_axil_arready;
     wire        bar0_axil_rvalid, bar0_axil_rready;
+
+    // Arbitrated AXI-Lite signals driving axil_reg_space (PCIe BAR0 + PS HPM0_FPD)
+    wire [31:0] arb_axil_awaddr, arb_axil_wdata, arb_axil_araddr, arb_axil_rdata;
+    wire [3:0]  arb_axil_wstrb;
+    wire [1:0]  arb_axil_bresp, arb_axil_rresp;
+    wire        arb_axil_awvalid, arb_axil_awready, arb_axil_wvalid, arb_axil_wready;
+    wire        arb_axil_bvalid, arb_axil_bready, arb_axil_arvalid, arb_axil_arready;
+    wire        arb_axil_rvalid, arb_axil_rready;
+
+    axil_arbiter_2to1 u_axil_arbiter (
+        .clk(clk),
+        .rst_n(rst_n),
+        .s0_axil_awaddr(bar0_axil_awaddr),
+        .s0_axil_awvalid(bar0_axil_awvalid),
+        .s0_axil_awready(bar0_axil_awready),
+        .s0_axil_wdata(bar0_axil_wdata),
+        .s0_axil_wstrb(bar0_axil_wstrb),
+        .s0_axil_wvalid(bar0_axil_wvalid),
+        .s0_axil_wready(bar0_axil_wready),
+        .s0_axil_bresp(bar0_axil_bresp),
+        .s0_axil_bvalid(bar0_axil_bvalid),
+        .s0_axil_bready(bar0_axil_bready),
+        .s0_axil_araddr(bar0_axil_araddr),
+        .s0_axil_arvalid(bar0_axil_arvalid),
+        .s0_axil_arready(bar0_axil_arready),
+        .s0_axil_rdata(bar0_axil_rdata),
+        .s0_axil_rresp(bar0_axil_rresp),
+        .s0_axil_rvalid(bar0_axil_rvalid),
+        .s0_axil_rready(bar0_axil_rready),
+
+        .s1_axil_awaddr(s_axil_ps_awaddr),
+        .s1_axil_awvalid(s_axil_ps_awvalid),
+        .s1_axil_awready(s_axil_ps_awready),
+        .s1_axil_wdata(s_axil_ps_wdata),
+        .s1_axil_wstrb(s_axil_ps_wstrb),
+        .s1_axil_wvalid(s_axil_ps_wvalid),
+        .s1_axil_wready(s_axil_ps_wready),
+        .s1_axil_bresp(s_axil_ps_bresp),
+        .s1_axil_bvalid(s_axil_ps_bvalid),
+        .s1_axil_bready(s_axil_ps_bready),
+        .s1_axil_araddr(s_axil_ps_araddr),
+        .s1_axil_arvalid(s_axil_ps_arvalid),
+        .s1_axil_arready(s_axil_ps_arready),
+        .s1_axil_rdata(s_axil_ps_rdata),
+        .s1_axil_rresp(s_axil_ps_rresp),
+        .s1_axil_rvalid(s_axil_ps_rvalid),
+        .s1_axil_rready(s_axil_ps_rready),
+
+        .m_axil_awaddr(arb_axil_awaddr),
+        .m_axil_awvalid(arb_axil_awvalid),
+        .m_axil_awready(arb_axil_awready),
+        .m_axil_wdata(arb_axil_wdata),
+        .m_axil_wstrb(arb_axil_wstrb),
+        .m_axil_wvalid(arb_axil_wvalid),
+        .m_axil_wready(arb_axil_wready),
+        .m_axil_bresp(arb_axil_bresp),
+        .m_axil_bvalid(arb_axil_bvalid),
+        .m_axil_bready(arb_axil_bready),
+        .m_axil_araddr(arb_axil_araddr),
+        .m_axil_arvalid(arb_axil_arvalid),
+        .m_axil_arready(arb_axil_arready),
+        .m_axil_rdata(arb_axil_rdata),
+        .m_axil_rresp(arb_axil_rresp),
+        .m_axil_rvalid(arb_axil_rvalid),
+        .m_axil_rready(arb_axil_rready)
+    );
 
     wire        read_req_valid, read_req_ack, read_req_bar_sel;
     wire [7:0]  read_req_tag;
@@ -364,6 +468,21 @@ module custom_pcie_dma_top #(
     wire [PCIE_DATA_WIDTH-1:0] sg_c2h_req_data;
     wire [31:0] sg_h2c_bytes, sg_c2h_bytes;
     wire        sg_h2c_busy, sg_c2h_busy;
+
+    // Firmware Upgrade Wires (BAR0 0x0780 - 0x079C & H2C PS DDR Writer)
+    wire [31:0] dma_upg_ctrl_w;
+    wire [31:0] dma_upg_size_w;
+    wire [31:0] dma_upg_crc32_w;
+    wire [63:0] dma_upg_ps_addr_w;
+    wire [63:0] dma_upg_host_addr_w;
+    wire [31:0] dma_upg_status_w;
+    wire [31:0] dma_upg_progress_w;
+    wire [31:0] dma_upg_doorbell_w;
+    wire        upg_write_done_w;
+    wire [31:0] upg_bytes_written_w;
+    wire        upg_irq_pulse_w;
+    wire        upg_lb_tready;
+
     wire [127:0] lb_tdata;
     wire        lb_tvalid, lb_tlast, lb_tuser;
     wire        sg_loopback_enable;
@@ -374,15 +493,14 @@ module custom_pcie_dma_top #(
     wire        ch3_loopback_full;
 `endif
 `ifdef QPCIe_single_rgb24_path
-    // Loopback consumers (Ch1-3 CDCs) are removed in the single RGB24 path,
-    // so the loopback stream has nowhere to go: accept-and-drop is impossible
-    // (sg_dma_engine requires data-ready handshake), so gate the sender off.
-    wire        lb_tready = 1'b1;
+    // When firmware upgrade is active, route backpressure from h2c_ps_ddr_writer
+    wire        lb_tready = dma_upg_ctrl_w[0] ? upg_lb_tready : 1'b1;
 `else
-    wire        lb_tready = !sg_loopback_enable ? 1'b1 :
+    wire        lb_tready = dma_upg_ctrl_w[0] ? upg_lb_tready :
+                            (!sg_loopback_enable ? 1'b1 :
                             (NUM_VIDEO_CH > 2 && sg_loopback_channel == 2'd2) ? !ch2_loopback_full :
                             (NUM_VIDEO_CH > 3 && sg_loopback_channel == 2'd3) ? !ch3_loopback_full :
-                            (NUM_VIDEO_CH > 1) ? !ch1_loopback_full : 1'b1;
+                            (NUM_VIDEO_CH > 1) ? !ch1_loopback_full : 1'b1);
 `endif
 
     // Multiplexed C2H Request Signals
@@ -465,6 +583,8 @@ module custom_pcie_dma_top #(
                              desc_fetch_idle, video_tx_idle, 4'd0,
                              a_done[0], v_done[0], a_busy[0], v_busy[0]};
 
+    wire cc_busy;
+
     // 1. CQ RX Decoder
     cq_rx_decoder #(
         .DATA_WIDTH(PCIE_DATA_WIDTH),
@@ -519,8 +639,6 @@ module custom_pcie_dma_top #(
         .read_req_ack(read_req_ack),
         .cc_busy(cc_busy)
     );
-
-    wire cc_busy;
 
     // 2. CC TX Encoder
     cc_tx_encoder #(
@@ -681,23 +799,23 @@ module custom_pcie_dma_top #(
     ) u_axil_reg_space (
         .clk(clk),
         .rst_n(rst_n),
-        .s_axil_awaddr(bar0_axil_awaddr),
-        .s_axil_awvalid(bar0_axil_awvalid),
-        .s_axil_awready(bar0_axil_awready),
-        .s_axil_wdata(bar0_axil_wdata),
-        .s_axil_wstrb(bar0_axil_wstrb),
-        .s_axil_wvalid(bar0_axil_wvalid),
-        .s_axil_wready(bar0_axil_wready),
-        .s_axil_bresp(bar0_axil_bresp),
-        .s_axil_bvalid(bar0_axil_bvalid),
-        .s_axil_bready(bar0_axil_bready),
-        .s_axil_araddr(bar0_axil_araddr),
-        .s_axil_arvalid(bar0_axil_arvalid),
-        .s_axil_arready(bar0_axil_arready),
-        .s_axil_rdata(bar0_axil_rdata),
-        .s_axil_rresp(bar0_axil_rresp),
-        .s_axil_rvalid(bar0_axil_rvalid),
-        .s_axil_rready(bar0_axil_rready),
+        .s_axil_awaddr(arb_axil_awaddr),
+        .s_axil_awvalid(arb_axil_awvalid),
+        .s_axil_awready(arb_axil_awready),
+        .s_axil_wdata(arb_axil_wdata),
+        .s_axil_wstrb(arb_axil_wstrb),
+        .s_axil_wvalid(arb_axil_wvalid),
+        .s_axil_wready(arb_axil_wready),
+        .s_axil_bresp(arb_axil_bresp),
+        .s_axil_bvalid(arb_axil_bvalid),
+        .s_axil_bready(arb_axil_bready),
+        .s_axil_araddr(arb_axil_araddr),
+        .s_axil_arvalid(arb_axil_arvalid),
+        .s_axil_arready(arb_axil_arready),
+        .s_axil_rdata(arb_axil_rdata),
+        .s_axil_rresp(arb_axil_rresp),
+        .s_axil_rvalid(arb_axil_rvalid),
+        .s_axil_rready(arb_axil_rready),
         .reg_dma_ctrl(reg_dma_ctrl),
         .reg_dma_status(reg_dma_status),
         .reg_h2c_ring_addr(reg_h2c_ring_addr),
@@ -836,8 +954,54 @@ module custom_pcie_dma_top #(
         .out_hdmi_ipc_cmd(out_hdmi_ipc_cmd),
         .out_hdmi_ipc_arg(out_hdmi_ipc_arg),
         .out_hdmi_ipc_status(out_hdmi_ipc_status),
-        .out_hdmi_ipc_doorbell(out_hdmi_ipc_doorbell)
+        .out_hdmi_ipc_doorbell(out_hdmi_ipc_doorbell),
+
+        // Firmware Upgrade CSR Ports (BAR0 0x0780 - 0x079C)
+        .out_dma_upg_ctrl(dma_upg_ctrl_w),
+        .out_dma_upg_size(dma_upg_size_w),
+        .out_dma_upg_crc32(dma_upg_crc32_w),
+        .out_dma_upg_ps_addr(dma_upg_ps_addr_w),
+        .out_dma_upg_host_addr(dma_upg_host_addr_w),
+        .out_dma_upg_status(dma_upg_status_w),
+        .out_dma_upg_progress(dma_upg_progress_w),
+        .out_dma_upg_doorbell(dma_upg_doorbell_w),
+        .in_dma_upg_write_done(upg_write_done_w),
+        .in_dma_upg_bytes_written(upg_bytes_written_w)
     );
+
+    h2c_ps_ddr_writer #(
+        .DATA_WIDTH(128),
+        .ADDR_WIDTH(49)
+    ) u_h2c_ps_ddr_writer (
+        .clk(clk),
+        .rst_n(rst_n),
+        .upg_enable(dma_upg_ctrl_w[0]),
+        .upg_dst_addr(dma_upg_ps_addr_w[48:0]),
+        .upg_total_size(dma_upg_size_w),
+        .upg_bytes_written(upg_bytes_written_w),
+        .upg_write_done(upg_write_done_w),
+        .upg_irq_pulse(upg_irq_pulse_w),
+        .s_axis_tdata(lb_tdata),
+        .s_axis_tvalid(lb_tvalid && dma_upg_ctrl_w[0]),
+        .s_axis_tlast(lb_tlast),
+        .s_axis_tready(upg_lb_tready),
+        .m_axi_awaddr(m_axi_hp0_awaddr),
+        .m_axi_awlen(m_axi_hp0_awlen),
+        .m_axi_awsize(m_axi_hp0_awsize),
+        .m_axi_awburst(m_axi_hp0_awburst),
+        .m_axi_awvalid(m_axi_hp0_awvalid),
+        .m_axi_awready(m_axi_hp0_awready),
+        .m_axi_wdata(m_axi_hp0_wdata),
+        .m_axi_wstrb(m_axi_hp0_wstrb),
+        .m_axi_wlast(m_axi_hp0_wlast),
+        .m_axi_wvalid(m_axi_hp0_wvalid),
+        .m_axi_wready(m_axi_hp0_wready),
+        .m_axi_bresp(m_axi_hp0_bresp),
+        .m_axi_bvalid(m_axi_hp0_bvalid),
+        .m_axi_bready(m_axi_hp0_bready)
+    );
+
+    assign out_ps_irq_pulse = upg_irq_pulse_w || (dma_upg_doorbell_w != 32'd0);
 
 
     // 3.1 Hardware Performance Monitor Instance
@@ -1110,25 +1274,46 @@ module custom_pcie_dma_top #(
         .channel_uv_almost_full(channel_uv_almost_full)
     );
 
-    // 7. Canonical v3.0 Thin Descriptor Engine Ties (Legacy 64B Engine Removed)
-    assign desc_fetch_idle = !thin_busy;
-    assign h2c_desc_valid  = 1'b0;
+    // 7. Canonical v3.0 Thin Descriptor Engine Ties + Upgrade H2C DMA Trigger
+    reg d_upg_start;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            d_upg_start <= 1'b0;
+        else
+            d_upg_start <= dma_upg_ctrl_w[0];
+    end
+    wire upg_start_pulse = dma_upg_ctrl_w[0] && !d_upg_start;
+
+    reg upg_h2c_desc_valid_q;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            upg_h2c_desc_valid_q <= 1'b0;
+        else if (upg_start_pulse)
+            upg_h2c_desc_valid_q <= 1'b1;
+        else if (sg_h2c_desc_ready)
+            upg_h2c_desc_valid_q <= 1'b0;
+    end
+
+    assign desc_fetch_idle = !thin_busy && !sg_h2c_busy;
+    assign h2c_desc_valid  = upg_h2c_desc_valid_q;
     assign c2h_desc_valid  = 1'b0;
-    assign h2c_plane0_src  = 64'd0;
+    assign h2c_plane0_src  = dma_upg_host_addr_w;
     assign h2c_plane0_dst  = 64'd0;
     assign h2c_plane1_src  = 64'd0;
     assign h2c_plane1_dst  = 64'd0;
     assign h2c_plane2_src  = 64'd0;
     assign h2c_plane2_dst  = 64'd0;
-    assign h2c_line_width  = 16'd0;
-    assign h2c_line_count  = 16'd0;
+    assign h2c_line_width  = 16'd4096;
+    assign h2c_line_count  = (dma_upg_size_w[11:0] == 12'd0) ?
+                             dma_upg_size_w[27:12] :
+                             (dma_upg_size_w[27:12] + 16'd1);
     assign h2c_src_stride  = 16'd0;
     assign h2c_dst_stride  = 16'd0;
     assign h2c_plane12_width = 16'd0;
     assign h2c_plane12_count = 16'd0;
     assign h2c_format      = 4'd0;
-    assign h2c_plane_count = 4'd0;
-    assign h2c_desc_ctrl   = 8'd0;
+    assign h2c_plane_count = 4'd1;
+    assign h2c_desc_ctrl   = 16'd0;
     assign c2h_plane0_src  = 64'd0;
     assign c2h_plane0_dst  = 64'd0;
     assign c2h_plane1_src  = 64'd0;
