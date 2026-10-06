@@ -8,7 +8,7 @@
 `timescale 1ns / 1ps
 
 module axil_reg_space #(
-    parameter [31:0]   C_VERSION    = 32'h2610_0604, // Mandatory hardware version YYMMDDpp
+    parameter [31:0]   C_VERSION    = 32'h2610_0605, // Mandatory hardware version YYMMDDpp
     parameter integer NUM_VIDEO_CH = 4,
     parameter integer NUM_AUDIO_CH = 4
 )(
@@ -717,7 +717,7 @@ module axil_reg_space #(
                     4'h0: begin // GLOBAL Block (0x0000 - 0x00FF)
                         case (s_axil_araddr[7:0])
                             8'h00: s_axil_rdata <= MAGIC_DEVICE_ID_VAL;
-                            8'h04: s_axil_rdata <= VERSION_ID_VAL;
+                            8'h04: s_axil_rdata <= C_VERSION;
                             8'h08: s_axil_rdata <= HARDWARE_CAPS_VAL;
                             8'h0C: s_axil_rdata <= GIT_COMMIT_HASH_VAL;
                             8'h10: s_axil_rdata <= BUILD_TIMESTAMP_VAL;
@@ -728,6 +728,8 @@ module axil_reg_space #(
                             8'h24: s_axil_rdata <= reg_irq_status;
                             8'h28: s_axil_rdata <= reg_dma_status;
                             8'h2C: s_axil_rdata <= {16'd0, in_requester_id};
+                            8'h30: s_axil_rdata <= completed_h2c_count;
+                            8'h34: s_axil_rdata <= in_dma_upg_bytes_written;
                             8'h74: s_axil_rdata <= reg_pacer_ctrl;
                             8'h78: s_axil_rdata <= reg_slice_height;
                             8'h7C: s_axil_rdata <= reg_frame_drop_count;
@@ -846,6 +848,7 @@ module axil_reg_space #(
                             8'h9C: s_axil_rdata <= reg_dma_upg_doorbell;
                             8'hA0: s_axil_rdata <= reg_dma_upg_host_addr[31:0];
                             8'hA4: s_axil_rdata <= reg_dma_upg_host_addr[63:32];
+                            8'hA8: s_axil_rdata <= in_dma_upg_bytes_written;
                             default: s_axil_rdata <= 32'd0;
                         endcase
                     end

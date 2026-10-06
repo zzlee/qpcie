@@ -1304,7 +1304,7 @@ module custom_pcie_dma_top #(
     assign c2h_desc_valid  = 1'b0;
     assign h2c_plane0_src  = dma_upg_host_addr_w;
     assign h2c_plane0_dst  = 64'd0;
-    assign h2c_plane1_src  = 64'd0;
+    assign h2c_plane1_src  = {32'd0, dma_upg_size_w};
     assign h2c_plane1_dst  = 64'd0;
     assign h2c_plane2_src  = 64'd0;
     assign h2c_plane2_dst  = 64'd0;

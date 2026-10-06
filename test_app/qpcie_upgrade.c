@@ -257,8 +257,8 @@ int main(int argc, char **argv) {
     uint64_t ps_addr  = ((uint64_t)bar0[REG_DMA_UPG_PS_ADDR_H / 4] << 32) | bar0[REG_DMA_UPG_PS_ADDR_L / 4];
 
     printf(" -> Hardware Magic    : 0x%08X %s\n", magic, (magic == 0x12ABE380) ? "[VALID]" : "[INVALID]");
-    printf(" -> Core Version      : v%d.%d.%d (Raw: 0x%08X)\n",
-           (ver_id >> 24) & 0xFF, (ver_id >> 16) & 0xFF, (ver_id >> 8) & 0xFF, ver_id);
+    printf(" -> Hardware Version  : 0x%08X (Date: 20%02X/%02X/%02X Rev %02d)\n",
+           ver_id, (ver_id >> 24) & 0xFF, (ver_id >> 16) & 0xFF, (ver_id >> 8) & 0xFF, ver_id & 0xFF);
     printf(" -> PCIe Requester ID : 0x%04X (Bus %02X, Dev %02X, Fn %02X)\n",
            req_id & 0xFFFF, (req_id >> 8) & 0xFF, (req_id >> 3) & 0x1F, req_id & 0x07);
     printf(" -> Git Commit Hash   : 0x%08X, Build Date: 0x%08X\n", git_hash, bld_date);

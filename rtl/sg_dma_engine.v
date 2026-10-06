@@ -218,14 +218,19 @@ module sg_dma_engine #(
                                            {19'd0, h2c_bytes_to_4k};
     wire [31:0] h2c_plane_rem_bytes = (!h2c_is_uv && h2c_plane_cnt_q >= 4'd2) ?
         (h2c_rem_bytes - h2c_p1_bytes_q) : h2c_rem_bytes;
-    wire [15:0] h2c_limit_bytes = (h2c_plane_rem_bytes < 32'd512) ?
-        h2c_plane_rem_bytes[15:0] : 16'd512;
+    wire [15:0] h2c_limit_bytes = (h2c_plane_rem_bytes < 32'd256) ?
+        h2c_plane_rem_bytes[15:0] : 16'd256;
     wire [15:0] h2c_calc_burst_bytes =
         (h2c_calc_limit < h2c_calc_avail) ? h2c_calc_limit : h2c_calc_avail;
 
     wire h2c_walker_ready = !h2c_sg_mode || (!h2c_is_uv ? (h2c_y_seg_valid && h2c_y_walker_bytes_left > 0) : (h2c_uv_seg_valid && h2c_uv_walker_bytes_left > 0));
 
     assign h2c_busy = (h2c_state != H2C_IDLE);
+
+    wire [31:0] p0_line_w_32 = (h2c_line_width > 0) ? {16'd0, h2c_line_width} : 32'd4096;
+    wire [31:0] p0_line_c_32 = (h2c_line_count > 0) ? {16'd0, h2c_line_count} : 32'd1;
+    wire [31:0] p1_line_w_32 = {16'd0, h2c_plane12_width};
+    wire [31:0] p1_line_c_32 = {16'd0, h2c_plane12_count};
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -260,8 +265,12 @@ module sg_dma_engine #(
                     h2c_is_uv      <= 1'b0;
                     if (h2c_desc_valid) begin
                         h2c_cur_addr      <= h2c_plane0_src;
-                        h2c_p0_bytes_q    <= (h2c_line_width > 0 ? h2c_line_width : 16'd4096) * (h2c_line_count > 0 ? h2c_line_count : 16'd1);
-                        h2c_p1_bytes_q    <= (h2c_plane12_width > 0 ? h2c_plane12_width : 16'd0) * (h2c_plane12_count > 0 ? h2c_plane12_count : 16'd0);
+                        if (h2c_plane_count == 4'd1 && h2c_plane1_src[31:0] != 32'd0) begin
+                            h2c_p0_bytes_q <= h2c_plane1_src[31:0];
+                        end else begin
+                            h2c_p0_bytes_q <= p0_line_w_32 * p0_line_c_32;
+                        end
+                        h2c_p1_bytes_q    <= p1_line_w_32 * p1_line_c_32;
                         h2c_p1_addr_q     <= h2c_plane1_src;
                         h2c_plane_cnt_q   <= h2c_plane_count;
                         h2c_desc_ctrl_q   <= h2c_desc_ctrl;
