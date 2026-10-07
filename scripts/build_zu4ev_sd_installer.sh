@@ -43,7 +43,11 @@ trap 'rm -rf "$WORK_DIR"' EXIT
 # 2. Check Prerequisites
 FSBL="$IMG_DIR/zynqmp_fsbl_sc7f0.elf"
 PMUFW="$IMG_DIR/pmufw.elf"
-BITSTREAM="$IMG_DIR/system_sc7f0_base.bit"
+if [ -f "$IMG_DIR/zu4ev_pcie_card_top.bit" ]; then
+    BITSTREAM="$IMG_DIR/zu4ev_pcie_card_top.bit"
+else
+    BITSTREAM="$IMG_DIR/system_sc7f0_base.bit"
+fi
 ATF="$IMG_DIR/bl31.elf"
 DTB="$IMG_DIR/system.dtb"
 UBOOT="$IMG_DIR/u-boot.elf"
@@ -304,15 +308,14 @@ log_msg "  4. System will now cold-boot from eMMC with <200ms PCIe Link!       "
 log_msg "======================================================================"
 log_msg ""
 
-# Safe auto poweroff
+# Keep system running so qpcie_upgrade_daemon can service PCIe host requests
 sync
-sleep 3
-poweroff || halt -p
+log_msg "  [INFO] eMMC flash verified. Keeping system running with qpcie_upgrade_daemon active."
 AUTOF_EOF
 
 chmod +x "$ROOTFS_WORK/usr/bin/qpcie_autoflash.sh"
 
-# Create systemd service
+# Create systemd service for autoflash
 cat << 'SVC_EOF' > "$ROOTFS_WORK/lib/systemd/system/qpcie-autoflash.service"
 [Unit]
 Description=QPCIe SC7F0 eMMC Auto-Provisioning Service
@@ -332,6 +335,8 @@ SVC_EOF
 mkdir -p "$ROOTFS_WORK/etc/systemd/system/multi-user.target.wants"
 ln -sf /lib/systemd/system/qpcie-autoflash.service \
        "$ROOTFS_WORK/etc/systemd/system/multi-user.target.wants/qpcie-autoflash.service"
+
+# (Removed qpcie_upgrade_daemon from SD Installer RAMDisk to prevent AXI hang during standalone boot)
 
 # Pack new installer_rootfs.cpio.gz
 INSTALLER_ROOTFS="$WORK_DIR/installer_rootfs.cpio.gz"
@@ -404,8 +409,35 @@ EOF
 "$MKIMAGE" -f "$WORK_DIR/installer_fit.its" "$REL_DIR/image.ub" > /dev/null
 echo "  -> Installer image.ub generated ($(ls -lh "$REL_DIR/image.ub" | awk '{print $5}'))"
 
-# Copy boot.scr
-cp -v "$BOOTSCR" "$REL_DIR/boot.scr"
+# ==============================================================================
+# Step 3.5: Generate custom boot.scr for SD Installer
+# Ensures installer boots from SD even if eMMC is already flashed
+# ==============================================================================
+cat << 'EOF' > "$WORK_DIR/boot.cmd"
+echo "================================================================="
+echo " QPCIe SC7F0 SD Installer Boot Script"
+echo "================================================================="
+setenv sd_dev ""
+if test -e mmc 0:1 /target_emmc/BOOT.BIN; then
+    setenv sd_dev 0
+elif test -e mmc 1:1 /target_emmc/BOOT.BIN; then
+    setenv sd_dev 1
+fi
+
+if test -n "${sd_dev}"; then
+    echo "SD Installer found on mmc ${sd_dev}"
+    fatload mmc ${sd_dev}:1 0x10000000 image.ub
+    bootm 0x10000000
+else
+    echo "ERROR: SD Installer target_emmc/ not found! Fallback to mmc 1"
+    fatload mmc 1:1 0x10000000 image.ub
+    bootm 0x10000000
+fi
+EOF
+
+"$MKIMAGE" -c none -A arm -T script -d "$WORK_DIR/boot.cmd" "$REL_DIR/boot.scr" > /dev/null
+echo "  -> Custom Installer boot.scr generated"
+
 
 # ==============================================================================
 # Step 4: Populate Target eMMC Production Files (Tandem PCIe 200ms Fast Boot)
