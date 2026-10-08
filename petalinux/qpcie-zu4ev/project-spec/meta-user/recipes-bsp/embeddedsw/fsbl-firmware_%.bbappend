@@ -4,8 +4,9 @@ FILESEXTRAPATHS:prepend := "${THISDIR}/${PN}:"
 
 EMBEDDEDSW_SRCURI += "file://0001-Fixed-vproc-ip-issues.patch \
             file://0002-feat-fsbl-add-Si5341-clock-generator-configuration.patch \
-            file://0003-fix-correct-pointer-arithmetic-in-io_read_reg_u32.patch \
             file://0004-feat-fsbl-support-two-stage-tandem-bitstream-loading.patch \
             file://0005-fix-fsbl-zzlab-env-baseaddr-macro.patch \
+            file://0006-silence-fsbl-prints.patch \
             "
+# NOTE 2026-10-08: 0003 retired — io_read fix folded into 0002.
 

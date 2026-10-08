@@ -53,6 +53,11 @@ EOF
 
 "$XSCT" "$BUILD_DIR/gen_app.tcl" > /dev/null
 
+echo "[1.5/4] Copying verified SC7F0 4GB DDR4 hardware initialization files..."
+cp -vf "$ROOT_DIR/hw_platform/psu_init.c" "$BUILD_DIR/src/"
+cp -vf "$ROOT_DIR/hw_platform/psu_init.h" "$BUILD_DIR/src/"
+rm -f "$BUILD_DIR/src/psu_init_gpl"*
+
 echo "[2/4] Applying SC7F0 board patches (Si5341, Tandem PCIe, zzlab-env)..."
 cd "$BUILD_DIR/src"
 git init -q .
@@ -63,9 +68,10 @@ git commit -q -m "initial fsbl"
 
 for patch_file in \
     "$PATCH_DIR/0002-feat-fsbl-add-Si5341-clock-generator-configuration.patch" \
-    "$PATCH_DIR/0003-fix-correct-pointer-arithmetic-in-io_read_reg_u32.patch" \
     "$PATCH_DIR/0004-feat-fsbl-support-two-stage-tandem-bitstream-loading.patch" \
     "$PATCH_DIR/0005-fix-fsbl-zzlab-env-baseaddr-macro.patch"; do
+    # NOTE 2026-10-08: 0003 retired — its io_read fix is folded into 0002,
+    # and its version-print hunk was superseded by 0002's SC7F0 block.
     if [ -f "$patch_file" ]; then
         echo "   Applying $(basename "$patch_file")..."
         git apply "$patch_file" -p5
@@ -76,7 +82,7 @@ done
 
 echo "[3/4] Compiling FSBL with FSBL_DEBUG_INFO (UART visibility)..."
 make clean > /dev/null
-make CFLAGS="-DFSBL_DEBUG_INFO" -j$(nproc) > /dev/null
+make CFLAGS="-DFSBL_PRINT_VAL=0" -j$(nproc) > /dev/null
 
 FSBL_ELF="$BUILD_DIR/src/executable.elf"
 if [ ! -f "$FSBL_ELF" ]; then

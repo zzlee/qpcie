@@ -29,8 +29,8 @@ proc create_zu4ev_ps_bd { } {
     CONFIG.PSU_BANK_1_IO_STANDARD {LVCMOS33} \
     CONFIG.PSU_BANK_2_IO_STANDARD {LVCMOS33} \
     CONFIG.PSU_BANK_3_IO_STANDARD {LVCMOS33} \
-    CONFIG.PSU_DDR_RAM_HIGHADDR {0x7FFFFFFF} \
-    CONFIG.PSU_DDR_RAM_HIGHADDR_OFFSET {0x00000002} \
+    CONFIG.PSU_DDR_RAM_HIGHADDR {0xFFFFFFFF} \
+    CONFIG.PSU_DDR_RAM_HIGHADDR_OFFSET {0x800000000} \
     CONFIG.PSU_DDR_RAM_LOWADDR_OFFSET {0x80000000} \
     CONFIG.PSU_IMPORT_BOARD_PRESET {} \
     CONFIG.PSU_MIO_0_DIRECTION {out} \
@@ -582,7 +582,7 @@ proc create_zu4ev_ps_bd { } {
     CONFIG.PSU__DDRC__DDR4_T_REF_MODE {0} \
     CONFIG.PSU__DDRC__DDR4_T_REF_RANGE {Normal (0-85)} \
     CONFIG.PSU__DDRC__DERATE_INT_D {<Select>} \
-    CONFIG.PSU__DDRC__DEVICE_CAPACITY {4096 MBits} \
+    CONFIG.PSU__DDRC__DEVICE_CAPACITY {8192 MBits} \
     CONFIG.PSU__DDRC__DM_DBI {DM_NO_DBI} \
     CONFIG.PSU__DDRC__DRAM_WIDTH {16 Bits} \
     CONFIG.PSU__DDRC__ECC {Disabled} \
@@ -605,7 +605,7 @@ proc create_zu4ev_ps_bd { } {
     CONFIG.PSU__DDRC__PWR_DOWN_EN {0} \
     CONFIG.PSU__DDRC__RANK_ADDR_COUNT {0} \
     CONFIG.PSU__DDRC__RD_DQS_CENTER {0} \
-    CONFIG.PSU__DDRC__ROW_ADDR_COUNT {15} \
+    CONFIG.PSU__DDRC__ROW_ADDR_COUNT {16} \
     CONFIG.PSU__DDRC__SB_TARGET {15-15-15} \
     CONFIG.PSU__DDRC__SELF_REF_ABORT {0} \
     CONFIG.PSU__DDRC__SPEED_BIN {DDR4_2400T} \
@@ -620,7 +620,7 @@ proc create_zu4ev_ps_bd { } {
     CONFIG.PSU__DDRC__T_RP {17} \
     CONFIG.PSU__DDRC__VIDEO_BUFFER_SIZE {0} \
     CONFIG.PSU__DDRC__VREF {1} \
-    CONFIG.PSU__DDR_HIGH_ADDRESS_GUI_ENABLE {0} \
+    CONFIG.PSU__DDR_HIGH_ADDRESS_GUI_ENABLE {1} \
     CONFIG.PSU__DDR_QOS_ENABLE {0} \
     CONFIG.PSU__DDR_QOS_HP0_RDQOS {} \
     CONFIG.PSU__DDR_QOS_HP0_WRQOS {} \
@@ -976,7 +976,7 @@ Port;FD4A0000;FD4AFFFF;0|FPD;DPDMA;FD4C0000;FD4CFFFF;0|FPD;DDR_XMPU5_CFG;FD05000
     CONFIG.PSU__USE__APU_LEGACY_INTERRUPT {0} \
     CONFIG.PSU__USE__AUDIO {0} \
     CONFIG.PSU__USE__CLK {0} \
-    CONFIG.PSU__USE__CLK0 {0} \
+    CONFIG.PSU__USE__CLK0 {1} \
     CONFIG.PSU__USE__CLK1 {0} \
     CONFIG.PSU__USE__CLK2 {0} \
     CONFIG.PSU__USE__CLK3 {0} \
@@ -1056,11 +1056,11 @@ Port;FD4A0000;FD4AFFFF;0|FPD;DPDMA;FD4C0000;FD4CFFFF;0|FPD;DDR_XMPU5_CFG;FD05000
 
   # Create external interface ports
   set m_axi [ create_bd_intf_port -mode Master -vlnv xilinx.com:interface:aximm_rtl:1.0 M_AXI_HPM0_FPD ]
-  set_property -dict [list CONFIG.DATA_WIDTH {32} CONFIG.ADDR_WIDTH {40}] $m_axi
+  set_property -dict [list CONFIG.DATA_WIDTH {32} CONFIG.ADDR_WIDTH {40} CONFIG.FREQ_HZ {99990005}] $m_axi
   connect_bd_intf_net $m_axi [get_bd_intf_pins zynq_ultra_ps_e_0/M_AXI_HPM0_FPD]
 
   set s_axi [ create_bd_intf_port -mode Slave -vlnv xilinx.com:interface:aximm_rtl:1.0 S_AXI_HP0_FPD ]
-  set_property -dict [list CONFIG.DATA_WIDTH {128} CONFIG.ADDR_WIDTH {40}] $s_axi
+  set_property -dict [list CONFIG.DATA_WIDTH {128} CONFIG.ADDR_WIDTH {40} CONFIG.FREQ_HZ {99990005}] $s_axi
   connect_bd_intf_net $s_axi [get_bd_intf_pins zynq_ultra_ps_e_0/S_AXI_HP0_FPD]
 
   create_bd_port -dir I -from 0 -to 0 -type intr pl_ps_irq0
@@ -1069,10 +1069,16 @@ Port;FD4A0000;FD4AFFFF;0|FPD;DPDMA;FD4C0000;FD4CFFFF;0|FPD;DDR_XMPU5_CFG;FD05000
   # Address mapping
   assign_bd_address
 
-  # Clock port (pcie_user_clk @ 250 MHz)
-  create_bd_port -dir I -type clk -freq_hz 250000000 pcie_user_clk
-  connect_bd_net [get_bd_ports pcie_user_clk] [get_bd_pins zynq_ultra_ps_e_0/maxihpm0_fpd_aclk]
-  connect_bd_net [get_bd_ports pcie_user_clk] [get_bd_pins zynq_ultra_ps_e_0/saxihp0_fpd_aclk]
+  # Export pl_clk0 (100MHz) and connect it to PS AXI interfaces
+  create_bd_port -dir O -type clk -freq_hz 99990005 pl_clk0
+  set_property -dict [list CONFIG.ASSOCIATED_BUSIF {M_AXI_HPM0_FPD:S_AXI_HP0_FPD}] [get_bd_ports pl_clk0]
+  connect_bd_net [get_bd_pins zynq_ultra_ps_e_0/pl_clk0] [get_bd_ports pl_clk0]
+  connect_bd_net [get_bd_pins zynq_ultra_ps_e_0/pl_clk0] [get_bd_pins zynq_ultra_ps_e_0/maxihpm0_fpd_aclk]
+  connect_bd_net [get_bd_pins zynq_ultra_ps_e_0/pl_clk0] [get_bd_pins zynq_ultra_ps_e_0/saxihp0_fpd_aclk]
+
+  # Export pl_resetn0 (sync to pl_clk0 usually, or async)
+  create_bd_port -dir O -type rst pl_resetn0
+  connect_bd_net [get_bd_pins zynq_ultra_ps_e_0/pl_resetn0] [get_bd_ports pl_resetn0]
 
   validate_bd_design
   save_bd_design

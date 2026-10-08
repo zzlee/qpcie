@@ -61,8 +61,8 @@
 #define STATUS_UPG_ERR_FLASH   0xE2
 #define STATUS_UPG_ERR_TIMEOUT 0xE3
 
-/* Dedicated DDR4 DMA Staging Physical Address (64MB window in PS DDR4) */
-#define DEFAULT_DDR4_DMA_PHYS  0x70000000UL
+/* Dedicated DDR4 DMA Staging Physical Address (dau_fpga reserved memory) */
+#define DEFAULT_DDR4_DMA_PHYS  0x30000000UL
 #define DDR4_DMA_BUF_SIZE      (64 * 1024 * 1024) /* 64 MB */
 
 #define EMMC_BOOT_PART         "/dev/mmcblk0p1"
@@ -145,8 +145,10 @@ int main(int argc, char **argv) {
         return EXIT_FAILURE;
     }
 
-    // Map PL CSR space with automatic base address detection (0xA0000000 or 0xB0000000)
-    uint64_t candidate_bases[] = {0xA0000000UL, 0xB0000000UL};
+    // Map PL CSR space with automatic base address detection (0xB0000000 or 0xA0000000)
+    // Checking an unmapped AXI address (like 0xA0000000) causes an SError Kernel Panic,
+    // so we MUST check the valid base (0xB0000000) first to avoid reading unmapped space!
+    uint64_t candidate_bases[] = {0xB0000000UL, 0xA0000000UL};
     volatile uint32_t *pl_regs = MAP_FAILED;
     uint64_t pl_base_used = 0;
 

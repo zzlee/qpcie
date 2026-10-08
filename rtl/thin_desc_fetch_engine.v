@@ -155,8 +155,9 @@ module thin_desc_fetch_engine #(
             sgl_uv_wr_en         <= 1'b0;
             frame_launch_req     <= 1'b0;
         end else begin
-            // Frame completion tracking
-            if (frame_done_in) begin
+            // Frame completion tracking: only retire active frame when all descriptors have been fetched
+            if (frame_done_in && (frame_bytes_accum_y >= frame_bytes_target_y) &&
+                (format == 4'd1 || frame_bytes_accum_uv >= frame_bytes_target_uv)) begin
                 frame_count  <= frame_count + 1'b1;
                 frame_active <= 1'b0;
             end

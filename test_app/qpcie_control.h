@@ -8,9 +8,10 @@
 #include <stdint.h>
 
 /* BAR1 Address Offsets */
-#define BAR1_OFFSET_VIDEO_TPG      0x0000
+#define BAR1_OFFSET_ENV            0x0000
 #define BAR1_OFFSET_AUDIO_PATGEN   0x1000
 #define BAR1_OFFSET_EDID_RAM       0x2000
+#define BAR1_OFFSET_VIDEO_TPG      0x3000
 #define BAR1_OFFSET_FW_STREAM      0x8000
 
 /* Video TPG (v_tpg_0) Register Offsets (s_axi_CTRL) */

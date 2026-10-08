@@ -51,7 +51,7 @@ static ssize_t firmware_upgrade_write(struct file *filp, struct kobject *kobj,
     /* Copy user payload to DMA buffer */
     memcpy(cpu_addr, buf, count);
 
-    u64 ps_phys_addr = 0x70000000ULL + (u64)off;
+    u64 ps_phys_addr = 0x30000000ULL + (u64)off;
 
     /* Program destination PS DDR4 physical address */
     iowrite32(lower_32_bits(ps_phys_addr), qdev->bar0_mmio + REG_DMA_UPG_PS_ADDR_L);

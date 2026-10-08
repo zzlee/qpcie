@@ -19,7 +19,8 @@
 
 module video_req_cdc #(
     parameter integer MAX_DWORDS = 64,      // Max 256-byte MWr payload (64 DW)
-    parameter integer FIFO_DEPTH = 512      // power of two, >= several packets
+    parameter integer FIFO_DEPTH = 512,
+    parameter integer DATA_WIDTH = 128
 )(
     // Video (150 MHz) side: engine request source
     input  wire         wr_clk,
@@ -27,7 +28,7 @@ module video_req_cdc #(
     input  wire         s_req_valid,
     input  wire [63:0]  s_req_addr,
     input  wire [10:0]  s_req_dw_len,       // 64 for 256B, 32 for 128B
-    input  wire [127:0] s_req_data,
+    input  wire [DATA_WIDTH-1:0] s_req_data,
     output reg          s_req_data_ready,
     output reg          s_req_ack,
     input  wire         s_frame_done,
@@ -38,14 +39,14 @@ module video_req_cdc #(
     output reg          m_req_valid,
     output reg  [63:0]  m_req_addr,
     output reg  [10:0]  m_req_dw_len,
-    output wire [127:0] m_req_data,
+    output wire [DATA_WIDTH-1:0] m_req_data,
     input  wire         m_req_data_ready,
     input  wire         m_req_ack,
     output reg          m_frame_done,
     output wire         m_fifo_empty,
     output wire [9:0]   m_fifo_count
 );
-    localparam integer DATA_DWORDS        = 4;                       // 128-bit beat = 4 DWs
+    localparam integer DATA_DWORDS        = DATA_WIDTH / 32;                       // 128-bit beat = 4 DWs
     localparam integer MAX_PAYLOAD_BEATS  = MAX_DWORDS / DATA_DWORDS; // 16 beats
     localparam integer FIFO_COUNT_WIDTH   = $clog2(FIFO_DEPTH) + 1;
 
@@ -54,9 +55,9 @@ module video_req_cdc #(
     // ---------------------------------------------------------------------
     wire        fifo_empty;
     wire        fifo_full;
-    wire [127:0] fifo_dout;
+    wire [DATA_WIDTH:0] fifo_dout;
     wire        fifo_wr_en;
-    wire [127:0] fifo_din;
+    wire [DATA_WIDTH:0] fifo_din;
     wire        fifo_rd_en;
     wire        fifo_prog_full;
     wire        fifo_wr_rst_busy;
@@ -71,8 +72,8 @@ module video_req_cdc #(
     xpm_fifo_async #(
         .FIFO_MEMORY_TYPE("block"),
         .FIFO_WRITE_DEPTH(FIFO_DEPTH),
-        .WRITE_DATA_WIDTH(128),
-        .READ_DATA_WIDTH(128),
+        .WRITE_DATA_WIDTH(DATA_WIDTH+1),
+        .READ_DATA_WIDTH(DATA_WIDTH+1),
         .READ_MODE("fwft"),
         .FIFO_READ_LATENCY(0),
         .PROG_FULL_THRESH(FIFO_DEPTH - 32),
@@ -157,7 +158,7 @@ module video_req_cdc #(
                     end else if (s_req_valid && wr_room_ok && !fifo_full) begin
                         s_req_addr_reg   <= s_req_addr;
                         s_req_dw_len_reg <= (s_req_dw_len != 0) ? s_req_dw_len : 11'd64;
-                        wr_beats_left    <= (s_req_dw_len != 0) ? s_req_dw_len[10:2] : 11'd16;
+                        wr_beats_left    <= (s_req_dw_len != 0) ? (s_req_dw_len / DATA_DWORDS) : (MAX_DWORDS / DATA_DWORDS);
                         wr_state         <= WR_ADDR;
                     end
                 end
@@ -193,13 +194,13 @@ module video_req_cdc #(
         end
     end
 
-    // Bit 127 distinguishes an ordered frame-completion marker from a request.
+    // Bit DATA_WIDTH distinguishes an ordered frame-completion marker from a request or payload data.
     wire fifo_write_eof = (wr_state == WR_IDLE) &&
                           (eof_pending || s_frame_done) &&
                           !fifo_wr_rst_busy && !fifo_full;
-    assign fifo_din = fifo_write_eof       ? {1'b1, 127'd0} :
-                      (wr_state == WR_ADDR) ? {1'b0, 52'd0, s_req_dw_len_reg, s_req_addr_reg} :
-                                              s_req_data;
+    assign fifo_din = fifo_write_eof       ? {1'b1, {DATA_WIDTH{1'b0}}} :
+                      (wr_state == WR_ADDR) ? {1'b0, {(DATA_WIDTH-128){1'b0}}, 1'b0, 51'd0, s_req_dw_len_reg, s_req_addr_reg} :
+                                              {1'b0, s_req_data};
     assign fifo_wr_en = fifo_write_eof || (wr_state == WR_ADDR) ||
                         (wr_state == WR_DATA && s_req_valid && s_req_data_ready);
 
@@ -236,7 +237,7 @@ module video_req_cdc #(
 
     wire [15:0] rd_completed = gray_to_bin(pkt_pushed_gray_sync2);
 
-    assign m_req_data = fifo_dout;
+    assign m_req_data = fifo_dout[DATA_WIDTH-1:0];
 
     wire fifo_pop_hdr = !fifo_rd_rst_busy && (rd_state == RD_IDLE) &&
                         !fifo_empty && (rd_completed != rd_started);
@@ -245,7 +246,7 @@ module video_req_cdc #(
                         (rd_completed != rd_started);
     wire fifo_pop_data = !fifo_rd_rst_busy && (rd_state == RD_STREAM) &&
                          m_req_data_ready && !m_req_ack;
-    wire fifo_head_is_eof = fifo_dout[127];
+    wire fifo_head_is_eof = fifo_dout[DATA_WIDTH];
 
     assign fifo_rd_en = fifo_pop_hdr || fifo_pop_next_hdr || fifo_pop_data;
 

@@ -82,3 +82,10 @@ set_clock_groups -asynchronous \
     -group [get_clocks -quiet -include_generated_clocks hdmi_tx_clk_p]
 
 
+
+## 7. 300MHz Si5341B Clock for Multimedia IPs (Bank 64 LVDS)
+set_property PACKAGE_PIN AD17 [get_ports pl_clk_300m_p]
+set_property PACKAGE_PIN AE17 [get_ports pl_clk_300m_n]
+set_property IOSTANDARD LVDS [get_ports pl_clk_300m_p]
+set_property IOSTANDARD LVDS [get_ports pl_clk_300m_n]
+create_clock -period 3.333 -name pl_clk_300m [get_ports pl_clk_300m_p]

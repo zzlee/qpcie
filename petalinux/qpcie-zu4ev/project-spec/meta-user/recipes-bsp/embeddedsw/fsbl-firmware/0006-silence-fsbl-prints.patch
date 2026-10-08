@@ -1,0 +1,11 @@
+--- a/lib/sw_apps/zynqmp_fsbl/src/xfsbl_config.h
++++ b/lib/sw_apps/zynqmp_fsbl/src/xfsbl_config.h
+@@ -72,7 +72,7 @@
+  *       all data exchanged.
+  */
+ #ifndef FSBL_PRINT_VAL
+-#define FSBL_PRINT_VAL              (1U)
++#define FSBL_PRINT_VAL              (0U)
+ #endif
+ 
+ #ifndef FSBL_DEBUG_VAL

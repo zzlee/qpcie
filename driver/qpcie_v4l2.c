@@ -150,15 +150,14 @@ static int qpcie_program_tpg(struct qpcie_v4l2_channel *vch, u32 pattern_id,
     if (!qdev || !qdev->bar0_mmio || !qdev->bar1_mmio)
         return -ENODEV;
 
-    tpg = qdev->bar1_mmio + (vch->channel_id * 0x100);
+    tpg = qdev->bar1_mmio + BAR1_OFFSET_TPG + (vch->channel_id * 0x100);
     if (reset_pipeline) {
-        iowrite32(1, qdev->bar0_mmio + REG_VIDEO_CTRL);
-        if (ioread32(qdev->bar0_mmio + REG_VIDEO_CTRL) != 1)
-            return -EIO;
+        /* Pulse reset on both TPG (bit 0) and video capture engine/FIFO (bit 1) */
+        iowrite32(3, qdev->bar0_mmio + REG_VIDEO_SUB_RESET);
+        ioread32(qdev->bar0_mmio + REG_VIDEO_SUB_RESET);
         usleep_range(1000, 2000);
-        iowrite32(0, qdev->bar0_mmio + REG_VIDEO_CTRL);
-        if (ioread32(qdev->bar0_mmio + REG_VIDEO_CTRL) != 0)
-            return -EIO;
+        iowrite32(0, qdev->bar0_mmio + REG_VIDEO_SUB_RESET);
+        ioread32(qdev->bar0_mmio + REG_VIDEO_SUB_RESET);
         usleep_range(1000, 2000);
     }
 
@@ -199,7 +198,7 @@ static int qpcie_program_tpg_motion(struct qpcie_v4l2_channel *vch, u32 speed)
     if (!qdev || !qdev->bar1_mmio)
         return -ENODEV;
 
-    tpg = qdev->bar1_mmio + (vch->channel_id * 0x100);
+    tpg = qdev->bar1_mmio + BAR1_OFFSET_TPG + (vch->channel_id * 0x100);
     expected_enable = speed ? 1 : 0;
     if (speed)
         iowrite32(speed, tpg + 0x38);
@@ -220,6 +219,7 @@ static int qpcie_tpg_pace_thread(void *data)
     struct qpcie_dev *qdev = data;
     u64 period_ns = div_u64(NSEC_PER_SEC, qdev->tpg_fps ? qdev->tpg_fps : 60);
     ktime_t next_ktime = ktime_get();
+    u32 pulse_cnt = 0;
 
     /* Elevate to real-time FIFO priority to prevent preemption under 4K load */
     sched_set_fifo(current);
@@ -230,8 +230,10 @@ static int qpcie_tpg_pace_thread(void *data)
 
         if (READ_ONCE(qdev->tpg_pace_run) && qdev->bar1_mmio) {
             spin_lock_irqsave(&qdev->tpg_lock, flags);
-            iowrite32(0x01, qdev->bar1_mmio + 0x0000 + 0x00); /* AP_START */
+            iowrite32(0x01, qdev->bar1_mmio + BAR1_OFFSET_TPG + 0x00); /* AP_START */
             spin_unlock_irqrestore(&qdev->tpg_lock, flags);
+            if (++pulse_cnt <= 5)
+                dev_info(&qdev->pdev->dev, "[TPG PACER] Pulse #%u AP_START fired\n", pulse_cnt);
         }
 
         next_ktime = ktime_add_ns(next_ktime, period_ns);
@@ -745,6 +747,14 @@ static int qpcie_publish_buffer(struct qpcie_v4l2_channel *vch,
                  "Thin-SGL ch%d %s buf%u: %u descriptors queued (tail: %u -> %u, size=%u)\n",
                  vch->channel_id, is_rgb ? "RGB24" : "NV12M", vb->index, entries_added,
                  thin_tail, vch->thin_ring_tail, RING_BUFFER_SIZE);
+        for (i = 0; i < entries_added; i++) {
+            u32 slot = (thin_tail + i) % RING_BUFFER_SIZE;
+            dev_info(&qdev->pdev->dev,
+                     "  buf%u desc%u: phys=0x%llx len=%u\n",
+                     vb->index, i,
+                     (unsigned long long)vch->thin_ring_virt[slot].phys_addr,
+                     vch->thin_ring_virt[slot].len_bytes);
+        }
         buf->sgl_logged = true;
     }
     return 0;
@@ -894,7 +904,8 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
                                      V4L2_CID_QPCIE_TPG_MOTION_SPEED);
         pattern_id = qpcie_tpg_pattern_id(pattern_ctrl ? pattern_ctrl->val : 3);
 
-        iowrite32(1, qdev->bar0_mmio + REG_VIDEO_SUB_RESET);
+        /* Pulse reset on both TPG (bit 0) and video capture engine/FIFO (bit 1) */
+        iowrite32(3, qdev->bar0_mmio + REG_VIDEO_SUB_RESET);
         ioread32(qdev->bar0_mmio + REG_VIDEO_SUB_RESET);
         usleep_range(1000, 2000);
         iowrite32(0, qdev->bar0_mmio + REG_VIDEO_SUB_RESET);
@@ -985,7 +996,7 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
                 return ret;
             }
         } else {
-            void __iomem *tpg = qdev->bar1_mmio + 0x000;
+            void __iomem *tpg = qdev->bar1_mmio + BAR1_OFFSET_TPG;
             iowrite32(0x81, tpg + 0x00); /* Continuous AUTO_RESTART */
         }
     }
@@ -1025,6 +1036,13 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
         spin_unlock_irqrestore(&vch->slock, flags);
     }
 
+    /* Halt TPG pacing and stop TPG FIRST before tearing down DMA */
+    if (vch->channel_id == 0 && qdev->bar1_mmio) {
+        void __iomem *tpg = qdev->bar1_mmio + BAR1_OFFSET_TPG;
+        qpcie_tpg_pace_stop(qdev);
+        iowrite32(0x00, tpg + 0x00);
+    }
+
     /* Stop fetching descriptors for this channel immediately in hardware */
     iowrite32(0, qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_CTRL);
     ioread32(qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_CTRL);
@@ -1041,12 +1059,12 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
             usleep_range(1000, 2000);
         } while (time_before(jiffies, timeout));
 
-        /* Pulse reset on the video engine and its CDC FIFO before cancelling descriptors */
-        iowrite32(1, qdev->bar0_mmio + REG_VIDEO_CTRL);
-        ioread32(qdev->bar0_mmio + REG_VIDEO_CTRL);
+        /* Pulse reset on both TPG (bit 0) and video engine (bit 1) to abort in-flight frame and idle TPG */
+        iowrite32(3, qdev->bar0_mmio + REG_VIDEO_SUB_RESET);
+        ioread32(qdev->bar0_mmio + REG_VIDEO_SUB_RESET);
         usleep_range(1000, 2000);
-        iowrite32(0, qdev->bar0_mmio + REG_VIDEO_CTRL);
-        ioread32(qdev->bar0_mmio + REG_VIDEO_CTRL);
+        iowrite32(0, qdev->bar0_mmio + REG_VIDEO_SUB_RESET);
+        ioread32(qdev->bar0_mmio + REG_VIDEO_SUB_RESET);
         timeout = jiffies + msecs_to_jiffies(500);
         do {
             u32 status = ioread32(qdev->bar0_mmio + stat_reg);
@@ -1086,13 +1104,6 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
                  "NV12M STREAMOFF (Ch%u): stream stopped, remaining active streams: %d\n",
                  vch->channel_id, atomic_read(&qdev->streaming_count));
         return;
-    }
-
-    /* All streams idle: halt TPG pacing and stop TPG */
-    if (qdev->bar1_mmio) {
-        void __iomem *tpg = qdev->bar1_mmio + 0x000;
-        qpcie_tpg_pace_stop(qdev);
-        iowrite32(0x00, tpg + 0x00);
     }
 
     iowrite32(0, qdev->bar0_mmio + REG_PACER_CTRL);

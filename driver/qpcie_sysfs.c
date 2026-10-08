@@ -22,7 +22,7 @@ static ssize_t tpg_pattern_show(struct device *dev, struct device_attribute *att
     u32 pattern_id = 0;
 
     if (qdev && qdev->bar1_mmio) {
-        pattern_id = ioread32(qdev->bar1_mmio + 0x0000 + 0x20);
+        pattern_id = ioread32(qdev->bar1_mmio + BAR1_OFFSET_TPG + 0x20);
     }
 
     const char *name = "Unknown";
@@ -52,10 +52,10 @@ static ssize_t tpg_pattern_store(struct device *dev, struct device_attribute *at
          * back to free-running AUTO_RESTART mid-stream. */
         if (vb2_is_streaming(&qdev->v4l2_ch[0].queue))
             return -EBUSY;
-        /* Write Pattern ID to BAR1 Offset 0x0020 */
-        iowrite32(pattern_id, qdev->bar1_mmio + 0x0000 + 0x20);
-        /* Trigger AP_START & Auto-Restart on TPG Control Reg (0x0000) */
-        iowrite32(0x81, qdev->bar1_mmio + 0x0000 + 0x00);
+        /* Write Pattern ID to BAR1 Offset */
+        iowrite32(pattern_id, qdev->bar1_mmio + BAR1_OFFSET_TPG + 0x20);
+        /* Trigger AP_START & Auto-Restart on TPG Control Reg */
+        iowrite32(0x81, qdev->bar1_mmio + BAR1_OFFSET_TPG + 0x00);
         dev_info(dev, "Updated Video TPG Pattern ID to %u\n", pattern_id);
     }
 
@@ -105,8 +105,8 @@ static ssize_t tpg_resolution_show(struct device *dev, struct device_attribute *
     u32 cols = 1920, rows = 1080;
 
     if (qdev && qdev->bar1_mmio) {
-        rows = ioread32(qdev->bar1_mmio + 0x0000 + 0x10);
-        cols = ioread32(qdev->bar1_mmio + 0x0000 + 0x18);
+        rows = ioread32(qdev->bar1_mmio + BAR1_OFFSET_TPG + 0x10);
+        cols = ioread32(qdev->bar1_mmio + BAR1_OFFSET_TPG + 0x18);
     }
 
     return sysfs_emit(buf, "%ux%u\n", cols, rows);
@@ -123,9 +123,9 @@ static ssize_t tpg_resolution_store(struct device *dev, struct device_attribute 
     if (qdev && qdev->bar1_mmio) {
         if (vb2_is_streaming(&qdev->v4l2_ch[0].queue))
             return -EBUSY;
-        iowrite32(rows, qdev->bar1_mmio + 0x0000 + 0x10);
-        iowrite32(cols, qdev->bar1_mmio + 0x0000 + 0x18);
-        iowrite32(0x81, qdev->bar1_mmio + 0x0000 + 0x00);
+        iowrite32(rows, qdev->bar1_mmio + BAR1_OFFSET_TPG + 0x10);
+        iowrite32(cols, qdev->bar1_mmio + BAR1_OFFSET_TPG + 0x18);
+        iowrite32(0x81, qdev->bar1_mmio + BAR1_OFFSET_TPG + 0x00);
         dev_info(dev, "Updated Video TPG Resolution to %ux%u\n", cols, rows);
     }
 

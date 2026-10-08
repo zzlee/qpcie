@@ -17,6 +17,7 @@
 `timescale 1ns / 1ps
 
 module zu4ev_pcie_card_top #(
+    parameter [31:0] C_VERSION = 32'h2610_0803,
     parameter PCIE_DATA_WIDTH  = 256,
     parameter PCIE_KEEP_WIDTH  = PCIE_DATA_WIDTH / 32, // 8 DW keep for 256-bit
     parameter NUM_VIDEO_CH     = 4,
@@ -65,7 +66,11 @@ module zu4ev_pcie_card_top #(
     input  wire                                             hdmi_tx_hpd_in,       // Pin G14 (Sink HPD Input)
     input  wire                                             hdmi_tx_refclk_rdy,   // Pin G13 (TX RefClk Ready)
     inout  wire                                             hdmi_tx_ddc_scl,      // Pin F12 (Sink DDC SCL)
-    inout  wire                                             hdmi_tx_ddc_sda       // Pin E12 (Sink DDC SDA)
+    inout  wire                                             hdmi_tx_ddc_sda,      // Pin E12 (Sink DDC SDA)
+    
+    // 300MHz Si5341B Clock for Multimedia IPs (Bank 64 LVDS)
+    input  wire                                             pl_clk_300m_p,        // Pin AD17
+    input  wire                                             pl_clk_300m_n         // Pin AE17
 );
 
     // =========================================================================
@@ -79,6 +84,57 @@ module zu4ev_pcie_card_top #(
     wire pcie_user_rst_n;
     assign pcie_user_rst_n       = pcie_user_lnk_up && ~pcie_user_reset;
     assign user_led_pcie_link_up = pcie_user_lnk_up;
+
+    // 100MHz PS Clock Domain
+    wire pl_clk0;
+    wire pl_resetn0;
+    wire sys_100m_rst_n;
+    proc_sys_reset_0 u_100m_reset (
+        .slowest_sync_clk(pl_clk0),
+        .ext_reset_in(pl_resetn0),
+        .aux_reset_in(1'b1),
+        .mb_debug_sys_rst(1'b0),
+        .dcm_locked(1'b1),
+        .mb_reset(),
+        .bus_struct_reset(),
+        .peripheral_reset(),
+        .interconnect_aresetn(),
+        .peripheral_aresetn(sys_100m_rst_n)
+    );
+
+    // 300MHz Multimedia Clock Domain (Reserved for future)
+    wire pl_clk_300m_ibufg;
+    wire pl_clk_300m;
+    wire sys_300m_rst_n;
+    
+    IBUFDS #(
+        .DIFF_TERM("FALSE"),
+        .IOSTANDARD("LVDS")
+    ) u_ibufds_300m (
+        .I(pl_clk_300m_p),
+        .IB(pl_clk_300m_n),
+        .O(pl_clk_300m_ibufg)
+    );
+
+    BUFGCE u_bufgce_300m (
+        .I(pl_clk_300m_ibufg),
+        .CE(1'b1),
+        .O(pl_clk_300m)
+    );
+
+    proc_sys_reset_0 u_300m_reset (
+        .slowest_sync_clk(pl_clk_300m),
+        .ext_reset_in(pcie_user_rst_n), // Using PCIe reset as external source for now
+        .aux_reset_in(1'b1),
+        .mb_debug_sys_rst(1'b0),
+        .dcm_locked(1'b1),
+        .mb_reset(),
+        .bus_struct_reset(),
+        .peripheral_reset(),
+        .interconnect_aresetn(),
+        .peripheral_aresetn(sys_300m_rst_n)
+    );
+
 
     // Fine-grained sub-domain resets (BAR0 0x84)
     wire video_pipeline_reset;
@@ -127,11 +183,26 @@ module zu4ev_pcie_card_top #(
     wire        bar1_m_rready;
 
     // =========================================================================
-    // AXI Crossbar Master Interface Wires (3 Masters)
-    // M00 (Bits 31:0)  : Video TPG IP s_axi_CTRL (Offset 0x0000 - 0x0FFF)
-    // M01 (Bits 63:32) : Audio Pattern Generator (Offset 0x1000 - 0x1FFF)
-    // M02 (Bits 95:64) : Dynamic EDID RAM + HPD (Offset 0x2000 - 0x2FFF)
     // =========================================================================
+    // AXI Crossbar Master Interface Wires (4 Masters)
+    // M00 (Bits 31:0)   : ZZLAB ENV CTRL (Offset 0x0000 - 0x0FFF)
+    // M01 (Bits 63:32)  : Audio Pattern Generator (Offset 0x1000 - 0x1FFF)
+    // M02 (Bits 95:64)  : Dynamic EDID RAM + HPD (Offset 0x2000 - 0x2FFF)
+    // M03 (Bits 127:96) : Video TPG IP s_axi_CTRL (Offset 0x3000 - 0x3FFF)
+    // =========================================================================
+    wire [31:0] env_axi_awaddr_32, env_axi_araddr_32;
+    wire        env_axi_awvalid, env_axi_awready;
+    wire [31:0] env_axi_wdata;
+    wire [3:0]  env_axi_wstrb;
+    wire        env_axi_wvalid, env_axi_wready;
+    wire [1:0]  env_axi_bresp;
+    wire        env_axi_bvalid, env_axi_bready;
+    wire        env_axi_arvalid, env_axi_arready;
+    wire [31:0] env_axi_rdata;
+    wire [1:0]  env_axi_rresp;
+    wire        env_axi_rvalid, env_axi_rready;
+    wire [31:0] env_ap_rst_n;
+
     wire [31:0] tpg_axi_awaddr_32, tpg_axi_araddr_32;
     wire [7:0]  tpg_axi_awaddr, tpg_axi_araddr;
     wire        tpg_axi_awvalid, tpg_axi_awready;
@@ -176,7 +247,7 @@ module zu4ev_pcie_card_top #(
     assign aud_axi_araddr = aud_axi_araddr_32[7:0];
 
     // =========================================================================
-    // Xilinx Official AXI Crossbar IP (1 SI x 3 MI AXI4-Lite)
+    // Xilinx Official AXI Crossbar IP (1 SI x 4 MI AXI4-Lite)
     // =========================================================================
     axi_crossbar_0 u_axil_crossbar (
         .aclk(pcie_user_clk),
@@ -203,26 +274,59 @@ module zu4ev_pcie_card_top #(
         .s_axi_rvalid(bar1_m_rvalid),
         .s_axi_rready(bar1_m_rready),
 
-        // Master Interfaces Vector Output: [M02 (EDID), M01 (Audio), M00 (TPG)]
-        .m_axi_awaddr({edid_axi_awaddr, aud_axi_awaddr_32, tpg_axi_awaddr_32}),
+        // Master Interfaces Vector Output: [M03 (TPG), M02 (EDID), M01 (Audio), M00 (ENV)]
+        .m_axi_awaddr({tpg_axi_awaddr_32, edid_axi_awaddr, aud_axi_awaddr_32, env_axi_awaddr_32}),
         .m_axi_awprot(),
-        .m_axi_awvalid({edid_axi_awvalid, aud_axi_awvalid, tpg_axi_awvalid}),
-        .m_axi_awready({edid_axi_awready, aud_axi_awready, tpg_axi_awready}),
-        .m_axi_wdata({edid_axi_wdata, aud_axi_wdata, tpg_axi_wdata}),
-        .m_axi_wstrb({edid_axi_wstrb, aud_axi_wstrb, tpg_axi_wstrb}),
-        .m_axi_wvalid({edid_axi_wvalid, aud_axi_wvalid, tpg_axi_wvalid}),
-        .m_axi_wready({edid_axi_wready, aud_axi_wready, tpg_axi_wready}),
-        .m_axi_bresp({edid_axi_bresp, aud_axi_bresp, tpg_axi_bresp}),
-        .m_axi_bvalid({edid_axi_bvalid, aud_axi_bvalid, tpg_axi_bvalid}),
-        .m_axi_bready({edid_axi_bready, aud_axi_bready, tpg_axi_bready}),
-        .m_axi_araddr({edid_axi_araddr, aud_axi_araddr_32, tpg_axi_araddr_32}),
+        .m_axi_awvalid({tpg_axi_awvalid, edid_axi_awvalid, aud_axi_awvalid, env_axi_awvalid}),
+        .m_axi_awready({tpg_axi_awready, edid_axi_awready, aud_axi_awready, env_axi_awready}),
+        .m_axi_wdata({tpg_axi_wdata, edid_axi_wdata, aud_axi_wdata, env_axi_wdata}),
+        .m_axi_wstrb({tpg_axi_wstrb, edid_axi_wstrb, aud_axi_wstrb, env_axi_wstrb}),
+        .m_axi_wvalid({tpg_axi_wvalid, edid_axi_wvalid, aud_axi_wvalid, env_axi_wvalid}),
+        .m_axi_wready({tpg_axi_wready, edid_axi_wready, aud_axi_wready, env_axi_wready}),
+        .m_axi_bresp({tpg_axi_bresp, edid_axi_bresp, aud_axi_bresp, env_axi_bresp}),
+        .m_axi_bvalid({tpg_axi_bvalid, edid_axi_bvalid, aud_axi_bvalid, env_axi_bvalid}),
+        .m_axi_bready({tpg_axi_bready, edid_axi_bready, aud_axi_bready, env_axi_bready}),
+        .m_axi_araddr({tpg_axi_araddr_32, edid_axi_araddr, aud_axi_araddr_32, env_axi_araddr_32}),
         .m_axi_arprot(),
-        .m_axi_arvalid({edid_axi_arvalid, aud_axi_arvalid, tpg_axi_arvalid}),
-        .m_axi_arready({edid_axi_arready, aud_axi_arready, tpg_axi_arready}),
-        .m_axi_rdata({edid_axi_rdata, aud_axi_rdata, tpg_axi_rdata}),
-        .m_axi_rresp({edid_axi_rresp, aud_axi_rresp, tpg_axi_rresp}),
-        .m_axi_rvalid({edid_axi_rvalid, aud_axi_rvalid, tpg_axi_rvalid}),
-        .m_axi_rready({edid_axi_rready, aud_axi_rready, tpg_axi_rready})
+        .m_axi_arvalid({tpg_axi_arvalid, edid_axi_arvalid, aud_axi_arvalid, env_axi_arvalid}),
+        .m_axi_arready({tpg_axi_arready, edid_axi_arready, aud_axi_arready, env_axi_arready}),
+        .m_axi_rdata({tpg_axi_rdata, edid_axi_rdata, aud_axi_rdata, env_axi_rdata}),
+        .m_axi_rresp({tpg_axi_rresp, edid_axi_rresp, aud_axi_rresp, env_axi_rresp}),
+        .m_axi_rvalid({tpg_axi_rvalid, edid_axi_rvalid, aud_axi_rvalid, env_axi_rvalid}),
+        .m_axi_rready({tpg_axi_rready, edid_axi_rready, aud_axi_rready, env_axi_rready})
+    );
+
+    // =========================================================================
+    // ZZLAB Environment Control Register Block (zzlab_env_ctrl)
+    // Mapped at BAR1 Offset 0x0000 - 0x0FFF
+    // =========================================================================
+    zzlab_env_ctrl #(
+        .C_S_AXI_ADDR_WIDTH(6),
+        .C_S_AXI_DATA_WIDTH(32),
+        .C_VERSION(C_VERSION),
+        .C_PLATFORM("PCIE"),
+        .C_BOARD_VERSION(32'h00000101)
+    ) u_zzlab_env_ctrl (
+        .clk                (pcie_user_clk),
+        .rst_n              (pcie_user_rst_n),
+        .s_axi_ctrl_awaddr  (env_axi_awaddr_32[5:0]),
+        .s_axi_ctrl_awvalid (env_axi_awvalid),
+        .s_axi_ctrl_awready (env_axi_awready),
+        .s_axi_ctrl_wdata   (env_axi_wdata),
+        .s_axi_ctrl_wstrb   (env_axi_wstrb),
+        .s_axi_ctrl_wvalid  (env_axi_wvalid),
+        .s_axi_ctrl_wready  (env_axi_wready),
+        .s_axi_ctrl_bresp   (env_axi_bresp),
+        .s_axi_ctrl_bvalid  (env_axi_bvalid),
+        .s_axi_ctrl_bready  (env_axi_bready),
+        .s_axi_ctrl_araddr  (env_axi_araddr_32[5:0]),
+        .s_axi_ctrl_arvalid (env_axi_arvalid),
+        .s_axi_ctrl_arready (env_axi_arready),
+        .s_axi_ctrl_rdata   (env_axi_rdata),
+        .s_axi_ctrl_rresp   (env_axi_rresp),
+        .s_axi_ctrl_rvalid  (env_axi_rvalid),
+        .s_axi_ctrl_rready  (env_axi_rready),
+        .ap_rst_n          (env_ap_rst_n)
     );
 
     // =========================================================================
@@ -972,10 +1076,10 @@ module zu4ev_pcie_card_top #(
     assign s_video_tuser[0]     = hdmi_rx_v_tuser;
     assign m_video_tready[0]    = 1'b1;
 
-    assign s_audio_tdata[31:0]  = hdmi_rx_a_tdata;
-    assign s_audio_tvalid[0]    = hdmi_rx_a_tvalid;
-    assign s_audio_tlast[0]     = hdmi_rx_a_tlast;
-    assign hdmi_rx_a_tready     = s_audio_tready[0];
+    assign s_audio_tdata[31:0]  = ch0_use_tpg ? aud_pat_axis_tdata  : hdmi_rx_a_tdata;
+    assign s_audio_tvalid[0]    = ch0_use_tpg ? aud_pat_axis_tvalid : hdmi_rx_a_tvalid;
+    assign s_audio_tlast[0]     = ch0_use_tpg ? aud_pat_axis_tlast  : hdmi_rx_a_tlast;
+    assign hdmi_rx_a_tready     = ch0_use_tpg ? 1'b1                 : s_audio_tready[0];
     assign m_audio_tready[0]    = 1'b1;
 
     // Channel 1 (HDMI TX):
@@ -1010,7 +1114,7 @@ module zu4ev_pcie_card_top #(
     assign s_audio_tdata[127:96]  = aud_pat_axis_tdata;
     assign s_audio_tvalid[3]      = aud_pat_axis_tvalid;
     assign s_audio_tlast[3]       = aud_pat_axis_tlast;
-    assign aud_pat_axis_tready    = s_audio_tready[3];
+    assign aud_pat_axis_tready    = (ch0_use_tpg ? s_audio_tready[0] : 1'b0) | s_audio_tready[3];
     assign m_audio_tready[3]      = 1'b1;
 
     // =========================================================================
@@ -1317,6 +1421,7 @@ module zu4ev_pcie_card_top #(
     wire         ps_irq_pulse_w;
 
     custom_pcie_dma_top #(
+        .C_VERSION(C_VERSION),
         .PCIE_DATA_WIDTH(PCIE_DATA_WIDTH),
         .PCIE_KEEP_WIDTH(PCIE_KEEP_WIDTH),
         .NUM_VIDEO_CH(NUM_VIDEO_CH),
@@ -1326,6 +1431,8 @@ module zu4ev_pcie_card_top #(
     ) u_dma_top (
         .clk(pcie_user_clk),
         .rst_n(pcie_user_rst_n),
+        .pl_clk0(pl_clk0),
+        .sys_100m_rst_n(sys_100m_rst_n),
 
         // PCIe CQ
         .s_axis_cq_tdata(m_axis_cq_tdata),
@@ -1483,7 +1590,8 @@ module zu4ev_pcie_card_top #(
     // Zynq UltraScale+ Processing System Subsystem (zu4ev_ps_bd_wrapper)
     // =========================================================================
     zu4ev_ps_bd_wrapper u_zu4ev_ps_bd (
-        .pcie_user_clk(pcie_user_clk),
+        .pl_clk0(pl_clk0),
+        .pl_resetn0(pl_resetn0),
         .pl_ps_irq0(ps_irq_pulse_w),
 
         // M_AXI_HPM0_FPD (PS AXI-Lite Master to PL axil_reg_space)

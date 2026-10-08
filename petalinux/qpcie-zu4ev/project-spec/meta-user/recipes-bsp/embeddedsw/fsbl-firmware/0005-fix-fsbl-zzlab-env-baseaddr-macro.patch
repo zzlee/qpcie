@@ -1,17 +1,8 @@
-From 8e652a921d7b1a6c111122223333444455556666 Mon Sep 17 00:00:00 2001
-From: QPCIe Builder <builder@example.com>
-Date: Tue, 29 Sep 2026 18:15:00 +0800
-Subject: [PATCH] fix(fsbl): support both XPAR_ZZLAB_ENV_0_BASEADDR and XPAR_ZZLAB_ENV_CTRL_0_BASEADDR
-
----
- lib/sw_apps/zynqmp_fsbl/src/xfsbl_hooks.c | 6 ++++++
- 1 file changed, 6 insertions(+)
-
 diff --git a/lib/sw_apps/zynqmp_fsbl/src/xfsbl_hooks.c b/lib/sw_apps/zynqmp_fsbl/src/xfsbl_hooks.c
-index 9f6c621798..a1b2c3d4e5 100644
+index 1e104df..fe8cb86 100644
 --- a/lib/sw_apps/zynqmp_fsbl/src/xfsbl_hooks.c
 +++ b/lib/sw_apps/zynqmp_fsbl/src/xfsbl_hooks.c
-@@ -101,6 +101,12 @@ static s32 si5341_write(XIicPs *IicInstance, u16 register_address, u8 data)
+@@ -100,12 +100,16 @@ static s32 si5341_write(XIicPs *IicInstance, u16 register_address, u8 data)
  	return Status;
  }
  
@@ -22,7 +13,23 @@ index 9f6c621798..a1b2c3d4e5 100644
 +#endif
 +
  static void ShowZzLabEnvVer() {
++#if 0
  	uintptr_t reg = (uintptr_t)XPAR_ZZLAB_ENV_CTRL_0_BASEADDR;
+-
+-	u32 nPlatform;
+-
+-	nPlatform = io_read_reg_u32(reg, 0x04);
++	u32 nPlatform = io_read_reg_u32(reg, 0x04);
+ 	XFsbl_Printf(DEBUG_PRINT_ALWAYS, "zzlab-env 0x%08X %c%c%c%c 0x%08X\n\r",
+ 		io_read_reg_u32(reg, 0x00),
+ 		(char)((nPlatform >> 24) & 0xFF),
+@@ -113,6 +117,9 @@ static void ShowZzLabEnvVer() {
+ 		(char)((nPlatform >> 8) & 0xFF),
+ 		(char)((nPlatform >> 0) & 0xFF),
+ 		io_read_reg_u32(reg, 0x08));
++#else
++	XFsbl_Printf(DEBUG_PRINT_ALWAYS, "zzlab-env (Skipped in PS due to missing PCIe RefClk during SD boot)\n\r");
++#endif
+ }
  
--- 
-2.34.1
+ #ifdef XFSBL_BS

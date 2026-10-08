@@ -6,7 +6,7 @@ Subject: [PATCH 2/2] feat(fsbl): add Si5341 clock generator configuration
 Implement initialization of the Si5341 Rev B clock generator within the
 FSBL hook after bitstream download.
 
-- Add Si5341-RevB-SC6F0-Ultra-V1_1-Registers.h containing the register
+- Add Si5341-RevB-SC7F0-V1_1-20261008-Registers.h containing the register
   map exported from ClockBuilder Pro (Ultra V1_1, 2026-09-15), aligned
   with the RX/TX FSBL configuration so all three projects share the same
   settings header file.
@@ -14,17 +14,17 @@ FSBL hook after bitstream download.
   hook body to program the Si5341 register map after bitstream download.
   I2C is configured at 100 kHz using the device at address 0x76.
 ---
- .../Si5341-RevB-SC6F0-Ultra-V1_1-Registers.h  | 757 ++++++++++++++++++
+ .../Si5341-RevB-SC7F0-V1_1-20261008-Registers.h  | 757 ++++++++++++++++++
  lib/sw_apps/zynqmp_fsbl/src/xfsbl_hooks.c     | 121 ++-
  2 files changed, 873 insertions(+), 5 deletions(-)
- create mode 100755 lib/sw_apps/zynqmp_fsbl/src/Si5341-RevB-SC6F0-Ultra-V1_1-Registers.h
+ create mode 100755 lib/sw_apps/zynqmp_fsbl/src/Si5341-RevB-SC7F0-V1_1-20261008-Registers.h
 
-diff --git a/lib/sw_apps/zynqmp_fsbl/src/Si5341-RevB-SC6F0-Ultra-V1_1-Registers.h b/lib/sw_apps/zynqmp_fsbl/src/Si5341-RevB-SC6F0-Ultra-V1_1-Registers.h
+diff --git a/lib/sw_apps/zynqmp_fsbl/src/Si5341-RevB-SC7F0-V1_1-20261008-Registers.h b/lib/sw_apps/zynqmp_fsbl/src/Si5341-RevB-SC7F0-V1_1-20261008-Registers.h
 new file mode 100755
 index 0000000000..abf8072dd4
 --- /dev/null
-+++ b/lib/sw_apps/zynqmp_fsbl/src/Si5341-RevB-SC6F0-Ultra-V1_1-Registers.h
-@@ -0,0 +1,757 @@
++++ b/lib/sw_apps/zynqmp_fsbl/src/Si5341-RevB-SC7F0-V1_1-20261008-Registers.h
+@@ -0,0 +1,752 @@
 +/*
 + * Si5341 Rev B Configuration Register Export Header File
 + *
@@ -34,10 +34,10 @@ index 0000000000..abf8072dd4
 + * export tool.
 + *
 + * Part:		                                       Si5341 Rev B
-+ * Design ID:                                          SC6F0
++ * Design ID:                                          SC7F0
 + * Includes Pre/Post Download Control Register Writes: Yes
 + * Created By:                                         ClockBuilder Pro v4.19 [2026-07-23]
-+ * Timestamp:                                          2026-09-15 11:23:54 GMT+08:00
++ * Timestamp:                                          2026-10-08 11:34:39 GMT+08:00
 + *
 + * A complete design report corresponding to this export is included at the end 
 + * of this header file.
@@ -113,10 +113,10 @@ index 0000000000..abf8072dd4
 +	{ 0x010E, 0x09 },
 +	{ 0x010F, 0x33 },
 +	{ 0x0110, 0x00 },
-+	{ 0x0112, 0x02 },
++	{ 0x0112, 0x01 },
 +	{ 0x0113, 0x09 },
 +	{ 0x0114, 0x33 },
-+	{ 0x0115, 0x01 },
++	{ 0x0115, 0x00 },
 +	{ 0x0117, 0x01 },
 +	{ 0x0118, 0x09 },
 +	{ 0x0119, 0x33 },
@@ -124,12 +124,12 @@ index 0000000000..abf8072dd4
 +	{ 0x011C, 0x02 },
 +	{ 0x011D, 0x09 },
 +	{ 0x011E, 0x33 },
-+	{ 0x011F, 0x02 },
-+	{ 0x0121, 0x02 },
++	{ 0x011F, 0x01 },
++	{ 0x0121, 0x06 },
 +	{ 0x0122, 0x09 },
 +	{ 0x0123, 0x33 },
 +	{ 0x0124, 0x00 },
-+	{ 0x0126, 0x02 },
++	{ 0x0126, 0x01 },
 +	{ 0x0127, 0x09 },
 +	{ 0x0128, 0x33 },
 +	{ 0x0129, 0x00 },
@@ -140,11 +140,11 @@ index 0000000000..abf8072dd4
 +	{ 0x0130, 0x06 },
 +	{ 0x0131, 0x09 },
 +	{ 0x0132, 0x33 },
-+	{ 0x0133, 0x03 },
++	{ 0x0133, 0x02 },
 +	{ 0x013A, 0x02 },
 +	{ 0x013B, 0x09 },
 +	{ 0x013C, 0x33 },
-+	{ 0x013D, 0x04 },
++	{ 0x013D, 0x03 },
 +	{ 0x013F, 0x00 },
 +	{ 0x0140, 0x00 },
 +	{ 0x0141, 0x40 },
@@ -197,31 +197,31 @@ index 0000000000..abf8072dd4
 +	{ 0x0236, 0x00 },
 +	{ 0x0237, 0x00 },
 +	{ 0x0238, 0x00 },
-+	{ 0x0239, 0x14 },
-+	{ 0x023A, 0x01 },
++	{ 0x0239, 0xB0 },
++	{ 0x023A, 0x00 },
 +	{ 0x023B, 0x00 },
 +	{ 0x023C, 0x00 },
 +	{ 0x023D, 0x00 },
-+	{ 0x023E, 0xFA },
++	{ 0x023E, 0xA0 },
 +	{ 0x024A, 0x00 },
 +	{ 0x024B, 0x00 },
 +	{ 0x024C, 0x00 },
 +	{ 0x024D, 0x00 },
 +	{ 0x024E, 0x00 },
 +	{ 0x024F, 0x00 },
-+	{ 0x0250, 0x01 },
++	{ 0x0250, 0x00 },
 +	{ 0x0251, 0x00 },
 +	{ 0x0252, 0x00 },
 +	{ 0x0253, 0x00 },
 +	{ 0x0254, 0x00 },
 +	{ 0x0255, 0x00 },
-+	{ 0x0256, 0x01 },
++	{ 0x0256, 0x02 },
 +	{ 0x0257, 0x00 },
 +	{ 0x0258, 0x00 },
-+	{ 0x0259, 0x02 },
++	{ 0x0259, 0x00 },
 +	{ 0x025A, 0x00 },
 +	{ 0x025B, 0x00 },
-+	{ 0x025C, 0x01 },
++	{ 0x025C, 0x00 },
 +	{ 0x025D, 0x00 },
 +	{ 0x025E, 0x00 },
 +	{ 0x025F, 0x00 },
@@ -230,12 +230,12 @@ index 0000000000..abf8072dd4
 +	{ 0x0262, 0x00 },
 +	{ 0x0263, 0x00 },
 +	{ 0x0264, 0x00 },
-+	{ 0x0268, 0x02 },
++	{ 0x0268, 0x03 },
 +	{ 0x0269, 0x00 },
 +	{ 0x026A, 0x00 },
 +	{ 0x026B, 0x53 },
 +	{ 0x026C, 0x43 },
-+	{ 0x026D, 0x36 },
++	{ 0x026D, 0x37 },
 +	{ 0x026E, 0x46 },
 +	{ 0x026F, 0x30 },
 +	{ 0x0270, 0x00 },
@@ -245,8 +245,8 @@ index 0000000000..abf8072dd4
 +	{ 0x0303, 0x00 },
 +	{ 0x0304, 0x00 },
 +	{ 0x0305, 0x00 },
-+	{ 0x0306, 0x2E },
-+	{ 0x0307, 0x00 },
++	{ 0x0306, 0x13 },
++	{ 0x0307, 0x01 },
 +	{ 0x0308, 0x00 },
 +	{ 0x0309, 0x00 },
 +	{ 0x030A, 0x00 },
@@ -255,46 +255,46 @@ index 0000000000..abf8072dd4
 +	{ 0x030D, 0x00 },
 +	{ 0x030E, 0x00 },
 +	{ 0x030F, 0x00 },
-+	{ 0x0310, 0x80 },
-+	{ 0x0311, 0x67 },
++	{ 0x0310, 0x00 },
++	{ 0x0311, 0x0B },
 +	{ 0x0312, 0x00 },
 +	{ 0x0313, 0x00 },
 +	{ 0x0314, 0x00 },
-+	{ 0x0315, 0x20 },
-+	{ 0x0316, 0xCB },
++	{ 0x0315, 0x50 },
++	{ 0x0316, 0xC3 },
 +	{ 0x0317, 0x00 },
 +	{ 0x0318, 0x00 },
 +	{ 0x0319, 0x00 },
 +	{ 0x031A, 0x00 },
-+	{ 0x031B, 0xF0 },
-+	{ 0x031C, 0x0C },
++	{ 0x031B, 0x00 },
++	{ 0x031C, 0x16 },
 +	{ 0x031D, 0x00 },
 +	{ 0x031E, 0x00 },
-+	{ 0x031F, 0x80 },
-+	{ 0x0320, 0x96 },
-+	{ 0x0321, 0x98 },
++	{ 0x031F, 0x00 },
++	{ 0x0320, 0x00 },
++	{ 0x0321, 0xFA },
 +	{ 0x0322, 0x00 },
 +	{ 0x0323, 0x00 },
 +	{ 0x0324, 0x00 },
 +	{ 0x0325, 0x00 },
-+	{ 0x0326, 0x40 },
-+	{ 0x0327, 0x11 },
++	{ 0x0326, 0xC0 },
++	{ 0x0327, 0x0D },
 +	{ 0x0328, 0x00 },
 +	{ 0x0329, 0x00 },
 +	{ 0x032A, 0x00 },
-+	{ 0x032B, 0x50 },
-+	{ 0x032C, 0xC3 },
++	{ 0x032B, 0x18 },
++	{ 0x032C, 0xEE },
 +	{ 0x032D, 0x00 },
 +	{ 0x032E, 0x00 },
 +	{ 0x032F, 0x00 },
 +	{ 0x0330, 0x00 },
-+	{ 0x0331, 0x80 },
-+	{ 0x0332, 0x0B },
++	{ 0x0331, 0x00 },
++	{ 0x0332, 0x00 },
 +	{ 0x0333, 0x00 },
 +	{ 0x0334, 0x00 },
 +	{ 0x0335, 0x00 },
-+	{ 0x0336, 0xCF },
-+	{ 0x0337, 0x94 },
++	{ 0x0336, 0x00 },
++	{ 0x0337, 0x00 },
 +	{ 0x0338, 0x00 },
 +	{ 0x0339, 0x1F },
 +	{ 0x033B, 0x00 },
@@ -346,11 +346,11 @@ index 0000000000..abf8072dd4
 +	{ 0x0949, 0x00 },
 +	{ 0x094A, 0x00 },
 +	{ 0x0A02, 0x00 },
-+	{ 0x0A03, 0x1F },
++	{ 0x0A03, 0x0F },
 +	{ 0x0A04, 0x01 },
-+	{ 0x0A05, 0x1F },
++	{ 0x0A05, 0x0F },
 +	{ 0x0B44, 0x0F },
-+	{ 0x0B4A, 0x00 },
++	{ 0x0B4A, 0x10 },
 +	/* End configuration registers */
 +
 +	/* Start configuration postamble */
@@ -368,10 +368,10 @@ index 0000000000..abf8072dd4
 + * ========
 + * 
 + * Part:               Si5341AB Rev B
-+ * Project File:       Z:\SI5341\Si5341-RevB-SC6F0-Ultra-V1_1-20260915.slabtimeproj
-+ * Design ID:          SC6F0
++ * Project File:       Z:\SI5341\Si5341-RevB-SC7F0-V1_1-20261008.slabtimeproj
++ * Design ID:          SC7F0
 + * Created By:         ClockBuilder Pro v4.19 [2026-07-23]
-+ * Timestamp:          2026-09-15 11:23:54 GMT+08:00
++ * Timestamp:          2026-10-08 11:34:39 GMT+08:00
 + * 
 + * Design Rule Check
 + * =================
@@ -422,15 +422,13 @@ index 0000000000..abf8072dd4
 + * Outputs:
 + *    OUT0: Unused
 + *    OUT1: Unused
-+ *    OUT2: 26 MHz
-+ *          Enabled, LVDS 3.3 V
++ *    OUT2: Unused
 + *    OUT3: Unused
 + *    OUT4: 156.25 MHz
 + *          Enabled, LVDS 3.3 V
-+ *    OUT5: 24.576 MHz
++ *    OUT5: 12.288 MHz
 + *          Enabled, LVDS 3.3 V
-+ *    OUT6: 36.864 MHz
-+ *          Enabled, LVDS 3.3 V
++ *    OUT6: Unused
 + *    OUT7: Unused
 + *    OUT8: 300 MHz
 + *          Enabled, LVDS 3.3 V
@@ -443,12 +441,11 @@ index 0000000000..abf8072dd4
 + * Priority: maximize the number of low jitter outputs
 + * 
 + * Fpfd = 48 MHz
-+ * Fvco = 13.565952 GHz
-+ * Fms0 = 147.456 MHz
-+ * Fms1 = 104 MHz
-+ * Fms2 = 625 MHz
-+ * Fms3 = 600 MHz
-+ * Fms4 = 685.71 MHz
++ * Fvco = 13.5168 GHz
++ * Fms0 = 24.576 MHz
++ * Fms1 = 937.5 MHz
++ * Fms2 = 600 MHz
++ * Fms3 = 914.28 MHz
 + * 
 + * P dividers:
 + *    P0  = Unused
@@ -457,36 +454,34 @@ index 0000000000..abf8072dd4
 + *    P3  = Unused
 + *    Pxaxb = 1
 + * 
-+ * M = 282.624
++ * M = 281.6
 + * N dividers:
 + *    N0:
-+ *       Value: 92
-+ *       OUT5: 24.576 MHz
-+ *       OUT6: 36.864 MHz
++ *       Value: 550
++ *       OUT5: 12.288 MHz
 + *    N1:
-+ *       Value: 130.4418461538461538... [ 130 + 718/1625 ]
-+ *       OUT2: 26 MHz
-+ *    N2:
-+ *       Value: 21.7055232
++ *       Value: 14.41792
 + *       OUT4: 156.25 MHz
-+ *    N3:
-+ *       Value: 22.60992
++ *    N2:
++ *       Value: 22.528
 + *       OUT8: 300 MHz
-+ *    N4:
-+ *       Value: 19.7838036487728048... [ 19 + 29859/38095 ]
++ *    N3:
++ *       Value: 14.7840924005775036... [ 14 + 5974/7619 ]
 + *       OUT9: 114.285 MHz
++ *    N4:
++ *       Unused
 + * 
 + * R dividers:
 + *    R0 = Unused
 + *    R1 = Unused
-+ *    R2 = 4
++ *    R2 = Unused
 + *    R3 = Unused
-+ *    R4 = 4
-+ *    R5 = 6
-+ *    R6 = 4
++ *    R4 = 6
++ *    R5 = 2
++ *    R6 = Unused
 + *    R7 = Unused
 + *    R8 = 2
-+ *    R9 = 6
++ *    R9 = 8
 + * 
 + * Dividers listed above show effective values. These values are translated to register settings by ClockBuilder Pro. For the actual register values, see below. Refer to the Family Reference Manual for information on registers related to frequency plan.
 + * 
@@ -515,7 +510,7 @@ index 0000000000..abf8072dd4
 + *                               Overall  On Chip
 + * Condition                     Power    Power    Ta    Tj
 + * ----------------------------  -------  -------  ----  ----
-+ * Typical Ta, Voltage, Current  1.048 W  1.012 W  25 C  43 C
++ * Typical Ta, Voltage, Current  929 mW   905 mW   25 C  41 C
 + * 
 + *                                     -----------------------
 + *                                             Typical        
@@ -523,23 +518,23 @@ index 0000000000..abf8072dd4
 + *                                     Voltage  Current  Power
 + *        Output  Frequency    Format    (V)     (mA)    (mW) 
 + *        ------  -----------  ------  -------  -------  -----
-+ * VDD                                    1.80      193    348
-+ * VDDA                                   3.30      119    393
++ * VDD                                    1.80      186    335
++ * VDDA                                   3.30      118    388
 + * VDDO0  OUT0         Unused        
 + * VDDO1  OUT1         Unused        
-+ * VDDO2  OUT2         26 MHz    LVDS     3.30       15     50
++ * VDDO2  OUT2         Unused        
 + * VDDO3  OUT3         Unused        
 + * VDDO4  OUT4     156.25 MHz    LVDS     3.30       16     52
-+ * VDDO5  OUT5     24.576 MHz    LVDS     3.30       15     50
-+ * VDDO6  OUT6     36.864 MHz    LVDS     3.30       15     50
++ * VDDO5  OUT5     12.288 MHz    LVDS     3.30       15     50
++ * VDDO6  OUT6         Unused        
 + * VDDO7  OUT7         Unused        
 + * VDDO8  OUT8        300 MHz    LVDS     3.30       16     54
 + * VDDO9  OUT9    114.285 MHz    LVDS     3.30       16     51
 + *                                     -------  -------  -----
-+ *                                        1.80      193    348
-+ *                                        3.30      212    700
++ *                                        1.80      186    335
++ *                                        3.30      180    595
 + *                                     -------  -------  -----
-+ *                                       Total           1,048
++ *                                       Total             929
 + *                                     -------  -------  -----
 + * 
 + * Note:
@@ -614,8 +609,8 @@ index 0000000000..abf8072dd4
 + * 0x010F[6:4]   OUT1_AMPL            3                  0x3              
 + * 0x0110[2:0]   OUT1_MUX_SEL         0                  0x0              
 + * 0x0110[7:6]   OUT1_INV             0                  0x0              
-+ * 0x0112[0]     OUT2_PDN             0                  0x0              
-+ * 0x0112[1]     OUT2_OE              1                  0x1              
++ * 0x0112[0]     OUT2_PDN             1                  0x1              
++ * 0x0112[1]     OUT2_OE              0                  0x0              
 + * 0x0112[2]     OUT2_RDIV_FORCE2     0                  0x0              
 + * 0x0113[2:0]   OUT2_FORMAT          1                  0x1              
 + * 0x0113[3]     OUT2_SYNC_EN         1                  0x1              
@@ -623,7 +618,7 @@ index 0000000000..abf8072dd4
 + * 0x0113[7:6]   OUT2_CMOS_DRV        0                  0x0              
 + * 0x0114[3:0]   OUT2_CM              3                  0x3              
 + * 0x0114[6:4]   OUT2_AMPL            3                  0x3              
-+ * 0x0115[2:0]   OUT2_MUX_SEL         1                  0x1              
++ * 0x0115[2:0]   OUT2_MUX_SEL         0                  0x0              
 + * 0x0115[7:6]   OUT2_INV             0                  0x0              
 + * 0x0117[0]     OUT3_PDN             1                  0x1              
 + * 0x0117[1]     OUT3_OE              0                  0x0              
@@ -645,11 +640,11 @@ index 0000000000..abf8072dd4
 + * 0x011D[7:6]   OUT4_CMOS_DRV        0                  0x0              
 + * 0x011E[3:0]   OUT4_CM              3                  0x3              
 + * 0x011E[6:4]   OUT4_AMPL            3                  0x3              
-+ * 0x011F[2:0]   OUT4_MUX_SEL         2                  0x2              
++ * 0x011F[2:0]   OUT4_MUX_SEL         1                  0x1              
 + * 0x011F[7:6]   OUT4_INV             0                  0x0              
 + * 0x0121[0]     OUT5_PDN             0                  0x0              
 + * 0x0121[1]     OUT5_OE              1                  0x1              
-+ * 0x0121[2]     OUT5_RDIV_FORCE2     0                  0x0              
++ * 0x0121[2]     OUT5_RDIV_FORCE2     1                  0x1              
 + * 0x0122[2:0]   OUT5_FORMAT          1                  0x1              
 + * 0x0122[3]     OUT5_SYNC_EN         1                  0x1              
 + * 0x0122[5:4]   OUT5_DIS_STATE       0                  0x0              
@@ -658,8 +653,8 @@ index 0000000000..abf8072dd4
 + * 0x0123[6:4]   OUT5_AMPL            3                  0x3              
 + * 0x0124[2:0]   OUT5_MUX_SEL         0                  0x0              
 + * 0x0124[7:6]   OUT5_INV             0                  0x0              
-+ * 0x0126[0]     OUT6_PDN             0                  0x0              
-+ * 0x0126[1]     OUT6_OE              1                  0x1              
++ * 0x0126[0]     OUT6_PDN             1                  0x1              
++ * 0x0126[1]     OUT6_OE              0                  0x0              
 + * 0x0126[2]     OUT6_RDIV_FORCE2     0                  0x0              
 + * 0x0127[2:0]   OUT6_FORMAT          1                  0x1              
 + * 0x0127[3]     OUT6_SYNC_EN         1                  0x1              
@@ -689,7 +684,7 @@ index 0000000000..abf8072dd4
 + * 0x0131[7:6]   OUT8_CMOS_DRV        0                  0x0              
 + * 0x0132[3:0]   OUT8_CM              3                  0x3              
 + * 0x0132[6:4]   OUT8_AMPL            3                  0x3              
-+ * 0x0133[2:0]   OUT8_MUX_SEL         3                  0x3              
++ * 0x0133[2:0]   OUT8_MUX_SEL         2                  0x2              
 + * 0x0133[7:6]   OUT8_INV             0                  0x0              
 + * 0x013A[0]     OUT9_PDN             0                  0x0              
 + * 0x013A[1]     OUT9_OE              1                  0x1              
@@ -700,7 +695,7 @@ index 0000000000..abf8072dd4
 + * 0x013B[7:6]   OUT9_CMOS_DRV        0                  0x0              
 + * 0x013C[3:0]   OUT9_CM              3                  0x3              
 + * 0x013C[6:4]   OUT9_AMPL            3                  0x3              
-+ * 0x013D[2:0]   OUT9_MUX_SEL         4                  0x4              
++ * 0x013D[2:0]   OUT9_MUX_SEL         3                  0x3              
 + * 0x013D[7:6]   OUT9_INV             0                  0x0              
 + * 0x013F[11:0]  OUTX_ALWAYS_ON       0                  0x000            
 + * 0x0141[5]     OUT_DIS_LOL_MSK      0                  0x0              
@@ -715,40 +710,40 @@ index 0000000000..abf8072dd4
 + * 0x0222[31:0]  P2_SET               0                  0x00000000       
 + * 0x0226[47:0]  P3                   0                  0x000000000000   
 + * 0x022C[31:0]  P3_SET               0                  0x00000000       
-+ * 0x0235[43:0]  M_NUM                1185410973696      0x11400000000    
-+ * 0x023B[31:0]  M_DEN                4194304000         0x0FA000000      
++ * 0x0235[43:0]  M_NUM                755914244096       0x0B000000000    
++ * 0x023B[31:0]  M_DEN                2684354560         0x0A0000000      
 + * 0x024A[23:0]  R0_REG               0                  0x000000         
 + * 0x024D[23:0]  R1_REG               0                  0x000000         
-+ * 0x0250[23:0]  R2_REG               1                  0x000001         
++ * 0x0250[23:0]  R2_REG               0                  0x000000         
 + * 0x0253[23:0]  R3_REG               0                  0x000000         
-+ * 0x0256[23:0]  R4_REG               1                  0x000001         
-+ * 0x0259[23:0]  R5_REG               2                  0x000002         
-+ * 0x025C[23:0]  R6_REG               1                  0x000001         
++ * 0x0256[23:0]  R4_REG               2                  0x000002         
++ * 0x0259[23:0]  R5_REG               0                  0x000000         
++ * 0x025C[23:0]  R6_REG               0                  0x000000         
 + * 0x025F[23:0]  R7_REG               0                  0x000000         
 + * 0x0262[23:0]  R8_REG               0                  0x000000         
-+ * 0x0268[23:0]  R9_REG               2                  0x000002         
++ * 0x0268[23:0]  R9_REG               3                  0x000003         
 + * 0x026B[7:0]   DESIGN_ID0           83                 0x53             
 + * 0x026C[7:0]   DESIGN_ID1           67                 0x43             
-+ * 0x026D[7:0]   DESIGN_ID2           54                 0x36             
++ * 0x026D[7:0]   DESIGN_ID2           55                 0x37             
 + * 0x026E[7:0]   DESIGN_ID3           70                 0x46             
 + * 0x026F[7:0]   DESIGN_ID4           48                 0x30             
 + * 0x0270[7:0]   DESIGN_ID5           0                  0x00             
 + * 0x0271[7:0]   DESIGN_ID6           0                  0x00             
 + * 0x0272[7:0]   DESIGN_ID7           0                  0x00             
-+ * 0x0302[43:0]  N0_NUM               197568495616       0x02E00000000    
++ * 0x0302[43:0]  N0_NUM               1181116006400      0x11300000000    
 + * 0x0308[31:0]  N0_DEN               2147483648         0x080000000      
 + * 0x030C[0]     N0_UPDATE            0                  0x0              
-+ * 0x030D[43:0]  N1_NUM               444529115136       0x06780000000    
-+ * 0x0313[31:0]  N1_DEN               3407872000         0x0CB200000      
++ * 0x030D[43:0]  N1_NUM               47244640256        0x00B00000000    
++ * 0x0313[31:0]  N1_DEN               3276800000         0x0C3500000      
 + * 0x0317[0]     N1_UPDATE            0                  0x0              
-+ * 0x0318[43:0]  N2_NUM               55566139392        0x00CF0000000    
-+ * 0x031E[31:0]  N2_DEN               2560000000         0x098968000      
++ * 0x0318[43:0]  N2_NUM               94489280512        0x01600000000    
++ * 0x031E[31:0]  N2_DEN               4194304000         0x0FA000000      
 + * 0x0322[0]     N2_UPDATE            0                  0x0              
-+ * 0x0323[43:0]  N3_NUM               74088185856        0x01140000000    
-+ * 0x0329[31:0]  N3_DEN               3276800000         0x0C3500000      
++ * 0x0323[43:0]  N3_NUM               59055800320        0x00DC0000000    
++ * 0x0329[31:0]  N3_DEN               3994550272         0x0EE180000      
 + * 0x032D[0]     N3_UPDATE            0                  0x0              
-+ * 0x032E[43:0]  N4_NUM               49392123904        0x00B80000000    
-+ * 0x0334[31:0]  N4_DEN               2496593920         0x094CF0000      
++ * 0x032E[43:0]  N4_NUM               0                  0x00000000000    
++ * 0x0334[31:0]  N4_DEN               0                  0x00000000       
 + * 0x0338[0]     N4_UPDATE            0                  0x0              
 + * 0x0338[1]     N_UPDATE             0                  0x0              
 + * 0x0339[4:0]   N_FSTEP_MSK          31                 0x1F             
@@ -772,17 +767,16 @@ index 0000000000..abf8072dd4
 + * 0x0949[7:4]   IN_PULSED_CMOS_EN    0                  0x0              
 + * 0x094A[7:4]   INX_TO_PFD_EN        0                  0x0              
 + * 0x0A02[4:0]   N_ADD_0P5            0                  0x00             
-+ * 0x0A03[4:0]   N_CLK_TO_OUTX_EN     31                 0x1F             
++ * 0x0A03[4:0]   N_CLK_TO_OUTX_EN     15                 0x0F             
 + * 0x0A04[4:0]   N_PIBYP              1                  0x01             
-+ * 0x0A05[4:0]   N_PDNB               31                 0x1F             
++ * 0x0A05[4:0]   N_PDNB               15                 0x0F             
 + * 0x0B44[3:0]   PDIV_ENB             15                 0x0F             
-+ * 0x0B4A[4:0]   N_CLK_DIS            0                  0x00
++ * 0x0B4A[4:0]   N_CLK_DIS            16                 0x10
 + * 
 + *
 + */
 +
 +#endif
-\ No newline at end of file
 diff --git a/lib/sw_apps/zynqmp_fsbl/src/xfsbl_hooks.c b/lib/sw_apps/zynqmp_fsbl/src/xfsbl_hooks.c
 index 6be980ca38..4378326e2c 100644
 --- a/lib/sw_apps/zynqmp_fsbl/src/xfsbl_hooks.c
@@ -792,7 +786,7 @@ index 6be980ca38..4378326e2c 100644
  #include "xfsbl_hooks.h"
  #include "psu_init.h"
 +#include "xiicps.h"
-+#include "Si5341-RevB-SC6F0-Ultra-V1_1-Registers.h"
++#include "Si5341-RevB-SC7F0-V1_1-20261008-Registers.h"
 +
 +#define IIC_SCLK_RATE_SI5341  100000
 +#define IIC_ADDR_SI5341       0x76
@@ -806,7 +800,7 @@ index 6be980ca38..4378326e2c 100644
  /************************** Variable Definitions *****************************/
 +
 +static u32 io_read_reg_u32(uintptr_t reg, int off) {
-+	return *((u32*)reg + off);
++	return *((u32*)(reg + off));
 +}
 +
 +static s32 si5341_write(XIicPs *IicInstance, u16 register_address, u8 data)
@@ -883,7 +877,7 @@ index 6be980ca38..4378326e2c 100644
 +	int i;
 +
 +	ShowZzLabEnvVer();
-+	XFsbl_Printf(DEBUG_PRINT_ALWAYS, "SC6F0 2026/04/10\n\r");
++	XFsbl_Printf(DEBUG_PRINT_ALWAYS, "SC7F0 2026/10/08\n\r");
 +
 +	I2c1CfgPtr = XIicPs_LookupConfig(XPAR_XIICPS_0_DEVICE_ID);
 +	if (I2c1CfgPtr == NULL) {

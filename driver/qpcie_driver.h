@@ -86,11 +86,12 @@
 #define IRQ_STATUS_ALL_MASK         0x00007FF3    /* Bits 0..1, 4..14 */
 
 /* BAR1 Offsets */
-#define BAR1_OFFSET_TPG             0x0000
+#define BAR1_OFFSET_ENV             0x0000
 #define BAR1_OFFSET_AUDIO_GEN       0x1000
 #define BAR1_OFFSET_EDID            0x2000
-#define BAR1_OFFSET_I2C             0x3000
-#define BAR1_OFFSET_SPI_FLASH       0x4000
+#define BAR1_OFFSET_TPG             0x3000
+#define BAR1_OFFSET_I2C             0x4000
+#define BAR1_OFFSET_SPI_FLASH       0x5000
 
 /* I2C Master Registers (BAR1 Offset 0x3000) */
 #define REG_I2C_PRER_LO             0x00

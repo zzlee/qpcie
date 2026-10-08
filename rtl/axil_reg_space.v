@@ -8,7 +8,7 @@
 `timescale 1ns / 1ps
 
 module axil_reg_space #(
-    parameter [31:0]   C_VERSION    = 32'h2610_0605, // Mandatory hardware version YYMMDDpp
+    parameter [31:0]   C_VERSION    = 32'h2610_0803, // Mandatory hardware version YYMMDDpp
     parameter integer NUM_VIDEO_CH = 4,
     parameter integer NUM_AUDIO_CH = 4
 )(
@@ -554,7 +554,7 @@ module axil_reg_space #(
                             8'h78: reg_slice_height    <= s_axil_wdata;
                             8'h80: reg_video_ctrl      <= s_axil_wdata;
                             8'h84: reg_video_sub_reset <= s_axil_wdata;
-                            8'h88: reg_overlay_ctrl    <= s_axil_wdata;
+                            8'h88, 8'h94: reg_overlay_ctrl <= s_axil_wdata;
                             8'hA0: begin
                                 reg_perf_enable        <= s_axil_wdata[0];
                                 reg_perf_reset_w1c     <= s_axil_wdata[1];
@@ -735,7 +735,10 @@ module axil_reg_space #(
                             8'h7C: s_axil_rdata <= reg_frame_drop_count;
                             8'h80: s_axil_rdata <= reg_video_ctrl;
                             8'h84: s_axil_rdata <= reg_video_sub_reset;
-                            8'h88: s_axil_rdata <= reg_overlay_ctrl;
+                            8'h88: s_axil_rdata <= reg_sof_count;
+                            8'h8C: s_axil_rdata <= reg_eol_count;
+                            8'h90: s_axil_rdata <= reg_beat_count;
+                            8'h94: s_axil_rdata <= reg_overlay_ctrl;
                             8'hA0: s_axil_rdata <= {30'd0, reg_perf_reset_w1c, reg_perf_enable};
                             default: s_axil_rdata <= 32'd0;
                         endcase

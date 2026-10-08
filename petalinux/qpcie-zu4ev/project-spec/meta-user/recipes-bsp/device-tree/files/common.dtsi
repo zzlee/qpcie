@@ -81,6 +81,20 @@
 // 	maximum-speed = "super-speed";
 // };
 
+/ {
+	amba_pl: amba_pl@0 {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		compatible = "simple-bus";
+		ranges;
+
+		zzlab_env_0: zzlab_env@b0000000 {
+			compatible = "yuan,zzlab-env";
+			reg = <0x0 0xb0000000 0x0 0x1000>;
+		};
+	};
+};
+
 ////////////////////////////////////////////////////////////////////////////
 // system peripherals
 

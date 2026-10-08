@@ -93,13 +93,13 @@ set_property -dict [list \
 
 generate_target all [get_ips v_tpg_0]
 
-# 5. Generate AXI Crossbar IP Core (axi_crossbar_0 - 1x3)
-puts "Generating AXI Crossbar IP Core (axi_crossbar_0 - 1x3)..."
+# 5. Generate AXI Crossbar IP Core (axi_crossbar_0 - 1x4)
+puts "Generating AXI Crossbar IP Core (axi_crossbar_0 - 1x4)..."
 create_ip -name axi_crossbar -vendor xilinx.com -library ip -version 2.1 -module_name axi_crossbar_0
 
 set_property -dict [list \
   CONFIG.NUM_SI {1} \
-  CONFIG.NUM_MI {3} \
+  CONFIG.NUM_MI {4} \
   CONFIG.PROTOCOL {AXI4LITE} \
   CONFIG.DATA_WIDTH {32} \
   CONFIG.ADDR_WIDTH {32} \
@@ -109,9 +109,57 @@ set_property -dict [list \
   CONFIG.M01_A00_ADDR_WIDTH {12} \
   CONFIG.M02_A00_BASE_ADDR {0x0000000000002000} \
   CONFIG.M02_A00_ADDR_WIDTH {12} \
+  CONFIG.M03_A00_BASE_ADDR {0x0000000000003000} \
+  CONFIG.M03_A00_ADDR_WIDTH {12} \
 ] [get_ips axi_crossbar_0]
 
 generate_target all [get_ips axi_crossbar_0]
+
+# 5.1 Generate AXI Clock Converter IP Core (axi_clock_converter_0)
+puts "Generating AXI Clock Converter IP Core (axi_clock_converter_0)..."
+create_ip -name axi_clock_converter -vendor xilinx.com -library ip -version 2.1 -module_name axi_clock_converter_0
+set_property -dict [list \
+  CONFIG.PROTOCOL {AXI4LITE} \
+  CONFIG.DATA_WIDTH {32} \
+  CONFIG.ADDR_WIDTH {32} \
+  CONFIG.ID_WIDTH {0} \
+  CONFIG.AWUSER_WIDTH {0} \
+  CONFIG.ARUSER_WIDTH {0} \
+  CONFIG.WUSER_WIDTH {0} \
+  CONFIG.RUSER_WIDTH {0} \
+  CONFIG.BUSER_WIDTH {0} \
+] [get_ips axi_clock_converter_0]
+generate_target all [get_ips axi_clock_converter_0]
+
+# 5.2 Generate AXI Crossbar IP Core for BAR0 / PS Arbiter (axi_crossbar_1 - 2x1)
+puts "Generating AXI Crossbar IP Core (axi_crossbar_1 - 2x1)..."
+create_ip -name axi_crossbar -vendor xilinx.com -library ip -version 2.1 -module_name axi_crossbar_1
+set_property -dict [list \
+  CONFIG.NUM_SI {2} \
+  CONFIG.NUM_MI {1} \
+  CONFIG.PROTOCOL {AXI4LITE} \
+  CONFIG.DATA_WIDTH {32} \
+  CONFIG.ADDR_WIDTH {32} \
+  CONFIG.M00_A00_BASE_ADDR {0x0000000000000000} \
+  CONFIG.M00_A00_ADDR_WIDTH {12} \
+] [get_ips axi_crossbar_1]
+generate_target all [get_ips axi_crossbar_1]
+
+# 5.3 Generate AXI-Stream Clock Converter IP Core (axis_clock_converter_0 - 128-bit)
+puts "Generating AXI-Stream Clock Converter IP Core (axis_clock_converter_0)..."
+create_ip -name axis_clock_converter -vendor xilinx.com -library ip -version 1.1 -module_name axis_clock_converter_0
+set_property -dict [list \
+  CONFIG.TDATA_NUM_BYTES {16} \
+  CONFIG.HAS_TKEEP {1} \
+  CONFIG.HAS_TLAST {1} \
+  CONFIG.TUSER_WIDTH {85} \
+] [get_ips axis_clock_converter_0]
+generate_target all [get_ips axis_clock_converter_0]
+
+# 5.4 Generate Processor System Reset IP Core (proc_sys_reset_0)
+puts "Generating Processor System Reset IP Core (proc_sys_reset_0)..."
+create_ip -name proc_sys_reset -vendor xilinx.com -library ip -version 5.0 -module_name proc_sys_reset_0
+generate_target all [get_ips proc_sys_reset_0]
 
 # 6. Generate Video PHY Controller IP Core (vid_phy_controller_0 - Quad 226 HDMI RX/TX)
 puts "Generating Video PHY Controller IP Core (vid_phy_controller_0)..."
@@ -183,7 +231,7 @@ update_compile_order -fileset sources_1
 config_ip_cache -disable_cache
 
 puts "Starting Synthesis (synth_1)..."
-launch_runs synth_1 -jobs 8
+launch_runs synth_1 -jobs 16
 wait_on_run synth_1
 
 if {[get_property PROGRESS [get_runs synth_1]] != "100%" ||
@@ -193,7 +241,7 @@ if {[get_property PROGRESS [get_runs synth_1]] != "100%" ||
 }
 
 puts "Starting Implementation & Bitstream Generation (impl_1)..."
-launch_runs impl_1 -to_step write_bitstream -jobs 8
+launch_runs impl_1 -to_step write_bitstream -jobs 16
 wait_on_run impl_1
 
 if {[get_property PROGRESS [get_runs impl_1]] != "100%" ||
@@ -214,5 +262,12 @@ foreach f [glob -nocomplain "$impl_dir/*.bit"] {
 puts "================================================================="
 
 report_timing_summary -file $project_dir/timing_summary.rpt
+
+set xsa_out "./hw_platform/sc7f0_base.xsa"
+file mkdir [file dirname $xsa_out]
+puts "Exporting updated Hardware Platform XSA ($xsa_out)..."
+write_hw_platform -fixed -include_bit -force $xsa_out
+puts " SUCCESS: Hardware Platform XSA exported to $xsa_out"
+
 close_project
 exit 0

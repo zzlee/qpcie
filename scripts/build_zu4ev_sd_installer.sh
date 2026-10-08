@@ -462,12 +462,31 @@ echo "  -> Custom Installer boot.scr generated"
 # Step 4: Populate Target eMMC Production Files (Tandem PCIe 200ms Fast Boot)
 # ==============================================================================
 echo "[4/4] Populating target_emmc/ with Production 200ms Fast-Boot firmware..."
-PROD_BOOTBIN="$REL_DIR/BOOT.BIN"
+# Production eMMC BOOT.BIN MUST come from PetaLinux (XSA-derived, tandem-capable),
+# NEVER from the SD installer monolithic image. See handoff 38fbf4ef §7.
+PROD_BOOTBIN="$IMG_DIR/BOOT.BIN"
 if [ -f "$PROD_BOOTBIN" ]; then
     cp -v "$PROD_BOOTBIN" "$REL_DIR/target_emmc/BOOT.BIN"
+else
+    echo "ERROR: Production BOOT.BIN missing at $PROD_BOOTBIN (rebuild PetaLinux from new XSA first)"
+    exit 1
 fi
 cp -v "$BOOTSCR" "$REL_DIR/target_emmc/boot.scr"
 cp -v "$IMG_DIR/image.ub" "$REL_DIR/target_emmc/image.ub"
+
+# Dual-boot invariant guard: SD installer files vs eMMC production files
+# must NEVER be silently identical (except boot.scr only if intended).
+# - BOOT.BIN: installer (monolithic) vs target_emmc (PetaLinux/tandem) MUST differ
+# - image.ub: installer (daemon-free) vs target_emmc (with upgrade daemon) MUST differ
+if cmp -s "$REL_DIR/BOOT.BIN" "$REL_DIR/target_emmc/BOOT.BIN"; then
+    echo "ERROR: Dual-boot violation: installer BOOT.BIN == target_emmc/BOOT.BIN (SD monolithic mixed into eMMC production)"
+    exit 1
+fi
+if cmp -s "$REL_DIR/image.ub" "$REL_DIR/target_emmc/image.ub"; then
+    echo "ERROR: Dual-boot violation: installer image.ub == target_emmc/image.ub (daemon injection missing or installer mixed into production)"
+    exit 1
+fi
+echo "[4/4] Dual-boot separation verified (installer vs target_emmc differ as required)"
 
 # Also create helper prepare_sd.sh in release dir
 cat << 'PREP_EOF' > "$REL_DIR/prepare_sd.sh"

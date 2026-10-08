@@ -70,6 +70,9 @@ static irqreturn_t qpcie_irq_handler(int irq, void *data)
     if (top & BIT(0)) {
         u32 ch_irq = ioread32(qdev->bar0_mmio + REG_VCH0_IRQ_STATUS);
         if (ch_irq & BIT(0)) {
+            static u32 irq_cnt = 0;
+            if (++irq_cnt <= 10)
+                dev_info(&qdev->pdev->dev, "[IRQ] VCH0 Frame Done #%u\n", irq_cnt);
             /* Frame done completion */
             if (qdev->v4l2_registered)
                 qpcie_v4l2_node_done(qdev, 0);

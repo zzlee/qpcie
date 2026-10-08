@@ -1,12 +1,5 @@
 [DEBUG] Using xsct from : /opt/Xilinx/petalinux/2023.2/tools/xsct/bin/xsct
 [DEBUG] Using conf/mconf from : /opt/Xilinx/petalinux/2023.2/components/yocto/buildtools/sysroots/x86_64-petalinux-linux/usr/bin/mconf
-[INFO] Generating Kconfig for project
-[DEBUG] Running CMD: xsct -sdx -nodisp /home/zzlee/qpcie/petalinux/qpcie-zu4ev/components/yocto/layers/meta-xilinx/meta-xilinx-core/gen-machine-conf/gen-machine-scripts/hw-description.tcl plnx_gen_hwsysconf /home/zzlee/qpcie/petalinux/qpcie-zu4ev/project-spec/hw-description/system.xsa /home/zzlee/qpcie/petalinux/qpcie-zu4ev/project-spec/configs/configs/Kconfig.syshw
-[DEBUG] WARNING: sdtgen package cannot be loaded. System Device tree commands will not 
- be available
-INFO: [Hsi 55-2053] elapsed time for repository (/opt/Xilinx/petalinux/2023.2/tools/xsct/data/embeddedsw) loading 0 seconds
-hsi::open_hw_design: Time (s): cpu = 00:00:07 ; elapsed = 00:00:07 . Memory (MB): peak = 746.371 ; gain = 158.344 ; free physical = 15616 ; free virtual = 41873
-
 [INFO] Silentconfig project
 [DEBUG] Running CMD: yes "" | env KCONFIG_CONFIG=/home/zzlee/qpcie/petalinux/qpcie-zu4ev/project-spec/configs/config conf /home/zzlee/qpcie/petalinux/qpcie-zu4ev/project-spec/configs/configs/Kconfig
 [DEBUG] *
@@ -48,8 +41,9 @@ Subsystem AUTO Hardware Settings (SUBSYSTEM_HARDWARE_AUTO) [Y/?] y
   *
   Primary Memory
   > 1. psu_ddr_0 (SUBSYSTEM_MEMORY_PSU_DDR_0_BANKLESS_SELECT)
-    2. manual (SUBSYSTEM_MEMORY_MANUAL_SELECT)
-  choice[1-2?]:   System memory base address (SUBSYSTEM_MEMORY_PSU_DDR_0_BANKLESS_BASEADDR) [0x0] 
+    2. psu_ddr_1 (SUBSYSTEM_MEMORY_PSU_DDR_1_BANKLESS_SELECT)
+    3. manual (SUBSYSTEM_MEMORY_MANUAL_SELECT)
+  choice[1-3?]:   System memory base address (SUBSYSTEM_MEMORY_PSU_DDR_0_BANKLESS_BASEADDR) [0x0] 
   System memory size (SUBSYSTEM_MEMORY_PSU_DDR_0_BANKLESS_SIZE) [0x80000000] 
   kernel base address (SUBSYSTEM_MEMORY_PSU_DDR_0_BANKLESS_KERNEL_BASEADDR) [0x0] 
   u-boot text base address offset to memory base address (SUBSYSTEM_MEMORY_PSU_DDR_0_BANKLESS_U__BOOT_TEXTBASE_OFFSET) [0x8000000] 
@@ -71,9 +65,8 @@ Subsystem AUTO Hardware Settings (SUBSYSTEM_HARDWARE_AUTO) [Y/?] y
   choice[1-3?]:   DTG Serial stdin/stdout
     1. psu_uart_1 (SUBSYSTEM_SERIAL_PSU_UART_1_SELECT)
   > 2. psu_uart_0 (SUBSYSTEM_SERIAL_PSU_UART_0_SELECT)
-    3. axi_uart16550_0 (SUBSYSTEM_SERIAL_AXI_UART16550_0_SELECT)
-    4. manual (SUBSYSTEM_SERIAL_MANUAL_SELECT)
-  choice[1-4?]:   System stdin/stdout baudrate for psu_uart_1
+    3. manual (SUBSYSTEM_SERIAL_MANUAL_SELECT)
+  choice[1-3?]:   System stdin/stdout baudrate for psu_uart_1
     1. 600 (SUBSYSTEM_SERIAL_PSU_UART_1_BAUDRATE_600)
     2. 9600 (SUBSYSTEM_SERIAL_PSU_UART_1_BAUDRATE_9600)
     3. 28800 (SUBSYSTEM_SERIAL_PSU_UART_1_BAUDRATE_28800)
@@ -89,14 +82,6 @@ Subsystem AUTO Hardware Settings (SUBSYSTEM_HARDWARE_AUTO) [Y/?] y
     5. 230400 (SUBSYSTEM_SERIAL_PSU_UART_0_BAUDRATE_230400)
     6. 460800 (SUBSYSTEM_SERIAL_PSU_UART_0_BAUDRATE_460800)
     7. 921600 (SUBSYSTEM_SERIAL_PSU_UART_0_BAUDRATE_921600)
-  choice[1-7]:   System stdin/stdout baudrate for axi_uart16550_0
-    1. 600 (SUBSYSTEM_SERIAL_AXI_UART16550_0_BAUDRATE_600)
-    2. 9600 (SUBSYSTEM_SERIAL_AXI_UART16550_0_BAUDRATE_9600)
-    3. 28800 (SUBSYSTEM_SERIAL_AXI_UART16550_0_BAUDRATE_28800)
-  > 4. 115200 (SUBSYSTEM_SERIAL_AXI_UART16550_0_BAUDRATE_115200)
-    5. 230400 (SUBSYSTEM_SERIAL_AXI_UART16550_0_BAUDRATE_230400)
-    6. 460800 (SUBSYSTEM_SERIAL_AXI_UART16550_0_BAUDRATE_460800)
-    7. 921600 (SUBSYSTEM_SERIAL_AXI_UART16550_0_BAUDRATE_921600)
   choice[1-7]:   *
   * Ethernet Settings
   *
@@ -140,7 +125,7 @@ Extra dts/dtsi files (SUBSYSTEM_EXTRA_DT_FILES) []
 *
 generate boot args automatically (SUBSYSTEM_BOOTARGS_AUTO) [Y/n/?] 
 enable kernel earlyprintk (SUBSYSTEM_BOOTARGS_EARLYPRINTK) [Y/n/?] 
-Auto generated bootargs (NO EDIT!) (SUBSYSTEM_BOOTARGS_GENERATED) [earlycon console=ttyPS0,115200 clk_ignore_unused root=/dev/ram0 rw cma=1000M] 
+Auto generated bootargs (NO EDIT!) (SUBSYSTEM_BOOTARGS_GENERATED) [earlycon console=ttyPS0,115200 clk_ignore_unused root=/dev/ram0 rw] 
 Add extra boot args (SUBSYSTEM_EXTRA_BOOTARGS) [] 
 Devicetree compiler flags (SUBSYSTEM_DEVICETREE_COMPILER_FLAGS) [-@] 
 Devicetree overlay (SUBSYSTEM_DTB_OVERLAY) [N/y/?] 
