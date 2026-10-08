@@ -23,7 +23,7 @@ module zzlab_env_ctrl #(
 	parameter C_S_AXI_ADDR_WIDTH = 6,
 	parameter C_S_AXI_DATA_WIDTH = 32,
 
-	parameter C_VERSION = 32'h26100803,
+	parameter C_VERSION = 32'h26100805,
 	parameter C_PLATFORM = "YYYY",
 	parameter C_BOARD_VERSION = 32'h0
 ) (

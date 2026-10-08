@@ -11,7 +11,7 @@
 `timescale 1ns / 1ps
 
 module custom_pcie_dma_top #(
-    parameter [31:0] C_VERSION = 32'h2610_0803,
+    parameter [31:0] C_VERSION = 32'h2610_0805,
     parameter PCIE_DATA_WIDTH  = 128,
     parameter PCIE_KEEP_WIDTH  = PCIE_DATA_WIDTH / 8,
     parameter NUM_VIDEO_CH     = 2,
@@ -188,12 +188,24 @@ module custom_pcie_dma_top #(
     wire        bar0_axil_rvalid, bar0_axil_rready;
 
     // Arbitrated AXI-Lite signals driving axil_reg_space (PCIe BAR0 + PS HPM0_FPD)
+    // M00 (0x000-0xFFF). Shared PS/PCIe: transaction-atomic via crossbar.
     wire [31:0] arb_axil_awaddr, arb_axil_wdata, arb_axil_araddr, arb_axil_rdata;
     wire [3:0]  arb_axil_wstrb;
     wire [1:0]  arb_axil_bresp, arb_axil_rresp;
     wire        arb_axil_awvalid, arb_axil_awready, arb_axil_wvalid, arb_axil_wready;
     wire        arb_axil_bvalid, arb_axil_bready, arb_axil_arvalid, arb_axil_arready;
     wire        arb_axil_rvalid, arb_axil_rready;
+
+    // Arbitrated AXI-Lite signals driving zzlab_env_ctrl (version/platform)
+    // M01 (0x1000-0x1FFF). Shared PS/PCIe so eMMC standalone boot (no PCIe
+    // clock) can still read version info for triage.
+    wire [31:0] env_axil_awaddr, env_axil_wdata, env_axil_araddr, env_axil_rdata;
+    wire [3:0]  env_axil_wstrb;
+    wire [1:0]  env_axil_bresp, env_axil_rresp;
+    wire        env_axil_awvalid, env_axil_awready, env_axil_wvalid, env_axil_wready;
+    wire        env_axil_bvalid, env_axil_bready, env_axil_arvalid, env_axil_arready;
+    wire        env_axil_rvalid, env_axil_rready;
+    wire [31:0] env_ap_rst_n;
 
     wire [31:0] cvt_bar0_axil_awaddr, cvt_bar0_axil_wdata, cvt_bar0_axil_araddr, cvt_bar0_axil_rdata;
     wire [3:0]  cvt_bar0_axil_wstrb;
@@ -251,7 +263,10 @@ module custom_pcie_dma_top #(
     axi_crossbar_1 u_axi_crossbar_1 (
         .aclk(pl_clk0),
         .aresetn(sys_100m_rst_n),
-        .s_axi_awaddr({s_axil_ps_awaddr, cvt_bar0_axil_awaddr}),
+        // S1 (MSB) = PS HPM0_FPD. NOTE: strip to 13-bit BAR0 offset — the
+        // M00/M01 windows only cover 0x000-0x1FFF. Passing full 0xB000xxxx
+        // addresses misses decode and wedges the requester (seen on HW).
+        .s_axi_awaddr({{19'd0, s_axil_ps_awaddr[12:0]}, cvt_bar0_axil_awaddr}),
         .s_axi_awprot(6'd0),
         .s_axi_awvalid({s_axil_ps_awvalid, cvt_bar0_axil_awvalid}),
         .s_axi_awready({s_axil_ps_awready, cvt_bar0_axil_awready}),
@@ -262,7 +277,7 @@ module custom_pcie_dma_top #(
         .s_axi_bresp({s_axil_ps_bresp, cvt_bar0_axil_bresp}),
         .s_axi_bvalid({s_axil_ps_bvalid, cvt_bar0_axil_bvalid}),
         .s_axi_bready({s_axil_ps_bready, cvt_bar0_axil_bready}),
-        .s_axi_araddr({s_axil_ps_araddr, cvt_bar0_axil_araddr}),
+        .s_axi_araddr({{19'd0, s_axil_ps_araddr[12:0]}, cvt_bar0_axil_araddr}),
         .s_axi_arprot(6'd0),
         .s_axi_arvalid({s_axil_ps_arvalid, cvt_bar0_axil_arvalid}),
         .s_axi_arready({s_axil_ps_arready, cvt_bar0_axil_arready}),
@@ -271,25 +286,60 @@ module custom_pcie_dma_top #(
         .s_axi_rvalid({s_axil_ps_rvalid, cvt_bar0_axil_rvalid}),
         .s_axi_rready({s_axil_ps_rready, cvt_bar0_axil_rready}),
 
-        .m_axi_awaddr(arb_axil_awaddr),
+        // M01 (MSB) = zzlab_env_ctrl, M00 (LSB) = axil_reg_space
+        .m_axi_awaddr({env_axil_awaddr, arb_axil_awaddr}),
         .m_axi_awprot(),
-        .m_axi_awvalid(arb_axil_awvalid),
-        .m_axi_awready(arb_axil_awready),
-        .m_axi_wdata(arb_axil_wdata),
-        .m_axi_wstrb(arb_axil_wstrb),
-        .m_axi_wvalid(arb_axil_wvalid),
-        .m_axi_wready(arb_axil_wready),
-        .m_axi_bresp(arb_axil_bresp),
-        .m_axi_bvalid(arb_axil_bvalid),
-        .m_axi_bready(arb_axil_bready),
-        .m_axi_araddr(arb_axil_araddr),
+        .m_axi_awvalid({env_axil_awvalid, arb_axil_awvalid}),
+        .m_axi_awready({env_axil_awready, arb_axil_awready}),
+        .m_axi_wdata({env_axil_wdata, arb_axil_wdata}),
+        .m_axi_wstrb({env_axil_wstrb, arb_axil_wstrb}),
+        .m_axi_wvalid({env_axil_wvalid, arb_axil_wvalid}),
+        .m_axi_wready({env_axil_wready, arb_axil_wready}),
+        .m_axi_bresp({env_axil_bresp, arb_axil_bresp}),
+        .m_axi_bvalid({env_axil_bvalid, arb_axil_bvalid}),
+        .m_axi_bready({env_axil_bready, arb_axil_bready}),
+        .m_axi_araddr({env_axil_araddr, arb_axil_araddr}),
         .m_axi_arprot(),
-        .m_axi_arvalid(arb_axil_arvalid),
-        .m_axi_arready(arb_axil_arready),
-        .m_axi_rdata(arb_axil_rdata),
-        .m_axi_rresp(arb_axil_rresp),
-        .m_axi_rvalid(arb_axil_rvalid),
-        .m_axi_rready(arb_axil_rready)
+        .m_axi_arvalid({env_axil_arvalid, arb_axil_arvalid}),
+        .m_axi_arready({env_axil_arready, arb_axil_arready}),
+        .m_axi_rdata({env_axil_rdata, arb_axil_rdata}),
+        .m_axi_rresp({env_axil_rresp, arb_axil_rresp}),
+        .m_axi_rvalid({env_axil_rvalid, arb_axil_rvalid}),
+        .m_axi_rready({env_axil_rready, arb_axil_rready})
+    );
+
+    // =========================================================================
+    // ZZLAB Environment Control Register Block (zzlab_env_ctrl)
+    // BAR0 Offset 0x1000 - 0x1FFF (was BAR1 0x0000). On pl_clk0 so PS and
+    // PCIe host share access; readable during eMMC standalone boot.
+    // =========================================================================
+    zzlab_env_ctrl #(
+        .C_S_AXI_ADDR_WIDTH(6),
+        .C_S_AXI_DATA_WIDTH(32),
+        .C_VERSION(C_VERSION),
+        .C_PLATFORM("PCIE"),
+        .C_BOARD_VERSION(32'h00000101)
+    ) u_zzlab_env_ctrl (
+        .clk                (pl_clk0),
+        .rst_n              (sys_100m_rst_n),
+        .s_axi_ctrl_awaddr  (env_axil_awaddr[5:0]),
+        .s_axi_ctrl_awvalid (env_axil_awvalid),
+        .s_axi_ctrl_awready (env_axil_awready),
+        .s_axi_ctrl_wdata   (env_axil_wdata),
+        .s_axi_ctrl_wstrb   (env_axil_wstrb),
+        .s_axi_ctrl_wvalid  (env_axil_wvalid),
+        .s_axi_ctrl_wready  (env_axil_wready),
+        .s_axi_ctrl_bresp   (env_axil_bresp),
+        .s_axi_ctrl_bvalid  (env_axil_bvalid),
+        .s_axi_ctrl_bready  (env_axil_bready),
+        .s_axi_ctrl_araddr  (env_axil_araddr[5:0]),
+        .s_axi_ctrl_arvalid (env_axil_arvalid),
+        .s_axi_ctrl_arready (env_axil_arready),
+        .s_axi_ctrl_rdata   (env_axil_rdata),
+        .s_axi_ctrl_rresp   (env_axil_rresp),
+        .s_axi_ctrl_rvalid  (env_axil_rvalid),
+        .s_axi_ctrl_rready  (env_axil_rready),
+        .ap_rst_n           (env_ap_rst_n)
     );
 
     wire        read_req_valid, read_req_ack, read_req_bar_sel;

@@ -131,17 +131,21 @@ set_property -dict [list \
 ] [get_ips axi_clock_converter_0]
 generate_target all [get_ips axi_clock_converter_0]
 
-# 5.2 Generate AXI Crossbar IP Core for BAR0 / PS Arbiter (axi_crossbar_1 - 2x1)
-puts "Generating AXI Crossbar IP Core (axi_crossbar_1 - 2x1)..."
+# 5.2 Generate AXI Crossbar IP Core for BAR0 / PS Arbiter (axi_crossbar_1 - 2x2)
+# M00 (0x000-0xFFF): axil_reg_space (DMA regs, PS+PCIe shared)
+# M01 (0x1000-0x1FFF): zzlab_env_ctrl (version/platform, PS+PCIe shared)
+puts "Generating AXI Crossbar IP Core (axi_crossbar_1 - 2x2)..."
 create_ip -name axi_crossbar -vendor xilinx.com -library ip -version 2.1 -module_name axi_crossbar_1
 set_property -dict [list \
   CONFIG.NUM_SI {2} \
-  CONFIG.NUM_MI {1} \
+  CONFIG.NUM_MI {2} \
   CONFIG.PROTOCOL {AXI4LITE} \
   CONFIG.DATA_WIDTH {32} \
   CONFIG.ADDR_WIDTH {32} \
   CONFIG.M00_A00_BASE_ADDR {0x0000000000000000} \
   CONFIG.M00_A00_ADDR_WIDTH {12} \
+  CONFIG.M01_A00_BASE_ADDR {0x0000000000001000} \
+  CONFIG.M01_A00_ADDR_WIDTH {12} \
 ] [get_ips axi_crossbar_1]
 generate_target all [get_ips axi_crossbar_1]
 

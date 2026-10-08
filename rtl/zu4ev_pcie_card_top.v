@@ -17,7 +17,7 @@
 `timescale 1ns / 1ps
 
 module zu4ev_pcie_card_top #(
-    parameter [31:0] C_VERSION = 32'h2610_0803,
+    parameter [31:0] C_VERSION = 32'h2610_0805,
     parameter PCIE_DATA_WIDTH  = 256,
     parameter PCIE_KEEP_WIDTH  = PCIE_DATA_WIDTH / 32, // 8 DW keep for 256-bit
     parameter NUM_VIDEO_CH     = 4,
@@ -185,23 +185,26 @@ module zu4ev_pcie_card_top #(
     // =========================================================================
     // =========================================================================
     // AXI Crossbar Master Interface Wires (4 Masters)
-    // M00 (Bits 31:0)   : ZZLAB ENV CTRL (Offset 0x0000 - 0x0FFF)
+    // M00 (Bits 31:0)   : RESERVED hole -> axil_decerr_slave (was ZZLAB ENV,
+    //                     moved to BAR0 0x1000). Answers DECERR, never hangs.
     // M01 (Bits 63:32)  : Audio Pattern Generator (Offset 0x1000 - 0x1FFF)
     // M02 (Bits 95:64)  : Dynamic EDID RAM + HPD (Offset 0x2000 - 0x2FFF)
     // M03 (Bits 127:96) : Video TPG IP s_axi_CTRL (Offset 0x3000 - 0x3FFF)
     // =========================================================================
-    wire [31:0] env_axi_awaddr_32, env_axi_araddr_32;
-    wire        env_axi_awvalid, env_axi_awready;
-    wire [31:0] env_axi_wdata;
-    wire [3:0]  env_axi_wstrb;
-    wire        env_axi_wvalid, env_axi_wready;
-    wire [1:0]  env_axi_bresp;
-    wire        env_axi_bvalid, env_axi_bready;
-    wire        env_axi_arvalid, env_axi_arready;
-    wire [31:0] env_axi_rdata;
-    wire [1:0]  env_axi_rresp;
-    wire        env_axi_rvalid, env_axi_rready;
-    wire [31:0] env_ap_rst_n;
+    // BAR1 M00 (Bits 31:0, Offset 0x0000 - 0x0FFF): RESERVED hole.
+    // zzlab_env moved to BAR0 0x1000 (pl_clk0, PS+PCIe shared). This DECERR
+    // guard answers stray host reads here instantly instead of wedging.
+    wire [31:0] hole_axi_awaddr_32, hole_axi_araddr_32;
+    wire        hole_axi_awvalid, hole_axi_awready;
+    wire [31:0] hole_axi_wdata;
+    wire [3:0]  hole_axi_wstrb;
+    wire        hole_axi_wvalid, hole_axi_wready;
+    wire [1:0]  hole_axi_bresp;
+    wire        hole_axi_bvalid, hole_axi_bready;
+    wire        hole_axi_arvalid, hole_axi_arready;
+    wire [31:0] hole_axi_rdata;
+    wire [1:0]  hole_axi_rresp;
+    wire        hole_axi_rvalid, hole_axi_rready;
 
     wire [31:0] tpg_axi_awaddr_32, tpg_axi_araddr_32;
     wire [7:0]  tpg_axi_awaddr, tpg_axi_araddr;
@@ -275,58 +278,52 @@ module zu4ev_pcie_card_top #(
         .s_axi_rready(bar1_m_rready),
 
         // Master Interfaces Vector Output: [M03 (TPG), M02 (EDID), M01 (Audio), M00 (ENV)]
-        .m_axi_awaddr({tpg_axi_awaddr_32, edid_axi_awaddr, aud_axi_awaddr_32, env_axi_awaddr_32}),
+        .m_axi_awaddr({tpg_axi_awaddr_32, edid_axi_awaddr, aud_axi_awaddr_32, hole_axi_awaddr_32}),
         .m_axi_awprot(),
-        .m_axi_awvalid({tpg_axi_awvalid, edid_axi_awvalid, aud_axi_awvalid, env_axi_awvalid}),
-        .m_axi_awready({tpg_axi_awready, edid_axi_awready, aud_axi_awready, env_axi_awready}),
-        .m_axi_wdata({tpg_axi_wdata, edid_axi_wdata, aud_axi_wdata, env_axi_wdata}),
-        .m_axi_wstrb({tpg_axi_wstrb, edid_axi_wstrb, aud_axi_wstrb, env_axi_wstrb}),
-        .m_axi_wvalid({tpg_axi_wvalid, edid_axi_wvalid, aud_axi_wvalid, env_axi_wvalid}),
-        .m_axi_wready({tpg_axi_wready, edid_axi_wready, aud_axi_wready, env_axi_wready}),
-        .m_axi_bresp({tpg_axi_bresp, edid_axi_bresp, aud_axi_bresp, env_axi_bresp}),
-        .m_axi_bvalid({tpg_axi_bvalid, edid_axi_bvalid, aud_axi_bvalid, env_axi_bvalid}),
-        .m_axi_bready({tpg_axi_bready, edid_axi_bready, aud_axi_bready, env_axi_bready}),
-        .m_axi_araddr({tpg_axi_araddr_32, edid_axi_araddr, aud_axi_araddr_32, env_axi_araddr_32}),
+        .m_axi_awvalid({tpg_axi_awvalid, edid_axi_awvalid, aud_axi_awvalid, hole_axi_awvalid}),
+        .m_axi_awready({tpg_axi_awready, edid_axi_awready, aud_axi_awready, hole_axi_awready}),
+        .m_axi_wdata({tpg_axi_wdata, edid_axi_wdata, aud_axi_wdata, hole_axi_wdata}),
+        .m_axi_wstrb({tpg_axi_wstrb, edid_axi_wstrb, aud_axi_wstrb, hole_axi_wstrb}),
+        .m_axi_wvalid({tpg_axi_wvalid, edid_axi_wvalid, aud_axi_wvalid, hole_axi_wvalid}),
+        .m_axi_wready({tpg_axi_wready, edid_axi_wready, aud_axi_wready, hole_axi_wready}),
+        .m_axi_bresp({tpg_axi_bresp, edid_axi_bresp, aud_axi_bresp, hole_axi_bresp}),
+        .m_axi_bvalid({tpg_axi_bvalid, edid_axi_bvalid, aud_axi_bvalid, hole_axi_bvalid}),
+        .m_axi_bready({tpg_axi_bready, edid_axi_bready, aud_axi_bready, hole_axi_bready}),
+        .m_axi_araddr({tpg_axi_araddr_32, edid_axi_araddr, aud_axi_araddr_32, hole_axi_araddr_32}),
         .m_axi_arprot(),
-        .m_axi_arvalid({tpg_axi_arvalid, edid_axi_arvalid, aud_axi_arvalid, env_axi_arvalid}),
-        .m_axi_arready({tpg_axi_arready, edid_axi_arready, aud_axi_arready, env_axi_arready}),
-        .m_axi_rdata({tpg_axi_rdata, edid_axi_rdata, aud_axi_rdata, env_axi_rdata}),
-        .m_axi_rresp({tpg_axi_rresp, edid_axi_rresp, aud_axi_rresp, env_axi_rresp}),
-        .m_axi_rvalid({tpg_axi_rvalid, edid_axi_rvalid, aud_axi_rvalid, env_axi_rvalid}),
-        .m_axi_rready({tpg_axi_rready, edid_axi_rready, aud_axi_rready, env_axi_rready})
+        .m_axi_arvalid({tpg_axi_arvalid, edid_axi_arvalid, aud_axi_arvalid, hole_axi_arvalid}),
+        .m_axi_arready({tpg_axi_arready, edid_axi_arready, aud_axi_arready, hole_axi_arready}),
+        .m_axi_rdata({tpg_axi_rdata, edid_axi_rdata, aud_axi_rdata, hole_axi_rdata}),
+        .m_axi_rresp({tpg_axi_rresp, edid_axi_rresp, aud_axi_rresp, hole_axi_rresp}),
+        .m_axi_rvalid({tpg_axi_rvalid, edid_axi_rvalid, aud_axi_rvalid, hole_axi_rvalid}),
+        .m_axi_rready({tpg_axi_rready, edid_axi_rready, aud_axi_rready, hole_axi_rready})
     );
 
     // =========================================================================
-    // ZZLAB Environment Control Register Block (zzlab_env_ctrl)
-    // Mapped at BAR1 Offset 0x0000 - 0x0FFF
+    // BAR1 0x0000 - 0x0FFF DECERR guard (was zzlab_env_ctrl, now at BAR0
+    // 0x1000 on pl_clk0). Answers stray host accesses instantly; the BAR1
+    // M00 window must never hang the PCIe CQ path.
     // =========================================================================
-    zzlab_env_ctrl #(
-        .C_S_AXI_ADDR_WIDTH(6),
-        .C_S_AXI_DATA_WIDTH(32),
-        .C_VERSION(C_VERSION),
-        .C_PLATFORM("PCIE"),
-        .C_BOARD_VERSION(32'h00000101)
-    ) u_zzlab_env_ctrl (
+    axil_decerr_slave u_bar1_hole_decerr (
         .clk                (pcie_user_clk),
         .rst_n              (pcie_user_rst_n),
-        .s_axi_ctrl_awaddr  (env_axi_awaddr_32[5:0]),
-        .s_axi_ctrl_awvalid (env_axi_awvalid),
-        .s_axi_ctrl_awready (env_axi_awready),
-        .s_axi_ctrl_wdata   (env_axi_wdata),
-        .s_axi_ctrl_wstrb   (env_axi_wstrb),
-        .s_axi_ctrl_wvalid  (env_axi_wvalid),
-        .s_axi_ctrl_wready  (env_axi_wready),
-        .s_axi_ctrl_bresp   (env_axi_bresp),
-        .s_axi_ctrl_bvalid  (env_axi_bvalid),
-        .s_axi_ctrl_bready  (env_axi_bready),
-        .s_axi_ctrl_araddr  (env_axi_araddr_32[5:0]),
-        .s_axi_ctrl_arvalid (env_axi_arvalid),
-        .s_axi_ctrl_arready (env_axi_arready),
-        .s_axi_ctrl_rdata   (env_axi_rdata),
-        .s_axi_ctrl_rresp   (env_axi_rresp),
-        .s_axi_ctrl_rvalid  (env_axi_rvalid),
-        .s_axi_ctrl_rready  (env_axi_rready),
-        .ap_rst_n          (env_ap_rst_n)
+        .s_axil_awaddr      (hole_axi_awaddr_32),
+        .s_axil_awvalid     (hole_axi_awvalid),
+        .s_axil_awready     (hole_axi_awready),
+        .s_axil_wdata       (hole_axi_wdata),
+        .s_axil_wstrb       (hole_axi_wstrb),
+        .s_axil_wvalid      (hole_axi_wvalid),
+        .s_axil_wready      (hole_axi_wready),
+        .s_axil_bresp       (hole_axi_bresp),
+        .s_axil_bvalid      (hole_axi_bvalid),
+        .s_axil_bready      (hole_axi_bready),
+        .s_axil_araddr      (hole_axi_araddr_32),
+        .s_axil_arvalid     (hole_axi_arvalid),
+        .s_axil_arready     (hole_axi_arready),
+        .s_axil_rdata       (hole_axi_rdata),
+        .s_axil_rresp       (hole_axi_rresp),
+        .s_axil_rvalid      (hole_axi_rvalid),
+        .s_axil_rready      (hole_axi_rready)
     );
 
     // =========================================================================

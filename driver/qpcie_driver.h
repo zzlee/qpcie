@@ -85,8 +85,11 @@
 #define IRQ_STATUS_CHANNEL_MASK     0x000007F0    /* Bits 4..10 */
 #define IRQ_STATUS_ALL_MASK         0x00007FF3    /* Bits 0..1, 4..14 */
 
-/* BAR1 Offsets */
-#define BAR1_OFFSET_ENV             0x0000
+/* BAR0 Offsets (PS + PCIe host shared, pl_clk0 domain) */
+#define BAR0_OFFSET_ENV             0x1000  /* zzlab_env_ctrl: version/platform/board */
+
+/* BAR1 Offsets (PCIe host only) */
+#define BAR1_OFFSET_ENV             0x0000  /* DEPRECATED: DECERR hole since C_VERSION 26100805; use BAR0_OFFSET_ENV */
 #define BAR1_OFFSET_AUDIO_GEN       0x1000
 #define BAR1_OFFSET_EDID            0x2000
 #define BAR1_OFFSET_TPG             0x3000

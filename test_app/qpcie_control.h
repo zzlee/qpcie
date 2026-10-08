@@ -7,8 +7,11 @@
 
 #include <stdint.h>
 
-/* BAR1 Address Offsets */
-#define BAR1_OFFSET_ENV            0x0000
+/* BAR0 Address Offsets (PS + PCIe host shared, pl_clk0 domain) */
+#define BAR0_OFFSET_ENV            0x1000
+
+/* BAR1 Address Offsets (PCIe host only) */
+#define BAR1_OFFSET_ENV            0x0000  /* DEPRECATED: DECERR hole; use BAR0_OFFSET_ENV */
 #define BAR1_OFFSET_AUDIO_PATGEN   0x1000
 #define BAR1_OFFSET_EDID_RAM       0x2000
 #define BAR1_OFFSET_VIDEO_TPG      0x3000
