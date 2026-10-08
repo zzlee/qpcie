@@ -165,6 +165,22 @@ puts "Generating Processor System Reset IP Core (proc_sys_reset_0)..."
 create_ip -name proc_sys_reset -vendor xilinx.com -library ip -version 5.0 -module_name proc_sys_reset_0
 generate_target all [get_ips proc_sys_reset_0]
 
+# PS->PL AXI read-path ILA: 100 MHz PS-derived clock, so it remains usable
+# with PCIe disconnected. Status/addresses/data are documented separately.
+create_ip -name ila -vendor xilinx.com -library ip -version 6.2 -module_name ila_ps_axi_0
+set_property -dict [list \
+  CONFIG.C_NUM_OF_PROBES {5} \
+  CONFIG.C_PROBE0_WIDTH {32} \
+  CONFIG.C_PROBE1_WIDTH {32} \
+  CONFIG.C_PROBE2_WIDTH {32} \
+  CONFIG.C_PROBE3_WIDTH {32} \
+  CONFIG.C_PROBE4_WIDTH {1} \
+  CONFIG.C_DATA_DEPTH {4096} \
+  CONFIG.C_TRIGIN_EN {false} \
+  CONFIG.C_TRIGOUT_EN {false} \
+] [get_ips ila_ps_axi_0]
+generate_target all [get_ips ila_ps_axi_0]
+
 # 6. Generate Video PHY Controller IP Core (vid_phy_controller_0 - Quad 226 HDMI RX/TX)
 puts "Generating Video PHY Controller IP Core (vid_phy_controller_0)..."
 create_ip -name vid_phy_controller -vendor xilinx.com -library ip -version 2.2 -module_name vid_phy_controller_0
@@ -256,6 +272,9 @@ if {[get_property PROGRESS [get_runs impl_1]] != "100%" ||
 
 open_run impl_1
 set impl_dir [get_property DIRECTORY [get_runs impl_1]]
+set probes_out "$impl_dir/zu4ev_pcie_card_top.ltx"
+write_debug_probes -force $probes_out
+puts " ILA debug probes: $probes_out"
 puts "================================================================="
 puts " SUCCESS: ZU4EV Tandem PCIe Bitstreams Built (12AB:E380)!"
 puts " Output Bitstreams in $impl_dir:"

@@ -11,7 +11,7 @@
 `timescale 1ns / 1ps
 
 module custom_pcie_dma_top #(
-    parameter [31:0] C_VERSION = 32'h2610_0806,
+    parameter [31:0] C_VERSION = 32'h2610_0807,
     parameter PCIE_DATA_WIDTH  = 128,
     parameter PCIE_KEEP_WIDTH  = PCIE_DATA_WIDTH / 8,
     parameter NUM_VIDEO_CH     = 2,
@@ -207,6 +207,42 @@ module custom_pcie_dma_top #(
     wire        env_axil_rvalid, env_axil_rready;
     wire [31:0] env_ap_rst_n;
 
+    // Standalone PS -> PL read-path capture (100 MHz PS clock, independent of
+    // PCIe link). Arm from JTAG BEFORE issuing a single devmem read on UART.
+    // Status bit map and capture procedure: docs/zu4ev_ps_axi_ila.md.
+    wire [31:0] ps_axi_ila_status;
+    assign ps_axi_ila_status = {
+        10'd0,
+        env_axil_rresp,             // [21:20]
+        arb_axil_rresp,             // [19:18]
+        s_axil_ps_rresp,            // [17:16]
+        env_axil_rready,            // [15]
+        env_axil_rvalid,            // [14]
+        env_axil_arready,           // [13]
+        env_axil_arvalid,           // [12]
+        arb_axil_rready,            // [11]
+        arb_axil_rvalid,            // [10]
+        arb_axil_arready,           // [9]
+        arb_axil_arvalid,           // [8]
+        s_axil_ps_rready,           // [7]
+        s_axil_ps_rvalid,           // [6]
+        s_axil_ps_arready,          // [5]
+        s_axil_ps_arvalid,          // [4]
+        cvt_bar0_axil_arvalid,      // [3] PCIe requester (should be 0)
+        env_axil_awvalid,           // [2] unexpected concurrent writes
+        arb_axil_awvalid,           // [1]
+        sys_100m_rst_n              // [0] 100 MHz domain out of reset
+    };
+
+    ila_ps_axi_0 u_ila_ps_axi (
+        .clk(pl_clk0),
+        .probe0(ps_axi_ila_status),
+        .probe1(s_axil_ps_araddr),
+        .probe2(arb_axil_araddr),
+        .probe3(s_axil_ps_rdata),
+        .probe4(s_axil_ps_arvalid) // simple trigger on first PS AR request
+    );
+
     wire [31:0] cvt_bar0_axil_awaddr, cvt_bar0_axil_wdata, cvt_bar0_axil_araddr, cvt_bar0_axil_rdata;
     wire [3:0]  cvt_bar0_axil_wstrb;
     wire [1:0]  cvt_bar0_axil_bresp, cvt_bar0_axil_rresp;
@@ -264,8 +300,8 @@ module custom_pcie_dma_top #(
         .aclk(pl_clk0),
         .aresetn(sys_100m_rst_n),
         // S1 (MSB) = PS HPM0_FPD. NOTE: strip to 13-bit BAR0 offset — the
-        // M00/M01 windows only cover 0x000-0x1FFF. Passing full 0xB000xxxx
-        // addresses misses decode and wedges the requester (seen on HW).
+        // M00/M01 windows only cover 0x000-0x1FFF. The PS address space
+        // maps this aperture at 0xA0000000; pass only the BAR0 offset here.
         .s_axi_awaddr({{19'd0, s_axil_ps_awaddr[12:0]}, cvt_bar0_axil_awaddr}),
         .s_axi_awprot(6'd0),
         .s_axi_awvalid({s_axil_ps_awvalid, cvt_bar0_axil_awvalid}),

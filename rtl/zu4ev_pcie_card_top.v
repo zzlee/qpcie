@@ -17,7 +17,7 @@
 `timescale 1ns / 1ps
 
 module zu4ev_pcie_card_top #(
-    parameter [31:0] C_VERSION = 32'h2610_0806,
+    parameter [31:0] C_VERSION = 32'h2610_0807,
     parameter PCIE_DATA_WIDTH  = 256,
     parameter PCIE_KEEP_WIDTH  = PCIE_DATA_WIDTH / 32, // 8 DW keep for 256-bit
     parameter NUM_VIDEO_CH     = 4,

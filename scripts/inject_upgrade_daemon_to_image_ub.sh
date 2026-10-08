@@ -70,7 +70,9 @@ EOF
 
 mkdir -p "$WORK_DIR/rootfs/etc/systemd/system/multi-user.target.wants"
 if [ "${MASK_DAEMON:-0}" = "1" ]; then
-    echo "[2b/4] MASK_DAEMON=1: service installed but NOT enabled (manual triage build)"
+    echo "[2b/4] MASK_DAEMON=1: service installed and masked (manual triage build)"
+    rm -f "$WORK_DIR/rootfs/etc/systemd/system/multi-user.target.wants/qpcie-upgrade-daemon.service"
+    ln -sfn /dev/null "$WORK_DIR/rootfs/etc/systemd/system/qpcie-upgrade-daemon.service"
 else
     ln -sf /lib/systemd/system/qpcie-upgrade-daemon.service \
            "$WORK_DIR/rootfs/etc/systemd/system/multi-user.target.wants/qpcie-upgrade-daemon.service"
