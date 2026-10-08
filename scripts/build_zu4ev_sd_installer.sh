@@ -41,7 +41,11 @@ mkdir -p "$WORK_DIR"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
 # 2. Check Prerequisites
-FSBL="$IMG_DIR/zynqmp_fsbl_sc7f0.elf"
+if [ -f "$ROOT_DIR/build/zu4ev_fsbl/src/executable.elf" ]; then
+    FSBL="$ROOT_DIR/build/zu4ev_fsbl/src/executable.elf"
+else
+    FSBL="$IMG_DIR/zynqmp_fsbl_sc7f0.elf"
+fi
 PMUFW="$IMG_DIR/pmufw.elf"
 if [ -f "$IMG_DIR/zu4ev_pcie_card_top.bit" ]; then
     BITSTREAM="$IMG_DIR/zu4ev_pcie_card_top.bit"
@@ -308,9 +312,20 @@ log_msg "  4. System will now cold-boot from eMMC with <200ms PCIe Link!       "
 log_msg "======================================================================"
 log_msg ""
 
-# Keep system running so qpcie_upgrade_daemon can service PCIe host requests
+# Light up status LEDs to indicate flashing is done
 sync
-log_msg "  [INFO] eMMC flash verified. Keeping system running with qpcie_upgrade_daemon active."
+log_msg "  [INFO] eMMC flash verified. Lighting up success LEDs."
+
+for led in /sys/class/leds/*; do
+    if [ -d "$led" ]; then
+        echo "default-on" > "$led/trigger" 2>/dev/null || true
+        echo 255 > "$led/brightness" 2>/dev/null || true
+    fi
+done
+
+# Halt the processor safely, keeping power on so LEDs remain lit
+sleep 2
+halt
 AUTOF_EOF
 
 chmod +x "$ROOTFS_WORK/usr/bin/qpcie_autoflash.sh"
@@ -447,7 +462,7 @@ echo "  -> Custom Installer boot.scr generated"
 # Step 4: Populate Target eMMC Production Files (Tandem PCIe 200ms Fast Boot)
 # ==============================================================================
 echo "[4/4] Populating target_emmc/ with Production 200ms Fast-Boot firmware..."
-PROD_BOOTBIN="$ROOT_DIR/petalinux/qpcie-zu4ev/images/linux/BOOT.BIN"
+PROD_BOOTBIN="$REL_DIR/BOOT.BIN"
 if [ -f "$PROD_BOOTBIN" ]; then
     cp -v "$PROD_BOOTBIN" "$REL_DIR/target_emmc/BOOT.BIN"
 fi
