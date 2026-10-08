@@ -31,8 +31,11 @@
 
 #define DAEMON_NAME "qpcie_upgrade_daemon"
 
-/* Base Address of PL CSR space mapped into PS (M_AXI_HPM0_FPD) */
-#define DEFAULT_PL_BASE_ADDR   0xB0000000UL
+/* Base Address of PL CSR space mapped into PS (M_AXI_HPM0_FPD).
+ * Verified 2026-10-08 from built BD: SEG_M_AXI_HPM0_FPD_Reg @0xA0000000/64KB.
+ * NOTE: 0xB0000000 is NOT mapped (reads wedge the NoC with no abort).
+ * NEVER probe unmapped addresses. */
+#define DEFAULT_PL_BASE_ADDR   0xA0000000UL
 #define PL_MMAP_SIZE           0x10000UL     /* 64KB */
 
 /* SC7F0 PCIe H2C DMA Fast-Push Upgrade Registers (BAR0 0x0780 - 0x079C) */
@@ -124,7 +127,7 @@ static bool pl_magic_ok(volatile uint32_t *map) {
  * a dead one. Sleeps between attempts so standalone (power-only) boot always
  * reaches login; daemon springs to life once PL is accessible. */
 static volatile uint32_t *pl_wait_ready(int fd_mem) {
-    uint64_t candidate_bases[] = {0xB0000000UL, 0xA0000000UL};
+    uint64_t candidate_bases[] = {0xA0000000UL};
     unsigned attempt = 0;
     for (;;) {
         for (size_t i = 0; i < sizeof(candidate_bases)/sizeof(candidate_bases[0]); i++) {
@@ -219,8 +222,8 @@ int main(int argc, char **argv) {
 
     // Wait for PL CSR to answer (standalone-safe: never touch PL until
     // the magic probe succeeds, so power-only boot always reaches login).
-    // Checking an unmapped AXI address (like 0xA0000000) causes an SError Kernel Panic,
-    // so we MUST check the valid base (0xB0000000) first to avoid reading unmapped space!
+    // ONLY probe the BD-mapped window (0xA0000000/64KB). Unmapped addresses
+    // wedge the NoC with no error response and must never be touched.
     volatile uint32_t *pl_regs = pl_wait_ready(fd_mem);
     if (pl_regs == MAP_FAILED || !g_running) {
         close(fd_mem);

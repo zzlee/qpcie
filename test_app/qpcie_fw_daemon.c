@@ -66,7 +66,7 @@
 #define STATUS_ERR_TIMEOUT     0x07
 
 /* Default PL Base Address (M_AXI_HPM1_FPD on ZU4EV) */
-#define DEFAULT_PL_BASE_ADDR   0xB0000000UL
+#define DEFAULT_PL_BASE_ADDR   0xA0000000UL /* BD-mapped HPM0 window (was wrong 0xB000) */
 #define PL_MMAP_SIZE           0x10000UL   /* 64KB */
 
 /* BAR1 Buffer Configuration (at offset 0x8000 in PL address space) */

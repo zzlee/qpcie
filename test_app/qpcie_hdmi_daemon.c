@@ -34,7 +34,7 @@
 #include "qpcie_control.h"
 
 #define DAEMON_NAME "qpcie_hdmi_daemon"
-#define DEFAULT_PL_BASE_ADDR   0xB0000000UL
+#define DEFAULT_PL_BASE_ADDR   0xA0000000UL /* BD-mapped HPM0 window (was wrong 0xB000) */
 #define PL_MMAP_SIZE           0x10000UL
 
 static volatile bool keep_running = true;
