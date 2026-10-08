@@ -26,6 +26,7 @@
 #include <sys/reboot.h>
 #include <errno.h>
 #include <signal.h>
+#include <setjmp.h>
 #include <syslog.h>
 
 #define DAEMON_NAME "qpcie_upgrade_daemon"
@@ -76,6 +77,77 @@ static volatile bool g_running = true;
 static void sig_handler(int sig) {
     (void)sig;
     g_running = false;
+}
+
+/* Standalone-safe PL liveness probe.
+ * Without PCIe/host (no pcie_user_clk), the PS->PL AXI path may never answer.
+ * Touching it unconditionally wedges boot, so the FIRST magic read of every
+ * attempt is guarded by alarm(2)+SIGBUS/SIGSEGV. On fault/timeout we abandon
+ * the mapping and idle-retry WITHOUT touching PL again until it answers.
+ * Production (PCIe present) behavior is unchanged: first probe succeeds. */
+#define PL_PROBE_MAGIC   0x12ABE380u
+#define PL_PROBE_TIMEOUT 2   /* seconds */
+#define PL_RETRY_SECS    30
+
+static sigjmp_buf probe_env;
+
+static void probe_handler(int sig) {
+    (void)sig;
+    siglongjmp(probe_env, 1);
+}
+
+static bool pl_magic_ok(volatile uint32_t *map) {
+    struct sigaction sa, old_alrm, old_bus, old_segv;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = probe_handler;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGALRM, &sa, &old_alrm);
+    sigaction(SIGBUS, &sa, &old_bus);
+    sigaction(SIGSEGV, &sa, &old_segv);
+    bool ok = false;
+    if (sigsetjmp(probe_env, 1) == 0) {
+        alarm(PL_PROBE_TIMEOUT);
+        uint32_t v = map[0];
+        alarm(0);
+        ok = (v == PL_PROBE_MAGIC);
+    } else {
+        ok = false; /* alarm fired or bus fault: PL not answering */
+    }
+    alarm(0);
+    sigaction(SIGALRM, &old_alrm, NULL);
+    sigaction(SIGBUS, &old_bus, NULL);
+    sigaction(SIGSEGV, &old_segv, NULL);
+    return ok;
+}
+
+/* Block until PL CSR answers with magic. Returns live mapping; never returns
+ * a dead one. Sleeps between attempts so standalone (power-only) boot always
+ * reaches login; daemon springs to life once PL is accessible. */
+static volatile uint32_t *pl_wait_ready(int fd_mem) {
+    uint64_t candidate_bases[] = {0xB0000000UL, 0xA0000000UL};
+    unsigned attempt = 0;
+    for (;;) {
+        for (size_t i = 0; i < sizeof(candidate_bases)/sizeof(candidate_bases[0]); i++) {
+            volatile uint32_t *map = (volatile uint32_t *)mmap(NULL, PL_MMAP_SIZE,
+                                                               PROT_READ | PROT_WRITE,
+                                                               MAP_SHARED, fd_mem, candidate_bases[i]);
+            if (map == MAP_FAILED)
+                continue;
+            if (pl_magic_ok(map)) {
+                syslog(LOG_NOTICE, "Discovered SC7F0 PL CSR at physical base 0x%08lX (Magic: 0x12ABE380)",
+                       candidate_bases[i]);
+                return map;
+            }
+            munmap((void *)map, PL_MMAP_SIZE);
+        }
+        if ((attempt++ % 10) == 0)
+            syslog(LOG_WARNING, "PL CSR not answering (standalone power-only boot?). Retrying every %ds...",
+                   PL_RETRY_SECS);
+        for (int s = 0; s < PL_RETRY_SECS && g_running; s++)
+            sleep(1);
+        if (!g_running)
+            return MAP_FAILED;
+    }
 }
 
 /* CRC32 Lookup Table & Calculation */
@@ -145,39 +217,15 @@ int main(int argc, char **argv) {
         return EXIT_FAILURE;
     }
 
-    // Map PL CSR space with automatic base address detection (0xB0000000 or 0xA0000000)
+    // Wait for PL CSR to answer (standalone-safe: never touch PL until
+    // the magic probe succeeds, so power-only boot always reaches login).
     // Checking an unmapped AXI address (like 0xA0000000) causes an SError Kernel Panic,
     // so we MUST check the valid base (0xB0000000) first to avoid reading unmapped space!
-    uint64_t candidate_bases[] = {0xB0000000UL, 0xA0000000UL};
-    volatile uint32_t *pl_regs = MAP_FAILED;
-    uint64_t pl_base_used = 0;
-
-    for (size_t i = 0; i < sizeof(candidate_bases)/sizeof(candidate_bases[0]); i++) {
-        volatile uint32_t *map = (volatile uint32_t *)mmap(NULL, PL_MMAP_SIZE,
-                                                           PROT_READ | PROT_WRITE,
-                                                           MAP_SHARED, fd_mem, candidate_bases[i]);
-        if (map != MAP_FAILED) {
-            if (map[0] == 0x12ABE380) {
-                pl_regs = map;
-                pl_base_used = candidate_bases[i];
-                syslog(LOG_NOTICE, "Discovered SC7F0 PL CSR at physical base 0x%08lX (Magic: 0x12ABE380)", pl_base_used);
-                break;
-            }
-            munmap((void *)map, PL_MMAP_SIZE);
-        }
-    }
-
-    if (pl_regs == MAP_FAILED) {
-        // Fallback to primary 0xA0000000
-        pl_regs = (volatile uint32_t *)mmap(NULL, PL_MMAP_SIZE,
-                                           PROT_READ | PROT_WRITE,
-                                           MAP_SHARED, fd_mem, candidate_bases[0]);
-        if (pl_regs == MAP_FAILED) {
-            syslog(LOG_ERR, "Failed to mmap PL registers: %s", strerror(errno));
-            close(fd_mem);
-            return EXIT_FAILURE;
-        }
-        pl_base_used = candidate_bases[0];
+    volatile uint32_t *pl_regs = pl_wait_ready(fd_mem);
+    if (pl_regs == MAP_FAILED || !g_running) {
+        close(fd_mem);
+        closelog();
+        return EXIT_SUCCESS;
     }
 
     // Map DDR4 DMA receive window

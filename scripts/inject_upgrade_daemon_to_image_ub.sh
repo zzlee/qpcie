@@ -59,7 +59,8 @@ Wants=local-fs.target
 Type=simple
 ExecStart=/usr/bin/qpcie_upgrade_daemon
 Restart=always
-RestartSec=3
+RestartSec=10
+TimeoutStartSec=60
 StandardOutput=journal+console
 StandardError=journal+console
 
