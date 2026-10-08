@@ -417,21 +417,25 @@ cat << 'EOF' > "$WORK_DIR/boot.cmd"
 echo "================================================================="
 echo " QPCIe SC7F0 SD Installer Boot Script"
 echo "================================================================="
-setenv sd_dev ""
-if test -e mmc 0:1 /target_emmc/BOOT.BIN; then
-    setenv sd_dev 0
-elif test -e mmc 1:1 /target_emmc/BOOT.BIN; then
-    setenv sd_dev 1
-fi
-
-if test -n "${sd_dev}"; then
-    echo "SD Installer found on mmc ${sd_dev}"
-    fatload mmc ${sd_dev}:1 0x10000000 image.ub
+if test -n "${devnum}"; then
+    echo "Loading installer image.ub from ${devtype} ${devnum}:${distro_bootpart} ..."
+    fatload ${devtype} ${devnum}:${distro_bootpart} 0x10000000 image.ub
     bootm 0x10000000
 else
-    echo "ERROR: SD Installer target_emmc/ not found! Fallback to mmc 1"
-    fatload mmc 1:1 0x10000000 image.ub
-    bootm 0x10000000
+    # Explicit fallback to mmc 1 (usually SD card)
+    setenv sd_dev ""
+    if test -e mmc 1:1 /target_emmc/BOOT.BIN; then
+        setenv sd_dev 1
+    else
+        if test -e mmc 0:1 /target_emmc/BOOT.BIN; then
+            setenv sd_dev 0
+        fi
+    fi
+    if test -n "${sd_dev}"; then
+        echo "SD Installer found on mmc ${sd_dev}"
+        fatload mmc ${sd_dev}:1 0x10000000 image.ub
+        bootm 0x10000000
+    fi
 fi
 EOF
 
