@@ -69,8 +69,12 @@ WantedBy=multi-user.target
 EOF
 
 mkdir -p "$WORK_DIR/rootfs/etc/systemd/system/multi-user.target.wants"
-ln -sf /lib/systemd/system/qpcie-upgrade-daemon.service \
-       "$WORK_DIR/rootfs/etc/systemd/system/multi-user.target.wants/qpcie-upgrade-daemon.service"
+if [ "${MASK_DAEMON:-0}" = "1" ]; then
+    echo "[2b/4] MASK_DAEMON=1: service installed but NOT enabled (manual triage build)"
+else
+    ln -sf /lib/systemd/system/qpcie-upgrade-daemon.service \
+           "$WORK_DIR/rootfs/etc/systemd/system/multi-user.target.wants/qpcie-upgrade-daemon.service"
+fi
 
 echo "[3/4] Repacking rootfs.cpio.gz..."
 NEW_ROOTFS="$WORK_DIR/rootfs_with_daemon.cpio.gz"
