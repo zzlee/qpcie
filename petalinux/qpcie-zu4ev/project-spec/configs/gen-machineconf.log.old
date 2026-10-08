@@ -5,7 +5,7 @@
 [DEBUG] WARNING: sdtgen package cannot be loaded. System Device tree commands will not 
  be available
 INFO: [Hsi 55-2053] elapsed time for repository (/opt/Xilinx/petalinux/2023.2/tools/xsct/data/embeddedsw) loading 0 seconds
-hsi::open_hw_design: Time (s): cpu = 00:00:05 ; elapsed = 00:00:05 . Memory (MB): peak = 701.477 ; gain = 106.246 ; free physical = 32809 ; free virtual = 57547
+hsi::open_hw_design: Time (s): cpu = 00:00:05 ; elapsed = 00:00:05 . Memory (MB): peak = 701.477 ; gain = 116.426 ; free physical = 30008 ; free virtual = 57736
 
 [INFO] Silentconfig project
 [DEBUG] Running CMD: yes "" | env KCONFIG_CONFIG=/home/zzlee/qpcie/petalinux/qpcie-zu4ev/project-spec/configs/config conf /home/zzlee/qpcie/petalinux/qpcie-zu4ev/project-spec/configs/configs/Kconfig

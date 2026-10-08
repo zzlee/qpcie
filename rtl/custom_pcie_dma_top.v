@@ -11,7 +11,7 @@
 `timescale 1ns / 1ps
 
 module custom_pcie_dma_top #(
-    parameter [31:0] C_VERSION = 32'h2610_0805,
+    parameter [31:0] C_VERSION = 32'h2610_0806,
     parameter PCIE_DATA_WIDTH  = 128,
     parameter PCIE_KEEP_WIDTH  = PCIE_DATA_WIDTH / 8,
     parameter NUM_VIDEO_CH     = 2,
