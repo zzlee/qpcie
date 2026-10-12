@@ -169,12 +169,15 @@ generate_target all [get_ips proc_sys_reset_0]
 # with PCIe disconnected. Status/addresses/data are documented separately.
 create_ip -name ila -vendor xilinx.com -library ip -version 6.2 -module_name ila_ps_axi_0
 set_property -dict [list \
-  CONFIG.C_NUM_OF_PROBES {5} \
+  CONFIG.C_NUM_OF_PROBES {8} \
   CONFIG.C_PROBE0_WIDTH {32} \
   CONFIG.C_PROBE1_WIDTH {32} \
   CONFIG.C_PROBE2_WIDTH {32} \
   CONFIG.C_PROBE3_WIDTH {32} \
   CONFIG.C_PROBE4_WIDTH {1} \
+  CONFIG.C_PROBE5_WIDTH {16} \
+  CONFIG.C_PROBE6_WIDTH {8} \
+  CONFIG.C_PROBE7_WIDTH {3} \
   CONFIG.C_DATA_DEPTH {4096} \
   CONFIG.C_TRIGIN_EN {false} \
   CONFIG.C_TRIGOUT_EN {false} \

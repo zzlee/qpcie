@@ -17,7 +17,7 @@
 `timescale 1ns / 1ps
 
 module zu4ev_pcie_card_top #(
-    parameter [31:0] C_VERSION = 32'h2610_1201,
+    parameter [31:0] C_VERSION = 32'h2610_1202,
     parameter PCIE_DATA_WIDTH  = 256,
     parameter PCIE_KEEP_WIDTH  = PCIE_DATA_WIDTH / 32, // 8 DW keep for 256-bit
     parameter NUM_VIDEO_CH     = 4,
@@ -1405,6 +1405,9 @@ module zu4ev_pcie_card_top #(
     wire [1:0]   ps_hpm0_bresp;
     wire         ps_hpm0_bvalid, ps_hpm0_bready;
     wire [39:0]  ps_hpm0_araddr;
+    wire [15:0]  ps_hpm0_arid;
+    wire [7:0]   ps_hpm0_arlen;
+    wire [2:0]   ps_hpm0_arsize;
     wire         ps_hpm0_arvalid, ps_hpm0_arready;
     wire [31:0]  ps_hpm0_rdata;
     wire [1:0]   ps_hpm0_rresp;
@@ -1437,6 +1440,9 @@ module zu4ev_pcie_card_top #(
         .pl_clk0(pl_clk0),
         .pl_resetn0(pl_resetn0),
         .sys_100m_rst_n(sys_100m_rst_n),
+        .ps_hpm0_arid(ps_hpm0_arid),
+        .ps_hpm0_arlen(ps_hpm0_arlen),
+        .ps_hpm0_arsize(ps_hpm0_arsize),
 
         // PCIe CQ
         .s_axis_cq_tdata(m_axis_cq_tdata),
@@ -1602,13 +1608,13 @@ module zu4ev_pcie_card_top #(
         .M_AXI_HPM0_FPD_araddr(ps_hpm0_araddr),
         .M_AXI_HPM0_FPD_arburst(),
         .M_AXI_HPM0_FPD_arcache(),
-        .M_AXI_HPM0_FPD_arid(),
-        .M_AXI_HPM0_FPD_arlen(),
+        .M_AXI_HPM0_FPD_arid(ps_hpm0_arid),
+        .M_AXI_HPM0_FPD_arlen(ps_hpm0_arlen),
         .M_AXI_HPM0_FPD_arlock(),
         .M_AXI_HPM0_FPD_arprot(),
         .M_AXI_HPM0_FPD_arqos(),
         .M_AXI_HPM0_FPD_arready(ps_hpm0_arready),
-        .M_AXI_HPM0_FPD_arsize(),
+        .M_AXI_HPM0_FPD_arsize(ps_hpm0_arsize),
         .M_AXI_HPM0_FPD_aruser(),
         .M_AXI_HPM0_FPD_arvalid(ps_hpm0_arvalid),
         .M_AXI_HPM0_FPD_awaddr(ps_hpm0_awaddr),

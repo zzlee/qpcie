@@ -11,7 +11,7 @@
 `timescale 1ns / 1ps
 
 module custom_pcie_dma_top #(
-    parameter [31:0] C_VERSION = 32'h2610_1201,
+    parameter [31:0] C_VERSION = 32'h2610_1202,
     parameter PCIE_DATA_WIDTH  = 128,
     parameter PCIE_KEEP_WIDTH  = PCIE_DATA_WIDTH / 8,
     parameter NUM_VIDEO_CH     = 2,
@@ -23,6 +23,9 @@ module custom_pcie_dma_top #(
     input  wire                                             pl_clk0,
     input  wire                                             pl_resetn0,
     input  wire                                             sys_100m_rst_n,
+    input  wire [15:0]                                      ps_hpm0_arid,
+    input  wire [7:0]                                       ps_hpm0_arlen,
+    input  wire [2:0]                                       ps_hpm0_arsize,
     input  wire                                             rst_n,
 
     // PCIe CQ Interface (PCIe IP -> DMA Top)
@@ -242,7 +245,10 @@ module custom_pcie_dma_top #(
         .probe1(s_axil_ps_araddr),
         .probe2(arb_axil_araddr),
         .probe3(s_axil_ps_rdata),
-        .probe4(s_axil_ps_arvalid) // simple trigger on first PS AR request
+        .probe4(s_axil_ps_arvalid), // trigger on first PS AR request
+        .probe5(ps_hpm0_arid),
+        .probe6(ps_hpm0_arlen),
+        .probe7(ps_hpm0_arsize)
     );
 
     wire [31:0] cvt_bar0_axil_awaddr, cvt_bar0_axil_wdata, cvt_bar0_axil_araddr, cvt_bar0_axil_rdata;
