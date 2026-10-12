@@ -125,6 +125,70 @@ set_property -dict [list \
 
 generate_target all [get_ips axi_crossbar_0]
 
+# 6b. Generate shared-DMA IPs instantiated by custom_pcie_dma_top
+# (same RTL as zu4ev; a50t ties off the PS slave ports).
+# Without these, synth_1 fails with "module 'ila_ps_axi_0' not found".
+puts "Generating AXI Clock Converter IP Core (axi_clock_converter_0)..."
+create_ip -name axi_clock_converter -vendor xilinx.com -library ip -version 2.1 -module_name axi_clock_converter_0
+set_property -dict [list \
+  CONFIG.PROTOCOL {AXI4LITE} \
+  CONFIG.DATA_WIDTH {32} \
+  CONFIG.ADDR_WIDTH {32} \
+  CONFIG.ID_WIDTH {0} \
+  CONFIG.AWUSER_WIDTH {0} \
+  CONFIG.ARUSER_WIDTH {0} \
+  CONFIG.WUSER_WIDTH {0} \
+  CONFIG.RUSER_WIDTH {0} \
+  CONFIG.BUSER_WIDTH {0} \
+] [get_ips axi_clock_converter_0]
+generate_target all [get_ips axi_clock_converter_0]
+
+puts "Generating AXI Crossbar IP Core (axi_crossbar_1 - 2x2)..."
+create_ip -name axi_crossbar -vendor xilinx.com -library ip -version 2.1 -module_name axi_crossbar_1
+set_property -dict [list \
+  CONFIG.NUM_SI {2} \
+  CONFIG.NUM_MI {2} \
+  CONFIG.PROTOCOL {AXI4LITE} \
+  CONFIG.DATA_WIDTH {32} \
+  CONFIG.ADDR_WIDTH {32} \
+  CONFIG.M00_A00_BASE_ADDR {0x0000000000000000} \
+  CONFIG.M00_A00_ADDR_WIDTH {12} \
+  CONFIG.M01_A00_BASE_ADDR {0x0000000000001000} \
+  CONFIG.M01_A00_ADDR_WIDTH {12} \
+] [get_ips axi_crossbar_1]
+generate_target all [get_ips axi_crossbar_1]
+
+puts "Generating AXI-Stream Clock Converter IP Core (axis_clock_converter_0 - 128-bit)..."
+create_ip -name axis_clock_converter -vendor xilinx.com -library ip -version 1.1 -module_name axis_clock_converter_0
+set_property -dict [list \
+  CONFIG.TDATA_NUM_BYTES {16} \
+  CONFIG.HAS_TKEEP {1} \
+  CONFIG.HAS_TLAST {1} \
+  CONFIG.TUSER_WIDTH {85} \
+] [get_ips axis_clock_converter_0]
+generate_target all [get_ips axis_clock_converter_0]
+
+puts "Generating PS AXI ILA IP Core (ila_ps_axi_0)..."
+create_ip -name ila -vendor xilinx.com -library ip -version 6.2 -module_name ila_ps_axi_0
+set_property -dict [list \
+  CONFIG.C_NUM_OF_PROBES {11} \
+  CONFIG.C_PROBE0_WIDTH {32} \
+  CONFIG.C_PROBE1_WIDTH {32} \
+  CONFIG.C_PROBE2_WIDTH {32} \
+  CONFIG.C_PROBE3_WIDTH {32} \
+  CONFIG.C_PROBE4_WIDTH {1} \
+  CONFIG.C_PROBE5_WIDTH {16} \
+  CONFIG.C_PROBE6_WIDTH {8} \
+  CONFIG.C_PROBE7_WIDTH {3} \
+  CONFIG.C_PROBE8_WIDTH {16} \
+  CONFIG.C_PROBE9_WIDTH {1} \
+  CONFIG.C_PROBE10_WIDTH {1} \
+  CONFIG.C_DATA_DEPTH {4096} \
+  CONFIG.C_TRIGIN_EN {false} \
+  CONFIG.C_TRIGOUT_EN {false} \
+] [get_ips ila_ps_axi_0]
+generate_target all [get_ips ila_ps_axi_0]
+
 # 7. Update Compile Order
 update_compile_order -fileset sources_1
 
