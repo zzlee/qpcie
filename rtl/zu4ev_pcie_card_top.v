@@ -17,7 +17,7 @@
 `timescale 1ns / 1ps
 
 module zu4ev_pcie_card_top #(
-    parameter [31:0] C_VERSION = 32'h2610_0807,
+    parameter [31:0] C_VERSION = 32'h2610_1201,
     parameter PCIE_DATA_WIDTH  = 256,
     parameter PCIE_KEEP_WIDTH  = PCIE_DATA_WIDTH / 32, // 8 DW keep for 256-bit
     parameter NUM_VIDEO_CH     = 4,
@@ -95,7 +95,9 @@ module zu4ev_pcie_card_top #(
         // Direct connection held the whole 100MHz domain in reset forever
         // (silent slaves -> any PS/PCIe BAR0 read wedged the NoC, RCU stalls).
         .ext_reset_in(~pl_resetn0),
-        .aux_reset_in(1'b1),
+        // proc_sys_reset_0 has C_AUX_RESET_HIGH=1: tie LOW when unused.
+        // Tying this input HIGH held the entire 100 MHz domain in reset.
+        .aux_reset_in(1'b0),
         .mb_debug_sys_rst(1'b0),
         .dcm_locked(1'b1),
         .mb_reset(),
@@ -129,7 +131,7 @@ module zu4ev_pcie_card_top #(
         .slowest_sync_clk(pl_clk_300m),
         // Same polarity note: pcie_user_rst_n is ACTIVE-LOW.
         .ext_reset_in(~pcie_user_rst_n),
-        .aux_reset_in(1'b1),
+        .aux_reset_in(1'b0),
         .mb_debug_sys_rst(1'b0),
         .dcm_locked(1'b1),
         .mb_reset(),
@@ -1433,6 +1435,7 @@ module zu4ev_pcie_card_top #(
         .clk(pcie_user_clk),
         .rst_n(pcie_user_rst_n),
         .pl_clk0(pl_clk0),
+        .pl_resetn0(pl_resetn0),
         .sys_100m_rst_n(sys_100m_rst_n),
 
         // PCIe CQ

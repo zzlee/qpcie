@@ -15,7 +15,7 @@ if {$device eq ""} {error "No xczu4 JTAG device"}
 set_property PROBES.FILE $probes_file $device
 refresh_hw_device $device
 set ila [lindex [get_hw_ilas -of_objects $device] 0]
-if {$ila eq ""} {error "ILA not found; confirm BOOT.BIN is 0807 and PL clock is active"}
+if {$ila eq ""} {error "ILA not found; confirm diagnostic BOOT.BIN is programmed and PL clock is active"}
 puts "ILA: $ila"
 puts "PROBES: [get_hw_probes -of_objects $ila]"
 set trigger_probe [lindex [get_hw_probes -of_objects $ila -filter {NAME =~ *s_axil_ps_arvalid*}] 0]

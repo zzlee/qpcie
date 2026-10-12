@@ -11,7 +11,7 @@
 `timescale 1ns / 1ps
 
 module custom_pcie_dma_top #(
-    parameter [31:0] C_VERSION = 32'h2610_0807,
+    parameter [31:0] C_VERSION = 32'h2610_1201,
     parameter PCIE_DATA_WIDTH  = 128,
     parameter PCIE_KEEP_WIDTH  = PCIE_DATA_WIDTH / 8,
     parameter NUM_VIDEO_CH     = 2,
@@ -21,6 +21,7 @@ module custom_pcie_dma_top #(
 )(
     input  wire                                             clk,
     input  wire                                             pl_clk0,
+    input  wire                                             pl_resetn0,
     input  wire                                             sys_100m_rst_n,
     input  wire                                             rst_n,
 
@@ -212,7 +213,8 @@ module custom_pcie_dma_top #(
     // Status bit map and capture procedure: docs/zu4ev_ps_axi_ila.md.
     wire [31:0] ps_axi_ila_status;
     assign ps_axi_ila_status = {
-        10'd0,
+        9'd0,
+        pl_resetn0,                  // [22] PS-provided reset deasserted
         env_axil_rresp,             // [21:20]
         arb_axil_rresp,             // [19:18]
         s_axil_ps_rresp,            // [17:16]
