@@ -38,6 +38,9 @@
 
 static uint32_t g_base = BAR1_OFFSET_I2C_MCU;
 static const char *g_bus = "mcu";
+static uint32_t g_prer = 249; /* ~100 kHz @ 125 MHz; try 2499 (~10 kHz) for test */
+static uint32_t g_slv = 0x2A;
+static uint32_t g_len = 16;
 #define REG_I2C_PRER_LO      0x00
 #define REG_I2C_PRER_HI      0x04
 #define REG_I2C_CTR          0x08
@@ -215,7 +218,7 @@ static int find_qpcie(void)
 
 static void usage(const char *p)
 {
-    printf("Usage: %s [--bus mcu|front] [--scan|--dump|--loopback|--status|--board-ver|--set-ctrl HEX]\n", p);
+    printf("Usage: %s [--bus mcu|front] [--scan|--dump|--loopback|--status|--board-ver|--probe HEX|--set-ctrl HEX]\n", p);
     printf("  Direct BAR MMIO: BAR1 I2C master (mcu=0x5000 default, front=0x3000);\n");
     printf("  BAR0 0x1008 board version. Unloads qpcie driver.\n");
 }
@@ -224,6 +227,7 @@ int main(int argc, char **argv)
 {
     bool do_scan = false, do_dump = false, do_lb = false, do_status = false;
     bool do_board = false;
+    const char *probe_hex = NULL;
     const char *ctrl_hex = NULL;
     static struct option lo[] = {
         {"scan", no_argument, 0, 's'},
@@ -231,19 +235,27 @@ int main(int argc, char **argv)
         {"loopback", no_argument, 0, 'l'},
         {"status", no_argument, 0, 't'},
         {"board-ver", no_argument, 0, 'b'},
+        {"probe", required_argument, 0, 'p'},
+        {"prescaler", required_argument, 0, 'P'},
+        {"slave", required_argument, 0, 'S'},
+        {"len", required_argument, 0, 'L'},
         {"bus", required_argument, 0, 'B'},
         {"set-ctrl", required_argument, 0, 'c'},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0}
     };
     int o;
-    while ((o = getopt_long(argc, argv, "sdlthbB:c:", lo, NULL)) != -1) {
+    while ((o = getopt_long(argc, argv, "sdlthbB:c:p:P:S:L:", lo, NULL)) != -1) {
         switch (o) {
         case 's': do_scan = true; break;
         case 'd': do_dump = true; break;
         case 'l': do_lb = true; break;
         case 't': do_status = true; break;
         case 'b': do_board = true; break;
+        case 'p': probe_hex = optarg; break;
+        case 'P': g_prer = (uint32_t)strtoul(optarg, NULL, 0); break;
+        case 'S': g_slv = (uint32_t)strtoul(optarg, NULL, 0); break;
+        case 'L': g_len = (uint32_t)strtoul(optarg, NULL, 0); break;
         case 'B':
             if (!strcmp(optarg, "front")) {
                 g_base = BAR1_OFFSET_I2C_FRONT;
@@ -260,7 +272,7 @@ int main(int argc, char **argv)
         default: usage(argv[0]); return o == 'h' ? 0 : 1;
         }
     }
-    if (!do_scan && !do_dump && !do_lb && !do_status && !do_board && !ctrl_hex) {
+    if (!do_scan && !do_dump && !do_lb && !do_status && !do_board && !ctrl_hex && !probe_hex) {
         usage(argv[0]);
         return 1;
     }
@@ -295,9 +307,9 @@ int main(int argc, char **argv)
     }
     int rc = 0;
 
-    /* Init master: 100 kHz @ 125 MHz, enable */
-    write32(bar1, g_base + REG_I2C_PRER_LO, 249);
-    write32(bar1, g_base + REG_I2C_PRER_HI, 0);
+    /* Init master: prescaler g_prer, enable */
+    write32(bar1, g_base + REG_I2C_PRER_LO, g_prer & 0xFF);
+    write32(bar1, g_base + REG_I2C_PRER_HI, (g_prer >> 8) & 0xFF);
     write32(bar1, g_base + REG_I2C_CTR, I2C_CTR_EN);
 
     if (do_board) {
@@ -326,6 +338,12 @@ int main(int argc, char **argv)
         }
     }
 
+    if (probe_hex) {
+        uint8_t a = (uint8_t)strtoul(probe_hex, NULL, 0);
+        int r = probe((volatile uint8_t *)bar1, a);
+        printf("probe %s 0x%02X: %s\n", g_bus, a, r == 0 ? "ACK" : "NACK");
+    }
+
     if (do_scan) {
         bool is_mcu = (g_base == BAR1_OFFSET_I2C_MCU);
         printf("--- %s bus scan (BAR1 0x%04X) ---\n", g_bus, g_base);
@@ -339,33 +357,37 @@ int main(int argc, char **argv)
         }
     }
 
-    if ((do_dump || do_status || do_lb || ctrl_hex) &&
+    if ((do_status || do_lb || ctrl_hex) &&
         g_base != BAR1_OFFSET_I2C_MCU) {
-        printf("ERROR: --dump/--status/--loopback/--set-ctrl need --bus mcu.\n");
+        printf("ERROR: --status/--loopback/--set-ctrl need --bus mcu.\n");
         rc = 1;
         goto out;
     }
 
     if (do_dump || do_status || do_lb || ctrl_hex) {
         uint8_t regs[16];
+        uint32_t n = g_len > 16 ? 16 : g_len;
         /* Quick presence check first */
-        if (probe((volatile uint8_t *)bar1, NUC_ADDR) != 0) {
-            printf("ERROR: NUC100 0x2A NACK. Check MCU fw + FPGA bitstream.\n");
+        if (probe((volatile uint8_t *)bar1, (uint8_t)g_slv) != 0) {
+            printf("ERROR: slave 0x%02X NACK. Check fw + FPGA bitstream.\n",
+                   (unsigned)g_slv);
             rc = 1;
             goto out;
         }
-        if (rd_regs((volatile uint8_t *)bar1, NUC_ADDR, 0x00, regs, 16) != 0) {
+        if (rd_regs((volatile uint8_t *)bar1, (uint8_t)g_slv, 0x00, regs, (int)n) != 0) {
             printf("ERROR: burst read failed.\n");
             rc = 1;
             goto out;
         }
         if (do_dump) {
-            printf("--- NUC100 regs ---\n");
-            for (int i = 0; i < 16; i++)
+            printf("--- slave 0x%02X regs ---\n", (unsigned)g_slv);
+            for (uint32_t i = 0; i < n; i++)
                 printf("  [%02X] 0x%02X%s\n", i, regs[i],
-                       i == 0 ? " MAGIC" : i == 1 ? " VER" :
-                       i == 2 ? " STATUS" : i == 3 ? " CTRL" : "");
-            if (regs[0] != 0x2A || regs[1] != 0x01) {
+                       (g_slv == NUC_ADDR && i == 0) ? " MAGIC" :
+                       (g_slv == NUC_ADDR && i == 1) ? " VER" :
+                       (g_slv == NUC_ADDR && i == 2) ? " STATUS" :
+                       (g_slv == NUC_ADDR && i == 3) ? " CTRL" : "");
+            if (g_slv == NUC_ADDR && (regs[0] != 0x2A || regs[1] != 0x01)) {
                 printf("WARN: MAGIC/VER mismatch (fw mismatch?)\n");
                 rc = 1;
             }
