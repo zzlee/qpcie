@@ -277,8 +277,8 @@ module rc_rx_decoder #(
                             s_axis_rc_tready      <= 1'b1;
                             if (s_axis_rc_tlast)
                                 state <= IDLE;
-                        end else begin
-                            // More than 4 Dwords in this beat
+                        end else if (DATA_WIDTH >= 256) begin
+                            // More than 4 Dwords in this 256-bit beat
                             // Cycle A: Emit lower 4 Dwords
                             h2c_fifo_wvalid       <= 1'b1;
                             h2c_fifo_wdata        <= {DATA_WIDTH{1'b0}};
@@ -302,6 +302,18 @@ module rc_rx_decoder #(
                             h2c_saved_last   <= s_axis_rc_tlast;
                             s_axis_rc_tready <= 1'b0;
                             state            <= ROUTE_H2C_SPLITN;
+                        end else begin
+                            // 128-bit beat carries at most 4 Dwords: emit
+                            // them, account 4, stay in BEATN for next beat.
+                            h2c_fifo_wvalid       <= 1'b1;
+                            h2c_fifo_wdata        <= {DATA_WIDTH{1'b0}};
+                            h2c_fifo_wdata[127:0] <= s_axis_rc_tdata[127:0];
+                            h2c_fifo_wdw_count    <= 3'd4;
+                            h2c_fifo_wlast        <= 1'b0;
+                            h2c_fifo_wtag         <= h2c_cpl_tag;
+                            h2c_cpl_dw_remaining  <= h2c_cpl_dw_remaining - 11'd4;
+                            s_axis_rc_tready      <= 1'b1;
+                            state                 <= ROUTE_H2C_BEATN;
                         end
                     end
                 end
