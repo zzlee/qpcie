@@ -95,6 +95,13 @@
 #define BAR1_OFFSET_TPG             0x3000
 #define BAR1_OFFSET_I2C             0x4000
 #define BAR1_OFFSET_SPI_FLASH       0x5000
+/* NOTE (HW truth, a50t crossbar M00..M04): TPG=0x0000, AUDIO=0x1000,
+ * EDID=0x2000, FRONT-I2C=0x3000, SPI=0x4000. The three _OFFSET names above
+ * for TPG/I2C/SPI are stale; do not move them (user flows may depend on
+ * them). New blocks must use the HW-true offsets below. */
+/* MCU I2C Master Registers (BAR1 Offset 0x5000, M05; NUC100 slave @ 0x2A) */
+#define BAR1_OFFSET_I2C_MCU         0x5000
+#define NUC100_SLAVE_ADDR           0x2A
 
 /* I2C Master Registers (BAR1 Offset 0x3000) */
 #define REG_I2C_PRER_LO             0x00
@@ -489,6 +496,11 @@ struct qpcie_dev {
     struct mutex i2c_lock;
     bool i2c_registered;
 
+    /* I2C Adapter for MCU I2C (NUC100 slave @ 0x2A, ATECC508A) */
+    struct i2c_adapter i2c_mcu_adap;
+    struct mutex i2c_mcu_lock;
+    bool i2c_mcu_registered;
+
     /* SPI Flash Lock */
     struct mutex flash_lock;
 };
@@ -509,6 +521,9 @@ void qpcie_alsa_irq_handler(struct qpcie_dev *qdev, u32 status);
 int qpcie_i2c_init(struct qpcie_dev *qdev);
 void qpcie_i2c_remove(struct qpcie_dev *qdev);
 int qpcie_it68051_get_status(struct qpcie_dev *qdev, u32 *width, u32 *height, u32 *fps, bool *locked);
+
+int qpcie_i2c_mcu_init(struct qpcie_dev *qdev);
+void qpcie_i2c_mcu_remove(struct qpcie_dev *qdev);
 
 int qpcie_flash_init(struct qpcie_dev *qdev);
 void qpcie_flash_remove(struct qpcie_dev *qdev);

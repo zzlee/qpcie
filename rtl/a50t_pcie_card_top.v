@@ -32,6 +32,10 @@ module a50t_pcie_card_top #(
     inout  wire                                             scl_front,
     inout  wire                                             sda_front,
 
+    // MCU I2C Bus (NUC100 I2C0 slave @ 0x2A, ATECC508A)
+    inout  wire                                             scl_mcu,
+    inout  wire                                             sda_mcu,
+
     // SPI Flash Interface (Macronix MX25L12835F / MX25L12872F)
     output wire                                             spi_fcs_b,
     output wire                                             spi_d00_mosi,
@@ -141,8 +145,9 @@ module a50t_pcie_card_top #(
     wire        bar1_m_rready;
 
     // =========================================================================
-    // AXI Crossbar Master Interface Wires (3 Masters)
+    // AXI Crossbar Master Interface Wires (6 Masters)
     // M00: Video TPG (0x0000), M01: Audio Pattern Gen (0x1000), M02: EDID/HPD (0x2000)
+    // M03: FRONT I2C Master (0x3000), M04: SPI Flash & ICAP (0x4000), M05: MCU I2C Master (0x5000)
     // =========================================================================
     // TPG AXI-Lite signals on the 125 MHz crossbar side.
     wire        tpg_axi_awvalid, tpg_axi_awready;
@@ -225,7 +230,20 @@ module a50t_pcie_card_top #(
     wire [1:0]  spi_axi_rresp;
     wire        spi_axi_rvalid, spi_axi_rready;
 
-    // AXI Crossbar IP Instance (5 Masters)
+    // M05: MCU I2C Master AXI-Lite Wires (BAR1 Offset 0x5000)
+    wire [31:0] mcu_axi_awaddr, mcu_axi_araddr;
+    wire        mcu_axi_awvalid, mcu_axi_awready;
+    wire [31:0] mcu_axi_wdata;
+    wire [3:0]  mcu_axi_wstrb;
+    wire        mcu_axi_wvalid, mcu_axi_wready;
+    wire [1:0]  mcu_axi_bresp;
+    wire        mcu_axi_bvalid, mcu_axi_bready;
+    wire        mcu_axi_arvalid, mcu_axi_arready;
+    wire [31:0] mcu_axi_rdata;
+    wire [1:0]  mcu_axi_rresp;
+    wire        mcu_axi_rvalid, mcu_axi_rready;
+
+    // AXI Crossbar IP Instance (6 Masters)
     axi_crossbar_0 u_axil_crossbar (
         .aclk(pcie_user_clk),
         .aresetn(pcie_user_rst_n),
@@ -249,28 +267,28 @@ module a50t_pcie_card_top #(
         .s_axi_rvalid(bar1_m_rvalid),
         .s_axi_rready(bar1_m_rready),
 
-        .m_axi_awaddr({spi_axi_awaddr, i2c_axi_awaddr, bar1_reg_awaddr, aud_axi_awaddr_32, tpg_axi_awaddr_32}),
+        .m_axi_awaddr({mcu_axi_awaddr, spi_axi_awaddr, i2c_axi_awaddr, bar1_reg_awaddr, aud_axi_awaddr_32, tpg_axi_awaddr_32}),
         .m_axi_awprot(),
-        .m_axi_awvalid({spi_axi_awvalid, i2c_axi_awvalid, bar1_reg_awvalid, aud_axi_awvalid, tpg_axi_awvalid}),
-        .m_axi_awready({spi_axi_awready, i2c_axi_awready, bar1_reg_awready, aud_axi_awready, tpg_axi_awready}),
-        .m_axi_wdata({spi_axi_wdata, i2c_axi_wdata, bar1_reg_wdata, aud_axi_wdata, tpg_axi_wdata}),
-        .m_axi_wstrb({spi_axi_wstrb, i2c_axi_wstrb, bar1_reg_wstrb, aud_axi_wstrb, tpg_axi_wstrb}),
-        .m_axi_wvalid({spi_axi_wvalid, i2c_axi_wvalid, bar1_reg_wvalid, aud_axi_wvalid, tpg_axi_wvalid}),
-        .m_axi_wready({spi_axi_wready, i2c_axi_wready, bar1_reg_wready, aud_axi_wready, tpg_axi_wready}),
-        .m_axi_bresp({spi_axi_bresp, i2c_axi_bresp, bar1_reg_bresp, aud_axi_bresp, tpg_axi_bresp}),
-        .m_axi_bvalid({spi_axi_bvalid, i2c_axi_bvalid, bar1_reg_bvalid, aud_axi_bvalid, tpg_axi_bvalid}),
-        .m_axi_bready({spi_axi_bready, i2c_axi_bready, bar1_reg_bready, aud_axi_bready, tpg_axi_bready}),
-        .m_axi_araddr({spi_axi_araddr, i2c_axi_araddr, bar1_reg_araddr, aud_axi_araddr_32, tpg_axi_araddr_32}),
+        .m_axi_awvalid({mcu_axi_awvalid, spi_axi_awvalid, i2c_axi_awvalid, bar1_reg_awvalid, aud_axi_awvalid, tpg_axi_awvalid}),
+        .m_axi_awready({mcu_axi_awready, spi_axi_awready, i2c_axi_awready, bar1_reg_awready, aud_axi_awready, tpg_axi_awready}),
+        .m_axi_wdata({mcu_axi_wdata, spi_axi_wdata, i2c_axi_wdata, bar1_reg_wdata, aud_axi_wdata, tpg_axi_wdata}),
+        .m_axi_wstrb({mcu_axi_wstrb, spi_axi_wstrb, i2c_axi_wstrb, bar1_reg_wstrb, aud_axi_wstrb, tpg_axi_wstrb}),
+        .m_axi_wvalid({mcu_axi_wvalid, spi_axi_wvalid, i2c_axi_wvalid, bar1_reg_wvalid, aud_axi_wvalid, tpg_axi_wvalid}),
+        .m_axi_wready({mcu_axi_wready, spi_axi_wready, i2c_axi_wready, bar1_reg_wready, aud_axi_wready, tpg_axi_wready}),
+        .m_axi_bresp({mcu_axi_bresp, spi_axi_bresp, i2c_axi_bresp, bar1_reg_bresp, aud_axi_bresp, tpg_axi_bresp}),
+        .m_axi_bvalid({mcu_axi_bvalid, spi_axi_bvalid, i2c_axi_bvalid, bar1_reg_bvalid, aud_axi_bvalid, tpg_axi_bvalid}),
+        .m_axi_bready({mcu_axi_bready, spi_axi_bready, i2c_axi_bready, bar1_reg_bready, aud_axi_bready, tpg_axi_bready}),
+        .m_axi_araddr({mcu_axi_araddr, spi_axi_araddr, i2c_axi_araddr, bar1_reg_araddr, aud_axi_araddr_32, tpg_axi_araddr_32}),
         .m_axi_arprot(),
-        .m_axi_arvalid({spi_axi_arvalid, i2c_axi_arvalid, bar1_reg_arvalid, aud_axi_arvalid, tpg_axi_arvalid}),
-        .m_axi_arready({spi_axi_arready, i2c_axi_arready, bar1_reg_arready, aud_axi_arready, tpg_axi_arready}),
-        .m_axi_rdata({spi_axi_rdata, i2c_axi_rdata, bar1_reg_rdata, aud_axi_rdata, tpg_axi_rdata}),
-        .m_axi_rresp({spi_axi_rresp, i2c_axi_rresp, bar1_reg_rresp, aud_axi_rresp, tpg_axi_rresp}),
-        .m_axi_rvalid({spi_axi_rvalid, i2c_axi_rvalid, bar1_reg_rvalid, aud_axi_rvalid, tpg_axi_rvalid}),
-        .m_axi_rready({spi_axi_rready, i2c_axi_rready, bar1_reg_rready, aud_axi_rready, tpg_axi_rready})
+        .m_axi_arvalid({mcu_axi_arvalid, spi_axi_arvalid, i2c_axi_arvalid, bar1_reg_arvalid, aud_axi_arvalid, tpg_axi_arvalid}),
+        .m_axi_arready({mcu_axi_arready, spi_axi_arready, i2c_axi_arready, bar1_reg_arready, aud_axi_arready, tpg_axi_arready}),
+        .m_axi_rdata({mcu_axi_rdata, spi_axi_rdata, i2c_axi_rdata, bar1_reg_rdata, aud_axi_rdata, tpg_axi_rdata}),
+        .m_axi_rresp({mcu_axi_rresp, spi_axi_rresp, i2c_axi_rresp, bar1_reg_rresp, aud_axi_rresp, tpg_axi_rresp}),
+        .m_axi_rvalid({mcu_axi_rvalid, spi_axi_rvalid, i2c_axi_rvalid, bar1_reg_rvalid, aud_axi_rvalid, tpg_axi_rvalid}),
+        .m_axi_rready({mcu_axi_rready, spi_axi_rready, i2c_axi_rready, bar1_reg_rready, aud_axi_rready, tpg_axi_rready})
     );
 
-    // M03: I2C Master IP Core Instance
+    // M03: I2C Master IP Core Instance (FRONT bus: IT68051, TLV320)
     i2c_master_axi #(
         .DEFAULT_PRESCALER(16'd249) // 100 kHz @ 125 MHz
     ) u_i2c_master (
@@ -295,6 +313,34 @@ module a50t_pcie_card_top #(
         .s_axil_rready  (i2c_axi_rready),
         .scl_io         (scl_front),
         .sda_io         (sda_front),
+        .irq            ()
+    );
+
+    // M05: MCU I2C Master IP Core Instance (MCU bus: NUC100 slave @ 0x2A, ATECC508A)
+    i2c_master_axi #(
+        .DEFAULT_PRESCALER(16'd249) // 100 kHz @ 125 MHz
+    ) u_i2c_mcu (
+        .clk            (pcie_user_clk),
+        .rst_n          (pcie_user_rst_n),
+        .s_axil_awaddr  (mcu_axi_awaddr[7:0]),
+        .s_axil_awvalid (mcu_axi_awvalid),
+        .s_axil_awready (mcu_axi_awready),
+        .s_axil_wdata   (mcu_axi_wdata),
+        .s_axil_wstrb   (mcu_axi_wstrb),
+        .s_axil_wvalid  (mcu_axi_wvalid),
+        .s_axil_wready  (mcu_axi_wready),
+        .s_axil_bresp   (mcu_axi_bresp),
+        .s_axil_bvalid  (mcu_axi_bvalid),
+        .s_axil_bready  (mcu_axi_bready),
+        .s_axil_araddr  (mcu_axi_araddr[7:0]),
+        .s_axil_arvalid (mcu_axi_arvalid),
+        .s_axil_arready (mcu_axi_arready),
+        .s_axil_rdata   (mcu_axi_rdata),
+        .s_axil_rresp   (mcu_axi_rresp),
+        .s_axil_rvalid  (mcu_axi_rvalid),
+        .s_axil_rready  (mcu_axi_rready),
+        .scl_io         (scl_mcu),
+        .sda_io         (sda_mcu),
         .irq            ()
     );
 

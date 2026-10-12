@@ -418,6 +418,9 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
     /* Initialize Front-End I2C Adapter (IT68051, TLV320ADC3101) */
     qpcie_i2c_init(qdev);
 
+    /* Initialize MCU I2C Adapter (NUC100 slave @ 0x2A, ATECC508A) */
+    qpcie_i2c_mcu_init(qdev);
+
     /* Initialize SPI Flash & ICAPE2 Programming Interface */
     qpcie_flash_init(qdev);
 
@@ -477,6 +480,7 @@ static void qpcie_remove(struct pci_dev *pdev)
 
     qpcie_upgrade_remove(qdev);
     qpcie_flash_remove(qdev);
+    qpcie_i2c_mcu_remove(qdev);
     qpcie_i2c_remove(qdev);
     qpcie_sysfs_remove(qdev);
 

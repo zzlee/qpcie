@@ -94,6 +94,19 @@ set_property IOSTANDARD LVCMOS33 [get_ports sda_front]
 set_property PULLUP true [get_ports sda_front]
 
 # ------------------------------------------------------------------------------
+# 6b. MCU I2C Bus (NUC100 I2C0 slave @ 0x2A, ATECC508A)
+# Sheet3: PA.8/SDA0->SDA_MCU, PA.9/SCL0->SCL_MCU; 4.7K pulls R31/R32 on board.
+# FPGA Bank14 pair IO_L10P/N (N18/P18), VCCO_14 = 3.3V.
+# ------------------------------------------------------------------------------
+set_property PACKAGE_PIN P18 [get_ports scl_mcu]
+set_property IOSTANDARD LVCMOS33 [get_ports scl_mcu]
+set_property PULLUP true [get_ports scl_mcu]
+
+set_property PACKAGE_PIN N18 [get_ports sda_mcu]
+set_property IOSTANDARD LVCMOS33 [get_ports sda_mcu]
+set_property PULLUP true [get_ports sda_mcu]
+
+# ------------------------------------------------------------------------------
 # 7. Macronix MX25L12835F SPI Flash (Bank 14 User Runtime Access)
 # Note: SCLK is driven via internal STARTUPE2 primitive to CCLK_0 (Pin E8).
 # ------------------------------------------------------------------------------

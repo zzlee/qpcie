@@ -274,3 +274,186 @@ void qpcie_i2c_remove(struct qpcie_dev *qdev)
         dev_info(&qdev->pdev->dev, "Unregistered I2C adapter\n");
     }
 }
+
+/* ==========================================================================
+ * MCU I2C bus (BAR1 0x5000 -> NUC100 slave @ 0x2A, ATECC508A).
+ * Same register interface as the FRONT master; separate adapter/lock so the
+ * two buses run independently. FRONT path above is intentionally untouched.
+ * ========================================================================== */
+
+static inline u32 qpcie_i2c_mcu_read(struct qpcie_dev *qdev, u32 reg)
+{
+    return ioread32(qdev->bar1_mmio + BAR1_OFFSET_I2C_MCU + reg);
+}
+
+static inline void qpcie_i2c_mcu_write(struct qpcie_dev *qdev, u32 reg, u32 val)
+{
+    iowrite32(val, qdev->bar1_mmio + BAR1_OFFSET_I2C_MCU + reg);
+}
+
+static int qpcie_i2c_mcu_wait_tip(struct qpcie_dev *qdev)
+{
+    unsigned long timeout = jiffies + usecs_to_jiffies(I2C_TIMEOUT_US);
+
+    while (time_before(jiffies, timeout)) {
+        u32 sr = qpcie_i2c_mcu_read(qdev, REG_I2C_SR);
+        if (!(sr & I2C_SR_TIP))
+            return 0;
+        usleep_range(20, 50);
+    }
+
+    dev_err_ratelimited(&qdev->pdev->dev, "MCU I2C timeout waiting for TIP to clear\n");
+    qpcie_i2c_mcu_write(qdev, REG_I2C_CTR, 0);
+    udelay(10);
+    qpcie_i2c_mcu_write(qdev, REG_I2C_CTR, I2C_CTR_EN);
+    return -ETIMEDOUT;
+}
+
+static int qpcie_i2c_mcu_send_byte(struct qpcie_dev *qdev, u8 byte, u32 cr_flags)
+{
+    int ret;
+
+    qpcie_i2c_mcu_write(qdev, REG_I2C_TXR, byte);
+    qpcie_i2c_mcu_write(qdev, REG_I2C_CR, cr_flags | I2C_CR_WR);
+
+    ret = qpcie_i2c_mcu_wait_tip(qdev);
+    if (ret)
+        return ret;
+
+    if (qpcie_i2c_mcu_read(qdev, REG_I2C_SR) & I2C_SR_RXACK)
+        return -ENXIO;
+
+    return 0;
+}
+
+static int qpcie_i2c_mcu_recv_byte(struct qpcie_dev *qdev, u8 *byte, bool last_byte, bool send_stop)
+{
+    int ret;
+    u32 cr = I2C_CR_RD;
+
+    if (last_byte)
+        cr |= I2C_CR_ACK;
+    if (send_stop)
+        cr |= I2C_CR_STO;
+
+    qpcie_i2c_mcu_write(qdev, REG_I2C_CR, cr);
+
+    ret = qpcie_i2c_mcu_wait_tip(qdev);
+    if (ret)
+        return ret;
+
+    *byte = (u8)(qpcie_i2c_mcu_read(qdev, REG_I2C_RXR) & 0xFF);
+    return 0;
+}
+
+static int qpcie_i2c_mcu_xfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num)
+{
+    struct qpcie_dev *qdev = i2c_get_adapdata(adap);
+    int i, j, ret = 0;
+
+    mutex_lock(&qdev->i2c_mcu_lock);
+
+    for (i = 0; i < num; i++) {
+        struct i2c_msg *msg = &msgs[i];
+        bool is_read = (msg->flags & I2C_M_RD) != 0;
+        u8 addr_byte = (msg->addr << 1) | (is_read ? 1 : 0);
+
+        u32 sta_flags = I2C_CR_STA;
+        if (msg->len == 0)
+            sta_flags |= I2C_CR_STO;
+
+        ret = qpcie_i2c_mcu_send_byte(qdev, addr_byte, sta_flags);
+        if (ret) {
+            if (!(sta_flags & I2C_CR_STO)) {
+                qpcie_i2c_mcu_write(qdev, REG_I2C_CR, I2C_CR_STO);
+                qpcie_i2c_mcu_wait_tip(qdev);
+            }
+            goto out;
+        }
+
+        if (is_read) {
+            for (j = 0; j < msg->len; j++) {
+                bool is_last_byte = (j == msg->len - 1);
+
+                ret = qpcie_i2c_mcu_recv_byte(qdev, &msg->buf[j], is_last_byte, is_last_byte);
+                if (ret)
+                    goto out;
+            }
+        } else {
+            for (j = 0; j < msg->len; j++) {
+                bool is_last_byte = (j == msg->len - 1);
+                u32 cr = 0;
+
+                if (is_last_byte)
+                    cr |= I2C_CR_STO;
+
+                ret = qpcie_i2c_mcu_send_byte(qdev, msg->buf[j], cr);
+                if (ret) {
+                    qpcie_i2c_mcu_write(qdev, REG_I2C_CR, I2C_CR_STO);
+                    qpcie_i2c_mcu_wait_tip(qdev);
+                    goto out;
+                }
+            }
+        }
+    }
+
+    ret = num;
+
+out:
+    mutex_unlock(&qdev->i2c_mcu_lock);
+    return ret;
+}
+
+static u32 qpcie_i2c_mcu_func(struct i2c_adapter *adap)
+{
+    return I2C_FUNC_I2C | I2C_FUNC_SMBUS_EMUL;
+}
+
+static const struct i2c_algorithm qpcie_i2c_mcu_algo = {
+    .master_xfer   = qpcie_i2c_mcu_xfer,
+    .functionality = qpcie_i2c_mcu_func,
+};
+
+int qpcie_i2c_mcu_init(struct qpcie_dev *qdev)
+{
+    int ret;
+
+    mutex_init(&qdev->i2c_mcu_lock);
+
+    if (!qdev->bar1_mmio) {
+        dev_warn(&qdev->pdev->dev, "BAR1 MMIO not available, skipping MCU I2C\n");
+        return -ENODEV;
+    }
+
+    qpcie_i2c_mcu_write(qdev, REG_I2C_PRER_LO, 249 & 0xFF);
+    qpcie_i2c_mcu_write(qdev, REG_I2C_PRER_HI, (249 >> 8) & 0xFF);
+    qpcie_i2c_mcu_write(qdev, REG_I2C_CTR, I2C_CTR_EN);
+
+    qdev->i2c_mcu_adap.owner = THIS_MODULE;
+    qdev->i2c_mcu_adap.algo = &qpcie_i2c_mcu_algo;
+    qdev->i2c_mcu_adap.dev.parent = &qdev->pdev->dev;
+    snprintf(qdev->i2c_mcu_adap.name, sizeof(qdev->i2c_mcu_adap.name), "qpcie-mcu-i2c-%s",
+             pci_name(qdev->pdev));
+    i2c_set_adapdata(&qdev->i2c_mcu_adap, qdev);
+
+    ret = i2c_add_adapter(&qdev->i2c_mcu_adap);
+    if (ret) {
+        dev_err(&qdev->pdev->dev, "Failed to register MCU I2C adapter: %d\n", ret);
+        return ret;
+    }
+
+    qdev->i2c_mcu_registered = true;
+    dev_info(&qdev->pdev->dev, "Registered MCU I2C bus: %s (adapter %d)\n",
+             qdev->i2c_mcu_adap.name, qdev->i2c_mcu_adap.nr);
+
+    return 0;
+}
+
+void qpcie_i2c_mcu_remove(struct qpcie_dev *qdev)
+{
+    if (qdev->i2c_mcu_registered) {
+        i2c_del_adapter(&qdev->i2c_mcu_adap);
+        qdev->i2c_mcu_registered = false;
+        dev_info(&qdev->pdev->dev, "Unregistered MCU I2C adapter\n");
+    }
+}

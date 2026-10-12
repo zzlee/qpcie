@@ -36,20 +36,20 @@ Outputs `mcu_nuc100_slave_i2c0.bin` (default) or `..._i2c1.bin`.
 
 ## Host-side test (after FPGA MCU-bus master exists)
 
+New bitstream must include M05 MCU master (`C_VERSION >= 0x26101205`):
+`./scripts/build_a50t.sh`, `./scripts/flash_a50t.sh`, reload driver.
+
 ```bash
-i2cdetect -y <fpga-mcu-bus>     # expect 0x2A (+ 0x60 ATECC on same bus)
-i2cget -y <bus> 0x2a 0x00        # expect 0x2a
-i2cset -y <bus> 0x2a 0x04 0x5a
-i2cget -y <bus> 0x2a 0x04        # expect 0x5a
-i2cget -y <bus> 0x2a 0x02        # STATUS live bits
+./test_app/qpcie_mcu_scan --scan   # expect 0x2A (+ 0x60 ATECC)
+./test_app/qpcie_mcu_scan --dump   # MAGIC=0x2A VER=0x01
+./test_app/qpcie_mcu_scan --loopback
+i2cdetect -y <mcu-bus>             # via qpcie-mcu-i2c adapter (driver path)
 ```
 
 ## Open items
 
-- Which NUC100 I2C peripheral is wired to `SDA_MCU/SCL_MCU` (I2C0 vs I2C1):
-  PDF text layer loses net-to-pin mapping; confirm visually on Sheet3 before
-  flashing, or flash I2C0 build, scan, and if NACK try the I2C1 build.
-- FPGA `sda/scl_mcu` pins + BAR1 offset for the second `i2c_master_axi`
-  (next step; current `a50t_pcie_card_top.v` only has FRONT bus).
+- ~~Which NUC100 I2C peripheral is wired to `SDA_MCU/SCL_MCU`~~ — confirmed
+  `PA.8/SDA0→SDA_MCU (FPGA N18)`, `PA.9/SCL0→SCL_MCU (FPGA P18)`:
+  flash the default `mcu_nuc100_slave_i2c0.bin`. (`PA.10/11→FRONT`, untouched.)
 - `i2c_master_axi.v` has no SCL clock-stretch wait; if NACKs appear under
   interrupt latency, add stretch support on the FPGA master.
