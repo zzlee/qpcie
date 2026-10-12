@@ -8,7 +8,7 @@
 `timescale 1ns / 1ps
 
 module axil_reg_space #(
-    parameter [31:0]   C_VERSION    = 32'h2610_1204, // Mandatory hardware version YYMMDDpp
+    parameter [31:0]   C_VERSION    = 32'h2610_1205, // Mandatory hardware version YYMMDDpp
     parameter integer NUM_VIDEO_CH = 4,
     parameter integer NUM_AUDIO_CH = 4
 )(
@@ -210,7 +210,11 @@ module axil_reg_space #(
     output wire [31:0] out_dma_upg_progress,
     output wire [31:0] out_dma_upg_doorbell,
     input  wire        in_dma_upg_write_done,
-    input  wire [31:0] in_dma_upg_bytes_written
+    input  wire [31:0] in_dma_upg_bytes_written,
+    input  wire [31:0] in_dma_upg_diag_pcie,
+    input  wire [31:0] in_dma_upg_diag_writer,
+    input  wire        in_dma_upg_diag_clear_ack,
+    output wire        out_dma_upg_diag_clear_toggle
 );
 
     // BAR0 Register Offset Definitions (12-bit decode aperture)
@@ -326,6 +330,7 @@ module axil_reg_space #(
     reg  [31:0] reg_dma_upg_status;    // 0x0794: 0x0=IDLE, 0x1=RECEIVING, 0x2=VERIFYING, 0x3=FLASHING, 0x4=SUCCESS
     reg  [31:0] reg_dma_upg_progress;  // 0x0798: 0..100% progress
     reg  [31:0] reg_dma_upg_doorbell;  // 0x079C: Doorbell notification
+    reg         reg_dma_upg_diag_clear_toggle; // 0x07B8: write 1 to clear sticky events
 
     // HDMI RX Detailed Telemetry Registers (Mirroring Xilinx xilinx-hdmirxss v4l2_dv_timings)
     reg  [31:0] reg_hdmi_rx_width;
@@ -408,6 +413,7 @@ module axil_reg_space #(
     assign out_dma_upg_status    = reg_dma_upg_status;
     assign out_dma_upg_progress = reg_dma_upg_progress;
     assign out_dma_upg_doorbell = reg_dma_upg_doorbell;
+    assign out_dma_upg_diag_clear_toggle = reg_dma_upg_diag_clear_toggle;
 
 
     // Write Logic
@@ -494,6 +500,7 @@ module axil_reg_space #(
             reg_dma_upg_status      <= 32'd0;
             reg_dma_upg_progress    <= 32'd0;
             reg_dma_upg_doorbell    <= 32'd0;
+            reg_dma_upg_diag_clear_toggle <= 1'b0;
             reg_hdmi_rx_width       <= 32'd1920;
             reg_hdmi_rx_height      <= 32'd1080;
             reg_hdmi_rx_pixelclk_lo <= 32'd148500000;
@@ -671,6 +678,8 @@ module axil_reg_space #(
                             8'h9C: reg_dma_upg_doorbell<= s_axil_wdata;
                             8'hA0: reg_dma_upg_host_addr[31:0]  <= s_axil_wdata;
                             8'hA4: reg_dma_upg_host_addr[63:32] <= s_axil_wdata;
+                            8'hB8: if (s_axil_wdata[0])
+                                        reg_dma_upg_diag_clear_toggle <= ~reg_dma_upg_diag_clear_toggle;
                             default: ;
                         endcase
                     end
@@ -852,6 +861,10 @@ module axil_reg_space #(
                             8'hA0: s_axil_rdata <= reg_dma_upg_host_addr[31:0];
                             8'hA4: s_axil_rdata <= reg_dma_upg_host_addr[63:32];
                             8'hA8: s_axil_rdata <= in_dma_upg_bytes_written;
+                            8'hB0: s_axil_rdata <= in_dma_upg_diag_pcie;
+                            8'hB4: s_axil_rdata <= in_dma_upg_diag_writer;
+                            8'hB8: s_axil_rdata <= {30'd0, in_dma_upg_diag_clear_ack,
+                                                    reg_dma_upg_diag_clear_toggle};
                             default: s_axil_rdata <= 32'd0;
                         endcase
                     end

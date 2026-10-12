@@ -11,7 +11,7 @@
 `timescale 1ns / 1ps
 
 module custom_pcie_dma_top #(
-    parameter [31:0] C_VERSION = 32'h2610_1204,
+    parameter [31:0] C_VERSION = 32'h2610_1205,
     parameter PCIE_DATA_WIDTH  = 128,
     parameter PCIE_KEEP_WIDTH  = PCIE_DATA_WIDTH / 8,
     parameter NUM_VIDEO_CH     = 2,
@@ -628,13 +628,19 @@ module custom_pcie_dma_top #(
     wire [31:0] upg_bytes_written_w;
     wire        upg_irq_pulse_w;
     wire        upg_lb_tready;
+    reg         upg_h2c_desc_valid_q;
+    wire        lb_tvalid, lb_tlast, lb_tuser, lb_tready;
+    wire        upg_lb_tvalid_cdc, upg_lb_tlast_cdc, upg_lb_tready_cdc;
+    wire        upg_diag_clear_toggle_w;
+    wire        upg_diag_clear_ack_w;
+    wire [31:0] upg_diag_pcie_sync, upg_diag_writer_sticky;
 
     // pl_clk0 -> pcie_user_clk synchronizer for the H2C upgrade trigger.
     // The BAR0 CSR (axil_reg_space, pl_clk0) publishes dma_upg_ctrl_w[0] as
     // START, but every consumer below (lb gate, descriptor trigger, RQ
-    // address/length) runs on pcie_user_clk `clk`. Sampling the CSR bit
-    // directly wedged the upgrade path (1203: START latched, zero bytes
-    // moved, DMA_DONE never set). The driver programs SIZE/HOST_ADDR before
+    // address/length) runs on pcie_user_clk `clk`. The 1204 CDC repair was
+    // necessary, but the canary still timed out; this was NOT proven to be
+    // the root cause. The driver programs SIZE/HOST_ADDR before
     // asserting START and holds them until DMA_DONE, so capturing the stable
     // bus on the synchronized rising edge is safe.
     reg  [1:0]  upg_start_sync;
@@ -656,8 +662,49 @@ module custom_pcie_dma_top #(
     wire upg_active_pcie = upg_start_sync[1];
     wire upg_start_pulse = (upg_start_sync == 2'b01);
 
+    // A sticky event is set in its source clock domain, then a stable LEVEL
+    // (never a narrow pulse or multi-bit counter) crosses into pl_clk0.
+    // BAR0+0x7B0/0x7B4 remain readable after the driver's 3s timeout.
+    wire [12:0] upg_diag_pcie_events;
+    assign upg_diag_pcie_events[0] = upg_start_pulse;
+    assign upg_diag_pcie_events[1] = upg_h2c_desc_valid_q;
+    assign upg_diag_pcie_events[2] = upg_h2c_desc_valid_q && sg_h2c_desc_ready;
+    assign upg_diag_pcie_events[3] = upg_active_pcie && sg_h2c_req_valid;
+    assign upg_diag_pcie_events[4] = upg_active_pcie && sg_h2c_req_valid && sg_h2c_req_ack;
+    assign upg_diag_pcie_events[5] = upg_active_pcie && m_axis_rq_tvalid && m_axis_rq_tready &&
+                                     (m_axis_rq_tdata[103:96] >= 8'd2) &&
+                                     (m_axis_rq_tdata[103:96] <= 8'd17);
+    assign upg_diag_pcie_events[6] = upg_active_pcie && s_axis_rc_tvalid && s_axis_rc_tready;
+    assign upg_diag_pcie_events[7] = upg_active_pcie && h2c_fifo_wvalid &&
+                                     (h2c_fifo_wtag >= 8'd2) && (h2c_fifo_wtag <= 8'd17);
+    assign upg_diag_pcie_events[8] = upg_active_pcie && lb_tvalid;
+    assign upg_diag_pcie_events[9] = upg_active_pcie && lb_tvalid && lb_tready;
+    assign upg_diag_pcie_events[10] = upg_active_pcie && sg_h2c_busy;
+    assign upg_diag_pcie_events[11] = upg_active_pcie && sg_h2c_bytes != 0;
+    assign upg_diag_pcie_events[12] = upg_active_pcie && upg_lb_tready;
+
+    wire [13:0] upg_diag_writer_events = {
+        sys_100m_rst_n, (upg_bytes_written_w != 0), upg_write_done_w,
+        (m_axi_hp0_bvalid && m_axi_hp0_bready && m_axi_hp0_bresp != 2'b00),
+        (m_axi_hp0_bvalid && m_axi_hp0_bready), m_axi_hp0_bvalid,
+        (m_axi_hp0_wvalid && m_axi_hp0_wready && m_axi_hp0_wlast),
+        (m_axi_hp0_wvalid && m_axi_hp0_wready), m_axi_hp0_wvalid,
+        (m_axi_hp0_awvalid && m_axi_hp0_awready), m_axi_hp0_awvalid,
+        (upg_lb_tvalid_cdc && upg_lb_tready_cdc), upg_lb_tvalid_cdc,
+        dma_upg_ctrl_w[0]
+    };
+    zu4ev_upg_diag u_zu4ev_upg_diag (
+        .clk_pcie(clk), .rst_pcie_n(rst_n),
+        .clk_pl(pl_clk0), .rst_pl_n(sys_100m_rst_n),
+        .clear_toggle_pl(upg_diag_clear_toggle_w),
+        .pcie_events(upg_diag_pcie_events),
+        .writer_events(upg_diag_writer_events),
+        .pcie_sticky_pl(upg_diag_pcie_sync),
+        .writer_sticky_pl(upg_diag_writer_sticky),
+        .clear_ack_pl(upg_diag_clear_ack_w)
+    );
+
     wire [127:0] lb_tdata;
-    wire        lb_tvalid, lb_tlast, lb_tuser;
     wire        sg_loopback_enable;
     wire [1:0]  sg_loopback_channel;
 `ifndef QPCIe_single_rgb24_path
@@ -669,10 +716,10 @@ module custom_pcie_dma_top #(
     // When firmware upgrade is active, route backpressure from h2c_ps_ddr_writer
     // NOTE: upg_active_pcie is the pl_clk0 START level synchronized into this
     // (pcie_user_clk) domain. Sampling dma_upg_ctrl_w[0] directly here is an
-    // unsynchronized CDC and the H2C descriptor below never fired (1203).
-    wire        lb_tready = upg_active_pcie ? upg_lb_tready : 1'b1;
+    // unsynchronized CDC; 1204 still timed out and needs stage tracing.
+    assign lb_tready = upg_active_pcie ? upg_lb_tready : 1'b1;
 `else
-    wire        lb_tready = upg_active_pcie ? upg_lb_tready :
+    assign lb_tready = upg_active_pcie ? upg_lb_tready :
                             (!sg_loopback_enable ? 1'b1 :
                             (NUM_VIDEO_CH > 2 && sg_loopback_channel == 2'd2) ? !ch2_loopback_full :
                             (NUM_VIDEO_CH > 3 && sg_loopback_channel == 2'd3) ? !ch3_loopback_full :
@@ -1144,11 +1191,14 @@ module custom_pcie_dma_top #(
         .out_dma_upg_progress(dma_upg_progress_w),
         .out_dma_upg_doorbell(dma_upg_doorbell_w),
         .in_dma_upg_write_done(upg_write_done_w),
-        .in_dma_upg_bytes_written(upg_bytes_written_w)
+        .in_dma_upg_bytes_written(upg_bytes_written_w),
+        .in_dma_upg_diag_pcie(upg_diag_pcie_sync),
+        .in_dma_upg_diag_writer(upg_diag_writer_sticky),
+        .in_dma_upg_diag_clear_ack(upg_diag_clear_ack_w),
+        .out_dma_upg_diag_clear_toggle(upg_diag_clear_toggle_w)
     );
 
     wire [127:0] upg_lb_tdata_cdc;
-    wire         upg_lb_tvalid_cdc, upg_lb_tlast_cdc, upg_lb_tready_cdc;
     wire [84:0]  upg_lb_tuser_cdc_w;
 
     axis_clock_converter_0 u_upg_cdc (
@@ -1480,7 +1530,6 @@ module custom_pcie_dma_top #(
     // 7. Canonical v3.0 Thin Descriptor Engine Ties + Upgrade H2C DMA Trigger
     // upg_start_pulse / upg_h2c_desc_valid_q are in the pcie_user_clk domain
     // and are now driven by the synchronized START (see upg_start_sync above).
-    reg upg_h2c_desc_valid_q;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n)
             upg_h2c_desc_valid_q <= 1'b0;
