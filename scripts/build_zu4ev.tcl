@@ -63,6 +63,8 @@ set_property -dict [list \
   CONFIG.axisten_if_width {256_bit} \
   CONFIG.AXISTEN_IF_CQ_ALIGNMENT_MODE {DWORD_Aligned} \
   CONFIG.AXISTEN_IF_RQ_ALIGNMENT_MODE {DWORD_Aligned} \
+  CONFIG.axisten_if_enable_client_tag {true} \
+  CONFIG.AXISTEN_IF_RC_STRADDLE {false} \
   CONFIG.PL_DISABLE_LANE_REVERSAL {FALSE} \
   CONFIG.vendor_id {12AB} \
   CONFIG.PF0_DEVICE_ID {E380} \
@@ -77,6 +79,20 @@ set_property -dict [list \
   CONFIG.pf0_bar1_size {64} \
   CONFIG.pf0_msi_enabled {true} \
 ] [get_ips pcie4_uscale_plus_0]
+
+# The RQ encoder/RC decoder own tag allocation (0, 1, 2..17, 0x20) and
+# parse one unstraddled RC completion at a time. PG213's default core tag
+# management overwrites the RQ tag; its RC straddle mode can put two
+# completions into a beat. Either default silently breaks H2C routing.
+foreach {property expected} {
+    CONFIG.axisten_if_enable_client_tag true
+    CONFIG.AXISTEN_IF_RC_STRADDLE false
+} {
+    set actual [get_property $property [get_ips pcie4_uscale_plus_0]]
+    if {![string equal -nocase $actual $expected]} {
+        error "PCIe IP $property=$actual, expected $expected for rq_tx_encoder/rc_rx_decoder"
+    }
+}
 
 generate_target all [get_ips pcie4_uscale_plus_0]
 

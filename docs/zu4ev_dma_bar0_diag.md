@@ -1,9 +1,9 @@
 # SC7F0 H2C upgrade: BAR0-only stage tracing (1205 diagnostic)
 
 Host can read these counters *after* the 3-second sysfs canary times out;
-no JTAG access is needed. There are no DMA behavioral changes or eMMC writes
-in this diagnostic. The host tool refuses any version other than `0x26101205`.
-This is a **diagnostic** image, not proof that the upgrade is fixed.
+no JTAG access is needed. The host tool accepts `0x26101205` and
+`0x26101206` only. Version 1206 changes PCIe IP tag and RC straddle modes;
+it is **not** proof that the upgrade is fixed, and this tool never writes eMMC.
 
 ## Registers in the existing PS/host-shared BAR0 CSR aperture
 
@@ -38,7 +38,7 @@ video/DMA traffic idle during the test.
 
 1. Update the card through the SD-to-eMMC installer **only after** the 1205
    bitstream, XSA, FSBL, image and installer are verified. Boot it on the
-   PCIe host and confirm BAR0 version `0x26101205` before writing anything.
+   PCIe host and confirm the intended BAR0 version before writing anything.
 2. Read `sudo qpcie_dma_diag RESOURCE0 --clear`. This refuses START in
    progress, waits for the PCIe clear ACK and checks that both event records
    are clear (PL-reset bit 13 may immediately become 1). If it fails, **do

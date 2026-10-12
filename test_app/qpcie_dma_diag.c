@@ -50,11 +50,13 @@ int main(int argc, char **argv) {
                                 MAP_SHARED, fd, 0);
     if (r == MAP_FAILED) { perror("mmap resource0"); close(fd); return 1; }
     int rc = 1;
-    if (r[REG_MAGIC/4] != 0x12abe380 || r[REG_VERSION/4] != 0x26101205) {
+    if (r[REG_MAGIC/4] != 0x12abe380 ||
+        (r[REG_VERSION/4] != 0x26101205 && r[REG_VERSION/4] != 0x26101206)) {
         fprintf(stderr, "diagnostic RTL not installed: magic=%08x version=%08x\n",
                 r[REG_MAGIC/4], r[REG_VERSION/4]);
         goto out;
     }
+    printf("VERSION=%08x\n", r[REG_VERSION/4]);
     if (argc == 3) {
         if (r[REG_CTRL/4] & 1) {
             fprintf(stderr, "refusing to clear during active DMA START\n");
