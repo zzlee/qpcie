@@ -32,8 +32,12 @@
 #define BAR0_OFFSET_ENV_BLOCK    0x1000
 #define BAR0_REG_BOARD_VERSION 0x1008  /* zzlab_env_ctrl C_BOARD_VERSION */
 
-/* MCU I2C master in BAR1 (M05) */
+/* MCU I2C master in BAR1 (M05); FRONT master (M03) at HW-true 0x3000 */
 #define BAR1_OFFSET_I2C_MCU  0x5000
+#define BAR1_OFFSET_I2C_FRONT 0x3000
+
+static uint32_t g_base = BAR1_OFFSET_I2C_MCU;
+static const char *g_bus = "mcu";
 #define REG_I2C_PRER_LO      0x00
 #define REG_I2C_PRER_HI      0x04
 #define REG_I2C_CTR          0x08
@@ -72,7 +76,7 @@ static int wait_tip(volatile uint8_t *bar1)
     struct timespec t0, now;
     clock_gettime(CLOCK_MONOTONIC, &t0);
     for (;;) {
-        uint32_t sr = read32(bar1, BAR1_OFFSET_I2C_MCU + REG_I2C_SR);
+        uint32_t sr = read32(bar1, g_base + REG_I2C_SR);
         if (!(sr & I2C_SR_TIP))
             return 0;
         clock_gettime(CLOCK_MONOTONIC, &now);
@@ -88,13 +92,13 @@ static int wait_tip(volatile uint8_t *bar1)
 /* Send one byte; returns 0 on ACK, -ENXIO on NACK, -ETIMEDOUT on TIP stuck */
 static int send_byte(volatile uint8_t *bar1, uint8_t byte, uint32_t flags)
 {
-    write32(bar1, BAR1_OFFSET_I2C_MCU + REG_I2C_TXR, byte);
-    write32(bar1, BAR1_OFFSET_I2C_MCU + REG_I2C_CR, flags | I2C_CR_WR);
-    (void)read32(bar1, BAR1_OFFSET_I2C_MCU + REG_I2C_CR); /* flush */
+    write32(bar1, g_base + REG_I2C_TXR, byte);
+    write32(bar1, g_base + REG_I2C_CR, flags | I2C_CR_WR);
+    (void)read32(bar1, g_base + REG_I2C_CR); /* flush */
     int r = wait_tip(bar1);
     if (r)
         return r;
-    if (read32(bar1, BAR1_OFFSET_I2C_MCU + REG_I2C_SR) & I2C_SR_RXACK)
+    if (read32(bar1, g_base + REG_I2C_SR) & I2C_SR_RXACK)
         return -ENXIO;
     return 0;
 }
@@ -102,12 +106,12 @@ static int send_byte(volatile uint8_t *bar1, uint8_t byte, uint32_t flags)
 static int recv_byte(volatile uint8_t *bar1, uint8_t *byte, bool last)
 {
     uint32_t cr = I2C_CR_RD | (last ? (I2C_CR_ACK | I2C_CR_STO) : 0);
-    write32(bar1, BAR1_OFFSET_I2C_MCU + REG_I2C_CR, cr);
-    (void)read32(bar1, BAR1_OFFSET_I2C_MCU + REG_I2C_CR);
+    write32(bar1, g_base + REG_I2C_CR, cr);
+    (void)read32(bar1, g_base + REG_I2C_CR);
     int r = wait_tip(bar1);
     if (r)
         return r;
-    *byte = (uint8_t)(read32(bar1, BAR1_OFFSET_I2C_MCU + REG_I2C_RXR) & 0xFF);
+    *byte = (uint8_t)(read32(bar1, g_base + REG_I2C_RXR) & 0xFF);
     return 0;
 }
 
@@ -116,7 +120,7 @@ static int probe(volatile uint8_t *bar1, uint8_t addr7)
 {
     int r = send_byte(bar1, (uint8_t)(addr7 << 1), I2C_CR_STA | I2C_CR_STO);
     if (r == -ENXIO) {
-        write32(bar1, BAR1_OFFSET_I2C_MCU + REG_I2C_CR, I2C_CR_STO);
+        write32(bar1, g_base + REG_I2C_CR, I2C_CR_STO);
         wait_tip(bar1);
     }
     return r;
@@ -137,7 +141,7 @@ static int wr_regs(volatile uint8_t *bar1, uint8_t addr7, uint8_t off,
     }
     return 0;
 stop:
-    write32(bar1, BAR1_OFFSET_I2C_MCU + REG_I2C_CR, I2C_CR_STO);
+    write32(bar1, g_base + REG_I2C_CR, I2C_CR_STO);
     wait_tip(bar1);
     return r;
 }
@@ -161,7 +165,7 @@ static int rd_regs(volatile uint8_t *bar1, uint8_t addr7, uint8_t off,
     }
     return 0;
 stop:
-    write32(bar1, BAR1_OFFSET_I2C_MCU + REG_I2C_CR, I2C_CR_STO);
+    write32(bar1, g_base + REG_I2C_CR, I2C_CR_STO);
     wait_tip(bar1);
     return r;
 }
@@ -211,9 +215,9 @@ static int find_qpcie(void)
 
 static void usage(const char *p)
 {
-    printf("Usage: %s [--scan|--dump|--loopback|--status|--board-ver|--set-ctrl HEX]\n", p);
-    printf("  Direct BAR MMIO: BAR1 0x5000 MCU I2C master; BAR0 0x1008 board version.\n");
-    printf("  Unloads qpcie driver.\n");
+    printf("Usage: %s [--bus mcu|front] [--scan|--dump|--loopback|--status|--board-ver|--set-ctrl HEX]\n", p);
+    printf("  Direct BAR MMIO: BAR1 I2C master (mcu=0x5000 default, front=0x3000);\n");
+    printf("  BAR0 0x1008 board version. Unloads qpcie driver.\n");
 }
 
 int main(int argc, char **argv)
@@ -227,18 +231,31 @@ int main(int argc, char **argv)
         {"loopback", no_argument, 0, 'l'},
         {"status", no_argument, 0, 't'},
         {"board-ver", no_argument, 0, 'b'},
+        {"bus", required_argument, 0, 'B'},
         {"set-ctrl", required_argument, 0, 'c'},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0}
     };
     int o;
-    while ((o = getopt_long(argc, argv, "sdlthbc:", lo, NULL)) != -1) {
+    while ((o = getopt_long(argc, argv, "sdlthbB:c:", lo, NULL)) != -1) {
         switch (o) {
         case 's': do_scan = true; break;
         case 'd': do_dump = true; break;
         case 'l': do_lb = true; break;
         case 't': do_status = true; break;
         case 'b': do_board = true; break;
+        case 'B':
+            if (!strcmp(optarg, "front")) {
+                g_base = BAR1_OFFSET_I2C_FRONT;
+                g_bus = "front";
+            } else if (!strcmp(optarg, "mcu")) {
+                g_base = BAR1_OFFSET_I2C_MCU;
+                g_bus = "mcu";
+            } else {
+                usage(argv[0]);
+                return 1;
+            }
+            break;
         case 'c': ctrl_hex = optarg; break;
         default: usage(argv[0]); return o == 'h' ? 0 : 1;
         }
@@ -279,9 +296,9 @@ int main(int argc, char **argv)
     int rc = 0;
 
     /* Init master: 100 kHz @ 125 MHz, enable */
-    write32(bar1, BAR1_OFFSET_I2C_MCU + REG_I2C_PRER_LO, 249);
-    write32(bar1, BAR1_OFFSET_I2C_MCU + REG_I2C_PRER_HI, 0);
-    write32(bar1, BAR1_OFFSET_I2C_MCU + REG_I2C_CTR, I2C_CTR_EN);
+    write32(bar1, g_base + REG_I2C_PRER_LO, 249);
+    write32(bar1, g_base + REG_I2C_PRER_HI, 0);
+    write32(bar1, g_base + REG_I2C_CTR, I2C_CTR_EN);
 
     if (do_board) {
         char r0[600];
@@ -310,13 +327,23 @@ int main(int argc, char **argv)
     }
 
     if (do_scan) {
-        printf("--- MCU bus scan ---\n");
+        bool is_mcu = (g_base == BAR1_OFFSET_I2C_MCU);
+        printf("--- %s bus scan (BAR1 0x%04X) ---\n", g_bus, g_base);
         for (int a = 0x08; a < 0x78; a++) {
             if (probe((volatile uint8_t *)bar1, (uint8_t)a) == 0)
                 printf("  ACK 0x%02X%s%s\n", a,
-                       a == NUC_ADDR ? "  <- NUC100" : "",
-                       a == 0x60 ? "  <- ATECC508A?" : "");
+                       (is_mcu && a == NUC_ADDR) ? "  <- NUC100" : "",
+                       (is_mcu && a == 0x60) ? "  <- ATECC508A?" :
+                       (!is_mcu && a == 0x18) ? "  <- TLV320?" :
+                       (!is_mcu && (a == 0x48 || a == 0x49)) ? "  <- IT68051?" : "");
         }
+    }
+
+    if ((do_dump || do_status || do_lb || ctrl_hex) &&
+        g_base != BAR1_OFFSET_I2C_MCU) {
+        printf("ERROR: --dump/--status/--loopback/--set-ctrl need --bus mcu.\n");
+        rc = 1;
+        goto out;
     }
 
     if (do_dump || do_status || do_lb || ctrl_hex) {
