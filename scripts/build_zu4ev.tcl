@@ -131,6 +131,19 @@ set_property -dict [list \
 ] [get_ips axi_clock_converter_0]
 generate_target all [get_ips axi_clock_converter_0]
 
+# PS HPM0_FPD is full AXI4 (16-bit transaction IDs), not AXI4-Lite.
+# Preserve AXI4 ID, burst, and last semantics when reaching the shared
+# PS/PCIe AXI-Lite BAR0 crossbar; tying RID/BID to zero wedges PS requests.
+create_ip -name axi_protocol_converter -vendor xilinx.com -library ip -version 2.1 -module_name axi_protocol_converter_0
+set_property -dict [list \
+  CONFIG.SI_PROTOCOL {AXI4} \
+  CONFIG.MI_PROTOCOL {AXI4LITE} \
+  CONFIG.ADDR_WIDTH {32} \
+  CONFIG.DATA_WIDTH {32} \
+  CONFIG.ID_WIDTH {16} \
+] [get_ips axi_protocol_converter_0]
+generate_target all [get_ips axi_protocol_converter_0]
+
 # 5.2 Generate AXI Crossbar IP Core for BAR0 / PS Arbiter (axi_crossbar_1 - 2x2)
 # M00 (0x000-0xFFF): axil_reg_space (DMA regs, PS+PCIe shared)
 # M01 (0x1000-0x1FFF): zzlab_env_ctrl (version/platform, PS+PCIe shared)
@@ -169,7 +182,7 @@ generate_target all [get_ips proc_sys_reset_0]
 # with PCIe disconnected. Status/addresses/data are documented separately.
 create_ip -name ila -vendor xilinx.com -library ip -version 6.2 -module_name ila_ps_axi_0
 set_property -dict [list \
-  CONFIG.C_NUM_OF_PROBES {8} \
+  CONFIG.C_NUM_OF_PROBES {11} \
   CONFIG.C_PROBE0_WIDTH {32} \
   CONFIG.C_PROBE1_WIDTH {32} \
   CONFIG.C_PROBE2_WIDTH {32} \
@@ -178,6 +191,9 @@ set_property -dict [list \
   CONFIG.C_PROBE5_WIDTH {16} \
   CONFIG.C_PROBE6_WIDTH {8} \
   CONFIG.C_PROBE7_WIDTH {3} \
+  CONFIG.C_PROBE8_WIDTH {16} \
+  CONFIG.C_PROBE9_WIDTH {1} \
+  CONFIG.C_PROBE10_WIDTH {1} \
   CONFIG.C_DATA_DEPTH {4096} \
   CONFIG.C_TRIGIN_EN {false} \
   CONFIG.C_TRIGOUT_EN {false} \

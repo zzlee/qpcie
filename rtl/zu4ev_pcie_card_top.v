@@ -17,7 +17,7 @@
 `timescale 1ns / 1ps
 
 module zu4ev_pcie_card_top #(
-    parameter [31:0] C_VERSION = 32'h2610_1202,
+    parameter [31:0] C_VERSION = 32'h2610_1203,
     parameter PCIE_DATA_WIDTH  = 256,
     parameter PCIE_KEEP_WIDTH  = PCIE_DATA_WIDTH / 32, // 8 DW keep for 256-bit
     parameter NUM_VIDEO_CH     = 4,
@@ -1396,22 +1396,108 @@ module zu4ev_pcie_card_top #(
     wire dma_active;
     assign user_led_dma_active = dma_active;
 
-    // PS Interconnect Signals (HPM0 AXI-Lite and HP0 AXI4 Write)
+    // Full AXI4 PS HPM0_FPD, adapted to AXI4-Lite before the BAR0 arbiter.
     wire [39:0]  ps_hpm0_awaddr;
+    wire [15:0]  ps_hpm0_awid, ps_hpm0_bid, ps_hpm0_rid;
+    wire [7:0]   ps_hpm0_awlen;
+    wire [2:0]   ps_hpm0_awsize;
+    wire [1:0]   ps_hpm0_awburst;
+    wire         ps_hpm0_awlock;
+    wire [3:0]   ps_hpm0_awcache, ps_hpm0_awqos;
+    wire [2:0]   ps_hpm0_awprot;
     wire         ps_hpm0_awvalid, ps_hpm0_awready;
     wire [31:0]  ps_hpm0_wdata;
     wire [3:0]   ps_hpm0_wstrb;
-    wire         ps_hpm0_wvalid, ps_hpm0_wready;
+    wire         ps_hpm0_wlast, ps_hpm0_wvalid, ps_hpm0_wready;
     wire [1:0]   ps_hpm0_bresp;
     wire         ps_hpm0_bvalid, ps_hpm0_bready;
     wire [39:0]  ps_hpm0_araddr;
     wire [15:0]  ps_hpm0_arid;
     wire [7:0]   ps_hpm0_arlen;
     wire [2:0]   ps_hpm0_arsize;
+    wire [1:0]   ps_hpm0_arburst;
+    wire         ps_hpm0_arlock;
+    wire [3:0]   ps_hpm0_arcache, ps_hpm0_arqos;
+    wire [2:0]   ps_hpm0_arprot;
     wire         ps_hpm0_arvalid, ps_hpm0_arready;
     wire [31:0]  ps_hpm0_rdata;
     wire [1:0]   ps_hpm0_rresp;
-    wire         ps_hpm0_rvalid, ps_hpm0_rready;
+    wire         ps_hpm0_rlast, ps_hpm0_rvalid, ps_hpm0_rready;
+
+    wire [31:0]  ps_lite_awaddr, ps_lite_wdata, ps_lite_araddr, ps_lite_rdata;
+    wire [3:0]   ps_lite_wstrb;
+    wire [1:0]   ps_lite_bresp, ps_lite_rresp;
+    wire         ps_lite_awvalid, ps_lite_awready, ps_lite_wvalid, ps_lite_wready;
+    wire         ps_lite_bvalid, ps_lite_bready, ps_lite_arvalid, ps_lite_arready;
+    wire         ps_lite_rvalid, ps_lite_rready;
+
+    // A direct AXI4-to-AXI-Lite hookup loses HPM0's transaction IDs.
+    // In the 1202 capture ARID=0x002D, but the former hardwired RID=0,
+    // leaving the CPU stuck despite a valid 0x12ABE380 RDATA handshake.
+    // This IP preserves AXI4 ID/last/burst semantics on the PS side and
+    // issues AXI4-Lite accesses into the existing two-master BAR0 crossbar.
+    axi_protocol_converter_0 u_ps_axi4_to_lite (
+        .aclk(pl_clk0),
+        .aresetn(sys_100m_rst_n),
+        .s_axi_awid(ps_hpm0_awid),
+        .s_axi_awaddr(ps_hpm0_awaddr[31:0]),
+        .s_axi_awlen(ps_hpm0_awlen),
+        .s_axi_awsize(ps_hpm0_awsize),
+        .s_axi_awburst(ps_hpm0_awburst),
+        .s_axi_awlock(ps_hpm0_awlock),
+        .s_axi_awcache(ps_hpm0_awcache),
+        .s_axi_awprot(ps_hpm0_awprot),
+        .s_axi_awregion(4'd0),
+        .s_axi_awqos(ps_hpm0_awqos),
+        .s_axi_awvalid(ps_hpm0_awvalid),
+        .s_axi_awready(ps_hpm0_awready),
+        .s_axi_wdata(ps_hpm0_wdata),
+        .s_axi_wstrb(ps_hpm0_wstrb),
+        .s_axi_wlast(ps_hpm0_wlast),
+        .s_axi_wvalid(ps_hpm0_wvalid),
+        .s_axi_wready(ps_hpm0_wready),
+        .s_axi_bid(ps_hpm0_bid),
+        .s_axi_bresp(ps_hpm0_bresp),
+        .s_axi_bvalid(ps_hpm0_bvalid),
+        .s_axi_bready(ps_hpm0_bready),
+        .s_axi_arid(ps_hpm0_arid),
+        .s_axi_araddr(ps_hpm0_araddr[31:0]),
+        .s_axi_arlen(ps_hpm0_arlen),
+        .s_axi_arsize(ps_hpm0_arsize),
+        .s_axi_arburst(ps_hpm0_arburst),
+        .s_axi_arlock(ps_hpm0_arlock),
+        .s_axi_arcache(ps_hpm0_arcache),
+        .s_axi_arprot(ps_hpm0_arprot),
+        .s_axi_arregion(4'd0),
+        .s_axi_arqos(ps_hpm0_arqos),
+        .s_axi_arvalid(ps_hpm0_arvalid),
+        .s_axi_arready(ps_hpm0_arready),
+        .s_axi_rid(ps_hpm0_rid),
+        .s_axi_rdata(ps_hpm0_rdata),
+        .s_axi_rresp(ps_hpm0_rresp),
+        .s_axi_rlast(ps_hpm0_rlast),
+        .s_axi_rvalid(ps_hpm0_rvalid),
+        .s_axi_rready(ps_hpm0_rready),
+        .m_axi_awaddr(ps_lite_awaddr),
+        .m_axi_awprot(),
+        .m_axi_awvalid(ps_lite_awvalid),
+        .m_axi_awready(ps_lite_awready),
+        .m_axi_wdata(ps_lite_wdata),
+        .m_axi_wstrb(ps_lite_wstrb),
+        .m_axi_wvalid(ps_lite_wvalid),
+        .m_axi_wready(ps_lite_wready),
+        .m_axi_bresp(ps_lite_bresp),
+        .m_axi_bvalid(ps_lite_bvalid),
+        .m_axi_bready(ps_lite_bready),
+        .m_axi_araddr(ps_lite_araddr),
+        .m_axi_arprot(),
+        .m_axi_arvalid(ps_lite_arvalid),
+        .m_axi_arready(ps_lite_arready),
+        .m_axi_rdata(ps_lite_rdata),
+        .m_axi_rresp(ps_lite_rresp),
+        .m_axi_rvalid(ps_lite_rvalid),
+        .m_axi_rready(ps_lite_rready)
+    );
 
     wire [48:0]  hp0_awaddr_w;
     wire [7:0]   hp0_awlen_w;
@@ -1443,6 +1529,10 @@ module zu4ev_pcie_card_top #(
         .ps_hpm0_arid(ps_hpm0_arid),
         .ps_hpm0_arlen(ps_hpm0_arlen),
         .ps_hpm0_arsize(ps_hpm0_arsize),
+        .ps_hpm0_arvalid_raw(ps_hpm0_arvalid),
+        .ps_hpm0_arready_raw(ps_hpm0_arready),
+        .ps_hpm0_rid_raw(ps_hpm0_rid),
+        .ps_hpm0_rvalid_raw(ps_hpm0_rvalid),
 
         // PCIe CQ
         .s_axis_cq_tdata(m_axis_cq_tdata),
@@ -1557,24 +1647,24 @@ module zu4ev_pcie_card_top #(
         .out_hdmi_ipc_status(hdmi_ipc_status_w),
         .out_hdmi_ipc_doorbell(hdmi_ipc_doorbell_w),
 
-        // PS ARM Linux AXI4-Lite Slave Interface (from PS M_AXI_HPM0_FPD)
-        .s_axil_ps_awaddr(ps_hpm0_awaddr[31:0]),
-        .s_axil_ps_awvalid(ps_hpm0_awvalid),
-        .s_axil_ps_awready(ps_hpm0_awready),
-        .s_axil_ps_wdata(ps_hpm0_wdata),
-        .s_axil_ps_wstrb(ps_hpm0_wstrb),
-        .s_axil_ps_wvalid(ps_hpm0_wvalid),
-        .s_axil_ps_wready(ps_hpm0_wready),
-        .s_axil_ps_bresp(ps_hpm0_bresp),
-        .s_axil_ps_bvalid(ps_hpm0_bvalid),
-        .s_axil_ps_bready(ps_hpm0_bready),
-        .s_axil_ps_araddr(ps_hpm0_araddr[31:0]),
-        .s_axil_ps_arvalid(ps_hpm0_arvalid),
-        .s_axil_ps_arready(ps_hpm0_arready),
-        .s_axil_ps_rdata(ps_hpm0_rdata),
-        .s_axil_ps_rresp(ps_hpm0_rresp),
-        .s_axil_ps_rvalid(ps_hpm0_rvalid),
-        .s_axil_ps_rready(ps_hpm0_rready),
+        // AXI4-Lite from PS AXI4 protocol converter (PCIe shares BAR0 here)
+        .s_axil_ps_awaddr(ps_lite_awaddr),
+        .s_axil_ps_awvalid(ps_lite_awvalid),
+        .s_axil_ps_awready(ps_lite_awready),
+        .s_axil_ps_wdata(ps_lite_wdata),
+        .s_axil_ps_wstrb(ps_lite_wstrb),
+        .s_axil_ps_wvalid(ps_lite_wvalid),
+        .s_axil_ps_wready(ps_lite_wready),
+        .s_axil_ps_bresp(ps_lite_bresp),
+        .s_axil_ps_bvalid(ps_lite_bvalid),
+        .s_axil_ps_bready(ps_lite_bready),
+        .s_axil_ps_araddr(ps_lite_araddr),
+        .s_axil_ps_arvalid(ps_lite_arvalid),
+        .s_axil_ps_arready(ps_lite_arready),
+        .s_axil_ps_rdata(ps_lite_rdata),
+        .s_axil_ps_rresp(ps_lite_rresp),
+        .s_axil_ps_rvalid(ps_lite_rvalid),
+        .s_axil_ps_rready(ps_lite_rready),
 
         // PS DDR4 AXI4 Master Write Interface (to PS S_AXI_HP0_FPD)
         .m_axi_hp0_awaddr(hp0_awaddr_w),
@@ -1604,43 +1694,43 @@ module zu4ev_pcie_card_top #(
         .pl_resetn0(pl_resetn0),
         .pl_ps_irq0(ps_irq_pulse_w),
 
-        // M_AXI_HPM0_FPD (PS AXI-Lite Master to PL axil_reg_space)
+        // M_AXI_HPM0_FPD (full AXI4 PS master -> protocol converter)
         .M_AXI_HPM0_FPD_araddr(ps_hpm0_araddr),
-        .M_AXI_HPM0_FPD_arburst(),
-        .M_AXI_HPM0_FPD_arcache(),
+        .M_AXI_HPM0_FPD_arburst(ps_hpm0_arburst),
+        .M_AXI_HPM0_FPD_arcache(ps_hpm0_arcache),
         .M_AXI_HPM0_FPD_arid(ps_hpm0_arid),
         .M_AXI_HPM0_FPD_arlen(ps_hpm0_arlen),
-        .M_AXI_HPM0_FPD_arlock(),
-        .M_AXI_HPM0_FPD_arprot(),
-        .M_AXI_HPM0_FPD_arqos(),
+        .M_AXI_HPM0_FPD_arlock(ps_hpm0_arlock),
+        .M_AXI_HPM0_FPD_arprot(ps_hpm0_arprot),
+        .M_AXI_HPM0_FPD_arqos(ps_hpm0_arqos),
         .M_AXI_HPM0_FPD_arready(ps_hpm0_arready),
         .M_AXI_HPM0_FPD_arsize(ps_hpm0_arsize),
         .M_AXI_HPM0_FPD_aruser(),
         .M_AXI_HPM0_FPD_arvalid(ps_hpm0_arvalid),
         .M_AXI_HPM0_FPD_awaddr(ps_hpm0_awaddr),
-        .M_AXI_HPM0_FPD_awburst(),
-        .M_AXI_HPM0_FPD_awcache(),
-        .M_AXI_HPM0_FPD_awid(),
-        .M_AXI_HPM0_FPD_awlen(),
-        .M_AXI_HPM0_FPD_awlock(),
-        .M_AXI_HPM0_FPD_awprot(),
-        .M_AXI_HPM0_FPD_awqos(),
+        .M_AXI_HPM0_FPD_awburst(ps_hpm0_awburst),
+        .M_AXI_HPM0_FPD_awcache(ps_hpm0_awcache),
+        .M_AXI_HPM0_FPD_awid(ps_hpm0_awid),
+        .M_AXI_HPM0_FPD_awlen(ps_hpm0_awlen),
+        .M_AXI_HPM0_FPD_awlock(ps_hpm0_awlock),
+        .M_AXI_HPM0_FPD_awprot(ps_hpm0_awprot),
+        .M_AXI_HPM0_FPD_awqos(ps_hpm0_awqos),
         .M_AXI_HPM0_FPD_awready(ps_hpm0_awready),
-        .M_AXI_HPM0_FPD_awsize(),
+        .M_AXI_HPM0_FPD_awsize(ps_hpm0_awsize),
         .M_AXI_HPM0_FPD_awuser(),
         .M_AXI_HPM0_FPD_awvalid(ps_hpm0_awvalid),
-        .M_AXI_HPM0_FPD_bid(16'd0),
+        .M_AXI_HPM0_FPD_bid(ps_hpm0_bid),
         .M_AXI_HPM0_FPD_bready(ps_hpm0_bready),
         .M_AXI_HPM0_FPD_bresp(ps_hpm0_bresp),
         .M_AXI_HPM0_FPD_bvalid(ps_hpm0_bvalid),
         .M_AXI_HPM0_FPD_rdata(ps_hpm0_rdata),
-        .M_AXI_HPM0_FPD_rid(16'd0),
-        .M_AXI_HPM0_FPD_rlast(1'b1),
+        .M_AXI_HPM0_FPD_rid(ps_hpm0_rid),
+        .M_AXI_HPM0_FPD_rlast(ps_hpm0_rlast),
         .M_AXI_HPM0_FPD_rready(ps_hpm0_rready),
         .M_AXI_HPM0_FPD_rresp(ps_hpm0_rresp),
         .M_AXI_HPM0_FPD_rvalid(ps_hpm0_rvalid),
         .M_AXI_HPM0_FPD_wdata(ps_hpm0_wdata),
-        .M_AXI_HPM0_FPD_wlast(),
+        .M_AXI_HPM0_FPD_wlast(ps_hpm0_wlast),
         .M_AXI_HPM0_FPD_wready(ps_hpm0_wready),
         .M_AXI_HPM0_FPD_wstrb(ps_hpm0_wstrb),
         .M_AXI_HPM0_FPD_wvalid(ps_hpm0_wvalid),

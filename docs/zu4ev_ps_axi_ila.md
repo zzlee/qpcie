@@ -1,8 +1,8 @@
-# ZU4EV PS → PL AXI ILA (26101202)
+# ZU4EV PS → PL AXI ILA (26101203)
 
 This diagnostic build adds one ILA clocked from `pl_clk0` (~100 MHz), not the PCIe user clock. The ILA does not alter the PS AXI path. Keep `qpcie-upgrade-daemon.service` disabled for single-read diagnosis.
 
-Timing caveat: 26101202 implementation reports 100 MHz `clk_pl_0` intra-clock WNS +1.915 ns, but overall timing is **not met** (WNS -1.535 ns; inter-clock paths still violate timing). These builds are for standalone PS AXI diagnostics, not a claim that PCIe functionality is production-validated.
+Timing caveat: 26101203 implementation reports 100 MHz `clk_pl_0` intra-clock WNS +1.681 ns, but overall timing is **not met** (WNS -1.706 ns; inter-clock paths violate timing). These builds are for standalone PS AXI diagnostics, not a claim that PCIe functionality is production-validated.
 
 | Probe | Signal |
 | --- | --- |
@@ -10,10 +10,13 @@ Timing caveat: 26101202 implementation reports 100 MHz `clk_pl_0` intra-clock WN
 | 1 | `s_axil_ps_araddr[31:0]` before BAR0 offset stripping |
 | 2 | `arb_axil_araddr[31:0]` at DMA CSR slave |
 | 3 | `s_axil_ps_rdata[31:0]` returned to PS |
-| 4 | `s_axil_ps_arvalid` dedicated trigger |
-| 5 | PS HPM0 `ARID[15:0]` (must match `RID`; currently RTL ties RID to zero) |
-| 6 | PS HPM0 `ARLEN[7:0]` (currently RTL always asserts RLAST) |
+| 4 | raw PS HPM0 `ARVALID` dedicated trigger (before protocol conversion) |
+| 5 | raw PS HPM0 `ARID[15:0]` (must match `RID`) |
+| 6 | raw PS HPM0 `ARLEN[7:0]` |
 | 7 | PS HPM0 `ARSIZE[2:0]` |
+| 8 | returned PS HPM0 `RID[15:0]` |
+| 9 | returned PS HPM0 `RVALID` |
+| 10 | raw PS HPM0 `ARREADY` |
 
 Status bits: 0=`sys_100m_rst_n`; 1=`arb_awvalid`; 2=`env_awvalid`; 3=`cvt_bar0_arvalid` (PCIe); 4=`ps_arvalid`; 5=`ps_arready`; 6=`ps_rvalid`; 7=`ps_rready`; 8=`arb_arvalid`; 9=`arb_arready`; 10=`arb_rvalid`; 11=`arb_rready`; 12=`env_arvalid`; 13=`env_arready`; 14=`env_rvalid`; 15=`env_rready`; 17:16=`ps_rresp`; 19:18=`arb_rresp`; 21:20=`env_rresp`; 22=`pl_resetn0`. Remaining bits zero.
 
@@ -25,4 +28,6 @@ Alternatively from the repository root, run `source /opt/Xilinx/Vivado/2023.2/se
 
 The two boot roles remain separate: SD root files (`BOOT.BIN`, `boot.scr`, `image.ub`) boot the eMMC installer; only `target_emmc/` gets copied to eMMC by that installer. The eMMC rootfs image in this diagnostic release explicitly masks the upgrade service (`/etc/systemd/system/qpcie-upgrade-daemon.service -> /dev/null`), as verified by extracting its FIT ramdisk. Capture the ILA *before* the first `devmem` because a hung read cannot be interrupted reliably from Linux.
 
-0807 hardware capture: PS address `0xA0000000`, ARVALID=1 held for 2048 samples, ARREADY=0, RVALID=0; status bit 0 (`sys_100m_rst_n`) stayed 0. The `proc_sys_reset_0.xci` declares `C_AUX_RESET_HIGH=1` but both reset instances tied `aux_reset_in` HIGH. 1201 ties unused auxiliary reset LOW; bit 22 distinguishes a PS-side reset assertion from the reset controller output. 1201 capture shows AR/R handshakes and data `0x12ABE380`, **but Linux devmem still hung**. 1202 only adds ARID/ARLEN/ARSIZE probes so that the AXI4-to-AXI-Lite protocol mismatch can be diagnosed; no AXI4 reply behavior is changed yet. Do not treat PL-side handshake as proof that the CPU completed the read.
+0807 capture: `sys_100m_rst_n=0` held the slave in reset. 1201 fixed reset and PL returned `0x12ABE380`, **but Linux devmem still hung**. 1202 capture shows `ARID=0x002D`, `ARLEN=0`, `ARSIZE=2` while RTL forced `RID=0`: an AXI4 ID mismatch. 1203 adds an AMD AXI4-to-AXI4-Lite protocol converter between PS HPM0 and the existing shared BAR0 crossbar, replacing hardwired `RID/BID/RLAST`. Probe4 now triggers at the raw PS AXI4 interface. Require Linux `devmem` to actually return; PL-side handshake alone does not prove CPU completion.
+
+Before burning 1203, run `source /opt/Xilinx/Vivado/2023.2/settings64.sh && vivado -mode batch -source scripts/sim_zu4ev_ps_axi_protocol.tcl`. The focused `tb/zu4ev_ps_axi_protocol_tb.sv` instantiates the **real Vivado converter IP** and a small AXI4-Lite CSR responder. It checks nonzero `ARID=0x002D` -> matching `RID`, `RLAST`, magic and version reads, nonzero `AWID` -> matching `BID`, and write/readback. Expect `TB_PASS`. This does **not** simulate the PS hard block, NoC, clock converter, crossbar with both masters, Linux driver, or installed board; still capture ILA and verify that `devmem` actually returns.

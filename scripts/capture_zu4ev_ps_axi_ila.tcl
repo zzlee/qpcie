@@ -18,7 +18,7 @@ set ila [lindex [get_hw_ilas -of_objects $device] 0]
 if {$ila eq ""} {error "ILA not found; confirm diagnostic BOOT.BIN is programmed and PL clock is active"}
 puts "ILA: $ila"
 puts "PROBES: [get_hw_probes -of_objects $ila]"
-set trigger_probe [lindex [get_hw_probes -of_objects $ila -filter {NAME =~ *s_axil_ps_arvalid*}] 0]
+set trigger_probe [lindex [get_hw_probes -of_objects $ila -filter {NAME =~ *ps_hpm0_arvalid_raw*}] 0]
 if {$trigger_probe eq ""} {error "No PS ARVALID trigger found in the loaded LTX"}
 set_property TRIGGER_COMPARE_VALUE {eq1'b1} $trigger_probe
 run_hw_ila $ila
