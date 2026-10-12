@@ -369,7 +369,7 @@ module custom_pcie_dma_top #(
         .C_S_AXI_DATA_WIDTH(32),
         .C_VERSION(C_VERSION),
         .C_PLATFORM("PCIE"),
-        .C_BOARD_VERSION(32'h00000101)
+        .C_BOARD_VERSION(32'h00000201) /* M2_710 N1 HDMI 4KP60 REV 2.1 */
     ) u_zzlab_env_ctrl (
         .clk                (pl_clk0),
         .rst_n              (sys_100m_rst_n),

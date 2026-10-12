@@ -29,6 +29,10 @@
 #define SYSFS_PCI_BASE "/sys/bus/pci/devices"
 
 /* MCU I2C master in BAR1 (M05) */
+#define BAR0_OFFSET_ENV_BLOCK    0x1000
+#define BAR0_REG_BOARD_VERSION 0x1008  /* zzlab_env_ctrl C_BOARD_VERSION */
+
+/* MCU I2C master in BAR1 (M05) */
 #define BAR1_OFFSET_I2C_MCU  0x5000
 #define REG_I2C_PRER_LO      0x00
 #define REG_I2C_PRER_HI      0x04
@@ -207,35 +211,39 @@ static int find_qpcie(void)
 
 static void usage(const char *p)
 {
-    printf("Usage: %s [--scan|--dump|--loopback|--status|--set-ctrl HEX]\n", p);
-    printf("  Direct BAR1 MMIO to MCU I2C master (0x5000). Unloads qpcie driver.\n");
+    printf("Usage: %s [--scan|--dump|--loopback|--status|--board-ver|--set-ctrl HEX]\n", p);
+    printf("  Direct BAR MMIO: BAR1 0x5000 MCU I2C master; BAR0 0x1008 board version.\n");
+    printf("  Unloads qpcie driver.\n");
 }
 
 int main(int argc, char **argv)
 {
     bool do_scan = false, do_dump = false, do_lb = false, do_status = false;
+    bool do_board = false;
     const char *ctrl_hex = NULL;
     static struct option lo[] = {
         {"scan", no_argument, 0, 's'},
         {"dump", no_argument, 0, 'd'},
         {"loopback", no_argument, 0, 'l'},
         {"status", no_argument, 0, 't'},
+        {"board-ver", no_argument, 0, 'b'},
         {"set-ctrl", required_argument, 0, 'c'},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0}
     };
     int o;
-    while ((o = getopt_long(argc, argv, "sdlthc:", lo, NULL)) != -1) {
+    while ((o = getopt_long(argc, argv, "sdlthbc:", lo, NULL)) != -1) {
         switch (o) {
         case 's': do_scan = true; break;
         case 'd': do_dump = true; break;
         case 'l': do_lb = true; break;
         case 't': do_status = true; break;
+        case 'b': do_board = true; break;
         case 'c': ctrl_hex = optarg; break;
         default: usage(argv[0]); return o == 'h' ? 0 : 1;
         }
     }
-    if (!do_scan && !do_dump && !do_lb && !do_status && !ctrl_hex) {
+    if (!do_scan && !do_dump && !do_lb && !do_status && !do_board && !ctrl_hex) {
         usage(argv[0]);
         return 1;
     }
@@ -274,6 +282,32 @@ int main(int argc, char **argv)
     write32(bar1, BAR1_OFFSET_I2C_MCU + REG_I2C_PRER_LO, 249);
     write32(bar1, BAR1_OFFSET_I2C_MCU + REG_I2C_PRER_HI, 0);
     write32(bar1, BAR1_OFFSET_I2C_MCU + REG_I2C_CTR, I2C_CTR_EN);
+
+    if (do_board) {
+        char r0[600];
+        snprintf(r0, sizeof(r0), "%s/resource0", g_device_path);
+        int fd0 = open(r0, O_RDONLY);
+        if (fd0 < 0) {
+            perror("open resource0");
+            rc = 1;
+        } else {
+            volatile uint8_t *bar0 = mmap(NULL, 65536, PROT_READ,
+                                          MAP_SHARED, fd0, 0);
+            if (bar0 == MAP_FAILED) {
+                perror("mmap resource0");
+                rc = 1;
+            } else {
+                uint32_t bv = read32(bar0,
+                    BAR0_OFFSET_ENV_BLOCK + BAR0_REG_BOARD_VERSION);
+                printf("BOARD_VERSION 0x%08X (expect 0x00000201 M2_710 REV2.1)%s\n",
+                       bv, bv == 0x00000201 ? "  [OK]" : "  [MISMATCH]");
+                if (bv != 0x00000201)
+                    rc = 1;
+                munmap((void *)bar0, 65536);
+            }
+            close(fd0);
+        }
+    }
 
     if (do_scan) {
         printf("--- MCU bus scan ---\n");
