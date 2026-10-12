@@ -28,11 +28,11 @@
 #define VENDOR_ID "0x12ab"
 #define DEVICE_ID "0xe380"
 
-/* BAR0 Firmware Update Register Offsets (0x0700 - 0x0728) */
-#define REG_VERSION_ID         0x0030
-#define REG_GIT_COMMIT_HASH    0x0034
-#define REG_BUILD_TIMESTAMP    0x0038
-#define REG_HARDWARE_CAPS      0x003C
+/* BAR0 Global ID Registers (match rtl/axil_reg_space.v GLOBAL block) */
+#define REG_VERSION_ID         0x0004
+#define REG_GIT_COMMIT_HASH    0x000C
+#define REG_BUILD_TIMESTAMP    0x0010
+#define REG_HARDWARE_CAPS      0x0008
 
 #define REG_FW_UPDATE_CMD      0x0700
 #define REG_FW_UPDATE_TYPE     0x0704

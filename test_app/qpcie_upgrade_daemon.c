@@ -358,7 +358,7 @@ int main(int argc, char **argv) {
             pl_regs[REG_DMA_UPG_CTRL / 4]     = DMA_UPG_CMD_NONE;
         }
 
-        usleep(20000); // 20ms poll interval
+        usleep(100000); // 100ms poll interval (firmware upgrade is not latency-sensitive)
     }
 
     munmap((void *)dma_buf, DDR4_DMA_BUF_SIZE);

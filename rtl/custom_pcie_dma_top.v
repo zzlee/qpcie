@@ -11,7 +11,7 @@
 `timescale 1ns / 1ps
 
 module custom_pcie_dma_top #(
-    parameter [31:0] C_VERSION = 32'h2610_1203,
+    parameter [31:0] C_VERSION = 32'h2610_1204,
     parameter PCIE_DATA_WIDTH  = 128,
     parameter PCIE_KEEP_WIDTH  = PCIE_DATA_WIDTH / 8,
     parameter NUM_VIDEO_CH     = 2,
@@ -215,6 +215,13 @@ module custom_pcie_dma_top #(
     wire        env_axil_rvalid, env_axil_rready;
     wire [31:0] env_ap_rst_n;
 
+    wire [31:0] cvt_bar0_axil_awaddr, cvt_bar0_axil_wdata, cvt_bar0_axil_araddr, cvt_bar0_axil_rdata;
+    wire [3:0]  cvt_bar0_axil_wstrb;
+    wire [1:0]  cvt_bar0_axil_bresp, cvt_bar0_axil_rresp;
+    wire        cvt_bar0_axil_awvalid, cvt_bar0_axil_awready, cvt_bar0_axil_wvalid, cvt_bar0_axil_wready;
+    wire        cvt_bar0_axil_bvalid, cvt_bar0_axil_bready, cvt_bar0_axil_arvalid, cvt_bar0_axil_arready;
+    wire        cvt_bar0_axil_rvalid, cvt_bar0_axil_rready;
+
     // Standalone PS -> PL read-path capture (100 MHz PS clock, independent of
     // PCIe link). Arm from JTAG BEFORE issuing a single devmem read on UART.
     // Status bit map and capture procedure: docs/zu4ev_ps_axi_ila.md.
@@ -257,13 +264,6 @@ module custom_pcie_dma_top #(
         .probe9(ps_hpm0_rvalid_raw),
         .probe10(ps_hpm0_arready_raw)
     );
-
-    wire [31:0] cvt_bar0_axil_awaddr, cvt_bar0_axil_wdata, cvt_bar0_axil_araddr, cvt_bar0_axil_rdata;
-    wire [3:0]  cvt_bar0_axil_wstrb;
-    wire [1:0]  cvt_bar0_axil_bresp, cvt_bar0_axil_rresp;
-    wire        cvt_bar0_axil_awvalid, cvt_bar0_axil_awready, cvt_bar0_axil_wvalid, cvt_bar0_axil_wready;
-    wire        cvt_bar0_axil_bvalid, cvt_bar0_axil_bready, cvt_bar0_axil_arvalid, cvt_bar0_axil_arready;
-    wire        cvt_bar0_axil_rvalid, cvt_bar0_axil_rready;
 
     axi_clock_converter_0 u_axi_clock_converter_0 (
         .s_axi_aclk(clk),
@@ -629,6 +629,33 @@ module custom_pcie_dma_top #(
     wire        upg_irq_pulse_w;
     wire        upg_lb_tready;
 
+    // pl_clk0 -> pcie_user_clk synchronizer for the H2C upgrade trigger.
+    // The BAR0 CSR (axil_reg_space, pl_clk0) publishes dma_upg_ctrl_w[0] as
+    // START, but every consumer below (lb gate, descriptor trigger, RQ
+    // address/length) runs on pcie_user_clk `clk`. Sampling the CSR bit
+    // directly wedged the upgrade path (1203: START latched, zero bytes
+    // moved, DMA_DONE never set). The driver programs SIZE/HOST_ADDR before
+    // asserting START and holds them until DMA_DONE, so capturing the stable
+    // bus on the synchronized rising edge is safe.
+    reg  [1:0]  upg_start_sync;
+    reg  [31:0] upg_size_pcie;
+    reg  [63:0] upg_host_addr_pcie;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            upg_start_sync     <= 2'b00;
+            upg_size_pcie      <= 32'd0;
+            upg_host_addr_pcie <= 64'd0;
+        end else begin
+            upg_start_sync <= {upg_start_sync[0], dma_upg_ctrl_w[0]};
+            if (upg_start_sync == 2'b01) begin
+                upg_size_pcie      <= dma_upg_size_w;
+                upg_host_addr_pcie <= dma_upg_host_addr_w;
+            end
+        end
+    end
+    wire upg_active_pcie = upg_start_sync[1];
+    wire upg_start_pulse = (upg_start_sync == 2'b01);
+
     wire [127:0] lb_tdata;
     wire        lb_tvalid, lb_tlast, lb_tuser;
     wire        sg_loopback_enable;
@@ -640,9 +667,12 @@ module custom_pcie_dma_top #(
 `endif
 `ifdef QPCIe_single_rgb24_path
     // When firmware upgrade is active, route backpressure from h2c_ps_ddr_writer
-    wire        lb_tready = dma_upg_ctrl_w[0] ? upg_lb_tready : 1'b1;
+    // NOTE: upg_active_pcie is the pl_clk0 START level synchronized into this
+    // (pcie_user_clk) domain. Sampling dma_upg_ctrl_w[0] directly here is an
+    // unsynchronized CDC and the H2C descriptor below never fired (1203).
+    wire        lb_tready = upg_active_pcie ? upg_lb_tready : 1'b1;
 `else
-    wire        lb_tready = dma_upg_ctrl_w[0] ? upg_lb_tready :
+    wire        lb_tready = upg_active_pcie ? upg_lb_tready :
                             (!sg_loopback_enable ? 1'b1 :
                             (NUM_VIDEO_CH > 2 && sg_loopback_channel == 2'd2) ? !ch2_loopback_full :
                             (NUM_VIDEO_CH > 3 && sg_loopback_channel == 2'd3) ? !ch3_loopback_full :
@@ -1126,7 +1156,7 @@ module custom_pcie_dma_top #(
         .s_axis_aresetn(rst_n),
         .s_axis_tdata(lb_tdata),
         .s_axis_tkeep(16'hFFFF),
-        .s_axis_tvalid(lb_tvalid && dma_upg_ctrl_w[0]),
+        .s_axis_tvalid(lb_tvalid && upg_active_pcie),
         .s_axis_tlast(lb_tlast),
         .s_axis_tuser({84'd0, lb_tuser}),
         .s_axis_tready(upg_lb_tready),
@@ -1448,15 +1478,8 @@ module custom_pcie_dma_top #(
     );
 
     // 7. Canonical v3.0 Thin Descriptor Engine Ties + Upgrade H2C DMA Trigger
-    reg d_upg_start;
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n)
-            d_upg_start <= 1'b0;
-        else
-            d_upg_start <= dma_upg_ctrl_w[0];
-    end
-    wire upg_start_pulse = dma_upg_ctrl_w[0] && !d_upg_start;
-
+    // upg_start_pulse / upg_h2c_desc_valid_q are in the pcie_user_clk domain
+    // and are now driven by the synchronized START (see upg_start_sync above).
     reg upg_h2c_desc_valid_q;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n)
@@ -1470,16 +1493,16 @@ module custom_pcie_dma_top #(
     assign desc_fetch_idle = !thin_busy && !sg_h2c_busy;
     assign h2c_desc_valid  = upg_h2c_desc_valid_q;
     assign c2h_desc_valid  = 1'b0;
-    assign h2c_plane0_src  = dma_upg_host_addr_w;
+    assign h2c_plane0_src  = upg_host_addr_pcie;
     assign h2c_plane0_dst  = 64'd0;
-    assign h2c_plane1_src  = {32'd0, dma_upg_size_w};
+    assign h2c_plane1_src  = {32'd0, upg_size_pcie};
     assign h2c_plane1_dst  = 64'd0;
     assign h2c_plane2_src  = 64'd0;
     assign h2c_plane2_dst  = 64'd0;
     assign h2c_line_width  = 16'd4096;
-    assign h2c_line_count  = (dma_upg_size_w[11:0] == 12'd0) ?
-                             dma_upg_size_w[27:12] :
-                             (dma_upg_size_w[27:12] + 16'd1);
+    assign h2c_line_count  = (upg_size_pcie[11:0] == 12'd0) ?
+                             upg_size_pcie[27:12] :
+                             (upg_size_pcie[27:12] + 16'd1);
     assign h2c_src_stride  = 16'd0;
     assign h2c_dst_stride  = 16'd0;
     assign h2c_plane12_width = 16'd0;
