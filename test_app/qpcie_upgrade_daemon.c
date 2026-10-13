@@ -252,7 +252,7 @@ static int stage_path(char *dst, size_t cap, const char *dir, const char *name) 
 
 /* VERIFY: CRC-check staging DDR, extract tar, validate package contents.
  * Touches eMMC in NO way. Sets *verified on success. */
-static void do_verify(volatile uint32_t *pl_regs, const uint8_t *dma_buf,
+static void do_verify_ram(volatile uint32_t *pl_regs, const uint8_t *dma_buf,
                       uint32_t req_size, uint32_t req_crc,
                       uint32_t *verified_size, uint32_t *verified_crc,
                       bool *verified) {
@@ -316,6 +316,32 @@ static void do_verify(volatile uint32_t *pl_regs, const uint8_t *dma_buf,
     pl_regs[REG_DMA_UPG_PROGRESS / 4] = 60;
     syslog(LOG_NOTICE, "VERIFY: package complete (BOOT.BIN/image.ub/boot.scr present)");
     finish_cmd(pl_regs, STATUS_UPG_VERIFIED);
+}
+
+/* Snapshot the Device-mapped DDR before using any libc bulk operation.
+ * The host must stop DMA and hold the session exclusive throughout VERIFY. */
+static void do_verify(volatile uint32_t *pl_regs, const uint8_t *dma_buf,
+                      uint32_t req_size, uint32_t req_crc,
+                      uint32_t *verified_size, uint32_t *verified_crc,
+                      bool *verified) {
+    *verified = false;
+    if (!req_size || req_size > DDR4_DMA_BUF_SIZE ||
+        (pl_regs[REG_DMA_UPG_CTRL / 4] & DMA_UPG_CMD_START)) {
+        finish_cmd(pl_regs, STATUS_UPG_ERR_STATE);
+        return;
+    }
+    uint8_t *snapshot = malloc(req_size);
+    if (!snapshot) {
+        syslog(LOG_ERR, "VERIFY: cannot allocate %u-byte RAM snapshot", req_size);
+        finish_cmd(pl_regs, STATUS_UPG_ERR_FLASH);
+        return;
+    }
+    pl_regs[REG_DMA_UPG_STATUS / 4] = STATUS_UPG_VERIFYING;
+    pl_regs[REG_DMA_UPG_PROGRESS / 4] = 25;
+    qch_device_snapshot(snapshot, dma_buf, req_size);
+    do_verify_ram(pl_regs, snapshot, req_size, req_crc,
+                  verified_size, verified_crc, verified);
+    free(snapshot);
 }
 
 /* Restore p1 files that were backed up (best effort, errors logged). */

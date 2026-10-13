@@ -17,6 +17,14 @@
 
 #define QCH_COPY_BUF (64u * 1024u)
 
+/* Device mappings must not be passed to libc memcpy/fwrite: optimized
+ * implementations may issue unaligned accesses forbidden by ARM Device memory.
+ * Volatile byte loads preserve the access width, including arbitrary tails. */
+static void qch_device_snapshot(unsigned char *dst,
+                                const volatile unsigned char *src, size_t len) {
+    for (size_t i = 0; i < len; ++i) dst[i] = src[i];
+}
+
 /* Copy src file to dst file (truncate/create 0644), fsync before close.
  * Returns 0 on full success, -1 otherwise (dst may be partial). */
 static int qch_copy_file(const char *src, const char *dst) {

@@ -30,6 +30,12 @@ static void join(char *dst, size_t cap, const char *dir, const char *name) {
 }
 
 int main(void) {
+    unsigned char device_bytes[257], snapshot[257];
+    for (size_t i = 0; i < sizeof device_bytes; ++i) device_bytes[i] = (unsigned char)i;
+    memset(snapshot, 0xaa, sizeof snapshot);
+    qch_device_snapshot(snapshot + 1, device_bytes + 1, 255);
+    CHECK(snapshot[0] == 0xaa && snapshot[256] == 0xaa, "snapshot guard bytes");
+    CHECK(memcmp(snapshot + 1, device_bytes + 1, 255) == 0, "unaligned snapshot tail");
     char tmp[] = "/tmp/opencode/qch_tb_XXXXXX";
     CHECK(mkdtemp(tmp) != NULL, "mkdtemp");
     char mnt[256], bak[256], stg[256];

@@ -275,16 +275,22 @@ static bool verify_staging(volatile uint32_t *bar0, const uint8_t *buf, size_t l
 /* Ring a doorbell command and poll for a terminal status. */
 static bool doorbell_poll(volatile uint32_t *bar0, uint32_t cmd, uint32_t want,
                           int timeout_s, const char *what) {
+    if (cmd == DOORBELL_VERIFY) {
+        bar0[REG_DMA_UPG_STATUS / 4] = STATUS_UPG_IDLE;
+        (void)bar0[REG_DMA_UPG_STATUS / 4];
+    }
     bar0[REG_DMA_UPG_DOORBELL / 4] = cmd;
     (void)bar0[REG_DMA_UPG_DOORBELL / 4];
     double t0 = get_time_sec();
     uint32_t last_prog = 0xFF;
+    bool accepted = false;
     while (get_time_sec() - t0 < timeout_s) {
+        if (bar0[REG_DMA_UPG_DOORBELL / 4] == 0) accepted = true;
         uint32_t st = bar0[REG_DMA_UPG_STATUS / 4];
         uint32_t prog = bar0[REG_DMA_UPG_PROGRESS / 4];
-        if (st == want) { printf("\n -> %s reached 0x%02X\n", what, want); return true; }
-        if (st == STATUS_UPG_ERR_CRC || st == STATUS_UPG_ERR_FLASH ||
-            st == STATUS_UPG_ERR_TIMEOUT || st == STATUS_UPG_ERR_STATE) {
+        if (accepted && st == want) { printf("\n -> %s reached 0x%02X\n", what, want); return true; }
+        if (accepted && (st == STATUS_UPG_ERR_CRC || st == STATUS_UPG_ERR_FLASH ||
+            st == STATUS_UPG_ERR_TIMEOUT || st == STATUS_UPG_ERR_STATE)) {
             fprintf(stderr, "\n%s failed: status %s (0x%02X)\n", what, status_name(st), st);
             return false;
         }

@@ -5,6 +5,30 @@ verifies it through BAR0 readback, then asks the board only to VERIFY.
 Stage 2 (`qpcie_upgrade --commit`) flashes eMMC from the VERIFIED bundle.
 eMMC is written ONLY by an explicit COMMIT; a VERIFY never writes.
 
+**COMMIT hardware testing is NOT authorized or safety-qualified yet.**
+The current backup is in volatile `/tmp`, so it cannot provide power-loss
+recovery. Restoration is best-effort, not an atomic update. The boot0 path
+can proceed without a verified backup and has not been validated against
+the actual eMMC capacity/boot layout. Archive extraction also still needs
+strict member/type/size validation. Do not interpret VERIFIED as permission
+to flash, or the helper tests as a complete transaction/rollback test.
+
+## VERIFY diagnostic result (1401)
+
+The 41,489,105-byte gzip bundle was completely DMA-transferred and host
+readback-verified, but the board VERIFY returned to IDLE after acknowledging
+the doorbell. A 50,532-byte legal test archive reproduced that behavior.
+The SAME small archive padded to 53,248 bytes reached VERIFIED; the real
+archive padded to 41,492,480 bytes likewise reached VERIFIED in 45.4s.
+No COMMIT or reboot was performed during these controlled tests.
+
+This strongly suggests an unaligned bulk access to `/dev/mem` Device memory
+(for example `fwrite`), not necessarily memory exhaustion; without PS logs,
+the precise fault/signal remains unconfirmed. The source now copies staging
+through volatile byte loads into ordinary RAM before CRC and libc I/O.
+That candidate compiled on host/aarch64 but has NOT been installed or board
+validated. Installed 1401 still requires the aligned-bundle workaround.
+
 ## Why two stages
 
 The old single-doorbell design let the daemon act on START&&DONE, which
