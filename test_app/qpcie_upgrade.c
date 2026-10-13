@@ -175,18 +175,28 @@ static const char *status_name(uint32_t st) {
 }
 
 /* Push buffer to staging DDR in 4K sysfs blocks with per-block retry.
- * The kernel caps each bin_attribute write at 4096 bytes. */
+ * The kernel caps each bin_attribute write at 4096 bytes, and only
+ * whole 4096-byte DMAs are hardware-validated, so a short tail is
+ * zero-padded to a full block for the transfer. SIZE/CRC still describe
+ * the real bytes; padding is never covered by CRC or compare. */
 static bool push_staging(const char *sysfs, const uint8_t *buf, size_t len) {
     int fd = open(sysfs, O_WRONLY);
     if (fd < 0) { perror("open firmware_upgrade sysfs"); return false; }
+    static unsigned char pad[PUSH_BLOCK];
     double t0 = get_time_sec();
     for (size_t off = 0; off < len; off += PUSH_BLOCK) {
         size_t want = len - off < PUSH_BLOCK ? len - off : PUSH_BLOCK;
+        const uint8_t *blk = buf + off;
+        if (want != PUSH_BLOCK) {
+            memcpy(pad, buf + off, want);
+            memset(pad + want, 0, PUSH_BLOCK - want);
+            blk = pad;
+        }
         bool ok = false;
         for (int a = 0; a < PUSH_MAX_RETRY && !ok; a++) {
             if (lseek(fd, (off_t)off, SEEK_SET) < 0) continue;
-            ssize_t n = write(fd, buf + off, want);
-            if (n == (ssize_t)want) ok = true;
+            ssize_t n = write(fd, blk, PUSH_BLOCK);
+            if (n == (ssize_t)PUSH_BLOCK) ok = true;
             else fprintf(stderr, "\nblock %zu: attempt %d failed (%zd); retrying\n", off, a, n);
         }
         if (!ok) { fprintf(stderr, "block %zu: FAILED; stop\n", off); close(fd); return false; }
@@ -359,7 +369,7 @@ int main(int argc, char **argv) {
         }
     }
 
-    if (!package_path && !bootbin_path && !kernel_path && !do_commit && !show_status) {
+    if (!package_path && !bootbin_path && !kernel_path && !do_commit && !do_reboot && !show_status) {
         if (optind < argc) {
             package_path = argv[optind];
         } else {
@@ -456,10 +466,32 @@ int main(int argc, char **argv) {
         return ok ? EXIT_SUCCESS : EXIT_FAILURE;
     }
 
-    if (show_status && !package_path && !bootbin_path && !kernel_path) {
+    if (show_status && !package_path && !bootbin_path && !kernel_path && !do_reboot) {
         printf("=================================================================\n");
         munmap((void *)bar0, 65536);
         close(fd_bar0);
+        return EXIT_SUCCESS;
+    }
+
+    /* Standalone --reboot: POR + rescan without any package work. */
+    if (do_reboot && !package_path && !bootbin_path && !kernel_path) {
+        printf(" Executing standalone POR + rescan...\n");
+        bar0[REG_DMA_UPG_CTRL / 4] = DMA_UPG_CMD_REBOOT;
+        (void)bar0[REG_DMA_UPG_CTRL / 4];
+        char rm_cmd[256];
+        snprintf(rm_cmd, sizeof(rm_cmd), "echo 1 > /sys/bus/pci/devices/%s/remove", bdf);
+        sys_ret = system(rm_cmd);
+        munmap((void *)bar0, 65536);
+        close(fd_bar0);
+        sleep(3);
+        sys_ret = system("echo 1 > /sys/bus/pci/rescan");
+        (void)sys_ret;
+        sleep(1);
+        char new_bdf[64] = {0};
+        if (find_pcie_device(new_bdf, sizeof(new_bdf)))
+            printf(" SUCCESS: PCIe Device re-established at %s!\n", new_bdf);
+        else
+            printf(" Notice: Card did not respond immediately. Check link status.\n");
         return EXIT_SUCCESS;
     }
 
@@ -596,7 +628,7 @@ int main(int argc, char **argv) {
     printf(" Next (after review): sudo %s --commit\n", argv[0]);
     printf("=================================================================\n");
 
-    // 6. Zero-Host-Reboot PCIe Hot-Reload Protocol
+    // 6. Zero-Host-Reboot PCIe Hot-Reload Protocol (standalone or after --package)
     if (do_reboot) {
         printf(" ⚡ Executing Zero-Host-Reboot Card POR & Rescan Sequence...\n");
 
