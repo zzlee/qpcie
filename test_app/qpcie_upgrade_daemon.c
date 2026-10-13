@@ -30,6 +30,7 @@
 #include <syslog.h>
 
 #include "qpcie_commit_helpers.h"
+#include "qpcie_archive_verify.h"
 
 #define DAEMON_NAME "qpcie_upgrade_daemon"
 
@@ -75,6 +76,8 @@
  * requires a preceding VERIFIED state with matching SIZE/CRC. */
 #define DOORBELL_VERIFY        0x01
 #define DOORBELL_COMMIT        0x02
+#define DOORBELL_HELLO         0x10
+#define STATUS_VERIFY_ONLY    0x06
 
 /* Dedicated DDR4 DMA Staging Physical Address (dau_fpga reserved memory) */
 #define DEFAULT_DDR4_DMA_PHYS  0x30000000UL
@@ -83,7 +86,8 @@
 #define EMMC_BOOT_PART         "/dev/mmcblk0p1"
 #define EMMC_BOOT0_PART        "/dev/mmcblk0boot0"
 #define EMMC_MOUNT_DIR         "/mnt/emmc_boot"
-#define STAGING_DIR            "/tmp/upgrade_staging"
+#define STAGING_DIR            staging_dir
+static char staging_dir[128];
 #define BACKUP_DIR             "/tmp/upgrade_backup"
 #define STAGING_TAR            "/tmp/upgrade.tar.gz"
 
@@ -235,7 +239,7 @@ static void finish_cmd(volatile uint32_t *pl_regs, uint32_t status) {
 
 /* Best-effort shell helper (e.g. force_ro toggles that may not exist).
  * Return value is logged, never fatal. */
-static void run_best_effort(const char *cmd) {
+static inline void run_best_effort(const char *cmd) {
     int rc = system(cmd);
     if (rc != 0)
         syslog(LOG_WARNING, "best-effort command rc=%d: %s", rc, cmd);
@@ -288,16 +292,23 @@ static void do_verify_ram(volatile uint32_t *pl_regs, const uint8_t *dma_buf,
     }
 
     pl_regs[REG_DMA_UPG_PROGRESS / 4] = 50;
-    char cmd[512];
-    snprintf(cmd, sizeof(cmd), "rm -rf %s && mkdir -p %s", STAGING_DIR, STAGING_DIR);
-    if (system(cmd) != 0) {
-        syslog(LOG_ERR, "VERIFY: cannot recreate staging dir");
+    /* Delete only our own three known files from the previous private dir. */
+    if (staging_dir[0]) {
+        for (int i = 0; i < N_PKG_FILES; ++i) {
+            char path[512];
+            if (!stage_path(path, sizeof path, staging_dir, kPkgFiles[i])) unlink(path);
+        }
+        rmdir(staging_dir);
+    }
+    strcpy(staging_dir, "/tmp/qpcie_verified_XXXXXX");
+    if (!mkdtemp(staging_dir)) {
+        staging_dir[0] = 0;
+        syslog(LOG_ERR, "VERIFY: cannot create private staging dir");
         finish_cmd(pl_regs, STATUS_UPG_ERR_FLASH);
         return;
     }
-    snprintf(cmd, sizeof(cmd), "tar -xzf %s -C %s", STAGING_TAR, STAGING_DIR);
-    if (system(cmd) != 0) {
-        syslog(LOG_ERR, "VERIFY: corrupted tar archive");
+    if (qav_gzip(STAGING_TAR, STAGING_DIR)) {
+        syslog(LOG_ERR, "VERIFY: invalid archive (only three regular bounded ustar files allowed)");
         finish_cmd(pl_regs, STATUS_UPG_ERR_CRC);
         return;
     }
@@ -344,6 +355,7 @@ static void do_verify(volatile uint32_t *pl_regs, const uint8_t *dma_buf,
     free(snapshot);
 }
 
+#if 0 // Quarantined legacy COMMIT: unsafe boot0 assumptions and volatile backups.
 /* Restore p1 files that were backed up (best effort, errors logged). */
 static void restore_p1(const char *mnt, const char *backup, const bool *backed_up) {
     for (int i = 0; i < N_PKG_FILES; i++) {
@@ -501,6 +513,19 @@ static void do_commit(volatile uint32_t *pl_regs,
     finish_cmd(pl_regs, STATUS_UPG_SUCCESS);
 }
 
+#endif
+/* Fail closed until device layout and persistent recovery are board-qualified.
+ * The file transaction helper is tested separately; never exercise it on
+ * real eMMC merely because VERIFY succeeded. */
+static void do_commit(volatile uint32_t *pl_regs,
+                      uint32_t *verified_size, uint32_t *verified_crc,
+                      bool *verified) {
+    (void)verified_size; (void)verified_crc;
+    *verified = false;
+    syslog(LOG_ERR, "COMMIT disabled: boot layout and persistent recovery not qualified");
+    finish_cmd(pl_regs, STATUS_UPG_ERR_STATE);
+}
+
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
     openlog(DAEMON_NAME, LOG_PID | LOG_CONS, LOG_DAEMON);
@@ -562,7 +587,11 @@ int main(int argc, char **argv) {
         // Only explicit doorbell commands latch work. Streaming-DMA
         // START&&DONE is deliberately NOT a trigger (fires spuriously
         // while the host pushes consecutive chunks).
-        if (doorbell == DOORBELL_VERIFY || doorbell == DOORBELL_COMMIT) {
+        if (doorbell == DOORBELL_HELLO) {
+            verified_valid = false;
+            pl_regs[REG_DMA_UPG_STATUS / 4] = STATUS_VERIFY_ONLY;
+            pl_regs[REG_DMA_UPG_DOORBELL / 4] = 0;
+        } else if (doorbell == DOORBELL_VERIFY || doorbell == DOORBELL_COMMIT) {
             uint32_t cmd = doorbell;
             uint32_t req_size = pl_regs[REG_DMA_UPG_SIZE / 4];
             uint32_t req_crc  = pl_regs[REG_DMA_UPG_CRC32 / 4];

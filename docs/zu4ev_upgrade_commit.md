@@ -5,6 +5,12 @@ verifies it through BAR0 readback, then asks the board only to VERIFY.
 Stage 2 (`qpcie_upgrade --commit`) flashes eMMC from the VERIFIED bundle.
 eMMC is written ONLY by an explicit COMMIT; a VERIFY never writes.
 
+**Latest VERIFY-only build rejects COMMIT on both host and daemon.**
+PL remains 1401 because this is software-only. HELLO `0x10` returns status
+`0x06` before host uploads anything; PL version alone is not a daemon
+generation check. The snapshot fix and strict extraction described below
+are included in the new installer (see `BUILD_INFO.md` and `SHA256SUMS`).
+
 **COMMIT hardware testing is NOT authorized or safety-qualified yet.**
 The current backup is in volatile `/tmp`, so it cannot provide power-loss
 recovery. Restoration is best-effort, not an atomic update. The boot0 path
@@ -26,8 +32,23 @@ This strongly suggests an unaligned bulk access to `/dev/mem` Device memory
 (for example `fwrite`), not necessarily memory exhaustion; without PS logs,
 the precise fault/signal remains unconfirmed. The source now copies staging
 through volatile byte loads into ordinary RAM before CRC and libc I/O.
-That candidate compiled on host/aarch64 but has NOT been installed or board
-validated. Installed 1401 still requires the aligned-bundle workaround.
+That candidate compiled on host/aarch64 and is packaged in the VERIFY-only
+installer, but has NOT been board validated. Original installed 1401 still
+requires the aligned-bundle workaround until the SD update.
+
+## Offline safety work, not yet enabled for eMMC
+
+`qpcie_file_transaction.h` creates unique persistent same-filesystem backups,
+verifies them before writing PREPARED/APPLYING/COMMITTED markers, and supports
+checked, idempotent restoration. Process-death checkpoint tests pass; they
+are not physical power-loss tests. Corrupt journals and incomplete backups
+fail closed. No claim of an atomic boot-file switch or boot-failure rollback.
+
+`qpcie_archive_verify.h` replaces shell tar extraction with a bounded ustar
+reader fed by gzip. Only exactly three nonempty regular named members are
+allowed; links, traversal, directories, duplicate/extra files and truncated
+streams are rejected. Tests cover these cases. The package still needs a
+trusted manifest/signature policy before use beyond controlled diagnostics.
 
 ## Why two stages
 

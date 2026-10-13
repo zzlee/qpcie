@@ -73,6 +73,7 @@ int main(void) {
     CHECK(qch_file_size("/nonexistent-xyz") == (size_t)-1, "missing size");
     CHECK(qch_copy_file("/nonexistent-xyz", p_bak_boot) == -1, "copy missing src");
     CHECK(qch_files_equal(p_old_boot, "/nonexistent-xyz") == -1, "equal missing");
+    CHECK(qch_copy_file(p_old_boot, "/dev/full") == -1, "disk-full failure propagated");
 
     /* overwrite then verify-then-restore (commit failure path) */
     CHECK(qch_copy_file(p_new_boot, p_old_boot) == 0, "overwrite");
@@ -98,6 +99,7 @@ int main(void) {
     /* file longer than len must not compare equal */
     CHECK(qch_block_prefix_equal(p_boot0, p_new_ub, 100) == 0, "length mismatch");
     CHECK(qch_block_write("/nonexistent-xyz", p_boot0, 100) == -1, "block write missing src");
+    CHECK(qch_block_write(p_new_ub, p_boot0, 4096) == -1, "short source rejected");
 
     /* empty files are equal */
     char p_e1[256], p_e2[256];

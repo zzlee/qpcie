@@ -72,6 +72,8 @@
  * COMMIT flashes eMMC and requires a preceding VERIFIED state. */
 #define DOORBELL_VERIFY        0x01
 #define DOORBELL_COMMIT        0x02
+#define DOORBELL_HELLO         0x10
+#define STATUS_VERIFY_ONLY    0x06
 
 /* Two-stage protocol requires daemon generation shipped with this PL. */
 #define MIN_COMMIT_VERSION     0x26101401u
@@ -166,6 +168,7 @@ static const char *status_name(uint32_t st) {
         case STATUS_UPG_FLASHING: return "FLASHING";
         case STATUS_UPG_SUCCESS: return "Previous Flash Succeeded";
         case STATUS_UPG_VERIFIED: return "VERIFIED (awaiting --commit)";
+        case STATUS_VERIFY_ONLY: return "VERIFY-only daemon; COMMIT disabled";
         case STATUS_UPG_ERR_CRC: return "CRC ERROR";
         case STATUS_UPG_ERR_FLASH: return "FLASH ERROR";
         case STATUS_UPG_ERR_TIMEOUT: return "TIMEOUT ERROR";
@@ -444,6 +447,26 @@ int main(int argc, char **argv) {
         munmap((void *)bar0, 65536);
         close(fd_bar0);
         return EXIT_FAILURE;
+    }
+
+    /* A PL version cannot identify the installed software generation. Require
+     * an explicit daemon capability handshake before any upload command.
+     * This build deliberately has no qualified eMMC writer. */
+    if (do_commit) {
+        fprintf(stderr, "COMMIT disabled in this build; boot layout/recovery not qualified\n");
+        munmap((void *)bar0, 65536); close(fd_bar0);
+        return EXIT_FAILURE;
+    }
+    if (package_path || bootbin_path || kernel_path) {
+        if (upg_stat == STATUS_UPG_FLASHING || upg_stat == STATUS_UPG_VERIFYING ||
+            bar0[REG_DMA_UPG_DOORBELL / 4] || (bar0[REG_DMA_UPG_CTRL / 4] & 1)) {
+            fprintf(stderr, "board busy; refusing capability probe\n");
+            munmap((void *)bar0, 65536); close(fd_bar0); return EXIT_FAILURE;
+        }
+        if (!doorbell_poll(bar0, DOORBELL_HELLO, STATUS_VERIFY_ONLY, 5, "HELLO")) {
+            fprintf(stderr, "requires new VERIFY-only daemon; no payload sent\n");
+            munmap((void *)bar0, 65536); close(fd_bar0); return EXIT_FAILURE;
+        }
     }
 
     /* --commit path: flash eMMC from the VERIFIED bundle. No data moves here. */

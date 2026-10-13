@@ -20,14 +20,14 @@
 /* Device mappings must not be passed to libc memcpy/fwrite: optimized
  * implementations may issue unaligned accesses forbidden by ARM Device memory.
  * Volatile byte loads preserve the access width, including arbitrary tails. */
-static void qch_device_snapshot(unsigned char *dst,
+static inline void qch_device_snapshot(unsigned char *dst,
                                 const volatile unsigned char *src, size_t len) {
     for (size_t i = 0; i < len; ++i) dst[i] = src[i];
 }
 
 /* Copy src file to dst file (truncate/create 0644), fsync before close.
  * Returns 0 on full success, -1 otherwise (dst may be partial). */
-static int qch_copy_file(const char *src, const char *dst) {
+static inline int qch_copy_file(const char *src, const char *dst) {
     FILE *fin = fopen(src, "rb");
     if (!fin) return -1;
     FILE *fout = fopen(dst, "wb");
@@ -49,7 +49,7 @@ static int qch_copy_file(const char *src, const char *dst) {
 
 /* Compare two regular files byte-for-byte.
  * Returns 1 if equal, 0 if different, -1 on I/O error. */
-static int qch_files_equal(const char *a, const char *b) {
+static inline int qch_files_equal(const char *a, const char *b) {
     FILE *fa = fopen(a, "rb");
     FILE *fb = fopen(b, "rb");
     if (!fa || !fb) {
@@ -73,7 +73,7 @@ static int qch_files_equal(const char *a, const char *b) {
 
 /* Compare the first `len` bytes of a block device (or file) with a file.
  * Returns 1 if equal, 0 if different, -1 on I/O error. */
-static int qch_block_prefix_equal(const char *dev, const char *file, size_t len) {
+static inline int qch_block_prefix_equal(const char *dev, const char *file, size_t len) {
     FILE *fd = fopen(dev, "rb");
     FILE *ff = fopen(file, "rb");
     if (!fd || !ff) {
@@ -104,7 +104,7 @@ static int qch_block_prefix_equal(const char *dev, const char *file, size_t len)
 
 /* Copy `len` bytes from file to block device (or file) with fsync.
  * Returns 0 on full success, -1 otherwise. */
-static int qch_block_write(const char *file, const char *dev, size_t len) {
+static inline int qch_block_write(const char *file, const char *dev, size_t len) {
     FILE *ff = fopen(file, "rb");
     if (!ff) return -1;
     int fd = open(dev, O_WRONLY);
@@ -132,7 +132,7 @@ static int qch_block_write(const char *file, const char *dev, size_t len) {
 }
 
 /* Regular-file size in bytes, or (size_t)-1 on error. */
-static size_t qch_file_size(const char *path) {
+static inline size_t qch_file_size(const char *path) {
     struct stat st;
     if (stat(path, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0)
         return (size_t)-1;
