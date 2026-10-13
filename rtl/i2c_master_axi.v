@@ -216,6 +216,11 @@ module i2c_master_axi #(
                     3'b010: s_axil_rdata <= {24'h0, reg_ctr_en, reg_ctr_ien, 6'h0};
                     3'b011: s_axil_rdata <= {24'h0, reg_rxr};
                     3'b101: s_axil_rdata <= {24'h0, reg_sr_rxack, reg_sr_busy, reg_sr_al, 3'h0, reg_sr_tip, reg_sr_if};
+                    // Bus spy (RO, passive; no effect on master FSM):
+                    // 0x18: [1:0]={SCL,SDA} live, [31:16]=SCL rising-edge count
+                    // 0x1C: [15:0]=START count, [31:16]=STOP count
+                    3'b110: s_axil_rdata <= {spy_scl_rise_cnt, 14'h0, spy_scl, spy_sda};
+                    3'b111: s_axil_rdata <= {spy_stop_cnt, spy_start_cnt};
                     default: s_axil_rdata <= 32'h0;
                 endcase
             end else begin
@@ -224,6 +229,34 @@ module i2c_master_axi #(
                     s_axil_rvalid <= 1'b0;
                 end
             end
+        end
+    end
+
+    // =========================================================================
+    // Passive Bus Spy (levels + SCL/START/STOP counters, saturating)
+    // =========================================================================
+    reg spy_scl_q, spy_sda_q, spy_scl_qq, spy_sda_qq;
+    reg spy_scl, spy_sda;
+    reg [15:0] spy_scl_rise_cnt, spy_start_cnt, spy_stop_cnt;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            spy_scl_q <= 1'b1; spy_sda_q <= 1'b1;
+            spy_scl_qq <= 1'b1; spy_sda_qq <= 1'b1;
+            spy_scl <= 1'b1; spy_sda <= 1'b1;
+            spy_scl_rise_cnt <= 16'd0;
+            spy_start_cnt <= 16'd0;
+            spy_stop_cnt <= 16'd0;
+        end else begin
+            spy_scl_q <= scl_i; spy_sda_q <= sda_i;
+            spy_scl_qq <= spy_scl_q; spy_sda_qq <= spy_sda_q;
+            spy_scl <= spy_scl_qq; spy_sda <= spy_sda_qq;
+            if (!spy_scl_qq && spy_scl_q && spy_scl_rise_cnt != 16'hFFFF)
+                spy_scl_rise_cnt <= spy_scl_rise_cnt + 1'b1;
+            if (spy_scl_qq && !spy_sda_qq && spy_sda_q && spy_start_cnt != 16'hFFFF)
+                spy_start_cnt <= spy_start_cnt + 1'b1;
+            if (spy_scl_qq && spy_sda_qq && !spy_sda_q && spy_stop_cnt != 16'hFFFF)
+                spy_stop_cnt <= spy_stop_cnt + 1'b1;
         end
     end
 

@@ -1,4 +1,4 @@
-# Minimal NUC100 I2C-slave firmware (M2_710 U2, APROM)
+# Minimal NUC100 dual I2C-slave firmware (M2_710 U2, APROM)
 BSP      := ../raw/NUC100BSP
 DEVDIR   := $(BSP)/Library/Device/Nuvoton/NUC100Series
 PREFIX   := arm-none-eabi-
@@ -13,14 +13,7 @@ STARTUP  := $(DEVDIR)/Source/GCC/startup_NUC100Series.S
 LDFLAGS  := -mcpu=cortex-m0 -mthumb -Wl,--gc-sections -specs=nosys.specs \
             -T$(DEVDIR)/Source/GCC/gcc_arm.ld
 
-# Set I2CSEL=I2C1 to build the PA.10/PA.11 variant if SDA_MCU is wired there.
-I2CSEL   ?= I2C0
-ifeq ($(I2CSEL),I2C1)
-CFLAGS   += -DUSE_I2C1
-TARGET   := mcu_nuc100_slave_i2c1
-else
-TARGET   := mcu_nuc100_slave_i2c0
-endif
+TARGET   := mcu_nuc100_slave
 
 all: $(TARGET).bin
 
@@ -32,5 +25,6 @@ $(TARGET).bin: $(TARGET).elf
 	@ls -la $@
 
 clean:
-	rm -f mcu_nuc100_slave_i2c0.elf mcu_nuc100_slave_i2c0.bin \
+	rm -f mcu_nuc100_slave.elf mcu_nuc100_slave.bin \
+	      mcu_nuc100_slave_i2c0.elf mcu_nuc100_slave_i2c0.bin \
 	      mcu_nuc100_slave_i2c1.elf mcu_nuc100_slave_i2c1.bin
