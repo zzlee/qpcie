@@ -461,7 +461,7 @@ int main(int argc, char **argv)
                        (g_slv == NUC_ADDR && i == 1) ? " VER" :
                        (g_slv == NUC_ADDR && i == 2) ? " STATUS" :
                        (g_slv == NUC_ADDR && i == 3) ? " CTRL" : "");
-            if (g_slv == NUC_ADDR && (regs[0] != 0x2A || regs[1] != 0x01)) {
+            if (g_slv == NUC_ADDR && (regs[0] != 0x2A || regs[1] != 0x02)) {
                 printf("WARN: MAGIC/VER mismatch (fw mismatch?)\n");
                 rc = 1;
             }
