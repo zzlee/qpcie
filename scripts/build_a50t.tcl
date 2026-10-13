@@ -127,7 +127,9 @@ generate_target all [get_ips axi_crossbar_0]
 
 # 6b. Generate shared-DMA IPs instantiated by custom_pcie_dma_top
 # (same RTL as zu4ev; a50t ties off the PS slave ports).
-# Without these, synth_1 fails with "module 'ila_ps_axi_0' not found".
+# NOTE: ila_ps_axi_0 intentionally NOT generated (instance removed from
+# custom_pcie_dma_top.v to save A50T resources; it only watched the
+# parked PS bus).
 puts "Generating AXI Clock Converter IP Core (axi_clock_converter_0)..."
 create_ip -name axi_clock_converter -vendor xilinx.com -library ip -version 2.1 -module_name axi_clock_converter_0
 set_property -dict [list \
@@ -168,26 +170,7 @@ set_property -dict [list \
 ] [get_ips axis_clock_converter_0]
 generate_target all [get_ips axis_clock_converter_0]
 
-puts "Generating PS AXI ILA IP Core (ila_ps_axi_0)..."
-create_ip -name ila -vendor xilinx.com -library ip -version 6.2 -module_name ila_ps_axi_0
-set_property -dict [list \
-  CONFIG.C_NUM_OF_PROBES {11} \
-  CONFIG.C_PROBE0_WIDTH {32} \
-  CONFIG.C_PROBE1_WIDTH {32} \
-  CONFIG.C_PROBE2_WIDTH {32} \
-  CONFIG.C_PROBE3_WIDTH {32} \
-  CONFIG.C_PROBE4_WIDTH {1} \
-  CONFIG.C_PROBE5_WIDTH {16} \
-  CONFIG.C_PROBE6_WIDTH {8} \
-  CONFIG.C_PROBE7_WIDTH {3} \
-  CONFIG.C_PROBE8_WIDTH {16} \
-  CONFIG.C_PROBE9_WIDTH {1} \
-  CONFIG.C_PROBE10_WIDTH {1} \
-  CONFIG.C_DATA_DEPTH {4096} \
-  CONFIG.C_TRIGIN_EN {false} \
-  CONFIG.C_TRIGOUT_EN {false} \
-] [get_ips ila_ps_axi_0]
-generate_target all [get_ips ila_ps_axi_0]
+# ila_ps_axi_0 removed on a50t (observes parked PS bus; see custom_pcie_dma_top.v).
 
 # 7. Update Compile Order
 update_compile_order -fileset sources_1

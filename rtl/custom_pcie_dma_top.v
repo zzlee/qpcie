@@ -250,20 +250,8 @@ module custom_pcie_dma_top #(
         sys_100m_rst_n              // [0] 100 MHz domain out of reset
     };
 
-    ila_ps_axi_0 u_ila_ps_axi (
-        .clk(pl_clk0),
-        .probe0(ps_axi_ila_status),
-        .probe1(s_axil_ps_araddr),
-        .probe2(arb_axil_araddr),
-        .probe3(s_axil_ps_rdata),
-        .probe4(ps_hpm0_arvalid_raw), // trigger BEFORE AXI4-to-Lite conversion
-        .probe5(ps_hpm0_arid),
-        .probe6(ps_hpm0_arlen),
-        .probe7(ps_hpm0_arsize),
-        .probe8(ps_hpm0_rid_raw),
-        .probe9(ps_hpm0_rvalid_raw),
-        .probe10(ps_hpm0_arready_raw)
-    );
+    // ILA removed on a50t (observes parked PS bus; saves LUTs/BRAM).
+    // Re-enable with build_zu4ev.tcl's ila_ps_axi_0 block if needed.
 
     axi_clock_converter_0 u_axi_clock_converter_0 (
         .s_axi_aclk(clk),
