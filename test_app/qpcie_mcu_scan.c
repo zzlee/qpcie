@@ -39,6 +39,7 @@
 static uint32_t g_base = BAR1_OFFSET_I2C_MCU;
 static const char *g_bus = "mcu";
 static uint32_t g_prer = 249; /* ~100 kHz @ 125 MHz; try 2499 (~10 kHz) for test */
+static int g_step_ms = 0; /* inter-byte delay for slow-mode debug */
 static uint32_t g_slv = 0x2A;
 static uint32_t g_len = 16;
 #define REG_I2C_PRER_LO      0x00
@@ -80,8 +81,13 @@ static int wait_tip(volatile uint8_t *bar1)
     clock_gettime(CLOCK_MONOTONIC, &t0);
     for (;;) {
         uint32_t sr = read32(bar1, g_base + REG_I2C_SR);
-        if (!(sr & I2C_SR_TIP))
+        if (!(sr & I2C_SR_TIP)) {
+            if (g_step_ms > 0) {
+                struct timespec ts = {g_step_ms / 1000, (g_step_ms % 1000) * 1000000L};
+                nanosleep(&ts, NULL);
+            }
             return 0;
+        }
         clock_gettime(CLOCK_MONOTONIC, &now);
         double ms = (now.tv_sec - t0.tv_sec) * 1000.0 +
                     (now.tv_nsec - t0.tv_nsec) / 1000000.0;
@@ -218,7 +224,7 @@ static int find_qpcie(void)
 
 static void usage(const char *p)
 {
-    printf("Usage: %s [--bus mcu|front] [--scan|--dump|--loopback|--status|--board-ver|--spy|--probe HEX|--set-ctrl HEX]\n", p);
+    printf("Usage: %s [--bus mcu|front] [--scan|--dump|--loopback|--status|--board-ver|--spy|--sniff SEC|--probe HEX|--set-ctrl HEX]\n", p);
     printf("  Direct BAR MMIO: BAR1 I2C master (mcu=0x5000 default, front=0x3000);\n");
     printf("  BAR0 0x1008 board version. Unloads qpcie driver.\n");
 }
@@ -228,6 +234,7 @@ int main(int argc, char **argv)
     bool do_scan = false, do_dump = false, do_lb = false, do_status = false;
     bool do_board = false;
     bool do_spy = false;
+    int do_sniff = -1;
     const char *probe_hex = NULL;
     const char *ctrl_hex = NULL;
     static struct option lo[] = {
@@ -238,8 +245,10 @@ int main(int argc, char **argv)
         {"board-ver", no_argument, 0, 'b'},
         {"probe", required_argument, 0, 'p'},
         {"spy", no_argument, 0, 'y'},
+        {"sniff", required_argument, 0, 'n'},
         {"prescaler", required_argument, 0, 'P'},
         {"slave", required_argument, 0, 'S'},
+        {"step-ms", required_argument, 0, 'T'},
         {"len", required_argument, 0, 'L'},
         {"bus", required_argument, 0, 'B'},
         {"set-ctrl", required_argument, 0, 'c'},
@@ -247,7 +256,7 @@ int main(int argc, char **argv)
         {0, 0, 0, 0}
     };
     int o;
-    while ((o = getopt_long(argc, argv, "sdlthbB:c:p:P:S:L:y", lo, NULL)) != -1) {
+    while ((o = getopt_long(argc, argv, "sdlthbB:c:p:P:S:L:yn:T:", lo, NULL)) != -1) {
         switch (o) {
         case 's': do_scan = true; break;
         case 'd': do_dump = true; break;
@@ -256,9 +265,11 @@ int main(int argc, char **argv)
         case 'b': do_board = true; break;
         case 'p': probe_hex = optarg; break;
         case 'y': do_spy = true; break;
+        case 'n': do_sniff = atoi(optarg); break;
         case 'P': g_prer = (uint32_t)strtoul(optarg, NULL, 0); break;
         case 'S': g_slv = (uint32_t)strtoul(optarg, NULL, 0); break;
         case 'L': g_len = (uint32_t)strtoul(optarg, NULL, 0); break;
+        case 'T': g_step_ms = atoi(optarg); break;
         case 'B':
             if (!strcmp(optarg, "front")) {
                 g_base = BAR1_OFFSET_I2C_FRONT;
@@ -275,7 +286,7 @@ int main(int argc, char **argv)
         default: usage(argv[0]); return o == 'h' ? 0 : 1;
         }
     }
-    if (!do_scan && !do_dump && !do_lb && !do_status && !do_board && !ctrl_hex && !probe_hex && !do_spy) {
+    if (!do_scan && !do_dump && !do_lb && !do_status && !do_board && !ctrl_hex && !probe_hex && !do_spy && do_sniff < 0) {
         usage(argv[0]);
         return 1;
     }
@@ -360,6 +371,31 @@ int main(int argc, char **argv)
                (unsigned short)((a1 >> 16) - (a0 >> 16)),
                (unsigned short)(b1 - b0),
                (unsigned short)((b1 >> 16) - (b0 >> 16)));
+    }
+
+    if (do_sniff >= 0) {
+        /* Sniffer transcript (needs bitstream C_VERSION >= 26101302):
+         * arm+clear, capture for N sec (run traffic in parallel), dump. */
+        write32(bar1, g_base + 0x40, 1);
+        sleep(do_sniff < 0 ? 0 : do_sniff);
+        uint32_t st = read32(bar1, g_base + 0x40);
+        uint32_t n = st & 0x1FF;
+        if (n > 256)
+            n = 256;
+        printf("sniff %s: avail=%u ovf=%d\n", g_bus, st & 0x1FF, !!(st & 0x400));
+        for (uint32_t i = 0; i < n; i++) {
+            uint32_t e = read32(bar1, g_base + 0x44) & 0xFFFF;
+            uint32_t mk = e >> 8, dt = e & 0xFF;
+            if (mk == 0x03)
+                printf("  Sr\n");
+            else if (mk == 0x02)
+                printf("  Sp\n");
+            else if (mk == 0x01)
+                printf("  %s\n", dt ? "NACK" : "ACK");
+            else
+                printf("  %02X\n", dt);
+        }
+        write32(bar1, g_base + 0x40, 0);
     }
 
     if (do_scan) {

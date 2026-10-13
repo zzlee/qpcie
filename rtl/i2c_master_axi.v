@@ -138,9 +138,12 @@ module i2c_master_axi #(
             cmd_ack         <= 1'b0;
             cmd_start_pulse <= 1'b0;
             cmd_iack_pulse  <= 1'b0;
+            snif_armed      <= 1'b0;
+            snif_clear_req  <= 1'b0;
         end else begin
             cmd_start_pulse <= 1'b0;
             cmd_iack_pulse  <= 1'b0;
+            snif_clear_req  <= 1'b0;
 
             // Address write handshake
             if (!aw_done && s_axil_awvalid && (!s_axil_bvalid || s_axil_bready)) begin
@@ -169,6 +172,12 @@ module i2c_master_axi #(
                 aw_done       <= 1'b0;
                 w_done        <= 1'b0;
 
+                if (wr_addr[7:0] == 8'h40) begin
+                    // Sniffer control (not a master register)
+                    snif_armed <= wr_data[0];
+                    if (wr_data[0])
+                        snif_clear_req <= 1'b1;
+                end else begin
                 case (wr_addr[4:2])
                     3'b000: reg_prer[7:0]  <= wr_data[7:0];   // 0x00
                     3'b001: reg_prer[15:8] <= wr_data[7:0];   // 0x04
@@ -189,6 +198,7 @@ module i2c_master_axi #(
                     end
                     default: ;
                 endcase
+                end
             end else if (s_axil_bvalid && s_axil_bready) begin
                 s_axil_bvalid <= 1'b0;
             end
@@ -204,12 +214,26 @@ module i2c_master_axi #(
             s_axil_rvalid  <= 1'b0;
             s_axil_rresp   <= 2'b00;
             s_axil_rdata   <= 32'h0;
+            snif_rd_total   <= 10'd0;
         end else begin
-            if (s_axil_arvalid && (!s_axil_rvalid || s_axil_rready)) begin
+            if (snif_clear_req) begin
+                snif_rd_total   <= 10'd0;
+            end
+            // Accept one AR per R-completion (no re-accept while outstanding):
+            // this makes FIFO pops exact even if the master holds ARVALID.
+            if (s_axil_arvalid && !s_axil_rvalid) begin
                 s_axil_arready <= 1'b1;
                 s_axil_rvalid  <= 1'b1;
                 s_axil_rresp   <= 2'b00;
 
+                if (s_axil_araddr[7:0] == 8'h40) begin
+                    s_axil_rdata <= {21'h0, snif_overflow, snif_armed,
+                                     snif_avail[8:0]};
+                end else if (s_axil_araddr[7:0] == 8'h44) begin
+                    s_axil_rdata <= {16'h0, snif_mem[snif_rd_total[8:0]]};
+                    if (snif_wr_total != snif_rd_total)
+                        snif_rd_total <= snif_rd_total + 1'b1;
+                end else begin
                 case (s_axil_araddr[4:2])
                     3'b000: s_axil_rdata <= {24'h0, reg_prer[7:0]};
                     3'b001: s_axil_rdata <= {24'h0, reg_prer[15:8]};
@@ -223,6 +247,7 @@ module i2c_master_axi #(
                     3'b111: s_axil_rdata <= {spy_stop_cnt, spy_start_cnt};
                     default: s_axil_rdata <= 32'h0;
                 endcase
+                end
             end else begin
                 s_axil_arready <= 1'b0;
                 if (s_axil_rvalid && s_axil_rready) begin
@@ -259,6 +284,99 @@ module i2c_master_axi #(
                 spy_stop_cnt <= spy_stop_cnt + 1'b1;
         end
     end
+
+    // =========================================================================
+    // Passive Sniffer Transcript FIFO (512 x {marker,data})
+    // =========================================================================
+    reg        n_scl_q, n_sda_q, n_scl, n_sda, p_scl, p_sda;
+    reg        snif_in_frame;
+    reg [3:0]  snif_bitcnt;
+    reg [7:0]  snif_shreg;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            n_scl_q <= 1'b1; n_sda_q <= 1'b1;
+            n_scl <= 1'b1; n_sda <= 1'b1;
+            p_scl <= 1'b1; p_sda <= 1'b1;
+            snif_in_frame <= 1'b0;
+            snif_bitcnt <= 4'd0;
+            snif_shreg <= 8'h00;
+            snif_wr_total <= 10'd0;
+            snif_overflow <= 1'b0;
+        end else begin
+            n_scl_q <= scl_i; n_sda_q <= sda_i;
+            p_scl <= n_scl; p_sda <= n_sda;
+            n_scl <= n_scl_q; n_sda <= n_sda_q;
+            if (snif_clear_req) begin
+                snif_wr_total <= 10'd0;
+                snif_overflow <= 1'b0;
+                snif_in_frame <= 1'b0;
+                snif_bitcnt <= 4'd0;
+            end else if (snif_armed) begin
+                if (n_scl && p_sda && !n_sda) begin
+                    // START (also marks repeated START)
+                    if (!snif_full) begin
+                        snif_mem[snif_wr_total[8:0]] <= {8'h03, 8'h00};
+                        snif_wr_total <= snif_wr_total + 1'b1;
+                    end else begin
+                        snif_overflow <= 1'b1;
+                    end
+                    snif_in_frame <= 1'b1;
+                    snif_bitcnt <= 4'd0;
+                end else if (n_scl && !p_sda && n_sda) begin
+                    // STOP
+                    if (snif_in_frame) begin
+                        if (!snif_full) begin
+                            snif_mem[snif_wr_total[8:0]] <= {8'h02, 8'h00};
+                            snif_wr_total <= snif_wr_total + 1'b1;
+                        end else begin
+                            snif_overflow <= 1'b1;
+                        end
+                    end
+                    snif_in_frame <= 1'b0;
+                    snif_bitcnt <= 4'd0;
+                end else if (!p_scl && n_scl && snif_in_frame) begin
+                    // SCL rise: shift in data/ACK bit
+                    if (snif_bitcnt == 4'd8) begin
+                        // ACK bit done: record it (FF=NACK, 00=ACK)
+                        if (!snif_full) begin
+                            snif_mem[snif_wr_total[8:0]] <= {8'h01, n_sda ? 8'hFF : 8'h00};
+                            snif_wr_total <= snif_wr_total + 1'b1;
+                        end else begin
+                            snif_overflow <= 1'b1;
+                        end
+                        snif_bitcnt <= 4'd0;
+                    end else begin
+                        snif_shreg <= {snif_shreg[6:0], n_sda};
+                        if (snif_bitcnt == 4'd7) begin
+                            // 8th data bit done: record byte
+                            if (!snif_full) begin
+                                snif_mem[snif_wr_total[8:0]] <= {8'h00, snif_shreg[6:0], n_sda};
+                                snif_wr_total <= snif_wr_total + 1'b1;
+                            end else begin
+                                snif_overflow <= 1'b1;
+                            end
+                        end
+                        snif_bitcnt <= snif_bitcnt + 1'b1;
+                    end
+                end
+            end
+        end
+    end
+
+    // Sniffer transcript FIFO (passive, per-bus logic analyzer)
+    // 0x40 W: bit0 1=arm+clear, 0=disarm
+    // 0x40 R: [10]=overflow, [9]=armed, [8:0]=entries available
+    // 0x44 R: pop {marker,data}: 0x00=data byte, 0x01=ACK(00)/NACK(FF),
+    //                            0x02=STOP, 0x03=repeated START
+    reg        snif_armed;
+    reg        snif_clear_req;
+    reg [9:0]  snif_wr_total;   // capture block
+    reg [9:0]  snif_rd_total;   // read block (pop on AR accept)
+    reg        snif_overflow;   // capture block
+    reg [15:0] snif_mem [0:511];
+    wire [9:0] snif_avail = snif_wr_total - snif_rd_total;
+    wire       snif_full  = (snif_avail >= 10'd512);
 
     // =========================================================================
     // I2C Timing & Sub-State Machine (Byte & Condition Engine)
