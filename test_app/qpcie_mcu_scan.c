@@ -222,6 +222,24 @@ static int find_qpcie(void)
     return -ENODEV;
 }
 
+/* Ensure PCI Memory Space + Bus Master are enabled (Jetson clears them
+ * across rescans/error containment; without Mem+ all MMIO reads as F's). */
+static void ensure_mem_enabled(void)
+{
+    char p[600];
+    snprintf(p, sizeof(p), "%s/config", g_device_path);
+    int fd = open(p, O_RDWR);
+    if (fd < 0)
+        return;
+    uint16_t cmd = 0;
+    if (pread(fd, &cmd, sizeof(cmd), 4) == sizeof(cmd) && !(cmd & 0x0006)) {
+        cmd |= 0x0006;
+        if (pwrite(fd, &cmd, sizeof(cmd), 4) == sizeof(cmd))
+            printf("(PCI COMMAND enabled: 0x%04X)\n", cmd);
+    }
+    close(fd);
+}
+
 static void usage(const char *p)
 {
     printf("Usage: %s [--bus mcu|front] [--scan|--dump|--loopback|--status|--board-ver|--spy|--sniff SEC|--probe HEX|--set-ctrl HEX]\n", p);
@@ -296,6 +314,8 @@ int main(int argc, char **argv)
         return 1;
     }
     printf("Found QPCIe [%s]\n", g_bdf);
+
+    ensure_mem_enabled();
 
     bool had_drv = (access("/sys/module/qpcie", F_OK) == 0);
     if (had_drv) {
