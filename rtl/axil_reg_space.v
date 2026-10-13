@@ -8,7 +8,7 @@
 `timescale 1ns / 1ps
 
 module axil_reg_space #(
-    parameter [31:0]   C_VERSION    = 32'h2610_1206, // Mandatory hardware version YYMMDDpp
+    parameter [31:0]   C_VERSION    = 32'h2610_1301, // Mandatory hardware version YYMMDDpp
     parameter integer NUM_VIDEO_CH = 4,
     parameter integer NUM_AUDIO_CH = 4
 )(
@@ -214,7 +214,11 @@ module axil_reg_space #(
     input  wire [31:0] in_dma_upg_diag_pcie,
     input  wire [31:0] in_dma_upg_diag_writer,
     input  wire        in_dma_upg_diag_clear_ack,
-    output wire        out_dma_upg_diag_clear_toggle
+    output wire        out_dma_upg_diag_clear_toggle,
+    output reg         out_ddr_read_request,
+    output reg [31:0]  out_ddr_read_offset,
+    input wire [31:0]  in_ddr_read_status, in_ddr_read_sequence,
+    input wire [127:0] in_ddr_read_data
 );
 
     // BAR0 Register Offset Definitions (12-bit decode aperture)
@@ -493,6 +497,8 @@ module axil_reg_space #(
             reg_fw_status           <= 32'd0;
             reg_fw_progress         <= 32'd0;
             reg_dma_upg_ctrl        <= 32'd0;
+            out_ddr_read_request    <= 1'b0;
+            out_ddr_read_offset     <= 32'd0;
             reg_dma_upg_size        <= 32'd0;
             reg_dma_upg_crc32       <= 32'd0;
             reg_dma_upg_ps_addr     <= 64'd0;
@@ -528,6 +534,7 @@ module axil_reg_space #(
             s_axil_bvalid           <= 1'b0;
             s_axil_bresp            <= 2'b00; // OKAY
         end else begin
+            out_ddr_read_request <= 1'b0;
             reg_irq_status_w1c       <= 32'd0;
             reg_perf_reset_w1c       <= 1'b0;
             pt_y_wr_en               <= 1'b0;
@@ -680,6 +687,8 @@ module axil_reg_space #(
                             8'hA4: reg_dma_upg_host_addr[63:32] <= s_axil_wdata;
                             8'hB8: if (s_axil_wdata[0])
                                         reg_dma_upg_diag_clear_toggle <= ~reg_dma_upg_diag_clear_toggle;
+                            8'hC0: if (s_axil_wstrb == 4'hf) out_ddr_read_offset <= s_axil_wdata;
+                            8'hC4: if (s_axil_wstrb[0] && s_axil_wdata[0]) out_ddr_read_request <= 1'b1;
                             default: ;
                         endcase
                     end
@@ -865,6 +874,13 @@ module axil_reg_space #(
                             8'hB4: s_axil_rdata <= in_dma_upg_diag_writer;
                             8'hB8: s_axil_rdata <= {30'd0, in_dma_upg_diag_clear_ack,
                                                     reg_dma_upg_diag_clear_toggle};
+                            8'hC0: s_axil_rdata <= out_ddr_read_offset;
+                            8'hC4: s_axil_rdata <= in_ddr_read_status;
+                            8'hC8: s_axil_rdata <= in_ddr_read_sequence;
+                            8'hD0: s_axil_rdata <= in_ddr_read_data[31:0];
+                            8'hD4: s_axil_rdata <= in_ddr_read_data[63:32];
+                            8'hD8: s_axil_rdata <= in_ddr_read_data[95:64];
+                            8'hDC: s_axil_rdata <= in_ddr_read_data[127:96];
                             default: s_axil_rdata <= 32'd0;
                         endcase
                     end

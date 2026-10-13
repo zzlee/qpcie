@@ -1,8 +1,8 @@
 # SC7F0 H2C upgrade: BAR0-only stage tracing (1205 diagnostic)
 
 Host can read these counters *after* the 3-second sysfs canary times out;
-no JTAG access is needed. The host tool accepts `0x26101205` and
-`0x26101206` only. Version 1206 changes PCIe IP tag and RC straddle modes;
+no JTAG access is needed. The host tool accepts `0x26101205`,
+`0x26101206` and `0x26101301` only. Version 1206 changes PCIe IP tag and RC straddle modes;
 it is **not** proof that the upgrade is fixed, and this tool never writes eMMC.
 
 ## Registers in the existing PS/host-shared BAR0 CSR aperture

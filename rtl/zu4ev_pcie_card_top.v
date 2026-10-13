@@ -17,7 +17,7 @@
 `timescale 1ns / 1ps
 
 module zu4ev_pcie_card_top #(
-    parameter [31:0] C_VERSION = 32'h2610_1206,
+    parameter [31:0] C_VERSION = 32'h2610_1301,
     parameter PCIE_DATA_WIDTH  = 256,
     parameter PCIE_KEEP_WIDTH  = PCIE_DATA_WIDTH / 32, // 8 DW keep for 256-bit
     parameter NUM_VIDEO_CH     = 4,
@@ -1500,6 +1500,11 @@ module zu4ev_pcie_card_top #(
     );
 
     wire [48:0]  hp0_awaddr_w;
+    wire [48:0] hp0_araddr_w;
+    wire hp0_arvalid_w, hp0_arready_w, hp0_rvalid_w, hp0_rready_w, hp0_rlast_w;
+    wire [127:0] hp0_rdata_w;
+    wire [1:0] hp0_rresp_w;
+    wire [5:0] hp0_rid_w;
     wire [7:0]   hp0_awlen_w;
     wire [2:0]   hp0_awsize_w;
     wire [1:0]   hp0_awburst_w;
@@ -1668,6 +1673,11 @@ module zu4ev_pcie_card_top #(
 
         // PS DDR4 AXI4 Master Write Interface (to PS S_AXI_HP0_FPD)
         .m_axi_hp0_awaddr(hp0_awaddr_w),
+        .m_axi_hp0_araddr(hp0_araddr_w), .m_axi_hp0_arvalid(hp0_arvalid_w),
+        .m_axi_hp0_arready(hp0_arready_w), .m_axi_hp0_rdata(hp0_rdata_w),
+        .m_axi_hp0_rresp(hp0_rresp_w), .m_axi_hp0_rid(hp0_rid_w),
+        .m_axi_hp0_rlast(hp0_rlast_w), .m_axi_hp0_rvalid(hp0_rvalid_w),
+        .m_axi_hp0_rready(hp0_rready_w),
         .m_axi_hp0_awlen(hp0_awlen_w),
         .m_axi_hp0_awsize(hp0_awsize_w),
         .m_axi_hp0_awburst(hp0_awburst_w),
@@ -1736,7 +1746,7 @@ module zu4ev_pcie_card_top #(
         .M_AXI_HPM0_FPD_wvalid(ps_hpm0_wvalid),
 
         // S_AXI_HP0_FPD (PL H2C DMA Master into PS DDR4)
-        .S_AXI_HP0_FPD_araddr(49'd0),
+        .S_AXI_HP0_FPD_araddr(hp0_araddr_w),
         .S_AXI_HP0_FPD_arburst(2'b01),
         .S_AXI_HP0_FPD_arcache(4'd0),
         .S_AXI_HP0_FPD_arid(6'd0),
@@ -1744,10 +1754,10 @@ module zu4ev_pcie_card_top #(
         .S_AXI_HP0_FPD_arlock(1'b0),
         .S_AXI_HP0_FPD_arprot(3'd0),
         .S_AXI_HP0_FPD_arqos(4'd0),
-        .S_AXI_HP0_FPD_arready(),
+        .S_AXI_HP0_FPD_arready(hp0_arready_w),
         .S_AXI_HP0_FPD_arsize(3'b100),
         .S_AXI_HP0_FPD_aruser(1'b0),
-        .S_AXI_HP0_FPD_arvalid(1'b0),
+        .S_AXI_HP0_FPD_arvalid(hp0_arvalid_w),
         .S_AXI_HP0_FPD_awaddr(hp0_awaddr_w),
         .S_AXI_HP0_FPD_awburst(hp0_awburst_w),
         .S_AXI_HP0_FPD_awcache(4'd3),
@@ -1764,12 +1774,12 @@ module zu4ev_pcie_card_top #(
         .S_AXI_HP0_FPD_bready(hp0_bready_w),
         .S_AXI_HP0_FPD_bresp(hp0_bresp_w),
         .S_AXI_HP0_FPD_bvalid(hp0_bvalid_w),
-        .S_AXI_HP0_FPD_rdata(),
-        .S_AXI_HP0_FPD_rid(),
-        .S_AXI_HP0_FPD_rlast(),
-        .S_AXI_HP0_FPD_rready(1'b1),
-        .S_AXI_HP0_FPD_rresp(),
-        .S_AXI_HP0_FPD_rvalid(),
+        .S_AXI_HP0_FPD_rdata(hp0_rdata_w),
+        .S_AXI_HP0_FPD_rid(hp0_rid_w),
+        .S_AXI_HP0_FPD_rlast(hp0_rlast_w),
+        .S_AXI_HP0_FPD_rready(hp0_rready_w),
+        .S_AXI_HP0_FPD_rresp(hp0_rresp_w),
+        .S_AXI_HP0_FPD_rvalid(hp0_rvalid_w),
         .S_AXI_HP0_FPD_wdata(hp0_wdata_w),
         .S_AXI_HP0_FPD_wlast(hp0_wlast_w),
         .S_AXI_HP0_FPD_wready(hp0_wready_w),

@@ -11,7 +11,7 @@
 `timescale 1ns / 1ps
 
 module custom_pcie_dma_top #(
-    parameter [31:0] C_VERSION = 32'h2610_1206,
+    parameter [31:0] C_VERSION = 32'h2610_1301,
     parameter PCIE_DATA_WIDTH  = 128,
     parameter PCIE_KEEP_WIDTH  = PCIE_DATA_WIDTH / 8,
     parameter NUM_VIDEO_CH     = 2,
@@ -182,6 +182,14 @@ module custom_pcie_dma_top #(
     input  wire [1:0]                                       m_axi_hp0_bresp,
     input  wire                                             m_axi_hp0_bvalid,
     output wire                                             m_axi_hp0_bready,
+    output wire [48:0]                                      m_axi_hp0_araddr,
+    output wire                                             m_axi_hp0_arvalid,
+    input wire                                              m_axi_hp0_arready,
+    input wire [127:0]                                      m_axi_hp0_rdata,
+    input wire [1:0]                                        m_axi_hp0_rresp,
+    input wire [5:0]                                        m_axi_hp0_rid,
+    input wire                                              m_axi_hp0_rlast, m_axi_hp0_rvalid,
+    output wire                                             m_axi_hp0_rready,
 
     // PS Interrupt Notification Pulse (to PS pl_ps_irq0)
     output wire                                             out_ps_irq_pulse
@@ -634,6 +642,18 @@ module custom_pcie_dma_top #(
     wire        upg_diag_clear_toggle_w;
     wire        upg_diag_clear_ack_w;
     wire [31:0] upg_diag_pcie_sync, upg_diag_writer_sticky;
+    wire ddr_read_request;
+    wire [31:0] ddr_read_offset, ddr_read_status, ddr_read_sequence;
+    wire [127:0] ddr_read_data;
+    zu4ev_ddr_readback u_ddr_readback (
+        .clk(pl_clk0), .rst_n(sys_100m_rst_n),
+        .request(ddr_read_request), .offset(ddr_read_offset),
+        .dma_active(dma_upg_ctrl_w[0]),
+        .status(ddr_read_status), .sequence_id(ddr_read_sequence), .data(ddr_read_data),
+        .araddr(m_axi_hp0_araddr), .arvalid(m_axi_hp0_arvalid), .arready(m_axi_hp0_arready),
+        .rdata(m_axi_hp0_rdata), .rresp(m_axi_hp0_rresp), .rid(m_axi_hp0_rid),
+        .rlast(m_axi_hp0_rlast), .rvalid(m_axi_hp0_rvalid), .rready(m_axi_hp0_rready)
+    );
 
     // pl_clk0 -> pcie_user_clk synchronizer for the H2C upgrade trigger.
     // The BAR0 CSR (axil_reg_space, pl_clk0) publishes dma_upg_ctrl_w[0] as
@@ -1195,7 +1215,10 @@ module custom_pcie_dma_top #(
         .in_dma_upg_diag_pcie(upg_diag_pcie_sync),
         .in_dma_upg_diag_writer(upg_diag_writer_sticky),
         .in_dma_upg_diag_clear_ack(upg_diag_clear_ack_w),
-        .out_dma_upg_diag_clear_toggle(upg_diag_clear_toggle_w)
+        .out_dma_upg_diag_clear_toggle(upg_diag_clear_toggle_w),
+        .out_ddr_read_request(ddr_read_request), .out_ddr_read_offset(ddr_read_offset),
+        .in_ddr_read_status(ddr_read_status), .in_ddr_read_sequence(ddr_read_sequence),
+        .in_ddr_read_data(ddr_read_data)
     );
 
     wire [127:0] upg_lb_tdata_cdc;
