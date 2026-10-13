@@ -1,8 +1,11 @@
-// BAR0-triggered read-only canary probe. Never cancel an outstanding AXI AR:
+// BAR0-triggered read-only staging probe. Never cancel an outstanding AXI AR:
 // timeout is sticky, but BUSY remains asserted until the response is drained.
 `timescale 1ns / 1ps
 module zu4ev_ddr_readback #(
-    parameter integer TIMEOUT_CYCLES = 1000000
+    parameter integer TIMEOUT_CYCLES = 1000000,
+    // Readable window: daemon staging buffer (64MB at PS DDR 0x30000000).
+    parameter [48:0] STAGING_BASE = 49'h30000000,
+    parameter [31:0] STAGING_SIZE = 32'h4000000
 )(
     input wire clk, rst_n,
     input wire request,
@@ -30,11 +33,11 @@ module zu4ev_ddr_readback #(
             if (request && !status[0]) begin
                 sequence_id <= sequence_id + 1;
                 data <= 0; timer <= 0;
-                if (dma_active || offset > 32'hff0 || offset[3:0] != 0)
+                if (dma_active || offset[3:0] != 0 || offset > STAGING_SIZE - 32'd16)
                     status <= 32'h16; // DONE | ERROR | REJECTED; no AXI request
                 else begin
                     status <= 1;
-                    araddr <= 49'h30000000 + offset;
+                    araddr <= STAGING_BASE + offset;
                     arvalid <= 1;
                 end
             end

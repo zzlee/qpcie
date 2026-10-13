@@ -52,7 +52,7 @@ int main(int argc, char **argv) {
     int rc = 1;
     if (r[REG_MAGIC/4] != 0x12abe380 ||
         (r[REG_VERSION/4] != 0x26101205 && r[REG_VERSION/4] != 0x26101206 &&
-         r[REG_VERSION/4] != 0x26101301)) {
+         r[REG_VERSION/4] != 0x26101301 && r[REG_VERSION/4] != 0x26101302)) {
         fprintf(stderr, "diagnostic RTL not installed: magic=%08x version=%08x\n",
                 r[REG_MAGIC/4], r[REG_VERSION/4]);
         goto out;

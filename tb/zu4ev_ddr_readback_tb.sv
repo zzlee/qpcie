@@ -38,10 +38,12 @@ module zu4ev_ddr_readback_tb;
         if (seq!==1 || addr!==49'h30000000) $fatal(1,"busy request accepted");
         accept_ar(); reply();
         if (status!==2 || data!==rdata) $fatal(1,"read data");
-        start(32'hff0); accept_ar(); rresp=2; reply(); rresp=0;
-        if (status!==6 || addr!==49'h30000ff0) $fatal(1,"RRESP/boundary");
-        start(32'h1000);
+        start(32'h3fffff0); accept_ar(); rresp=2; reply(); rresp=0;
+        if (status!==6 || addr!==49'h33fffff0) $fatal(1,"RRESP/boundary");
+        start(32'h4000000); // 16-byte aligned but past the 64MB staging window
         if (status!==32'h16 || arvalid) $fatal(1,"range rejection");
+        start(32'h3ffffff1); // misaligned and out of range
+        if (status!==32'h16 || arvalid) $fatal(1,"range+alignment rejection");
         start(1);
         if (status!==32'h16 || arvalid) $fatal(1,"alignment rejection");
         dma=1; start(0); dma=0;
@@ -62,8 +64,7 @@ module zu4ev_ddr_readback_tb;
         if (!status[0] || !status[2] || !rready) $fatal(1,"missing RLAST");
         rlast=1; reply();
         if (status!==6) $fatal(1,"malformed response drain");
-        $display("TB_PASS: DDR readback bounds, busy, data, RRESP/RID/RLAST, timeout and late drain");
-        $finish;
+        $display("TB_PASS: DDR readback bounds, busy, data, RRESP/RID/RLAST, timeout and late drain");        $finish;
     end
     initial begin #10000; $fatal(1,"watchdog"); end
 endmodule
