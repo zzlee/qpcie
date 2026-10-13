@@ -40,14 +40,25 @@ requires review; a built bitstream is not proof of reliable operation.
 ### Transport ladder (host-only, no eMMC writes)
 1. Confirm BAR0 version and PCIe link, load the driver.
 2. `qpcie_dma_diag RESOURCE0 --clear`; require clear ACK before each stage.
-3. Push 64KiB random file with one `dd bs=65536 count=1`, then
+3. Push 64KiB random file with `qpcie_stage_push SYSFS FILE 0`, then
    `sudo qpcie_ddr_verify RESOURCE0 FILE 0`; require `DDR_VERIFY_PASS`.
-4. Push 2MiB random file with one `dd bs=2M count=1` (single driver chunk
-   limit), then verify as above.
-5. Push 8MiB random file with one `dd bs=2M count=4` (four sequential
-   2MB chunks), then verify as above.
+4. Push 2MiB random file the same way (proves multi-chunk sequencing),
+   then verify as above.
+5. Push 8MiB random file the same way (2048 sequential 4K blocks),
+   then verify as above.
 6. If any stage fails, preserve diag/AER output and stop; do not proceed
    to larger sizes or any COMMIT work.
+
+Two transport facts established on 26101302 hardware:
+- The kernel caps each `firmware_upgrade` sysfs write at 4096 bytes
+  (a single 1MB `write()` returns 4096), so the driver's 2MB coherent
+  chunk path is unreachable; transfers proceed as sequential 4K DMAs at
+  ~23-24MB/s, not 3.2GB/s. `qpcie_stage_push` loops 4K blocks with
+  `lseek` positioning and per-block retry for this reason.
+- The board daemon spuriously triggers on START&&DONE during multi-chunk
+  pushes (`STATUS=0xe1` latched, CRC mismatch on a partial SIZE). It is
+  harmless for transport but proves the single-doorbell design unsafe;
+  COMMIT must become a separate explicit step (see next section).
 
 1. Confirm 26101301 BAR0 version and PCIe link, load the driver.
 2. `qpcie_dma_diag RESOURCE0 --clear`; require clear ACK before one fresh

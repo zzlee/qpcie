@@ -9,7 +9,7 @@ LDFLAGS ?= -lm -pthread
 # Cross compiler for ZU4EV target daemon
 AARCH64_CC ?= $(shell which aarch64-linux-gnu-gcc 2>/dev/null || which /opt/Xilinx/Vitis/2023.2/gnu/aarch64/lin/aarch64-linux/bin/aarch64-linux-gnu-gcc 2>/dev/null || echo aarch64-linux-gnu-gcc)
 
-TARGETS = qpcie_sanity_check qpcie_upgrade qpcie_dma_diag qpcie_ddr_verify qpcie_flash qpcie_a50t_tool qpcie_hdmi_ctl v4l2_test_app v4l2_rgb24_test_app alsa_test_app alsa_loopback_test_app dmabuf_p2p_test_app loopback_test_app
+TARGETS = qpcie_sanity_check qpcie_upgrade qpcie_dma_diag qpcie_ddr_verify qpcie_stage_push qpcie_flash qpcie_a50t_tool qpcie_hdmi_ctl v4l2_test_app v4l2_rgb24_test_app alsa_test_app alsa_loopback_test_app dmabuf_p2p_test_app loopback_test_app
 
 all: $(TARGETS)
 
@@ -21,6 +21,9 @@ qpcie_dma_diag: qpcie_dma_diag.c
 
 qpcie_ddr_verify: qpcie_ddr_verify.c
 	$(CC) $(CFLAGS) -o $@ qpcie_ddr_verify.c
+
+qpcie_stage_push: qpcie_stage_push.c
+	$(CC) $(CFLAGS) -o $@ qpcie_stage_push.c
 
 qpcie_upgrade_daemon: qpcie_upgrade_daemon.c
 	$(AARCH64_CC) -O2 -Wall -static -o $@ qpcie_upgrade_daemon.c
