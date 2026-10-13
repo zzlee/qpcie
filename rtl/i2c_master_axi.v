@@ -230,7 +230,7 @@ module i2c_master_axi #(
                     s_axil_rdata <= {21'h0, snif_overflow, snif_armed,
                                      snif_avail[8:0]};
                 end else if (s_axil_araddr[7:0] == 8'h44) begin
-                    s_axil_rdata <= {16'h0, snif_mem[snif_rd_total[8:0]]};
+                    s_axil_rdata <= {16'h0, snif_mem[snif_rd_total[6:0]]};
                     if (snif_wr_total != snif_rd_total)
                         snif_rd_total <= snif_rd_total + 1'b1;
                 end else begin
@@ -316,7 +316,7 @@ module i2c_master_axi #(
                 if (n_scl && p_sda && !n_sda) begin
                     // START (also marks repeated START)
                     if (!snif_full) begin
-                        snif_mem[snif_wr_total[8:0]] <= {8'h03, 8'h00};
+                        snif_mem[snif_wr_total[6:0]] <= {8'h03, 8'h00};
                         snif_wr_total <= snif_wr_total + 1'b1;
                     end else begin
                         snif_overflow <= 1'b1;
@@ -327,7 +327,7 @@ module i2c_master_axi #(
                     // STOP
                     if (snif_in_frame) begin
                         if (!snif_full) begin
-                            snif_mem[snif_wr_total[8:0]] <= {8'h02, 8'h00};
+                            snif_mem[snif_wr_total[6:0]] <= {8'h02, 8'h00};
                             snif_wr_total <= snif_wr_total + 1'b1;
                         end else begin
                             snif_overflow <= 1'b1;
@@ -340,7 +340,7 @@ module i2c_master_axi #(
                     if (snif_bitcnt == 4'd8) begin
                         // ACK bit done: record it (FF=NACK, 00=ACK)
                         if (!snif_full) begin
-                            snif_mem[snif_wr_total[8:0]] <= {8'h01, n_sda ? 8'hFF : 8'h00};
+                            snif_mem[snif_wr_total[6:0]] <= {8'h01, n_sda ? 8'hFF : 8'h00};
                             snif_wr_total <= snif_wr_total + 1'b1;
                         end else begin
                             snif_overflow <= 1'b1;
@@ -351,7 +351,7 @@ module i2c_master_axi #(
                         if (snif_bitcnt == 4'd7) begin
                             // 8th data bit done: record byte
                             if (!snif_full) begin
-                                snif_mem[snif_wr_total[8:0]] <= {8'h00, snif_shreg[6:0], n_sda};
+                                snif_mem[snif_wr_total[6:0]] <= {8'h00, snif_shreg[6:0], n_sda};
                                 snif_wr_total <= snif_wr_total + 1'b1;
                             end else begin
                                 snif_overflow <= 1'b1;
@@ -364,7 +364,7 @@ module i2c_master_axi #(
         end
     end
 
-    // Sniffer transcript FIFO (passive, per-bus logic analyzer)
+    // Sniffer transcript FIFO 128 deep (passive, per-bus logic analyzer)
     // 0x40 W: bit0 1=arm+clear, 0=disarm
     // 0x40 R: [10]=overflow, [9]=armed, [8:0]=entries available
     // 0x44 R: pop {marker,data}: 0x00=data byte, 0x01=ACK(00)/NACK(FF),
@@ -374,9 +374,9 @@ module i2c_master_axi #(
     reg [9:0]  snif_wr_total;   // capture block
     reg [9:0]  snif_rd_total;   // read block (pop on AR accept)
     reg        snif_overflow;   // capture block
-    reg [15:0] snif_mem [0:511];
+    reg [15:0] snif_mem [0:127];
     wire [9:0] snif_avail = snif_wr_total - snif_rd_total;
-    wire       snif_full  = (snif_avail >= 10'd512);
+    wire       snif_full  = (snif_avail >= 10'd128);
 
     // =========================================================================
     // I2C Timing & Sub-State Machine (Byte & Condition Engine)
