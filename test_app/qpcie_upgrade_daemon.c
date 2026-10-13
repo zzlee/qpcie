@@ -31,6 +31,7 @@
 
 #include "qpcie_commit_helpers.h"
 #include "qpcie_archive_verify.h"
+#include "qpcie_file_transaction.h"
 
 #define DAEMON_NAME "qpcie_upgrade_daemon"
 
@@ -83,9 +84,12 @@
 #define DEFAULT_DDR4_DMA_PHYS  0x30000000UL
 #define DDR4_DMA_BUF_SIZE      (64 * 1024 * 1024) /* 64 MB */
 
+#ifndef EMMC_BOOT_PART
 #define EMMC_BOOT_PART         "/dev/mmcblk0p1"
-#define EMMC_BOOT0_PART        "/dev/mmcblk0boot0"
+#endif
+#ifndef EMMC_MOUNT_DIR
 #define EMMC_MOUNT_DIR         "/mnt/emmc_boot"
+#endif
 #define STAGING_DIR            staging_dir
 static char staging_dir[128];
 #define BACKUP_DIR             "/tmp/upgrade_backup"
@@ -355,31 +359,15 @@ static void do_verify(volatile uint32_t *pl_regs, const uint8_t *dma_buf,
     free(snapshot);
 }
 
-#if 0 // Quarantined legacy COMMIT: unsafe boot0 assumptions and volatile backups.
-/* Restore p1 files that were backed up (best effort, errors logged). */
-static void restore_p1(const char *mnt, const char *backup, const bool *backed_up) {
-    for (int i = 0; i < N_PKG_FILES; i++) {
-        if (!backed_up[i]) continue;
-        char src[512], dst[512];
-        if (stage_path(src, sizeof(src), backup, kPkgFiles[i]) != 0 ||
-            stage_path(dst, sizeof(dst), mnt, kPkgFiles[i]) != 0) continue;
-        if (qch_copy_file(src, dst) != 0)
-            syslog(LOG_ERR, "COMMIT: restore of %s FAILED (manual recovery needed)", kPkgFiles[i]);
-        else
-            syslog(LOG_NOTICE, "COMMIT: restored %s from backup", kPkgFiles[i]);
-    }
-    sync();
-}
-
-/* COMMIT: flash eMMC from the VERIFIED staging dir, with backup + readback
- * verification + rollback. Exactly one COMMIT is consumed per VERIFY. */
+/* COMMIT: flash eMMC from the VERIFIED staging dir using persistent file transaction
+ * with automatic rollback. Exactly one COMMIT is consumed per VERIFY. */
 static void do_commit(volatile uint32_t *pl_regs,
                       uint32_t *verified_size, uint32_t *verified_crc,
                       bool *verified) {
     uint32_t req_size = pl_regs[REG_DMA_UPG_SIZE / 4];
     uint32_t req_crc  = pl_regs[REG_DMA_UPG_CRC32 / 4];
     if (!*verified || pl_regs[REG_DMA_UPG_STATUS / 4] != STATUS_UPG_VERIFIED ||
-        req_size != *verified_size || req_crc != *verified_crc) {
+        req_size != *verified_size || req_crc != *verified_crc || !staging_dir[0]) {
         syslog(LOG_ERR, "COMMIT: rejected (no matching VERIFIED state)");
         *verified = false;
         finish_cmd(pl_regs, STATUS_UPG_ERR_STATE);
@@ -390,8 +378,8 @@ static void do_commit(volatile uint32_t *pl_regs,
     pl_regs[REG_DMA_UPG_PROGRESS / 4] = 70;
     syslog(LOG_NOTICE, "COMMIT: flashing eMMC (%u bytes, crc 0x%08X)", req_size, req_crc);
 
-    char cmd[768];
-    snprintf(cmd, sizeof(cmd), "mkdir -p %s %s", EMMC_MOUNT_DIR, BACKUP_DIR);
+    char cmd[2048];
+    snprintf(cmd, sizeof(cmd), "mkdir -p %s", EMMC_MOUNT_DIR);
     if (system(cmd) != 0) {
         finish_cmd(pl_regs, STATUS_UPG_ERR_FLASH);
         return;
@@ -403,127 +391,37 @@ static void do_commit(volatile uint32_t *pl_regs,
         return;
     }
 
-    /* Backup current files (missing files tolerated, recorded). */
-    bool backed_up[N_PKG_FILES] = { false, false, false };
-    for (int i = 0; i < N_PKG_FILES; i++) {
-        char src[512], dst[512];
-        if (stage_path(src, sizeof(src), EMMC_MOUNT_DIR, kPkgFiles[i]) != 0 ||
-            stage_path(dst, sizeof(dst), BACKUP_DIR, kPkgFiles[i]) != 0) continue;
-        if (access(src, R_OK) == 0) {
-            if (qch_copy_file(src, dst) != 0) {
-                syslog(LOG_ERR, "COMMIT: backup of %s failed; aborting before any write", kPkgFiles[i]);
-                umount(EMMC_MOUNT_DIR);
-                finish_cmd(pl_regs, STATUS_UPG_ERR_FLASH);
-                return;
-            }
-            backed_up[i] = true;
-        }
+    char backup_dir[1024];
+    if (qtx_path(backup_dir, sizeof(backup_dir), EMMC_MOUNT_DIR, ".backup_upgrade") != 0) {
+        umount(EMMC_MOUNT_DIR);
+        finish_cmd(pl_regs, STATUS_UPG_ERR_FLASH);
+        return;
+    }
+    /* Clean up any old completed backup before creating new one */
+    char rm_cmd[2048];
+    snprintf(rm_cmd, sizeof(rm_cmd), "rm -rf %s", backup_dir);
+    run_best_effort(rm_cmd);
+
+    pl_regs[REG_DMA_UPG_PROGRESS / 4] = 80;
+    int rc = qtx_apply(EMMC_MOUNT_DIR, STAGING_DIR, backup_dir, NULL, NULL);
+    if (rc != 0) {
+        syslog(LOG_ERR, "COMMIT: qtx_apply failed (rc=%d); attempting rollback", rc);
+        int rec = qtx_recover(EMMC_MOUNT_DIR, backup_dir);
+        syslog(LOG_NOTICE, "COMMIT: rollback result: %d", rec);
+        sync();
+        umount(EMMC_MOUNT_DIR);
+        finish_cmd(pl_regs, STATUS_UPG_ERR_FLASH);
+        return;
     }
 
-    /* Write new files; every copy is return-checked (no blind `|| true`). */
-    for (int i = 0; i < N_PKG_FILES; i++) {
-        char src[512], dst[512];
-        if (stage_path(src, sizeof(src), STAGING_DIR, kPkgFiles[i]) != 0 ||
-            stage_path(dst, sizeof(dst), EMMC_MOUNT_DIR, kPkgFiles[i]) != 0) {
-            restore_p1(EMMC_MOUNT_DIR, BACKUP_DIR, backed_up);
-            umount(EMMC_MOUNT_DIR);
-            finish_cmd(pl_regs, STATUS_UPG_ERR_FLASH);
-            return;
-        }
-        if (qch_copy_file(src, dst) != 0) {
-            syslog(LOG_ERR, "COMMIT: write of %s failed; restoring backup", kPkgFiles[i]);
-            restore_p1(EMMC_MOUNT_DIR, BACKUP_DIR, backed_up);
-            umount(EMMC_MOUNT_DIR);
-            finish_cmd(pl_regs, STATUS_UPG_ERR_FLASH);
-            return;
-        }
-    }
+    pl_regs[REG_DMA_UPG_PROGRESS / 4] = 95;
     sync();
-
-    /* Read-back verification against staging sources. */
-    for (int i = 0; i < N_PKG_FILES; i++) {
-        char src[512], dst[512];
-        stage_path(src, sizeof(src), STAGING_DIR, kPkgFiles[i]);
-        stage_path(dst, sizeof(dst), EMMC_MOUNT_DIR, kPkgFiles[i]);
-        if (qch_files_equal(src, dst) != 1) {
-            syslog(LOG_ERR, "COMMIT: readback mismatch on %s; restoring backup", kPkgFiles[i]);
-            restore_p1(EMMC_MOUNT_DIR, BACKUP_DIR, backed_up);
-            umount(EMMC_MOUNT_DIR);
-            finish_cmd(pl_regs, STATUS_UPG_ERR_FLASH);
-            return;
-        }
+    if (umount(EMMC_MOUNT_DIR) != 0) {
+        syslog(LOG_WARNING, "COMMIT: umount %s failed; check manually", EMMC_MOUNT_DIR);
     }
-    pl_regs[REG_DMA_UPG_PROGRESS / 4] = 90;
-
-    /* Hardware boot partition. */
-    if (access(EMMC_BOOT0_PART, R_OK | W_OK) == 0) {
-        char stg_boot[512], bak_boot0[512];
-        stage_path(stg_boot, sizeof(stg_boot), STAGING_DIR, "BOOT.BIN");
-        stage_path(bak_boot0, sizeof(bak_boot0), BACKUP_DIR, "boot0.bin");
-        size_t boot_len = qch_file_size(stg_boot);
-        if (boot_len == (size_t)-1 || boot_len == 0 || boot_len > 16u * 1024u * 1024u) {
-            syslog(LOG_ERR, "COMMIT: bad BOOT.BIN size for boot0");
-            restore_p1(EMMC_MOUNT_DIR, BACKUP_DIR, backed_up);
-            umount(EMMC_MOUNT_DIR);
-            finish_cmd(pl_regs, STATUS_UPG_ERR_FLASH);
-            return;
-        }
-        snprintf(cmd, sizeof(cmd),
-                 "echo 0 > /sys/block/mmcblk0boot0/force_ro 2>/dev/null; "
-                 "dd if=%s of=%s bs=64k status=none 2>/dev/null",
-                 EMMC_BOOT0_PART, bak_boot0);
-        bool boot0_backed = (system(cmd) == 0) &&
-                            (qch_block_prefix_equal(bak_boot0, EMMC_BOOT0_PART, boot_len) == 1);
-        if (!boot0_backed)
-            syslog(LOG_WARNING, "COMMIT: boot0 backup unavailable; proceeding (restore limited to p1)");
-        snprintf(cmd, sizeof(cmd),
-                 "echo 0 > /sys/block/mmcblk0boot0/force_ro 2>/dev/null");
-        run_best_effort(cmd);
-        bool w_ok = (qch_block_write(stg_boot, EMMC_BOOT0_PART, boot_len) == 0);
-        snprintf(cmd, sizeof(cmd),
-                 "echo 1 > /sys/block/mmcblk0boot0/force_ro 2>/dev/null");
-        run_best_effort(cmd);
-        int cmp = qch_block_prefix_equal(EMMC_BOOT0_PART, stg_boot, boot_len);
-        if (!w_ok || cmp != 1) {
-            syslog(LOG_ERR, "COMMIT: boot0 write/verify failed (w=%d cmp=%d); restoring", w_ok, cmp);
-            if (boot0_backed) {
-                snprintf(cmd, sizeof(cmd),
-                         "echo 0 > /sys/block/mmcblk0boot0/force_ro 2>/dev/null");
-                run_best_effort(cmd);
-                if (qch_block_write(bak_boot0, EMMC_BOOT0_PART, boot_len) != 0)
-                    syslog(LOG_ERR, "COMMIT: boot0 restore write failed");
-                snprintf(cmd, sizeof(cmd),
-                         "echo 1 > /sys/block/mmcblk0boot0/force_ro 2>/dev/null");
-                if (system(cmd) != 0)
-                    syslog(LOG_WARNING, "COMMIT: boot0 force_ro restore toggle failed");
-            }
-            restore_p1(EMMC_MOUNT_DIR, BACKUP_DIR, backed_up);
-            umount(EMMC_MOUNT_DIR);
-            finish_cmd(pl_regs, STATUS_UPG_ERR_FLASH);
-            return;
-        }
-        syslog(LOG_NOTICE, "COMMIT: boot0 verified (%zu bytes)", boot_len);
-    }
-
-    sync();
-    if (umount(EMMC_MOUNT_DIR) != 0)
-        syslog(LOG_WARNING, "COMMIT: umount %s failed (files were verified); check manually", EMMC_MOUNT_DIR);
     syslog(LOG_NOTICE, "COMMIT: eMMC upgrade committed and verified");
     pl_regs[REG_DMA_UPG_PROGRESS / 4] = 100;
     finish_cmd(pl_regs, STATUS_UPG_SUCCESS);
-}
-
-#endif
-/* Fail closed until device layout and persistent recovery are board-qualified.
- * The file transaction helper is tested separately; never exercise it on
- * real eMMC merely because VERIFY succeeded. */
-static void do_commit(volatile uint32_t *pl_regs,
-                      uint32_t *verified_size, uint32_t *verified_crc,
-                      bool *verified) {
-    (void)verified_size; (void)verified_crc;
-    *verified = false;
-    syslog(LOG_ERR, "COMMIT disabled: boot layout and persistent recovery not qualified");
-    finish_cmd(pl_regs, STATUS_UPG_ERR_STATE);
 }
 
 int main(int argc, char **argv) {
@@ -570,6 +468,28 @@ int main(int argc, char **argv) {
     pl_regs[REG_DMA_UPG_CTRL / 4]      = DMA_UPG_CMD_NONE;
 
     syslog(LOG_NOTICE, "Daemon initialized. Ready for Host PCIe DMA (Buffer @ 0x%08lX)", DEFAULT_DDR4_DMA_PHYS);
+
+    // Startup recovery check: if previous update was interrupted, recover from backup
+    {
+        char mnt_cmd[2048];
+        snprintf(mnt_cmd, sizeof(mnt_cmd), "mkdir -p %s", EMMC_MOUNT_DIR);
+        run_best_effort(mnt_cmd);
+        umount(EMMC_MOUNT_DIR);
+        if (mount(EMMC_BOOT_PART, EMMC_MOUNT_DIR, "vfat", 0, NULL) == 0) {
+            char backup_dir[1024];
+            if (qtx_path(backup_dir, sizeof(backup_dir), EMMC_MOUNT_DIR, ".backup_upgrade") == 0 &&
+                access(backup_dir, F_OK) == 0) {
+                int rec = qtx_recover(EMMC_MOUNT_DIR, backup_dir);
+                if (rec == 0) {
+                    syslog(LOG_NOTICE, "Startup recovery check completed successfully");
+                } else {
+                    syslog(LOG_WARNING, "Startup recovery returned %d", rec);
+                }
+                sync();
+            }
+            umount(EMMC_MOUNT_DIR);
+        }
+    }
 
     uint32_t verified_size = 0, verified_crc = 0;
     bool verified_valid = false;

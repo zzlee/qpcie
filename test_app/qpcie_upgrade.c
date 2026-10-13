@@ -450,13 +450,7 @@ int main(int argc, char **argv) {
     }
 
     /* A PL version cannot identify the installed software generation. Require
-     * an explicit daemon capability handshake before any upload command.
-     * This build deliberately has no qualified eMMC writer. */
-    if (do_commit) {
-        fprintf(stderr, "COMMIT disabled in this build; boot layout/recovery not qualified\n");
-        munmap((void *)bar0, 65536); close(fd_bar0);
-        return EXIT_FAILURE;
-    }
+     * an explicit daemon capability handshake before any upload command. */
     if (package_path || bootbin_path || kernel_path) {
         if (upg_stat == STATUS_UPG_FLASHING || upg_stat == STATUS_UPG_VERIFYING ||
             bar0[REG_DMA_UPG_DOORBELL / 4] || (bar0[REG_DMA_UPG_CTRL / 4] & 1)) {
