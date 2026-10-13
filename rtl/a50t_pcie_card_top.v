@@ -893,6 +893,28 @@ module a50t_pcie_card_top #(
         .clk(pcie_user_clk),
         .rst_n(pcie_user_rst_n),
 
+        // No PS on Artix-7: run the BAR0/PS-shared logic in the PCIe
+        // user domain and park all PS-side AXI inputs idle.
+        .pl_clk0(pcie_user_clk),
+        .pl_resetn0(pcie_user_rst_n),
+        .sys_100m_rst_n(pcie_user_rst_n),
+        .ps_hpm0_arid(16'd0),
+        .ps_hpm0_arlen(8'd0),
+        .ps_hpm0_arsize(3'd0),
+        .ps_hpm0_arvalid_raw(1'b0),
+        .ps_hpm0_arready_raw(1'b0),
+        .ps_hpm0_rid_raw(16'd0),
+        .ps_hpm0_rvalid_raw(1'b0),
+        .s_axil_ps_awaddr(32'd0),
+        .s_axil_ps_awvalid(1'b0),
+        .s_axil_ps_wdata(32'd0),
+        .s_axil_ps_wstrb(4'd0),
+        .s_axil_ps_wvalid(1'b0),
+        .s_axil_ps_bready(1'b0),
+        .s_axil_ps_araddr(32'd0),
+        .s_axil_ps_arvalid(1'b0),
+        .s_axil_ps_rready(1'b0),
+
         .s_axis_cq_tdata(m_axis_cq_tdata),
         .s_axis_cq_tvalid(m_axis_cq_tvalid),
         .s_axis_cq_tlast(m_axis_cq_tlast),

@@ -218,7 +218,7 @@ static int find_qpcie(void)
 
 static void usage(const char *p)
 {
-    printf("Usage: %s [--bus mcu|front] [--scan|--dump|--loopback|--status|--board-ver|--probe HEX|--set-ctrl HEX]\n", p);
+    printf("Usage: %s [--bus mcu|front] [--scan|--dump|--loopback|--status|--board-ver|--spy|--probe HEX|--set-ctrl HEX]\n", p);
     printf("  Direct BAR MMIO: BAR1 I2C master (mcu=0x5000 default, front=0x3000);\n");
     printf("  BAR0 0x1008 board version. Unloads qpcie driver.\n");
 }
@@ -227,6 +227,7 @@ int main(int argc, char **argv)
 {
     bool do_scan = false, do_dump = false, do_lb = false, do_status = false;
     bool do_board = false;
+    bool do_spy = false;
     const char *probe_hex = NULL;
     const char *ctrl_hex = NULL;
     static struct option lo[] = {
@@ -236,6 +237,7 @@ int main(int argc, char **argv)
         {"status", no_argument, 0, 't'},
         {"board-ver", no_argument, 0, 'b'},
         {"probe", required_argument, 0, 'p'},
+        {"spy", no_argument, 0, 'y'},
         {"prescaler", required_argument, 0, 'P'},
         {"slave", required_argument, 0, 'S'},
         {"len", required_argument, 0, 'L'},
@@ -245,7 +247,7 @@ int main(int argc, char **argv)
         {0, 0, 0, 0}
     };
     int o;
-    while ((o = getopt_long(argc, argv, "sdlthbB:c:p:P:S:L:", lo, NULL)) != -1) {
+    while ((o = getopt_long(argc, argv, "sdlthbB:c:p:P:S:L:y", lo, NULL)) != -1) {
         switch (o) {
         case 's': do_scan = true; break;
         case 'd': do_dump = true; break;
@@ -253,6 +255,7 @@ int main(int argc, char **argv)
         case 't': do_status = true; break;
         case 'b': do_board = true; break;
         case 'p': probe_hex = optarg; break;
+        case 'y': do_spy = true; break;
         case 'P': g_prer = (uint32_t)strtoul(optarg, NULL, 0); break;
         case 'S': g_slv = (uint32_t)strtoul(optarg, NULL, 0); break;
         case 'L': g_len = (uint32_t)strtoul(optarg, NULL, 0); break;
@@ -272,7 +275,7 @@ int main(int argc, char **argv)
         default: usage(argv[0]); return o == 'h' ? 0 : 1;
         }
     }
-    if (!do_scan && !do_dump && !do_lb && !do_status && !do_board && !ctrl_hex && !probe_hex) {
+    if (!do_scan && !do_dump && !do_lb && !do_status && !do_board && !ctrl_hex && !probe_hex && !do_spy) {
         usage(argv[0]);
         return 1;
     }
@@ -342,6 +345,21 @@ int main(int argc, char **argv)
         uint8_t a = (uint8_t)strtoul(probe_hex, NULL, 0);
         int r = probe((volatile uint8_t *)bar1, a);
         printf("probe %s 0x%02X: %s\n", g_bus, a, r == 0 ? "ACK" : "NACK");
+    }
+
+    if (do_spy) {
+        /* Passive bus spy at 0x18/0x1C: levels + SCL/START/STOP counters.
+         * Requires bitstream C_VERSION >= 26101301. */
+        uint32_t a0 = read32(bar1, g_base + 0x18);
+        uint32_t b0 = read32(bar1, g_base + 0x1C);
+        sleep(2);
+        uint32_t a1 = read32(bar1, g_base + 0x18);
+        uint32_t b1 = read32(bar1, g_base + 0x1C);
+        printf("spy %s: idle SCL=%d SDA=%d | SCL+=%u START+=%u STOP+=%u (2s)\n",
+               g_bus, (a1 >> 1) & 1, a1 & 1,
+               (unsigned short)((a1 >> 16) - (a0 >> 16)),
+               (unsigned short)(b1 - b0),
+               (unsigned short)((b1 >> 16) - (b0 >> 16)));
     }
 
     if (do_scan) {
