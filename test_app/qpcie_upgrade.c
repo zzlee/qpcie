@@ -62,9 +62,29 @@
 #define STATUS_UPG_VERIFYING   0x02
 #define STATUS_UPG_FLASHING    0x03
 #define STATUS_UPG_SUCCESS     0x04
+#define STATUS_UPG_VERIFIED    0x05
 #define STATUS_UPG_ERR_CRC     0xE1
 #define STATUS_UPG_ERR_FLASH   0xE2
 #define STATUS_UPG_ERR_TIMEOUT 0xE3
+#define STATUS_UPG_ERR_STATE   0xE4
+
+/* Doorbell commands: VERIFY stages+checks without touching eMMC;
+ * COMMIT flashes eMMC and requires a preceding VERIFIED state. */
+#define DOORBELL_VERIFY        0x01
+#define DOORBELL_COMMIT        0x02
+
+/* Two-stage protocol requires daemon generation shipped with this PL. */
+#define MIN_COMMIT_VERSION     0x26101401u
+
+/* BAR0 DDR readback registers (16-byte staging verification). */
+#define REG_DDR_READ_OFF       0x07C0
+#define REG_DDR_READ_STATUS    0x07C4
+#define REG_DDR_READ_SEQ       0x07C8
+#define REG_DDR_READ_DATA      0x07D0
+
+#define STAGING_SIZE           (64u * 1024u * 1024u)
+#define PUSH_BLOCK             4096u
+#define PUSH_MAX_RETRY         5
 
 /* CRC32 Lookup Table & Calculation */
 static uint32_t crc32_table[256];
@@ -98,6 +118,7 @@ static double get_time_sec(void) {
 }
 
 /* Locate PCIe Device matching 12AB:E380 */
+static void print_progress(int percent, double speed_mb);
 static bool find_pcie_device(char *out_bdf, size_t max_len) {
     DIR *dir = opendir("/sys/bus/pci/devices");
     if (!dir) return false;
@@ -137,6 +158,133 @@ static bool find_pcie_device(char *out_bdf, size_t max_len) {
     return found;
 }
 
+static const char *status_name(uint32_t st) {
+    switch (st) {
+        case STATUS_UPG_IDLE: return "IDLE / Ready";
+        case STATUS_UPG_RECEIVING: return "RECEIVING";
+        case STATUS_UPG_VERIFYING: return "VERIFYING";
+        case STATUS_UPG_FLASHING: return "FLASHING";
+        case STATUS_UPG_SUCCESS: return "Previous Flash Succeeded";
+        case STATUS_UPG_VERIFIED: return "VERIFIED (awaiting --commit)";
+        case STATUS_UPG_ERR_CRC: return "CRC ERROR";
+        case STATUS_UPG_ERR_FLASH: return "FLASH ERROR";
+        case STATUS_UPG_ERR_TIMEOUT: return "TIMEOUT ERROR";
+        case STATUS_UPG_ERR_STATE: return "STATE ERROR (commit without verify?)";
+        default: return "Busy / Other";
+    }
+}
+
+/* Push buffer to staging DDR in 4K sysfs blocks with per-block retry.
+ * The kernel caps each bin_attribute write at 4096 bytes. */
+static bool push_staging(const char *sysfs, const uint8_t *buf, size_t len) {
+    int fd = open(sysfs, O_WRONLY);
+    if (fd < 0) { perror("open firmware_upgrade sysfs"); return false; }
+    double t0 = get_time_sec();
+    for (size_t off = 0; off < len; off += PUSH_BLOCK) {
+        size_t want = len - off < PUSH_BLOCK ? len - off : PUSH_BLOCK;
+        bool ok = false;
+        for (int a = 0; a < PUSH_MAX_RETRY && !ok; a++) {
+            if (lseek(fd, (off_t)off, SEEK_SET) < 0) continue;
+            ssize_t n = write(fd, buf + off, want);
+            if (n == (ssize_t)want) ok = true;
+            else fprintf(stderr, "\nblock %zu: attempt %d failed (%zd); retrying\n", off, a, n);
+        }
+        if (!ok) { fprintf(stderr, "block %zu: FAILED; stop\n", off); close(fd); return false; }
+        double el = get_time_sec() - t0;
+        print_progress((int)(off * 100 / len), (off / 1048576.0) / (el > 0 ? el : 1));
+    }
+    double el = get_time_sec() - t0;
+    printf("\n -> push complete (%zu bytes, %.1f MB/s)\n", len, (len / 1048576.0) / (el > 0 ? el : 1));
+    close(fd);
+    return true;
+}
+
+/* Verify staging DDR against buffer via BAR0 16-byte readback. */
+static bool verify_staging(volatile uint32_t *bar0, const uint8_t *buf, size_t len) {
+    if (bar0[REG_DMA_UPG_CTRL / 4] & DMA_UPG_CMD_START) {
+        fprintf(stderr, "DMA START active; refusing verify\n"); return false;
+    }
+    size_t full = len & ~(size_t)15;
+    double t0 = get_time_sec();
+    for (size_t off = 0; off < full; off += 16) {
+        if (bar0[REG_DDR_READ_STATUS / 4] & 1) { fprintf(stderr, "readback BUSY\n"); return false; }
+        uint32_t seq = bar0[REG_DDR_READ_SEQ / 4];
+        bar0[REG_DDR_READ_OFF / 4] = (uint32_t)off;
+        (void)bar0[REG_DDR_READ_OFF / 4];
+        bar0[REG_DDR_READ_STATUS / 4] = 1;
+        (void)bar0[REG_DDR_READ_STATUS / 4];
+        bool done = false;
+        for (int i = 0; i < 100; i++) {
+            uint32_t now = bar0[REG_DDR_READ_SEQ / 4], st = bar0[REG_DDR_READ_STATUS / 4];
+            if (now == seq + 1 && (st & 0x1c)) {
+                fprintf(stderr, "readback error off=%zx st=%x\n", off, st); return false;
+            }
+            if (now == seq + 1 && (st & 3) == 2) { done = true; break; }
+            usleep(1000);
+        }
+        if (!done) { fprintf(stderr, "readback timeout off=%zx\n", off); return false; }
+        for (int w = 0; w < 4; w++) {
+            uint32_t v = bar0[REG_DDR_READ_DATA / 4 + w];
+            for (int b = 0; b < 4; b++) {
+                if ((unsigned char)(v >> (8 * b)) != buf[off + 4 * w + b]) {
+                    fprintf(stderr, "DDR mismatch at 0x%zx\n", off + 4 * w + b); return false;
+                }
+            }
+        }
+        if ((off & 0xfffff) == 0 && off) {
+            double el = get_time_sec() - t0;
+            fprintf(stderr, "verify progress: %zu/%zu bytes\n", off, len);
+            (void)el;
+        }
+    }
+    if (len != full) { /* trailing bytes via one overlapping aligned read */
+        uint32_t seq = bar0[REG_DDR_READ_SEQ / 4];
+        bar0[REG_DDR_READ_OFF / 4] = (uint32_t)full;
+        (void)bar0[REG_DDR_READ_OFF / 4];
+        bar0[REG_DDR_READ_STATUS / 4] = 1;
+        (void)bar0[REG_DDR_READ_STATUS / 4];
+        bool done = false;
+        for (int i = 0; i < 100; i++) {
+            uint32_t now = bar0[REG_DDR_READ_SEQ / 4], st = bar0[REG_DDR_READ_STATUS / 4];
+            if (now == seq + 1 && (st & 3) == 2) { done = true; break; }
+            if (now == seq + 1 && (st & 0x1c)) { fprintf(stderr, "readback tail error\n"); return false; }
+            usleep(1000);
+        }
+        if (!done) { fprintf(stderr, "readback tail timeout\n"); return false; }
+        for (size_t i = full; i < len; i++) {
+            uint32_t v = bar0[REG_DDR_READ_DATA / 4 + (i - full) / 4];
+            if ((unsigned char)(v >> (8 * ((i - full) % 4))) != buf[i]) {
+                fprintf(stderr, "DDR tail mismatch at 0x%zx\n", i); return false;
+            }
+        }
+    }
+    printf(" -> BAR0 readback verify PASS (%zu bytes)\n", len);
+    return true;
+}
+
+/* Ring a doorbell command and poll for a terminal status. */
+static bool doorbell_poll(volatile uint32_t *bar0, uint32_t cmd, uint32_t want,
+                          int timeout_s, const char *what) {
+    bar0[REG_DMA_UPG_DOORBELL / 4] = cmd;
+    (void)bar0[REG_DMA_UPG_DOORBELL / 4];
+    double t0 = get_time_sec();
+    uint32_t last_prog = 0xFF;
+    while (get_time_sec() - t0 < timeout_s) {
+        uint32_t st = bar0[REG_DMA_UPG_STATUS / 4];
+        uint32_t prog = bar0[REG_DMA_UPG_PROGRESS / 4];
+        if (st == want) { printf("\n -> %s reached 0x%02X\n", what, want); return true; }
+        if (st == STATUS_UPG_ERR_CRC || st == STATUS_UPG_ERR_FLASH ||
+            st == STATUS_UPG_ERR_TIMEOUT || st == STATUS_UPG_ERR_STATE) {
+            fprintf(stderr, "\n%s failed: status %s (0x%02X)\n", what, status_name(st), st);
+            return false;
+        }
+        if (prog != last_prog) { print_progress(prog > 100 ? 100 : (int)prog, 0.0); last_prog = prog; }
+        usleep(100000);
+    }
+    fprintf(stderr, "\n%s timed out waiting for 0x%02X\n", what, want);
+    return false;
+}
+
 static void print_progress(int percent, double speed_mb) {
     const int bar_width = 36;
     int pos = (percent * bar_width) / 100;
@@ -162,12 +310,14 @@ int main(int argc, char **argv) {
     char *bootscr_path = NULL;
     bool show_status = false;
     bool do_reboot = false;
+    bool do_commit = false;
 
     static struct option long_options[] = {
         {"package", required_argument, 0, 'p'},
         {"boot",    required_argument, 0, 'b'},
         {"kernel",  required_argument, 0, 'k'},
         {"script",  required_argument, 0, 'c'},
+        {"commit",  no_argument,       0, 'm'},
         {"status",  no_argument,       0, 's'},
         {"reboot",  no_argument,       0, 'r'},
         {"help",    no_argument,       0, 'h'},
@@ -175,12 +325,13 @@ int main(int argc, char **argv) {
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "p:b:k:c:srh", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "p:b:k:c:msrh", long_options, NULL)) != -1) {
         switch (opt) {
             case 'p': package_path = optarg; break;
             case 'b': bootbin_path = optarg; break;
             case 'k': kernel_path = optarg; break;
             case 'c': bootscr_path = optarg; break;
+            case 'm': do_commit = true; break;
             case 's': show_status = true; break;
             case 'r': do_reboot = true; break;
             case 'h':
@@ -189,13 +340,18 @@ int main(int argc, char **argv) {
                 printf(" QPCIe SC7F0 In-System Firmware Upgrade Tool (PCIe DMA)\n");
                 printf(" Target: AMD ZU4EV (SC7F0 N1 HDMI2 V11, PCI 12AB:E380)\n");
                 printf("=================================================================\n");
+                printf("Two-stage protocol (eMMC is written ONLY by --commit):\n");
+                printf("  1. sudo %s --package <tar.gz>  push + BAR0-verify + board VERIFY\n", argv[0]);
+                printf("  2. sudo %s --commit             flash eMMC from VERIFIED bundle\n", argv[0]);
+                printf("  3. sudo %s --reboot             POR reset + PCIe rescan\n", argv[0]);
                 printf("Usage:\n");
                 printf("  sudo %s [options]\n\n", argv[0]);
                 printf("Options:\n");
-                printf("  -p, --package <tar.gz> Push upgrade package (containing BOOT.BIN, image.ub, etc.)\n");
-                printf("  -b, --boot <BOOT.BIN>  Specify BOOT.BIN to package and upgrade\n");
+                printf("  -p, --package <tar.gz> Push package, verify, request board VERIFY (no eMMC write)\n");
+                printf("  -b, --boot <BOOT.BIN>  Specify BOOT.BIN to package and stage\n");
                 printf("  -k, --kernel <image.ub> Specify image.ub kernel to package\n");
                 printf("  -c, --script <boot.scr> Specify boot.scr script to package\n");
+                printf("  -m, --commit           Flash eMMC from VERIFIED bundle (requires prior --package)\n");
                 printf("  -s, --status           Query card version, caps, and upgrade state\n");
                 printf("  -r, --reboot           Trigger card POR reset & PCIe link rescan (Zero-Host-Reboot)\n");
                 printf("  -h, --help             Show this help message\n");
@@ -203,11 +359,11 @@ int main(int argc, char **argv) {
         }
     }
 
-    if (!package_path && !bootbin_path && !kernel_path && !show_status) {
+    if (!package_path && !bootbin_path && !kernel_path && !do_commit && !show_status) {
         if (optind < argc) {
             package_path = argv[optind];
         } else {
-            fprintf(stderr, "Error: No action specified. Use --package <file> or --status.\n");
+            fprintf(stderr, "Error: No action specified. Use --package <file>, --commit or --status.\n");
             fprintf(stderr, "Run '%s --help' for usage.\n", argv[0]);
             return EXIT_FAILURE;
         }
@@ -265,9 +421,40 @@ int main(int argc, char **argv) {
     printf(" -> Hardware Caps     : 0x%08X (VideoCh=%u, AudioCh=%u)\n",
            hw_caps, (hw_caps >> 8) & 0xFF, (hw_caps >> 16) & 0xFF);
     printf(" -> Board PS DDR4 Buf : 0x%016llX\n", (unsigned long long)ps_addr);
-    printf(" -> Upgrade Status    : 0x%02X (%s)\n", upg_stat,
-           (upg_stat == STATUS_UPG_IDLE) ? "IDLE / Ready" :
-           (upg_stat == STATUS_UPG_SUCCESS) ? "Previous Flash Succeeded" : "Busy / Other");
+    printf(" -> Upgrade Status    : 0x%02X (%s)\n", upg_stat, status_name(upg_stat));
+
+    if (magic != 0x12ABE380) {
+        fprintf(stderr, "ERROR: BAR0 magic mismatch; aborting\n");
+        munmap((void *)bar0, 65536);
+        close(fd_bar0);
+        return EXIT_FAILURE;
+    }
+
+    /* --commit path: flash eMMC from the VERIFIED bundle. No data moves here. */
+    if (do_commit && !package_path && !bootbin_path && !kernel_path) {
+        if (ver_id < MIN_COMMIT_VERSION) {
+            fprintf(stderr, "ERROR: two-stage COMMIT requires board RTL >= 0x%08X (got 0x%08X)\n",
+                    MIN_COMMIT_VERSION, ver_id);
+            munmap((void *)bar0, 65536);
+            close(fd_bar0);
+            return EXIT_FAILURE;
+        }
+        if (upg_stat != STATUS_UPG_VERIFIED) {
+            fprintf(stderr, "ERROR: board is not VERIFIED (status %s 0x%02X); run --package first\n",
+                    status_name(upg_stat), upg_stat);
+            munmap((void *)bar0, 65536);
+            close(fd_bar0);
+            return EXIT_FAILURE;
+        }
+        printf(" -> Sending COMMIT doorbell (eMMC flash with backup+readback)...\n");
+        bool ok = doorbell_poll(bar0, DOORBELL_COMMIT, STATUS_UPG_SUCCESS, 600, "COMMIT");
+        printf("=================================================================\n");
+        if (ok)
+            printf(" SUCCESS: eMMC upgrade committed and board-verified! Use --reboot to activate.\n");
+        munmap((void *)bar0, 65536);
+        close(fd_bar0);
+        return ok ? EXIT_SUCCESS : EXIT_FAILURE;
+    }
 
     if (show_status && !package_path && !bootbin_path && !kernel_path) {
         printf("=================================================================\n");
@@ -335,98 +522,78 @@ int main(int argc, char **argv) {
     printf(" -> Package CRC32     : 0x%08X\n", total_crc);
 
     printf("=================================================================\n");
-    printf(" Initiating High-Speed Firmware Push to SC7F0 Board...\n");
+    printf(" Stage 1: push + verify (eMMC is NOT touched in this step)\n");
 
-    // Handshake: Set Size, CRC32, and Start Transfer
-    bar0[REG_DMA_UPG_SIZE / 4]  = (uint32_t)file_size;
-    bar0[REG_DMA_UPG_CRC32 / 4] = total_crc;
-
-    double t_start = get_time_sec();
-
-    // 5.1 Push payload to board PS DDR4 via kernel DMA Fast-Push channel
-    char upg_sysfs[256];
-    snprintf(upg_sysfs, sizeof(upg_sysfs), "/sys/bus/pci/devices/%s/firmware_upgrade", bdf);
-    int fd_upg = open(upg_sysfs, O_WRONLY);
-
-    if (fd_upg >= 0) {
-        printf(" -> Streaming %zu bytes over PCIe Gen3 x4 DMA to Board PS DDR4...\n", file_size);
-        size_t total_pushed = 0;
-        const size_t chunk_sz = 2 * 1024 * 1024; // 2 MB coherent chunks
-        while (total_pushed < file_size) {
-            size_t to_write = file_size - total_pushed;
-            if (to_write > chunk_sz) to_write = chunk_sz;
-            ssize_t nw = write(fd_upg, file_buf + total_pushed, to_write);
-            if (nw <= 0) {
-                perror("❌ ERROR: Failed writing to firmware_upgrade sysfs");
-                break;
-            }
-            total_pushed += nw;
-            double elapsed = get_time_sec() - t_start;
-            double mb_s = (elapsed > 0) ? (total_pushed / (1024.0 * 1024.0)) / elapsed : 0.0;
-            print_progress((int)(total_pushed * 25 / file_size), mb_s);
-        }
-        close(fd_upg);
-        printf("\n -> PCIe DMA transfer complete (took %.2f s, speed: %.1f MB/s)\n",
-               get_time_sec() - t_start,
-               (file_size / (1024.0 * 1024.0)) / (get_time_sec() - t_start));
-
-        // Publish total size, total CRC32, and Ring Doorbell to notify board daemon
-        bar0[REG_DMA_UPG_SIZE / 4]     = (uint32_t)file_size;
-        bar0[REG_DMA_UPG_CRC32 / 4]    = total_crc;
-        bar0[REG_DMA_UPG_DOORBELL / 4] = 0x01;
-    } else {
-        // Fallback: direct hardware trigger
-        bar0[REG_DMA_UPG_CTRL / 4]     = DMA_UPG_CMD_START;
-        bar0[REG_DMA_UPG_DOORBELL / 4] = 0x01; // Ring doorbell to board daemon
+    if (ver_id < MIN_COMMIT_VERSION) {
+        fprintf(stderr, "ERROR: two-stage protocol requires board RTL >= 0x%08X (got 0x%08X)\n",
+                MIN_COMMIT_VERSION, ver_id);
+        free(file_buf);
+        if (auto_tar[0]) unlink(auto_tar);
+        munmap((void *)bar0, 65536);
+        close(fd_bar0);
+        return EXIT_FAILURE;
     }
-
-    // Monitor progress and status reported by board daemon (CRC verify + eMMC flash)
-    int wait_sec = 120;
-    bool success = false;
-    uint32_t last_prog = 0xFF;
-
-    while (wait_sec > 0) {
-        uint32_t st = bar0[REG_DMA_UPG_STATUS / 4];
-        uint32_t prog = bar0[REG_DMA_UPG_PROGRESS / 4];
-
-        if (st == STATUS_UPG_SUCCESS) {
-            print_progress(100, (file_size / (1024.0 * 1024.0)) / (get_time_sec() - t_start));
-            printf("\n");
-            success = true;
-            break;
-        }
-
-        if (st == STATUS_UPG_ERR_CRC) {
-            fprintf(stderr, "\n❌ ERROR: Board reported CRC verification failure!\n");
-            break;
-        }
-        if (st == STATUS_UPG_ERR_FLASH) {
-            fprintf(stderr, "\n❌ ERROR: Board reported eMMC flashing error!\n");
-            break;
-        }
-
-        if (prog != last_prog) {
-            double elapsed = get_time_sec() - t_start;
-            double speed = (elapsed > 0) ? ((double)file_size * prog / 100.0) / (1024.0 * 1024.0 * elapsed) : 0.0;
-            print_progress(prog, speed);
-            last_prog = prog;
-        }
-
-        usleep(100000); // 100ms
-        wait_sec--;
+    if (file_size > STAGING_SIZE - 16) {
+        fprintf(stderr, "ERROR: package %zu bytes exceeds staging window\n", file_size);
+        free(file_buf);
+        if (auto_tar[0]) unlink(auto_tar);
+        munmap((void *)bar0, 65536);
+        close(fd_bar0);
+        return EXIT_FAILURE;
     }
-
-    free(file_buf);
-    if (auto_tar[0]) unlink(auto_tar);
-
-    if (!success) {
-        fprintf(stderr, "\n❌ ERROR: Firmware upgrade timed out or failed!\n");
+    if (upg_stat == STATUS_UPG_FLASHING || upg_stat == STATUS_UPG_VERIFYING) {
+        fprintf(stderr, "ERROR: board busy (%s); retry later\n", status_name(upg_stat));
+        free(file_buf);
+        if (auto_tar[0]) unlink(auto_tar);
         munmap((void *)bar0, 65536);
         close(fd_bar0);
         return EXIT_FAILURE;
     }
 
-    printf(" ✨ SUCCESS: Firmware package written & verified on eMMC in %.2f s!\n", get_time_sec() - t_start);
+    double t_start = get_time_sec();
+
+    // 5.1 Push payload to board staging DDR via kernel DMA Fast-Push channel
+    char upg_sysfs[256];
+    snprintf(upg_sysfs, sizeof(upg_sysfs), "/sys/bus/pci/devices/%s/firmware_upgrade", bdf);
+    printf(" -> Streaming %zu bytes over PCIe Gen3 x4 DMA to Board PS DDR4...\n", file_size);
+    if (!push_staging(upg_sysfs, file_buf, file_size)) {
+        free(file_buf);
+        if (auto_tar[0]) unlink(auto_tar);
+        munmap((void *)bar0, 65536);
+        close(fd_bar0);
+        return EXIT_FAILURE;
+    }
+
+    // 5.2 Host-side BAR0 readback verification of staging DDR
+    printf(" -> Verifying staging DDR through BAR0 readback...\n");
+    if (!verify_staging(bar0, file_buf, file_size)) {
+        free(file_buf);
+        if (auto_tar[0]) unlink(auto_tar);
+        munmap((void *)bar0, 65536);
+        close(fd_bar0);
+        return EXIT_FAILURE;
+    }
+
+    // 5.3 Ask the board daemon to VERIFY (CRC + extract + contents, no eMMC)
+    bar0[REG_DMA_UPG_SIZE / 4]  = (uint32_t)file_size;
+    bar0[REG_DMA_UPG_CRC32 / 4] = total_crc;
+    (void)bar0[REG_DMA_UPG_CRC32 / 4]; /* flush posted writes, then doorbell */
+    printf(" -> Requesting board VERIFY (no eMMC write)...\n");
+    bool verified = doorbell_poll(bar0, DOORBELL_VERIFY, STATUS_UPG_VERIFIED, 300, "VERIFY");
+
+    free(file_buf);
+    if (auto_tar[0]) unlink(auto_tar);
+
+    if (!verified) {
+        fprintf(stderr, "ERROR: board VERIFY failed; eMMC untouched (took %.1fs)\n",
+                get_time_sec() - t_start);
+        munmap((void *)bar0, 65536);
+        close(fd_bar0);
+        return EXIT_FAILURE;
+    }
+
+    printf(" VERIFIED in %.1fs. eMMC is unchanged.\n", get_time_sec() - t_start);
+    printf(" Next (after review): sudo %s --commit\n", argv[0]);
     printf("=================================================================\n");
 
     // 6. Zero-Host-Reboot PCIe Hot-Reload Protocol

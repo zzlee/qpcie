@@ -1,0 +1,53 @@
+# SC7F0 PCIe firmware update: two-stage protocol (26101401)
+
+Stage 1 (`qpcie_upgrade --package`) pushes the tarball to staging DDR,
+verifies it through BAR0 readback, then asks the board only to VERIFY.
+Stage 2 (`qpcie_upgrade --commit`) flashes eMMC from the VERIFIED bundle.
+eMMC is written ONLY by an explicit COMMIT; a VERIFY never writes.
+
+## Why two stages
+
+The old single-doorbell design let the daemon act on START&&DONE, which
+fires spuriously while the host streams consecutive 4K chunks (observed
+as `STATUS=0xe1` on 26101302 hardware). The new daemon ignores START&&DONE
+entirely and latches work only from explicit doorbell values. The old
+`cp ... || true` flash path (failures silently ignored) is replaced by
+checked copies plus readback verification and backup restore.
+
+## BAR0 protocol (existing registers, new values)
+
+- `0x780 CTRL`: bit3 REBOOT (unchanged). START/DONE remain the DMA
+  transport handshake owned by the host driver; the daemon never acts on them.
+- `0x784 SIZE`, `0x788 CRC32`: latched by the daemon when a doorbell arrives.
+- `0x79C DOORBELL`: `0x01` VERIFY, `0x02` COMMIT. The daemon acknowledges
+  by writing `0x00` immediately after latching SIZE/CRC. Anything else
+  nonzero is acknowledged and reported as `ERR_STATE`.
+- `0x794 STATUS`: `0x00` IDLE, `0x02` VERIFYING, `0x05` VERIFIED (new),
+  `0x03` FLASHING, `0x04` SUCCESS, `0xE1` CRC, `0xE2` FLASH, `0xE4` STATE
+  (new: COMMIT without a matching VERIFIED, or unknown doorbell).
+
+VERIFY (no eMMC access at all): bounds check, CRC32 over staging DDR,
+write staging tar (checked), extract, require non-empty
+BOOT.BIN/image.ub/boot.scr. Success latches SIZE/CRC and reports VERIFIED.
+
+COMMIT (exactly one per VERIFY): requires `STATUS==VERIFIED` with SIZE/CRC
+still matching the latch, then consumes it. Mounts eMMC p1, backs up the
+current files, copies the new files (every copy return-checked), `sync`,
+compares each file back against staging, then handles boot0 (backup,
+write, compare). Any failure restores the backups and reports `ERR_FLASH`;
+only fully verified writes report SUCCESS.
+
+## Host requirements
+
+- Board RTL `>= 0x26101401` (gates the new daemon generation; older boards
+  still run the single-doorbell daemon and are refused for --package/--commit).
+- `--package` refuses a busy board (VERIFYING/FLASHING) and oversized input.
+- `--commit` refuses unless the board reports VERIFIED.
+
+## What rollback does and does not cover
+
+Backup/restore covers write-time failures (bad copy, readback mismatch):
+the previous eMMC files and boot0 bytes are put back and `ERR_FLASH` is
+reported. It does NOT cover a successfully written image that fails to
+boot; that case still needs physical SD-card recovery. A fallback that
+boots the backup automatically does not exist.

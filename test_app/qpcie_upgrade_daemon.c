@@ -29,6 +29,8 @@
 #include <setjmp.h>
 #include <syslog.h>
 
+#include "qpcie_commit_helpers.h"
+
 #define DAEMON_NAME "qpcie_upgrade_daemon"
 
 /* Base Address of PL CSR space mapped into PS (M_AXI_HPM0_FPD).
@@ -61,9 +63,18 @@
 #define STATUS_UPG_VERIFYING   0x02
 #define STATUS_UPG_FLASHING    0x03
 #define STATUS_UPG_SUCCESS     0x04
+#define STATUS_UPG_VERIFIED    0x05
 #define STATUS_UPG_ERR_CRC     0xE1
 #define STATUS_UPG_ERR_FLASH   0xE2
 #define STATUS_UPG_ERR_TIMEOUT 0xE3
+#define STATUS_UPG_ERR_STATE   0xE4
+
+/* Doorbell commands (REG_DMA_UPG_DOORBELL). The daemon NEVER acts on
+ * START&&DONE; only an explicit doorbell value triggers work. VERIFY stages
+ * and checks the package without touching eMMC; COMMIT flashes eMMC and
+ * requires a preceding VERIFIED state with matching SIZE/CRC. */
+#define DOORBELL_VERIFY        0x01
+#define DOORBELL_COMMIT        0x02
 
 /* Dedicated DDR4 DMA Staging Physical Address (dau_fpga reserved memory) */
 #define DEFAULT_DDR4_DMA_PHYS  0x30000000UL
@@ -73,7 +84,11 @@
 #define EMMC_BOOT0_PART        "/dev/mmcblk0boot0"
 #define EMMC_MOUNT_DIR         "/mnt/emmc_boot"
 #define STAGING_DIR            "/tmp/upgrade_staging"
+#define BACKUP_DIR             "/tmp/upgrade_backup"
 #define STAGING_TAR            "/tmp/upgrade.tar.gz"
+
+static const char *const kPkgFiles[] = { "BOOT.BIN", "image.ub", "boot.scr" };
+#define N_PKG_FILES 3
 
 static volatile bool g_running = true;
 
@@ -206,6 +221,260 @@ static void trigger_pmu_por(void) {
     reboot(RB_AUTOBOOT);
 }
 
+/* ---- Two-stage upgrade protocol (VERIFY then COMMIT) ----
+ * The daemon NEVER treats streaming-DMA START&&DONE as a trigger: that
+ * condition fires spuriously while the host pushes consecutive chunks.
+ * Only an explicit doorbell value latches work. VERIFY checks the staged
+ * bundle and stops; COMMIT flashes eMMC exactly once per VERIFY and
+ * requires the latched SIZE/CRC to still match. */
+
+static void finish_cmd(volatile uint32_t *pl_regs, uint32_t status) {
+    pl_regs[REG_DMA_UPG_STATUS / 4] = status;
+    pl_regs[REG_DMA_UPG_CTRL / 4]   = DMA_UPG_CMD_NONE;
+}
+
+/* Best-effort shell helper (e.g. force_ro toggles that may not exist).
+ * Return value is logged, never fatal. */
+static void run_best_effort(const char *cmd) {
+    int rc = system(cmd);
+    if (rc != 0)
+        syslog(LOG_WARNING, "best-effort command rc=%d: %s", rc, cmd);
+}
+
+static int stage_path(char *dst, size_t cap, const char *dir, const char *name) {
+    size_t dl = strlen(dir), nl = strlen(name);
+    if (dl + 1 + nl + 1 > cap) return -1;
+    memcpy(dst, dir, dl);
+    dst[dl] = '/';
+    memcpy(dst + dl + 1, name, nl + 1);
+    return 0;
+}
+
+/* VERIFY: CRC-check staging DDR, extract tar, validate package contents.
+ * Touches eMMC in NO way. Sets *verified on success. */
+static void do_verify(volatile uint32_t *pl_regs, const uint8_t *dma_buf,
+                      uint32_t req_size, uint32_t req_crc,
+                      uint32_t *verified_size, uint32_t *verified_crc,
+                      bool *verified) {
+    *verified = false;
+    pl_regs[REG_DMA_UPG_STATUS / 4]   = STATUS_UPG_VERIFYING;
+    pl_regs[REG_DMA_UPG_PROGRESS / 4] = 30;
+
+    if (req_size == 0 || req_size > DDR4_DMA_BUF_SIZE) {
+        syslog(LOG_ERR, "VERIFY: invalid package size %u", req_size);
+        finish_cmd(pl_regs, STATUS_UPG_ERR_CRC);
+        return;
+    }
+    uint32_t calc_crc = calculate_crc32(dma_buf, req_size);
+    if (calc_crc != req_crc) {
+        syslog(LOG_ERR, "VERIFY: CRC32 mismatch expected=0x%08X got=0x%08X", req_crc, calc_crc);
+        finish_cmd(pl_regs, STATUS_UPG_ERR_CRC);
+        return;
+    }
+    syslog(LOG_NOTICE, "VERIFY: CRC32 OK (0x%08X, %u bytes); staging tarball", calc_crc, req_size);
+
+    FILE *f_tar = fopen(STAGING_TAR, "wb");
+    if (!f_tar) {
+        syslog(LOG_ERR, "VERIFY: cannot write %s: %s", STAGING_TAR, strerror(errno));
+        finish_cmd(pl_regs, STATUS_UPG_ERR_FLASH);
+        return;
+    }
+    bool wr_ok = (fwrite(dma_buf, 1, req_size, f_tar) == req_size);
+    bool cl_ok = (fclose(f_tar) == 0);
+    if (!wr_ok || !cl_ok) {
+        syslog(LOG_ERR, "VERIFY: short write to staging tar");
+        finish_cmd(pl_regs, STATUS_UPG_ERR_FLASH);
+        return;
+    }
+
+    pl_regs[REG_DMA_UPG_PROGRESS / 4] = 50;
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "rm -rf %s && mkdir -p %s", STAGING_DIR, STAGING_DIR);
+    if (system(cmd) != 0) {
+        syslog(LOG_ERR, "VERIFY: cannot recreate staging dir");
+        finish_cmd(pl_regs, STATUS_UPG_ERR_FLASH);
+        return;
+    }
+    snprintf(cmd, sizeof(cmd), "tar -xzf %s -C %s", STAGING_TAR, STAGING_DIR);
+    if (system(cmd) != 0) {
+        syslog(LOG_ERR, "VERIFY: corrupted tar archive");
+        finish_cmd(pl_regs, STATUS_UPG_ERR_CRC);
+        return;
+    }
+    for (int i = 0; i < N_PKG_FILES; i++) {
+        char p[512];
+        if (stage_path(p, sizeof(p), STAGING_DIR, kPkgFiles[i]) != 0 ||
+            qch_file_size(p) == (size_t)-1 || qch_file_size(p) == 0) {
+            syslog(LOG_ERR, "VERIFY: package file %s missing or empty", kPkgFiles[i]);
+            finish_cmd(pl_regs, STATUS_UPG_ERR_CRC);
+            return;
+        }
+    }
+    *verified_size = req_size;
+    *verified_crc  = req_crc;
+    *verified       = true;
+    pl_regs[REG_DMA_UPG_PROGRESS / 4] = 60;
+    syslog(LOG_NOTICE, "VERIFY: package complete (BOOT.BIN/image.ub/boot.scr present)");
+    finish_cmd(pl_regs, STATUS_UPG_VERIFIED);
+}
+
+/* Restore p1 files that were backed up (best effort, errors logged). */
+static void restore_p1(const char *mnt, const char *backup, const bool *backed_up) {
+    for (int i = 0; i < N_PKG_FILES; i++) {
+        if (!backed_up[i]) continue;
+        char src[512], dst[512];
+        if (stage_path(src, sizeof(src), backup, kPkgFiles[i]) != 0 ||
+            stage_path(dst, sizeof(dst), mnt, kPkgFiles[i]) != 0) continue;
+        if (qch_copy_file(src, dst) != 0)
+            syslog(LOG_ERR, "COMMIT: restore of %s FAILED (manual recovery needed)", kPkgFiles[i]);
+        else
+            syslog(LOG_NOTICE, "COMMIT: restored %s from backup", kPkgFiles[i]);
+    }
+    sync();
+}
+
+/* COMMIT: flash eMMC from the VERIFIED staging dir, with backup + readback
+ * verification + rollback. Exactly one COMMIT is consumed per VERIFY. */
+static void do_commit(volatile uint32_t *pl_regs,
+                      uint32_t *verified_size, uint32_t *verified_crc,
+                      bool *verified) {
+    uint32_t req_size = pl_regs[REG_DMA_UPG_SIZE / 4];
+    uint32_t req_crc  = pl_regs[REG_DMA_UPG_CRC32 / 4];
+    if (!*verified || pl_regs[REG_DMA_UPG_STATUS / 4] != STATUS_UPG_VERIFIED ||
+        req_size != *verified_size || req_crc != *verified_crc) {
+        syslog(LOG_ERR, "COMMIT: rejected (no matching VERIFIED state)");
+        *verified = false;
+        finish_cmd(pl_regs, STATUS_UPG_ERR_STATE);
+        return;
+    }
+    *verified = false; /* consume: one COMMIT per VERIFY */
+    pl_regs[REG_DMA_UPG_STATUS / 4]   = STATUS_UPG_FLASHING;
+    pl_regs[REG_DMA_UPG_PROGRESS / 4] = 70;
+    syslog(LOG_NOTICE, "COMMIT: flashing eMMC (%u bytes, crc 0x%08X)", req_size, req_crc);
+
+    char cmd[768];
+    snprintf(cmd, sizeof(cmd), "mkdir -p %s %s", EMMC_MOUNT_DIR, BACKUP_DIR);
+    if (system(cmd) != 0) {
+        finish_cmd(pl_regs, STATUS_UPG_ERR_FLASH);
+        return;
+    }
+    umount(EMMC_MOUNT_DIR);
+    if (mount(EMMC_BOOT_PART, EMMC_MOUNT_DIR, "vfat", 0, NULL) != 0) {
+        syslog(LOG_ERR, "COMMIT: mount %s failed: %s", EMMC_BOOT_PART, strerror(errno));
+        finish_cmd(pl_regs, STATUS_UPG_ERR_FLASH);
+        return;
+    }
+
+    /* Backup current files (missing files tolerated, recorded). */
+    bool backed_up[N_PKG_FILES] = { false, false, false };
+    for (int i = 0; i < N_PKG_FILES; i++) {
+        char src[512], dst[512];
+        if (stage_path(src, sizeof(src), EMMC_MOUNT_DIR, kPkgFiles[i]) != 0 ||
+            stage_path(dst, sizeof(dst), BACKUP_DIR, kPkgFiles[i]) != 0) continue;
+        if (access(src, R_OK) == 0) {
+            if (qch_copy_file(src, dst) != 0) {
+                syslog(LOG_ERR, "COMMIT: backup of %s failed; aborting before any write", kPkgFiles[i]);
+                umount(EMMC_MOUNT_DIR);
+                finish_cmd(pl_regs, STATUS_UPG_ERR_FLASH);
+                return;
+            }
+            backed_up[i] = true;
+        }
+    }
+
+    /* Write new files; every copy is return-checked (no blind `|| true`). */
+    for (int i = 0; i < N_PKG_FILES; i++) {
+        char src[512], dst[512];
+        if (stage_path(src, sizeof(src), STAGING_DIR, kPkgFiles[i]) != 0 ||
+            stage_path(dst, sizeof(dst), EMMC_MOUNT_DIR, kPkgFiles[i]) != 0) {
+            restore_p1(EMMC_MOUNT_DIR, BACKUP_DIR, backed_up);
+            umount(EMMC_MOUNT_DIR);
+            finish_cmd(pl_regs, STATUS_UPG_ERR_FLASH);
+            return;
+        }
+        if (qch_copy_file(src, dst) != 0) {
+            syslog(LOG_ERR, "COMMIT: write of %s failed; restoring backup", kPkgFiles[i]);
+            restore_p1(EMMC_MOUNT_DIR, BACKUP_DIR, backed_up);
+            umount(EMMC_MOUNT_DIR);
+            finish_cmd(pl_regs, STATUS_UPG_ERR_FLASH);
+            return;
+        }
+    }
+    sync();
+
+    /* Read-back verification against staging sources. */
+    for (int i = 0; i < N_PKG_FILES; i++) {
+        char src[512], dst[512];
+        stage_path(src, sizeof(src), STAGING_DIR, kPkgFiles[i]);
+        stage_path(dst, sizeof(dst), EMMC_MOUNT_DIR, kPkgFiles[i]);
+        if (qch_files_equal(src, dst) != 1) {
+            syslog(LOG_ERR, "COMMIT: readback mismatch on %s; restoring backup", kPkgFiles[i]);
+            restore_p1(EMMC_MOUNT_DIR, BACKUP_DIR, backed_up);
+            umount(EMMC_MOUNT_DIR);
+            finish_cmd(pl_regs, STATUS_UPG_ERR_FLASH);
+            return;
+        }
+    }
+    pl_regs[REG_DMA_UPG_PROGRESS / 4] = 90;
+
+    /* Hardware boot partition. */
+    if (access(EMMC_BOOT0_PART, R_OK | W_OK) == 0) {
+        char stg_boot[512], bak_boot0[512];
+        stage_path(stg_boot, sizeof(stg_boot), STAGING_DIR, "BOOT.BIN");
+        stage_path(bak_boot0, sizeof(bak_boot0), BACKUP_DIR, "boot0.bin");
+        size_t boot_len = qch_file_size(stg_boot);
+        if (boot_len == (size_t)-1 || boot_len == 0 || boot_len > 16u * 1024u * 1024u) {
+            syslog(LOG_ERR, "COMMIT: bad BOOT.BIN size for boot0");
+            restore_p1(EMMC_MOUNT_DIR, BACKUP_DIR, backed_up);
+            umount(EMMC_MOUNT_DIR);
+            finish_cmd(pl_regs, STATUS_UPG_ERR_FLASH);
+            return;
+        }
+        snprintf(cmd, sizeof(cmd),
+                 "echo 0 > /sys/block/mmcblk0boot0/force_ro 2>/dev/null; "
+                 "dd if=%s of=%s bs=64k status=none 2>/dev/null",
+                 EMMC_BOOT0_PART, bak_boot0);
+        bool boot0_backed = (system(cmd) == 0) &&
+                            (qch_block_prefix_equal(bak_boot0, EMMC_BOOT0_PART, boot_len) == 1);
+        if (!boot0_backed)
+            syslog(LOG_WARNING, "COMMIT: boot0 backup unavailable; proceeding (restore limited to p1)");
+        snprintf(cmd, sizeof(cmd),
+                 "echo 0 > /sys/block/mmcblk0boot0/force_ro 2>/dev/null");
+        run_best_effort(cmd);
+        bool w_ok = (qch_block_write(stg_boot, EMMC_BOOT0_PART, boot_len) == 0);
+        snprintf(cmd, sizeof(cmd),
+                 "echo 1 > /sys/block/mmcblk0boot0/force_ro 2>/dev/null");
+        run_best_effort(cmd);
+        int cmp = qch_block_prefix_equal(EMMC_BOOT0_PART, stg_boot, boot_len);
+        if (!w_ok || cmp != 1) {
+            syslog(LOG_ERR, "COMMIT: boot0 write/verify failed (w=%d cmp=%d); restoring", w_ok, cmp);
+            if (boot0_backed) {
+                snprintf(cmd, sizeof(cmd),
+                         "echo 0 > /sys/block/mmcblk0boot0/force_ro 2>/dev/null");
+                run_best_effort(cmd);
+                if (qch_block_write(bak_boot0, EMMC_BOOT0_PART, boot_len) != 0)
+                    syslog(LOG_ERR, "COMMIT: boot0 restore write failed");
+                snprintf(cmd, sizeof(cmd),
+                         "echo 1 > /sys/block/mmcblk0boot0/force_ro 2>/dev/null");
+                if (system(cmd) != 0)
+                    syslog(LOG_WARNING, "COMMIT: boot0 force_ro restore toggle failed");
+            }
+            restore_p1(EMMC_MOUNT_DIR, BACKUP_DIR, backed_up);
+            umount(EMMC_MOUNT_DIR);
+            finish_cmd(pl_regs, STATUS_UPG_ERR_FLASH);
+            return;
+        }
+        syslog(LOG_NOTICE, "COMMIT: boot0 verified (%zu bytes)", boot_len);
+    }
+
+    sync();
+    if (umount(EMMC_MOUNT_DIR) != 0)
+        syslog(LOG_WARNING, "COMMIT: umount %s failed (files were verified); check manually", EMMC_MOUNT_DIR);
+    syslog(LOG_NOTICE, "COMMIT: eMMC upgrade committed and verified");
+    pl_regs[REG_DMA_UPG_PROGRESS / 4] = 100;
+    finish_cmd(pl_regs, STATUS_UPG_SUCCESS);
+}
+
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
     openlog(DAEMON_NAME, LOG_PID | LOG_CONS, LOG_DAEMON);
@@ -251,6 +520,9 @@ int main(int argc, char **argv) {
 
     syslog(LOG_NOTICE, "Daemon initialized. Ready for Host PCIe DMA (Buffer @ 0x%08lX)", DEFAULT_DDR4_DMA_PHYS);
 
+    uint32_t verified_size = 0, verified_crc = 0;
+    bool verified_valid = false;
+
     while (g_running) {
         uint32_t ctrl     = pl_regs[REG_DMA_UPG_CTRL / 4];
         uint32_t doorbell = pl_regs[REG_DMA_UPG_DOORBELL / 4];
@@ -261,101 +533,27 @@ int main(int argc, char **argv) {
             break;
         }
 
-        // Check for Doorbell notification or Start Transfer with DMA_DONE
-        bool trigger_active = (doorbell & 0x01) ||
-                              ((ctrl & DMA_UPG_CMD_START) && (ctrl & DMA_UPG_CMD_DMA_DONE));
-
-        if (trigger_active) {
-            pl_regs[REG_DMA_UPG_DOORBELL / 4] = 0x00; // Acknowledge doorbell
-            uint32_t expected_size  = pl_regs[REG_DMA_UPG_SIZE / 4];
-            uint32_t expected_crc32 = pl_regs[REG_DMA_UPG_CRC32 / 4];
-
-            syslog(LOG_NOTICE, "Received upgrade trigger: size=%u bytes, crc32=0x%08X. Verifying package integrity...", expected_size, expected_crc32);
-
-            if (expected_size == 0 || expected_size > DDR4_DMA_BUF_SIZE) {
-                syslog(LOG_ERR, "Invalid package size: %u bytes", expected_size);
-                pl_regs[REG_DMA_UPG_STATUS / 4] = STATUS_UPG_ERR_CRC;
-                pl_regs[REG_DMA_UPG_CTRL / 4] = DMA_UPG_CMD_NONE;
-                continue;
+        // Only explicit doorbell commands latch work. Streaming-DMA
+        // START&&DONE is deliberately NOT a trigger (fires spuriously
+        // while the host pushes consecutive chunks).
+        if (doorbell == DOORBELL_VERIFY || doorbell == DOORBELL_COMMIT) {
+            uint32_t cmd = doorbell;
+            uint32_t req_size = pl_regs[REG_DMA_UPG_SIZE / 4];
+            uint32_t req_crc  = pl_regs[REG_DMA_UPG_CRC32 / 4];
+            pl_regs[REG_DMA_UPG_DOORBELL / 4] = 0x00; // latch + acknowledge
+            if (cmd == DOORBELL_VERIFY) {
+                syslog(LOG_NOTICE, "VERIFY request: size=%u crc=0x%08X", req_size, req_crc);
+                do_verify(pl_regs, dma_buf, req_size, req_crc,
+                          &verified_size, &verified_crc, &verified_valid);
+            } else {
+                syslog(LOG_NOTICE, "COMMIT request: size=%u crc=0x%08X", req_size, req_crc);
+                do_commit(pl_regs, &verified_size, &verified_crc, &verified_valid);
             }
-
-            // 1. Verify CRC32
-            pl_regs[REG_DMA_UPG_STATUS / 4] = STATUS_UPG_VERIFYING;
-            pl_regs[REG_DMA_UPG_PROGRESS / 4] = 30;
-
-            uint32_t calc_crc = calculate_crc32(dma_buf, expected_size);
-            if (calc_crc != expected_crc32) {
-                syslog(LOG_ERR, "CRC32 Mismatch! Expected: 0x%08X, Got: 0x%08X", expected_crc32, calc_crc);
-                pl_regs[REG_DMA_UPG_STATUS / 4] = STATUS_UPG_ERR_CRC;
-                pl_regs[REG_DMA_UPG_CTRL / 4] = DMA_UPG_CMD_NONE;
-                continue;
-            }
-            syslog(LOG_NOTICE, "CRC32 verified successfully (0x%08X)", calc_crc);
-
-            // 2. Save tar.gz to staging file
-            FILE *f_tar = fopen(STAGING_TAR, "wb");
-            if (!f_tar) {
-                syslog(LOG_ERR, "Failed to write staging tar: %s", strerror(errno));
-                pl_regs[REG_DMA_UPG_STATUS / 4] = STATUS_UPG_ERR_FLASH;
-                pl_regs[REG_DMA_UPG_CTRL / 4] = DMA_UPG_CMD_NONE;
-                continue;
-            }
-            fwrite(dma_buf, 1, expected_size, f_tar);
-            fclose(f_tar);
-
-            // 3. Extract and test tar integrity
-            pl_regs[REG_DMA_UPG_PROGRESS / 4] = 50;
-            mkdir(STAGING_DIR, 0755);
-            char cmd[512];
-            snprintf(cmd, sizeof(cmd), "tar -xzf %s -C %s", STAGING_TAR, STAGING_DIR);
-            if (system(cmd) != 0) {
-                syslog(LOG_ERR, "Corrupted tar archive or extraction failure");
-                pl_regs[REG_DMA_UPG_STATUS / 4] = STATUS_UPG_ERR_CRC;
-                pl_regs[REG_DMA_UPG_CTRL / 4] = DMA_UPG_CMD_NONE;
-                continue;
-            }
-
-            // 4. Mount eMMC Boot Partition and Replace Files
-            pl_regs[REG_DMA_UPG_STATUS / 4] = STATUS_UPG_FLASHING;
-            pl_regs[REG_DMA_UPG_PROGRESS / 4] = 70;
-
-            mkdir(EMMC_MOUNT_DIR, 0755);
-            umount(EMMC_MOUNT_DIR); // Ensure clean state
-            if (mount(EMMC_BOOT_PART, EMMC_MOUNT_DIR, "vfat", 0, NULL) != 0) {
-                syslog(LOG_ERR, "Failed to mount eMMC partition %s: %s", EMMC_BOOT_PART, strerror(errno));
-                pl_regs[REG_DMA_UPG_STATUS / 4] = STATUS_UPG_ERR_FLASH;
-                pl_regs[REG_DMA_UPG_CTRL / 4] = DMA_UPG_CMD_NONE;
-                continue;
-            }
-
-            // Copy BOOT.BIN, image.ub, boot.scr
-            snprintf(cmd, sizeof(cmd), "cp -v %s/BOOT.BIN %s/ 2>/dev/null || true", STAGING_DIR, EMMC_MOUNT_DIR);
-            system(cmd);
-            snprintf(cmd, sizeof(cmd), "cp -v %s/image.ub %s/ 2>/dev/null || true", STAGING_DIR, EMMC_MOUNT_DIR);
-            system(cmd);
-            snprintf(cmd, sizeof(cmd), "cp -v %s/boot.scr %s/ 2>/dev/null || true", STAGING_DIR, EMMC_MOUNT_DIR);
-            system(cmd);
-
-            sync();
-            umount(EMMC_MOUNT_DIR);
-            pl_regs[REG_DMA_UPG_PROGRESS / 4] = 90;
-
-            // 5. Update Hardware Boot Partition 0 if present
-            if (access(EMMC_BOOT0_PART, W_OK | R_OK) == 0) {
-                char copy_boot0[512];
-                snprintf(copy_boot0, sizeof(copy_boot0),
-                         "echo 0 > /sys/block/mmcblk0boot0/force_ro 2>/dev/null && "
-                         "dd if=%s/BOOT.BIN of=%s bs=64k conv=fsync status=none 2>/dev/null && "
-                         "echo 1 > /sys/block/mmcblk0boot0/force_ro 2>/dev/null",
-                         STAGING_DIR, EMMC_BOOT0_PART);
-                system(copy_boot0);
-            }
-
-            sync();
-            syslog(LOG_NOTICE, "eMMC firmware upgrade successfully committed!");
-            pl_regs[REG_DMA_UPG_PROGRESS / 4] = 100;
-            pl_regs[REG_DMA_UPG_STATUS / 4]   = STATUS_UPG_SUCCESS;
-            pl_regs[REG_DMA_UPG_CTRL / 4]     = DMA_UPG_CMD_NONE;
+        } else if (doorbell != 0) {
+            pl_regs[REG_DMA_UPG_DOORBELL / 4] = 0x00;
+            verified_valid = false;
+            syslog(LOG_ERR, "Unknown doorbell 0x%08X; ignored", doorbell);
+            finish_cmd(pl_regs, STATUS_UPG_ERR_STATE);
         }
 
         usleep(100000); // 100ms poll interval (firmware upgrade is not latency-sensitive)
