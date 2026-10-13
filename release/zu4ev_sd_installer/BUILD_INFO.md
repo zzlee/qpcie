@@ -1,8 +1,8 @@
-# 1401 PL / Transactional COMMIT daemon (2026-10-13)
+# 1401 PL / Transactional COMMIT daemon with Safe Reset (2026-10-13)
 
 This is a software-only update; BAR0 PL version remains `0x26101401`.
-Daemon SHA256: `c06a3c99b72cd6404d4e1eb2d186b707218f640dfe64dd5d1e0eb0979ad2074d`.
-Target image SHA256: `c988d1f615c5397a7a634758f57f9ea9a2fea9cbe4f5631fec5657977c99d7ff`.
+Daemon SHA256: `3518171b7ae1dc96a35caa4477efd35e30ca2f5903eba922d52d235ed3e836f0`.
+Target image SHA256: `f21fb48a4b5dca798fc1e082039ff265a114aaa3fb2e56244b5ddd5143da95c4`.
 
 Features:
 - Includes Device DDR byte-snapshot volatile loads fix and strict ustar three-file parser.

@@ -201,32 +201,37 @@ static uint32_t calculate_crc32(const uint8_t *buf, size_t len) {
     return crc ^ 0xFFFFFFFF;
 }
 
-/* Trigger ZU4EV PMU Chip-Level Power-On Reset (POR) */
+/* Best-effort shell helper (e.g. force_ro toggles that may not exist).
+ * Return value is logged, never fatal. */
+static inline void run_best_effort(const char *cmd) {
+    int rc = system(cmd);
+    if (rc != 0)
+        syslog(LOG_WARNING, "best-effort command rc=%d: %s", rc, cmd);
+}
+
+/* Trigger ZU4EV System Reset */
 static void trigger_pmu_por(void) {
-    syslog(LOG_NOTICE, "Triggering ZU4EV chip-level Power-On Reset (POR)...");
+    syslog(LOG_NOTICE, "Triggering ZU4EV system reset...");
     sync();
 
-    // 1. Attempt writing PMU_GLOBAL.GLOBAL_RESET (0xFFD80030 = 0x1) via /dev/mem
-    int fd = open("/dev/mem", O_RDWR | O_SYNC);
-    if (fd >= 0) {
-        void *pmu = mmap(NULL, 0x1000, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0xFFD80000);
-        if (pmu != MAP_FAILED) {
-            volatile uint32_t *global_reset = (volatile uint32_t *)((uint8_t *)pmu + 0x30);
-            *global_reset = 0x00000001; // Chip-level POR
-            msync((void *)global_reset, 4, MS_SYNC);
-        }
-        close(fd);
+    // 1. Enable sysrq and trigger immediate emergency reset
+    FILE *sysrq_ctrl = fopen("/proc/sys/kernel/sysrq", "w");
+    if (sysrq_ctrl) {
+        fputs("1\n", sysrq_ctrl);
+        fclose(sysrq_ctrl);
     }
 
-    // 2. Fallback: sysrq trigger 'b'
     FILE *sysrq = fopen("/proc/sysrq-trigger", "w");
     if (sysrq) {
         fputs("b\n", sysrq);
         fclose(sysrq);
     }
 
-    // 3. Fallback: Linux reboot syscall
+    // 2. Linux reboot syscall (calls ATF PSCI SYSTEM_RESET via SMC)
     reboot(RB_AUTOBOOT);
+
+    // 3. Fallback: userspace reboot command
+    run_best_effort("reboot -f");
 }
 
 /* ---- Two-stage upgrade protocol (VERIFY then COMMIT) ----
@@ -239,14 +244,6 @@ static void trigger_pmu_por(void) {
 static void finish_cmd(volatile uint32_t *pl_regs, uint32_t status) {
     pl_regs[REG_DMA_UPG_STATUS / 4] = status;
     pl_regs[REG_DMA_UPG_CTRL / 4]   = DMA_UPG_CMD_NONE;
-}
-
-/* Best-effort shell helper (e.g. force_ro toggles that may not exist).
- * Return value is logged, never fatal. */
-static inline void run_best_effort(const char *cmd) {
-    int rc = system(cmd);
-    if (rc != 0)
-        syslog(LOG_WARNING, "best-effort command rc=%d: %s", rc, cmd);
 }
 
 static int stage_path(char *dst, size_t cap, const char *dir, const char *name) {
@@ -500,6 +497,7 @@ int main(int argc, char **argv) {
 
         // Check for Warm Reboot request
         if (ctrl & DMA_UPG_CMD_REBOOT) {
+            pl_regs[REG_DMA_UPG_CTRL / 4] = DMA_UPG_CMD_NONE;
             trigger_pmu_por();
             break;
         }
