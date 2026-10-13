@@ -330,21 +330,23 @@ int main(int argc, char **argv) {
     bool show_status = false;
     bool do_reboot = false;
     bool do_commit = false;
+    bool allow_legacy = false;
 
     static struct option long_options[] = {
-        {"package", required_argument, 0, 'p'},
-        {"boot",    required_argument, 0, 'b'},
-        {"kernel",  required_argument, 0, 'k'},
-        {"script",  required_argument, 0, 'c'},
-        {"commit",  no_argument,       0, 'm'},
-        {"status",  no_argument,       0, 's'},
-        {"reboot",  no_argument,       0, 'r'},
-        {"help",    no_argument,       0, 'h'},
+        {"package",      required_argument, 0, 'p'},
+        {"boot",         required_argument, 0, 'b'},
+        {"kernel",       required_argument, 0, 'k'},
+        {"script",       required_argument, 0, 'c'},
+        {"commit",       no_argument,       0, 'm'},
+        {"status",       no_argument,       0, 's'},
+        {"reboot",       no_argument,       0, 'r'},
+        {"allow-legacy", no_argument,       0, 'L'},
+        {"help",         no_argument,       0, 'h'},
         {0, 0, 0, 0}
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "p:b:k:c:msrh", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "p:b:k:c:msrhL", long_options, NULL)) != -1) {
         switch (opt) {
             case 'p': package_path = optarg; break;
             case 'b': bootbin_path = optarg; break;
@@ -353,6 +355,7 @@ int main(int argc, char **argv) {
             case 'm': do_commit = true; break;
             case 's': show_status = true; break;
             case 'r': do_reboot = true; break;
+            case 'L': allow_legacy = true; break;
             case 'h':
             default:
                 printf("=================================================================\n");
@@ -373,6 +376,7 @@ int main(int argc, char **argv) {
                 printf("  -m, --commit           Flash eMMC from VERIFIED bundle (requires prior --package)\n");
                 printf("  -s, --status           Query card version, caps, and upgrade state\n");
                 printf("  -r, --reboot           Trigger card POR reset & PCIe link rescan (Zero-Host-Reboot)\n");
+                printf("  -L, --allow-legacy     Allow upgrade of legacy daemons without HELLO handshake\n");
                 printf("  -h, --help             Show this help message\n");
                 return EXIT_SUCCESS;
         }
@@ -458,8 +462,14 @@ int main(int argc, char **argv) {
             munmap((void *)bar0, 65536); close(fd_bar0); return EXIT_FAILURE;
         }
         if (!doorbell_poll(bar0, DOORBELL_HELLO, STATUS_VERIFY_ONLY, 5, "HELLO")) {
-            fprintf(stderr, "requires new VERIFY-only daemon; no payload sent\n");
-            munmap((void *)bar0, 65536); close(fd_bar0); return EXIT_FAILURE;
+            if (allow_legacy) {
+                printf(" Notice: HELLO not acknowledged (legacy daemon detected); resetting status to IDLE and proceeding per --allow-legacy\n");
+                bar0[REG_DMA_UPG_STATUS / 4] = STATUS_UPG_IDLE;
+                (void)bar0[REG_DMA_UPG_STATUS / 4];
+            } else {
+                fprintf(stderr, "requires new VERIFY-only daemon (or use --allow-legacy); no payload sent\n");
+                munmap((void *)bar0, 65536); close(fd_bar0); return EXIT_FAILURE;
+            }
         }
     }
 
