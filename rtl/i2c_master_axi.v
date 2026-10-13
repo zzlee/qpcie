@@ -407,6 +407,8 @@ module i2c_master_axi #(
     localparam ST_STOP_A     = 4'd7;
     localparam ST_STOP_B     = 4'd8;
     localparam ST_STOP_C     = 4'd9;
+    localparam ST_RESTART_RELEASE = 4'd10;
+    localparam ST_RESTART_HIGH = 4'd11;
 
     reg [3:0] state;
     reg [3:0] bit_idx;      // 0..7 for data bits, 8 for ACK bit
@@ -447,8 +449,12 @@ module i2c_master_axi #(
 
             case (state)
                 ST_IDLE: begin
-                    scl_oen <= 1'b1;
-                    sda_oen <= 1'b1;
+                    // Hold the byte-boundary SCL LOW until software sends
+                    // another command. Releasing it clocks a phantom bit.
+                    if (!reg_sr_busy) begin
+                        scl_oen <= 1'b1;
+                        sda_oen <= 1'b1;
+                    end
                     if (cmd_start_pulse) begin
                         reg_sr_if    <= 1'b0;
                         reg_sr_tip   <= 1'b1;
@@ -459,13 +465,31 @@ module i2c_master_axi #(
                         bit_idx      <= 4'd0;
 
                         if (cmd_sta) begin
-                            state       <= ST_START_A;
+                            state       <= reg_sr_busy ? ST_RESTART_RELEASE : ST_START_A;
                             reg_sr_busy <= 1'b1;
                         end else if (cmd_wr || cmd_rd) begin
                             state <= ST_BIT_Q0;
                         end else if (cmd_sto) begin
                             state <= ST_STOP_A;
                         end
+                    end
+                end
+
+                ST_RESTART_RELEASE: begin
+                    if (tick) begin
+                        scl_oen <= 1'b0;
+                        sda_oen <= 1'b1;
+                        state <= ST_RESTART_HIGH;
+                    end
+                end
+
+                ST_RESTART_HIGH: begin
+                    if (tick) begin
+                        scl_oen <= 1'b1;
+                        // Wait for a stretching slave to release SCL before
+                        // generating SDA's high-to-low START transition.
+                        if (scl_oen && scl_i)
+                            state <= ST_START_A;
                     end
                 end
 

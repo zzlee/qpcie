@@ -30,7 +30,7 @@
 
 /* MCU I2C master in BAR1 (M05) */
 #define BAR0_OFFSET_ENV_BLOCK    0x1000
-#define BAR0_REG_BOARD_VERSION 0x1008  /* zzlab_env_ctrl C_BOARD_VERSION */
+#define BAR0_REG_BOARD_VERSION 0x0008  /* relative to BAR0_OFFSET_ENV_BLOCK */
 
 /* MCU I2C master in BAR1 (M05); FRONT master (M03) at HW-true 0x3000 */
 #define BAR1_OFFSET_I2C_MCU  0x5000

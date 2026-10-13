@@ -884,6 +884,7 @@ module a50t_pcie_card_top #(
 
     // Instantiate Custom PCIe DMA Controller Top Module (256-bit internal CQ descriptor bus)
     custom_pcie_dma_top #(
+        .C_VERSION(32'h26101303), // byte-gap/repeated-START I2C fix
         .PCIE_DATA_WIDTH(PCIE_DATA_WIDTH),
         .NUM_VIDEO_CH(NUM_VIDEO_CH),
         .NUM_AUDIO_CH(NUM_AUDIO_CH),
