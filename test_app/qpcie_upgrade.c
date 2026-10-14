@@ -28,6 +28,7 @@
 #include <sys/time.h>
 #include <errno.h>
 #include <dirent.h>
+#include "qpcie_sha256.h"
 
 #define VENDOR_ID "0x12ab"
 #define DEVICE_ID "0xe380"
@@ -212,6 +213,50 @@ static bool push_staging(const char *sysfs, const uint8_t *buf, size_t len) {
     return true;
 }
 
+static bool readback_16bytes(volatile uint32_t *bar0, size_t off, const uint8_t *expected) {
+    if (bar0[REG_DDR_READ_STATUS / 4] & 1) return false;
+    uint32_t seq = bar0[REG_DDR_READ_SEQ / 4];
+    bar0[REG_DDR_READ_OFF / 4] = (uint32_t)off;
+    (void)bar0[REG_DDR_READ_OFF / 4];
+    bar0[REG_DDR_READ_STATUS / 4] = 1;
+    (void)bar0[REG_DDR_READ_STATUS / 4];
+    bool done = false;
+    for (int i = 0; i < 100; i++) {
+        uint32_t now = bar0[REG_DDR_READ_SEQ / 4], st = bar0[REG_DDR_READ_STATUS / 4];
+        if (now == seq + 1 && (st & 0x1c)) return false;
+        if (now == seq + 1 && (st & 3) == 2) { done = true; break; }
+        usleep(500);
+    }
+    if (!done) return false;
+    for (int w = 0; w < 4; w++) {
+        uint32_t v = bar0[REG_DDR_READ_DATA / 4 + w];
+        for (int b = 0; b < 4; b++) {
+            if ((unsigned char)(v >> (8 * b)) != expected[4 * w + b])
+                return false;
+        }
+    }
+    return true;
+}
+
+/* Fast canary verification: checks 16-byte head and 16-byte tail via BAR0 (< 2ms total) */
+static bool verify_staging_canary(volatile uint32_t *bar0, const uint8_t *buf, size_t len) {
+    if (len < 16) return false;
+    if (bar0[REG_DMA_UPG_CTRL / 4] & DMA_UPG_CMD_START) {
+        fprintf(stderr, "DMA START active; refusing verify\n"); return false;
+    }
+    if (!readback_16bytes(bar0, 0, buf)) {
+        fprintf(stderr, "❌ ERROR: Head boundary canary mismatch at offset 0x0!\n");
+        return false;
+    }
+    size_t tail_off = (len - 16) & ~(size_t)15;
+    if (!readback_16bytes(bar0, tail_off, buf + tail_off)) {
+        fprintf(stderr, "❌ ERROR: Tail boundary canary mismatch at offset 0x%zx!\n", tail_off);
+        return false;
+    }
+    printf(" -> Staging DDR boundary canaries verified (Head 0x0 + Tail 0x%zx PASS)\n", tail_off);
+    return true;
+}
+
 /* Verify staging DDR against buffer via BAR0 16-byte readback. */
 static bool verify_staging(volatile uint32_t *bar0, const uint8_t *buf, size_t len) {
     if (bar0[REG_DMA_UPG_CTRL / 4] & DMA_UPG_CMD_START) {
@@ -341,12 +386,14 @@ int main(int argc, char **argv) {
         {"status",       no_argument,       0, 's'},
         {"reboot",       no_argument,       0, 'r'},
         {"allow-legacy", no_argument,       0, 'L'},
+        {"verify-bar0",  no_argument,       0, 'V'},
         {"help",         no_argument,       0, 'h'},
         {0, 0, 0, 0}
     };
 
+    bool do_full_bar0_verify = false;
     int opt;
-    while ((opt = getopt_long(argc, argv, "p:b:k:c:msrhL", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "p:b:k:c:msrhLV", long_options, NULL)) != -1) {
         switch (opt) {
             case 'p': package_path = optarg; break;
             case 'b': bootbin_path = optarg; break;
@@ -356,6 +403,7 @@ int main(int argc, char **argv) {
             case 's': show_status = true; break;
             case 'r': do_reboot = true; break;
             case 'L': allow_legacy = true; break;
+            case 'V': do_full_bar0_verify = true; break;
             case 'h':
             default:
                 printf("=================================================================\n");
@@ -531,21 +579,67 @@ int main(int argc, char **argv) {
     // 4. Automatic Bundle Packaging if discrete files provided
     char auto_tar[256] = {0};
     if (!package_path && (bootbin_path || kernel_path || bootscr_path)) {
-        snprintf(auto_tar, sizeof(auto_tar), "/tmp/sc7f0_upgrade_%d.tar.gz", getpid());
-        printf(" -> Packaging discrete firmware files into %s...\n", auto_tar);
+        char staging_pack[64];
+        snprintf(staging_pack, sizeof(staging_pack), "/tmp/qpcie_pack_%d", getpid());
+        char mkdir_cmd[512];
+        snprintf(mkdir_cmd, sizeof(mkdir_cmd), "rm -rf %s && mkdir -p %s", staging_pack, staging_pack);
+        int m_ret = system(mkdir_cmd);
+        (void)m_ret;
+
+        snprintf(auto_tar, sizeof(auto_tar), "/tmp/sc7f0_upgrade_%d.tar", getpid());
+        printf(" -> Generating manifest.sha256 and uncompressed bundle %s...\n", auto_tar);
+
+        char manifest_file[512];
+        snprintf(manifest_file, sizeof(manifest_file), "%s/manifest.sha256", staging_pack);
+        FILE *mf = fopen(manifest_file, "w");
+
+        if (bootbin_path) {
+            char sha[65] = {0};
+            qpcie_sha256_file(bootbin_path, sha);
+            if (mf) fprintf(mf, "%s  BOOT.BIN\n", sha);
+            char cp_cmd[512];
+            snprintf(cp_cmd, sizeof(cp_cmd), "cp %s %s/BOOT.BIN", bootbin_path, staging_pack);
+            int ret = system(cp_cmd); (void)ret;
+            printf("    [Manifest] BOOT.BIN  SHA-256: %s\n", sha);
+        }
+        if (kernel_path) {
+            char sha[65] = {0};
+            qpcie_sha256_file(kernel_path, sha);
+            if (mf) fprintf(mf, "%s  image.ub\n", sha);
+            char cp_cmd[512];
+            snprintf(cp_cmd, sizeof(cp_cmd), "cp %s %s/image.ub", kernel_path, staging_pack);
+            int ret = system(cp_cmd); (void)ret;
+            printf("    [Manifest] image.ub  SHA-256: %s\n", sha);
+        }
+        if (bootscr_path) {
+            char sha[65] = {0};
+            qpcie_sha256_file(bootscr_path, sha);
+            if (mf) fprintf(mf, "%s  boot.scr\n", sha);
+            char cp_cmd[512];
+            snprintf(cp_cmd, sizeof(cp_cmd), "cp %s %s/boot.scr", bootscr_path, staging_pack);
+            int ret = system(cp_cmd); (void)ret;
+            printf("    [Manifest] boot.scr  SHA-256: %s\n", sha);
+        }
+        if (mf) fclose(mf);
 
         char tar_cmd[1024];
-        snprintf(tar_cmd, sizeof(tar_cmd), "tar -czf %s", auto_tar);
-        if (bootbin_path) snprintf(tar_cmd + strlen(tar_cmd), sizeof(tar_cmd) - strlen(tar_cmd), " -C $(dirname %s) $(basename %s)", bootbin_path, bootbin_path);
-        if (kernel_path)  snprintf(tar_cmd + strlen(tar_cmd), sizeof(tar_cmd) - strlen(tar_cmd), " -C $(dirname %s) $(basename %s)", kernel_path, kernel_path);
-        if (bootscr_path) snprintf(tar_cmd + strlen(tar_cmd), sizeof(tar_cmd) - strlen(tar_cmd), " -C $(dirname %s) $(basename %s)", bootscr_path, bootscr_path);
+        int tlen = snprintf(tar_cmd, sizeof(tar_cmd), "tar -cf %s --format=ustar -C %s", auto_tar, staging_pack);
+        if (bootbin_path) tlen += snprintf(tar_cmd + tlen, sizeof(tar_cmd) - tlen, " BOOT.BIN");
+        if (kernel_path)  tlen += snprintf(tar_cmd + tlen, sizeof(tar_cmd) - tlen, " image.ub");
+        if (bootscr_path) tlen += snprintf(tar_cmd + tlen, sizeof(tar_cmd) - tlen, " boot.scr");
+        tlen += snprintf(tar_cmd + tlen, sizeof(tar_cmd) - tlen, " manifest.sha256");
+
+        char rm_cmd[512];
+        snprintf(rm_cmd, sizeof(rm_cmd), "rm -rf %s", staging_pack);
 
         if (system(tar_cmd) != 0) {
-            fprintf(stderr, "❌ ERROR: Failed to create package tar.gz!\n");
+            fprintf(stderr, "❌ ERROR: Failed to create uncompressed package tar!\n");
+            int r_err = system(rm_cmd); (void)r_err;
             munmap((void *)bar0, 65536);
             close(fd_bar0);
             return EXIT_FAILURE;
         }
+        int r_ok = system(rm_cmd); (void)r_ok;
         package_path = auto_tar;
     }
 
@@ -582,9 +676,12 @@ int main(int argc, char **argv) {
     fclose(fp);
 
     uint32_t total_crc = calculate_crc32(file_buf, file_size);
+    char pkg_sha[65] = {0};
+    qpcie_sha256_buffer(file_buf, file_size, pkg_sha);
     printf(" -> Upgrade Package   : %s\n", package_path);
     printf(" -> Package Size      : %zu bytes (%.2f MB)\n", file_size, file_size / (1024.0 * 1024.0));
     printf(" -> Package CRC32     : 0x%08X\n", total_crc);
+    printf(" -> Package SHA-256   : %s\n", pkg_sha);
 
     printf("=================================================================\n");
     printf(" Stage 1: push + verify (eMMC is NOT touched in this step)\n");
@@ -629,14 +726,25 @@ int main(int argc, char **argv) {
         return EXIT_FAILURE;
     }
 
-    // 5.2 Host-side BAR0 readback verification of staging DDR
-    printf(" -> Verifying staging DDR through BAR0 readback...\n");
-    if (!verify_staging(bar0, file_buf, file_size)) {
-        free(file_buf);
-        if (auto_tar[0]) unlink(auto_tar);
-        munmap((void *)bar0, 65536);
-        close(fd_bar0);
-        return EXIT_FAILURE;
+    // 5.2 Staging DDR verification
+    if (do_full_bar0_verify) {
+        printf(" -> Verifying staging DDR through full BAR0 readback (legacy mode)...\n");
+        if (!verify_staging(bar0, file_buf, file_size)) {
+            free(file_buf);
+            if (auto_tar[0]) unlink(auto_tar);
+            munmap((void *)bar0, 65536);
+            close(fd_bar0);
+            return EXIT_FAILURE;
+        }
+    } else {
+        printf(" -> Verifying staging DDR through fast boundary canaries (<2ms)...\n");
+        if (!verify_staging_canary(bar0, file_buf, file_size)) {
+            free(file_buf);
+            if (auto_tar[0]) unlink(auto_tar);
+            munmap((void *)bar0, 65536);
+            close(fd_bar0);
+            return EXIT_FAILURE;
+        }
     }
 
     // 5.3 Ask the board daemon to VERIFY (CRC + extract + contents, no eMMC)

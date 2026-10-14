@@ -308,8 +308,8 @@ static void do_verify_ram(volatile uint32_t *pl_regs, const uint8_t *dma_buf,
         finish_cmd(pl_regs, STATUS_UPG_ERR_FLASH);
         return;
     }
-    if (qav_gzip(STAGING_TAR, STAGING_DIR)) {
-        syslog(LOG_ERR, "VERIFY: invalid archive (only three regular bounded ustar files allowed)");
+    if (qav_extract(STAGING_TAR, STAGING_DIR)) {
+        syslog(LOG_ERR, "VERIFY: invalid archive (only bounded ustar files allowed)");
         finish_cmd(pl_regs, STATUS_UPG_ERR_CRC);
         return;
     }
@@ -322,11 +322,32 @@ static void do_verify_ram(volatile uint32_t *pl_regs, const uint8_t *dma_buf,
             return;
         }
     }
+    int m_rc = qav_verify_manifest(STAGING_DIR);
+    if (m_rc == -2) {
+        syslog(LOG_ERR, "VERIFY: SHA-256 hash mismatch against manifest.sha256!");
+        finish_cmd(pl_regs, STATUS_UPG_ERR_CRC);
+        return;
+    } else if (m_rc < 0) {
+        syslog(LOG_ERR, "VERIFY: manifest.sha256 parse/verification failed (rc=%d)", m_rc);
+        finish_cmd(pl_regs, STATUS_UPG_ERR_CRC);
+        return;
+    }
+
+    char p_path[512], sha_str[65];
+    if (stage_path(p_path, sizeof(p_path), STAGING_DIR, "BOOT.BIN") == 0 &&
+        qpcie_sha256_file(p_path, sha_str) == 0) {
+        syslog(LOG_NOTICE, "VERIFY: BOOT.BIN sha256=%s", sha_str);
+    }
+    if (stage_path(p_path, sizeof(p_path), STAGING_DIR, "image.ub") == 0 &&
+        qpcie_sha256_file(p_path, sha_str) == 0) {
+        syslog(LOG_NOTICE, "VERIFY: image.ub sha256=%s", sha_str);
+    }
+
     *verified_size = req_size;
     *verified_crc  = req_crc;
     *verified       = true;
     pl_regs[REG_DMA_UPG_PROGRESS / 4] = 60;
-    syslog(LOG_NOTICE, "VERIFY: package complete (BOOT.BIN/image.ub/boot.scr present)");
+    syslog(LOG_NOTICE, "VERIFY: package verified (BOOT.BIN/image.ub/boot.scr present, SHA-256 validated)");
     finish_cmd(pl_regs, STATUS_UPG_VERIFIED);
 }
 
