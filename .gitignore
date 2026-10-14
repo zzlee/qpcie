@@ -36,6 +36,13 @@ xsim_*.backup.log
 xsim_*.backup.jou
 petalinux/*/project-spec/hw-description/drivers/
 petalinux/*/project-spec/hw-description/psu_init*
+petalinux/*/project-spec/hw-description/*.mmi
+petalinux/*/time.build
+hw_platform/*.mmi
+hw_platform/*.html
+hw_platform/*.tcl
+hw_platform/psu_init_gpl.*
+scripts/archive_debug/
 
 # ------------------------------------------------------------------------------
 # 2. Simulation Artifacts (Icarus Verilog, ModelSim, Verilator)
@@ -69,6 +76,9 @@ test_app/*.o
 test_app/qpcie_sanity_check
 test_app/qpcie_upgrade
 test_app/qpcie_upgrade_daemon
+test_app/qpcie_ddr_verify
+test_app/qpcie_dma_diag
+test_app/qpcie_stage_push
 test_app/qpcie_flash
 test_app/qpcie_a50t_tool
 test_app/qpcie_fw_daemon
