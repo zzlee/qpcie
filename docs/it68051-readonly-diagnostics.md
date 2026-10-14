@@ -111,3 +111,21 @@ HS(E17), VS(B17), with proper CDC/reset handling. Then configure TTL per guide
 for the board's 60-bit dual-pixel interface, verify readback, and observe actual
 PCLK/DE/frame counts before connecting the capture engine. Keep TPG selectable.
 No DMA claim until a captured host buffer has been checked.
+
+## VER03 on-board verification
+
+User programmed VER03 via Windows Nu-Link. PCIe MMIO initially returned
+invalid data (including flash JEDEC FFFFFF); remove/rescan restored JEDEC
+C22018 and MCU access. Do not interpret the initial NACKs as MCU failure.
+
+- MCU MAGIC=2A, VER=03, CTRL=02, STATUS=0B before a host CTRL write.
+- Scratch write/read A5 passed on MCU bus; FRONT read saw the same A5.
+- IT68051 currently 13=BD,19=30,98=00: clock/IPLL locked, but HDMI-mode
+  bit1=0 and video/SCDT are NOT stable. Timing values vary; no resolution
+  claim for this session. This differs from the earlier locked BF/BA/08.
+- A one-second HPD-low pulse (CTRL03 then CTRL02) did not restore video lock.
+- TTL settings remain 1C0=00,1C6=FF; bank selector restored after reads.
+
+Next recheck: physically unplug/replug the HDMI source, then repeat status
+and timing reads before modifying TTL registers. No MCU reset/OpenOCD or
+IT68051 initialization writes were performed in this verification session.
