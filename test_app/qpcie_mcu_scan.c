@@ -489,7 +489,7 @@ int main(int argc, char **argv)
         }
         if (do_status) {
             uint8_t st = regs[2];
-            printf("STATUS 0x%02X: INT=%d SCDT=%d HPD=%d RSTn=%d\n", st,
+            printf("STATUS 0x%02X: INT_RAW=%d SCDT_RAW=%d PB10_RAW=%d PB15_RAW=%d\n", st,
                    !!(st & 1), !!(st & 2), !!(st & 4), !!(st & 8));
         }
         if (ctrl_hex) {

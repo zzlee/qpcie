@@ -47,3 +47,38 @@ Next: check source output mode/EDID handshake, obtain the matching ITE reference
 initialization if available, then validate receiver lock before enabling TTL
 outputs. Guide 1C6/1C8 documents default tri-state controls; access to extended
 blocks must be verified before touching them. Avoid speculative register writes.
+
+## Confirmed HPD polarity fix (2026-10-14)
+
+Schematic sheet4: PB.10/HPD0_CTRL drives the gate of M1 (2N7002KW).
+M1 pulls RX_HPD0 to ground when its gate is HIGH; SR3 (1k) pulls that node
+to HDMI +5V when M1 is off. Thus PB.10 HIGH deasserts cable HPD, not asserts it.
+The old firmware's "HPD asserted" comment for CTRL=03 was incorrect.
+
+After unplugging: reg13 changed 83 -> 82 (5V detection drops), but no lock.
+After replugging: reg13 returned to 83, still unlocked.
+Then host wrote NUC100 CTRL=02 (PB.10 LOW, bit1 preserved). No IT68051
+configuration writes or OpenOCD sessions were needed. Receiver immediately
+locked. Three subsequent snapshots matched:
+
+- 13=BF: 5V, HDMI, RxCLK detect/valid/stable, IPLL lock, symbol lock all set.
+- 19=BA: SCDT and OPLL lock set.
+- 98=08: progressive, PxVideoStable=1. Color-depth code is zero; do not
+  interpret it as a valid 8/10/12-bit depth without additional evidence.
+- 9D/9E=00/0F -> active width 3840.
+- A4/A5=70/08 -> active height 2160.
+- 9B/9C=30/11 -> horizontal total 4400.
+- A2/A3=CA/08 -> vertical total 2250.
+
+Source reports 3840x2160p60; frame rate was not independently measured here.
+Video lock does not establish HDCP state or that TTL output/capture/DMA works.
+
+Current board remains at CTRL=02. Firmware VER02 still defaults to CTRL=03,
+so a MCU reset/power cycle reintroduces the HPD problem. Until the startup
+firmware is corrected, restore with:
+
+```sh
+sudo ~/qpcie_dbg/qpcie_mcu_scan --set-ctrl 0x02
+```
+
+Do not use CTRL bit0=1 to mean "HPD on": it is a raw GPIO level.
