@@ -1,6 +1,10 @@
 /* Generic I2C slave engine (APROM app + LDROM console).
- * Pure transport: 0x2A registers; 0x2B + 0xAA prefix routes to upg.c.
- * serving on SLA+R, else regfile hooks (weak dummies; app overrides).
+ * Pure transport: one protocol on every slave address. First W byte
+ * UPG_ESCAPE_BYTE routes the transaction to upg.c; anything else starts
+ * a register access (ptr = byte & 0x0F). SLA+R serves the pending
+ * upgrade response if any, else regfile hooks (weak dummies; app overrides).
+ * 0x2B is kept only as a hardware alias (I2CADDR1); data bytes there NACK
+ * on this board, so all traffic uses 0x2A + escape byte.
  */
 #include "i2c_slave.h"
 #include "upg.h"
@@ -19,14 +23,18 @@ __attribute__((weak)) void app_reg_write(uint8_t idx, uint8_t val)
 
 static void ch_rx_byte(i2c_ch_t *ch, uint8_t dat)
 {
-    if (ch->upg) {
+    if (ch->rx_len == 0U) {
+        if (dat == UPG_ESCAPE_BYTE) {
+            ch->upg = 1U;
+        } else {
+            ch->ptr = (uint8_t)(dat & 0x0FU);
+        }
+    } else if (ch->upg) {
         if (ch->cmdlen < UPG_CMD_MAX) {
             ch->cmd[ch->cmdlen++] = dat;
         } else {
             ch->cmdlen = UPG_CMD_MAX + 1U;
         }
-    } else if (ch->rx_len == 0U) {
-            ch->ptr = (uint8_t)(dat & 0x0FU);
     } else {
         uint8_t idx = (uint8_t)(ch->ptr & 0x0FU);
         app_reg_write(idx, dat);
@@ -83,35 +91,28 @@ void i2c_slave_isr(I2C_T *i2c, i2c_ch_t *ch)
     if (status == 0x60U) {              /* SLA+W, ACK returned */
         ch->rx_len = 0U;
         ch->cmdlen = 0U;
-        ch->upg = ((i2c->I2CDAT >> 1) == UPG_ADDR);
-        if (ch->upg) {
-            ch->resp_len = 0U;
-            ch->resp_idx = 0U;
-        }
+        ch->upg = 0U;
+        ch->resp_len = 0U;
+        ch->resp_idx = 0U;
         I2C_SET_CONTROL_REG(i2c, I2C_I2CON_SI_AA);
     } else if (status == 0x80U) {       /* data received, ACK returned */
         ch_rx_byte(ch, (uint8_t)i2c->I2CDAT);
         I2C_SET_CONTROL_REG(i2c, I2C_I2CON_SI_AA);
     } else if (status == 0x88U) {       /* data received, NACK returned */
         ch->rx_len = 0U;
-        ch->upg = 0U;
         ch->cmdlen = 0U;
+        ch->upg = 0U;
         I2C_SET_CONTROL_REG(i2c, I2C_I2CON_SI_AA);
     } else if (status == 0xA8U) {       /* SLA+R, ACK returned */
-        uint8_t address = (uint8_t)(i2c->I2CDAT >> 1);
         ch_rx_end(ch);
-        ch->upg = (address == UPG_ADDR);
-        ch->resp_idx = 0U;
         ch_next_tx(ch, i2c);
         I2C_SET_CONTROL_REG(i2c, I2C_I2CON_SI_AA);
     } else if (status == 0xB8U) {       /* data TXed, ACK received */
         ch_next_tx(ch, i2c);
         I2C_SET_CONTROL_REG(i2c, I2C_I2CON_SI_AA);
     } else if (status == 0xC0U) {       /* data TXed, NACK received: done */
-        if (ch->upg) {
-            ch->resp_len = 0U;
-            ch->resp_idx = 0U;
-        }
+        ch->resp_len = 0U;
+        ch->resp_idx = 0U;
         I2C_SET_CONTROL_REG(i2c, I2C_I2CON_SI_AA);
     } else if (status == 0xA0U) {       /* STOP or repeated START */
         ch_rx_end(ch);
@@ -146,10 +147,10 @@ void i2c_slave_ch_init(I2C_T *i2c, i2c_ch_t *ch, uint8_t addr7)
     i2c->I2CADDR1 = (uint32_t)(UPG_ADDR << I2C_I2CADDR_I2CADDR_Pos);
     i2c->I2CADDR2 = (uint32_t)(0x7FUL << I2C_I2CADDR_I2CADDR_Pos);
     i2c->I2CADDR3 = (uint32_t)(0x7FUL << I2C_I2CADDR_I2CADDR_Pos);
-    i2c->I2CADM0 = 0UL;
-    i2c->I2CADM1 = 0UL;
-    i2c->I2CADM2 = 0UL;
-    i2c->I2CADM3 = 0UL;
+    i2c->I2CADM0 = 1UL << I2C_I2CADM_I2CADM_Pos;
+    i2c->I2CADM1 = 1UL << I2C_I2CADM_I2CADM_Pos;
+    i2c->I2CADM2 = 1UL << I2C_I2CADM_I2CADM_Pos;
+    i2c->I2CADM3 = 1UL << I2C_I2CADM_I2CADM_Pos;
 
     i2c->I2CON |= (I2C_I2CON_EI_Msk | I2C_I2CON_AA_Msk);
 

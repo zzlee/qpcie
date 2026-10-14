@@ -1,7 +1,11 @@
 /* Shared I2C slave engine (APROM app + LDROM console).
- * One instance per bus. First W byte 0xAA escapes the transaction to the
- * upgrade engine (upg.c); SLA+R serves the pending upgrade response if any,
- * else the regfile hooks below.
+ * One instance per bus. First W byte UPG_ESCAPE_BYTE escapes the
+ * transaction to the upgrade engine (upg.c); SLA+R serves the pending
+ * upgrade response if any, else the regfile hooks below.
+ * Escape 0x04 (not 0xAA): 0xAA NACKs as a data byte on the M2_710 FPGA
+ * I2C master path. Consequence: regfile offset 0x04 is unreachable as a
+ * first W byte (scratch 0x05..0x0F unaffected; 0x04 reads still work
+ * through pointer auto-increment).
  */
 #ifndef I2C_SLAVE_H
 #define I2C_SLAVE_H
@@ -11,7 +15,7 @@
 #include "i2c.h"
 #include "upg.h"
 
-#define UPG_ESCAPE_BYTE 0xAAU
+#define UPG_ESCAPE_BYTE UPG_ESCAPE
 
 typedef struct {
     volatile uint8_t ptr;

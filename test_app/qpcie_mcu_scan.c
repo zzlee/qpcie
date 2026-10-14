@@ -221,26 +221,16 @@ static uint8_t crc8_poly07(const uint8_t *data, uint32_t len)
 }
 
 #define MCU_CONTROL_ADDR 0x2A
-#define MCU_UPGRADE_ADDR 0x2B
+#define UPG_ESCAPE_BYTE  0x04U /* must match firmware i2c_slave.h */
 
-/* Upgrade commands go directly to 0x2B (address selects upgrade routing). */
+/* Upgrade commands go to 0x2A behind the escape byte: firmware routes by
+ * first W byte, not by the 0x2B secondary address (data bytes there NACK
+ * on this board). Bus layout: [ESCAPE, CMD, args...]. */
 static int upg_cmd(volatile uint8_t *bar1, const uint8_t *cmd, int cmdlen)
 {
-    uint8_t *tmp;
-    int r;
     if (cmdlen < 1)
         return -EINVAL;
-    if (cmdlen == 1) {
-        tmp = calloc(1, 1);
-    } else {
-        tmp = malloc(cmdlen - 1);
-    }
-    if (!tmp)
-        return -ENOMEM;
-    memcpy(tmp, cmd + 1, cmdlen - 1);
-    r = wr_regs(bar1, MCU_UPGRADE_ADDR, cmd[0], tmp, cmdlen - 1);
-    free(tmp);
-    return r;
+    return wr_regs(bar1, MCU_CONTROL_ADDR, UPG_ESCAPE_BYTE, cmd, cmdlen);
 }
 
 /* Write command then Sr+R response read. */
@@ -250,7 +240,7 @@ static int upg_cmd_rsp(volatile uint8_t *bar1, const uint8_t *cmd, int cmdlen,
     int r = upg_cmd(bar1, cmd, cmdlen);
     if (r)
         return r;
-    return rd_raw(bar1, MCU_UPGRADE_ADDR, rsp, rsplen);
+    return rd_raw(bar1, MCU_CONTROL_ADDR, rsp, rsplen);
 }
 
 /* PCIe-driven APROM update. Image = app.bin (header @0, NOT bundle).
@@ -506,10 +496,11 @@ static void ensure_mem_enabled(void)
 
 static void usage(const char *p)
 {
-    printf("Usage: %s [--bus mcu|front] [--scan|--dump|--loopback|--status|--board-ver|--spy|--sniff SEC|--probe HEX|--set-ctrl HEX|--flash-aprom FILE]\n", p);
+    printf("Usage: %s [--bus mcu|front] [--scan|--dump|--loopback|--status|--board-ver|--spy|--sniff SEC|--probe HEX|--set-ctrl HEX|--hello-upg|--flash-aprom FILE]\n", p);
     printf("  Direct BAR MMIO: BAR1 I2C master (mcu=0x5000 default, front=0x3000);\n");
     printf("  BAR0 0x1008 board version. Unloads qpcie driver.\n");
     printf("  --dump --offset HEX --len 1..16: read register range (default offset 0).\n");
+    printf("  --hello-upg: upgrade HELLO via 0x2A + escape byte (0x2A route only).\n");
     printf("  --bank 0..7: IT68051 FRONT/0x48 dump; saves/restores 0x0F selector.\n");
 }
 
@@ -541,12 +532,14 @@ int main(int argc, char **argv)
         {"bus", required_argument, 0, 'B'},
         {"set-ctrl", required_argument, 0, 'c'},
         {"flash-aprom", required_argument, 0, 'F'},
+        {"hello-upg", no_argument, 0, 'j'},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0}
     };
     int o;
     const char *flash_path = NULL;
-    while ((o = getopt_long(argc, argv, "sdlthbB:c:p:P:S:L:yn:T:O:K:F:", lo, NULL)) != -1) {
+    bool do_hello = false;
+    while ((o = getopt_long(argc, argv, "sdlthbB:c:p:P:S:L:yn:T:O:K:F:j", lo, NULL)) != -1) {
         switch (o) {
         case 's': do_scan = true; break;
         case 'd': do_dump = true; break;
@@ -594,10 +587,11 @@ int main(int argc, char **argv)
             break;
         case 'c': ctrl_hex = optarg; break;
         case 'F': flash_path = optarg; break;
+        case 'j': do_hello = true; break;
         default: usage(argv[0]); return o == 'h' ? 0 : 1;
         }
     }
-    if (!do_scan && !do_dump && !do_lb && !do_status && !do_board && !ctrl_hex && !probe_hex && !do_spy && do_sniff < 0 && !flash_path) {
+    if (!do_scan && !do_dump && !do_lb && !do_status && !do_board && !ctrl_hex && !probe_hex && !do_spy && do_sniff < 0 && !flash_path && !do_hello) {
         usage(argv[0]);
         return 1;
     }
@@ -654,6 +648,20 @@ int main(int argc, char **argv)
     write32(bar1, g_base + REG_I2C_PRER_LO, g_prer & 0xFF);
     write32(bar1, g_base + REG_I2C_PRER_HI, (g_prer >> 8) & 0xFF);
     write32(bar1, g_base + REG_I2C_CTR, I2C_CTR_EN);
+
+    if (do_hello) {
+        uint8_t hello[1] = { 0x01 };
+        uint8_t rsp[4] = { 0 };
+        int r2 = upg_cmd_rsp(bar1, hello, 1, rsp, 4);
+        printf("UPG HELLO (0x2A + escape 0x%02X): rc=%d rsp=%02X %02X %02X %02X\n",
+               UPG_ESCAPE_BYTE, r2, rsp[0], rsp[1], rsp[2], rsp[3]);
+        if (r2 == 0)
+            printf("  PROTO=%u ROLE=%u FLAGS=0x%02X MAXCHUNK=%u\n",
+                   rsp[0], rsp[1], rsp[2], rsp[3]);
+        else
+            rc = 1;
+        goto out;
+    }
 
     if (flash_path) {
         rc = flash_aprom(bar1, flash_path);
@@ -816,9 +824,10 @@ int main(int argc, char **argv)
             }
         }
         if (do_lb) {
+            /* Scratch 0x05: offset 0x04 is the upgrade escape byte now. */
             uint8_t w = 0xA5, r = 0;
-            if (wr_regs((volatile uint8_t *)bar1, NUC_ADDR, 0x04, &w, 1) != 0 ||
-                rd_regs((volatile uint8_t *)bar1, NUC_ADDR, 0x04, &r, 1) != 0) {
+            if (wr_regs((volatile uint8_t *)bar1, NUC_ADDR, 0x05, &w, 1) != 0 ||
+                rd_regs((volatile uint8_t *)bar1, NUC_ADDR, 0x05, &r, 1) != 0) {
                 printf("ERROR: loopback transaction failed.\n");
                 rc = 1;
             } else if (r != w) {

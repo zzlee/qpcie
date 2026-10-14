@@ -1,7 +1,8 @@
 /* Shared upgrade protocol engine (APROM app + LDROM console).
  *
- * Transport (owned by i2c_slave.c): first W byte 0xAA escapes the whole
- * transaction to upg_rx_byte(); the following Sr+R serves the last response.
+ * Transport (owned by i2c_slave.c): first W byte UPG_ESCAPE escapes the
+ * whole transaction to the command decoder; the following Sr+R serves
+ * the last response.
  * All multi-byte values little-endian. CRC32 = IEEE (poly 0xEDB88320),
  * CRC8 poly 0x07 init 0x00.
  *
@@ -22,8 +23,8 @@
 
 #include <stdint.h>
 
-#define UPG_ESCAPE        0xAAU
-#define UPG_ADDR          0x2BU
+#define UPG_ESCAPE        0x04U
+#define UPG_ADDR          0x2BU  /* hardware alias only; same escape protocol */
 #define UPG_CMD_MAX       40U
 #define UPG_PROTO_VER     0x01U
 #define UPG_ROLE_APP      0U

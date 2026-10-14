@@ -28,4 +28,5 @@ void SystemCoreClockUpdate(void);
 #define I2C_I2CON_EI_Msk 0x80U
 #define I2C_I2CON_AA_Msk 4U
 #define I2C_I2CADDR_I2CADDR_Pos 1U
+#define I2C_I2CADM_I2CADM_Pos 1U
 #endif

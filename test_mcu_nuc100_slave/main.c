@@ -8,7 +8,7 @@
  *   0x02 STATUS RO live (PA.12 INT, PA.13 SCDT, PB.10/PB.15 latches)
  *   0x03 CTRL   RW raw GPIO (bit0 PB.10 inverted HPD, bit1 PB.15 RSTn)
  *   0x04..0x0F SCRATCH RW
- * First W byte 0xAA escapes the transaction to the upgrade engine.
+ * First W byte UPG_ESCAPE (0x04) escapes the transaction to the upgrade engine.
  */
 #include "NUC100Series.h"
 #include "i2c.h"
@@ -87,6 +87,9 @@ int main(void)
     regfile_init(APP_FW_VER, 0x02U);
     i2c_slave_ch_init(I2C0, &g_c0, 0x2AU);
     i2c_slave_ch_init(I2C1, &g_c1, 0x2AU);
+    /* Runtime diagnostic of upgrade secondary addresses (host reads reg 0x0A/B). */
+    app_reg_write(0x0A, (uint8_t)I2C0->I2CADDR1);
+    app_reg_write(0x0B, (uint8_t)I2C1->I2CADDR1);
     NVIC_EnableIRQ(I2C0_IRQn);
     NVIC_EnableIRQ(I2C1_IRQn);
     SYS->REGWRPROT = 0x00UL;

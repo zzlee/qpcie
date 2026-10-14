@@ -1,10 +1,12 @@
 # MCU APROM update over PCIe (with LDROM cooperation)
 
 > **Experimental — do not run `--flash-aprom` yet.** Build/CRC checks do
-> not establish working recovery. The current transport is still 0x2A,
-> not the approved 0x2B; LDROM readiness, reset handoff and host continuation
-> require correction and hardware validation. Earlier claims that both
-> upgrade phases were complete were incorrect.
+> not establish working recovery. The transport is 0x2A + escape byte;
+> the 0x2B secondary address ACKs at address level after the I2CADM fix
+> but data bytes still NACK on hardware (root cause open), so 0x2B is a
+> hardware alias only. LDROM readiness, reset handoff and host continuation
+> require hardware validation. Earlier claims that both upgrade phases
+> were complete were incorrect.
 
 ## 2026-10-14 boot/IRQ correction
 
@@ -63,10 +65,30 @@ CBS=11. CONFIG stays untouched.
 
 ## I2C upgrade protocol (slave 0x2A, both buses)
 
-First W byte `0xAA` escapes the transaction (offset `0x0A` must be
-addressed with byte `0x0A`, never `0xAA`). Then `[CMD args...]` + STOP;
-response via following Sr+R (single-shot, then cleared; a new W
-discards any unread response).
+First W byte `0x04` escapes the transaction to the upgrade engine.
+Then `[CMD args...]` + STOP; response via following Sr+R (single-shot,
+then cleared; a new W discards any unread response).
+
+### 2026-10-14 transport pivot: escape byte on 0x2A
+
+Hardware (Jetson + M2_710) showed: (1) after enabling I2CADMn the 0x2B
+secondary address ACKs, but its data bytes NACK; (2) escape byte `0xAA`
+as a data byte on 0x2A also NACKs, while ordinary register bytes
+(including values >= 0x80 such as 0xA5 loopback) ACK normally. The
+transport therefore routes upgrade by **first W byte `0x04`** on the
+0x2A address; `0xAA` is now an ordinary (offset) first byte. `0x2B`
+(I2CADDR1) is kept only as a hardware alias: same escape protocol if it
+ever becomes usable. Root cause of the byte-level NACKs is still open.
+
+Consequences:
+- Register offset `0x04` is unreachable as a first W byte (it escapes);
+  host loopback test uses scratch `0x05`. Reads of offset 0x04 via
+  pointer auto-increment still work.
+- Host `upg_cmd` sends `[0x04, CMD, args...]` to 0x2A;
+  `qpcie_mcu_scan --hello-upg` is the quick transport acceptance test
+  (expects `PROTO=1 ROLE=0 FLAGS=0x02 MAXCHUNK=32` from a good app).
+- Local regressions (transport/protocol/stage0) all pass with this
+  routing; board validation of HELLO/BEGIN flow is the pending step.
 
 | CMD | Write payload | Read response |
 |---|---|---|
