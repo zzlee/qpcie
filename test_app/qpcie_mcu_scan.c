@@ -246,6 +246,7 @@ static void usage(const char *p)
     printf("  Direct BAR MMIO: BAR1 I2C master (mcu=0x5000 default, front=0x3000);\n");
     printf("  BAR0 0x1008 board version. Unloads qpcie driver.\n");
     printf("  --dump --offset HEX --len 1..16: read register range (default offset 0).\n");
+    printf("  --bank 0..7: IT68051 FRONT/0x48 dump; saves/restores 0x0F selector.\n");
 }
 
 int main(int argc, char **argv)
@@ -257,6 +258,7 @@ int main(int argc, char **argv)
     const char *probe_hex = NULL;
     const char *ctrl_hex = NULL;
     unsigned int dump_offset = 0;
+    int dump_bank = -1;
     static struct option lo[] = {
         {"scan", no_argument, 0, 's'},
         {"dump", no_argument, 0, 'd'},
@@ -271,13 +273,14 @@ int main(int argc, char **argv)
         {"step-ms", required_argument, 0, 'T'},
         {"len", required_argument, 0, 'L'},
         {"offset", required_argument, 0, 'O'},
+        {"bank", required_argument, 0, 'K'},
         {"bus", required_argument, 0, 'B'},
         {"set-ctrl", required_argument, 0, 'c'},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0}
     };
     int o;
-    while ((o = getopt_long(argc, argv, "sdlthbB:c:p:P:S:L:yn:T:O:", lo, NULL)) != -1) {
+    while ((o = getopt_long(argc, argv, "sdlthbB:c:p:P:S:L:yn:T:O:K:", lo, NULL)) != -1) {
         switch (o) {
         case 's': do_scan = true; break;
         case 'd': do_dump = true; break;
@@ -298,6 +301,16 @@ int main(int argc, char **argv)
                 return 1;
             }
             dump_offset = (unsigned int)value;
+            break;
+        }
+        case 'K': {
+            char *end;
+            unsigned long value = strtoul(optarg, &end, 0);
+            if (!*optarg || *end || value > 7) {
+                fprintf(stderr, "Invalid --bank (0..7)\n");
+                return 1;
+            }
+            dump_bank = (int)value;
             break;
         }
         case 'T': g_step_ms = atoi(optarg); break;
@@ -327,6 +340,12 @@ int main(int argc, char **argv)
     }
     if (g_len == 0 || g_len > 16 || dump_offset + g_len > 256) {
         fprintf(stderr, "--len must be 1..16 without register address wrap\n");
+        return 1;
+    }
+    if (dump_bank >= 0 && (!do_dump || g_base != BAR1_OFFSET_I2C_FRONT ||
+        g_slv != 0x48 || do_status || do_lb || ctrl_hex || do_scan ||
+        do_spy || do_board || probe_hex || do_sniff >= 0)) {
+        fprintf(stderr, "--bank requires only FRONT slave 0x48 --dump\n");
         return 1;
     }
 
@@ -361,6 +380,8 @@ int main(int argc, char **argv)
         return 1;
     }
     int rc = 0;
+    uint8_t saved_bank = 0;
+    bool restore_bank = false;
 
     /* Init master: prescaler g_prer, enable */
     write32(bar1, g_base + REG_I2C_PRER_LO, g_prer & 0xFF);
@@ -469,6 +490,26 @@ int main(int argc, char **argv)
             rc = 1;
             goto out;
         }
+        if (dump_bank >= 0) {
+            uint8_t selected, check;
+            if (rd_regs(bar1, 0x48, 0x0F, &saved_bank, 1) != 0) {
+                fprintf(stderr, "Cannot read IT68051 bank selector\n");
+                rc = 1;
+                goto out;
+            }
+            selected = (saved_bank & 0xF8) | (uint8_t)dump_bank;
+            // Restore even when a failed transfer might already have written.
+            restore_bank = true;
+            if (wr_regs(bar1, 0x48, 0x0F, &selected, 1) != 0 ||
+                rd_regs(bar1, 0x48, 0x0F, &check, 1) != 0 ||
+                (check & 7) != (unsigned int)dump_bank) {
+                fprintf(stderr, "Cannot select/verify IT68051 bank\n");
+                rc = 1;
+                goto out;
+            }
+            printf("IT68051 bank=%d (original=%u; restored on exit)\n",
+                   dump_bank, saved_bank & 7);
+        }
         if (rd_regs((volatile uint8_t *)bar1, (uint8_t)g_slv, (uint8_t)dump_offset, regs, (int)n) != 0) {
             printf("ERROR: burst read failed.\n");
             rc = 1;
@@ -482,7 +523,8 @@ int main(int argc, char **argv)
                        (g_slv == NUC_ADDR && dump_offset + i == 1) ? " VER" :
                        (g_slv == NUC_ADDR && dump_offset + i == 2) ? " STATUS" :
                        (g_slv == NUC_ADDR && dump_offset + i == 3) ? " CTRL" : "");
-            if (g_slv == NUC_ADDR && dump_offset == 0 && n >= 2 && (regs[0] != 0x2A || regs[1] != 0x02)) {
+            if (g_slv == NUC_ADDR && dump_offset == 0 && n >= 2 &&
+                (regs[0] != 0x2A || (regs[1] != 0x02 && regs[1] != 0x03))) {
                 printf("WARN: MAGIC/VER mismatch (fw mismatch?)\n");
                 rc = 1;
             }
@@ -517,6 +559,15 @@ int main(int argc, char **argv)
     }
 
 out:
+    if (restore_bank) {
+        uint8_t check;
+        if (wr_regs(bar1, 0x48, 0x0F, &saved_bank, 1) != 0 ||
+            rd_regs(bar1, 0x48, 0x0F, &check, 1) != 0 ||
+            (check & 7) != (saved_bank & 7)) {
+            fprintf(stderr, "WARNING: bank restore failed; stop concurrent access\n");
+            rc = 1;
+        }
+    }
     munmap((void *)bar1, 65536);
     close(fd);
     return rc;

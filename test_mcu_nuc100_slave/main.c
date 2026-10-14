@@ -11,10 +11,10 @@
  *
  * Register map (1-byte offset + auto-increment, wraps at 0x0F):
  *   0x00 MAGIC  RO = 0x2A
- *   0x01 VER    RO = 0x02
+ *   0x01 VER    RO = 0x03
  *   0x02 STATUS RO (live): bit0=PA.12 INT_68051 raw, bit1=PA.13 SCDT raw,
  *                          bit2=PB.10 HPD state, bit3=PB.15 RSTn state
- *   0x03 CTRL   RW: bit0->PB.10 HPD0_CTRL (1=assert HPD),
+ *   0x03 CTRL   RW: bit0->PB.10 HPD0_CTRL (1=HPD LOW, 0=HPD released),
  *                   bit1->PB.15 RSTn_PCIe (1=release reset tree)
  *   0x04..0x0F SCRATCH RW (loopback test)
  *
@@ -31,7 +31,8 @@
 #define REG_VER           (0x01U)
 #define REG_STATUS        (0x02U)
 #define REG_CTRL          (0x03U)
-#define FW_VER            (0x02U)
+#define FW_VER            (0x03U)
+#define DEFAULT_CTRL      (0x02U) /* PB.10 LOW releases cable HPD via M1 */
 #define HXT_TIMEOUT       (0x100000UL)
 #define PARK_ADDR_7BIT    (0x7FU)
 
@@ -219,7 +220,7 @@ int main(void)
         g_reg[i] = 0U;
     g_reg[REG_MAGIC] = 0x2AU;
     g_reg[REG_VER] = FW_VER;
-    g_reg[REG_CTRL] = 0x03U;   /* HPD asserted, reset released */
+    g_reg[REG_CTRL] = DEFAULT_CTRL;
     g_st0.ptr = 0; g_st0.rx_len = 0;
     g_st1.ptr = 0; g_st1.rx_len = 0;
 
@@ -248,10 +249,12 @@ int main(void)
     /* PA.12/PA.13 inputs (INT/SCDT sense); keep others untouched */
     PA->PMD &= ~((0x3UL << (12 * 2)) | (0x3UL << (13 * 2)));
 
-    /* PB.10 (HPD) + PB.15 (RSTn_PCIe) push-pull HIGH */
+    /* Preload levels BEFORE switching to push-pull to avoid a GPIO glitch.
+     * PB.10 is inverted by M1: LOW releases RX_HPD0 to SR3's +5V pullup.
+     * Preserve legacy PB.15 behavior; only HPD polarity changes in VER03. */
+    apply_ctrl(DEFAULT_CTRL);
     PB->PMD = (PB->PMD & ~((0x3UL << (10 * 2)) | (0x3UL << (15 * 2))))
             | ((0x1UL << (10 * 2)) | (0x1UL << (15 * 2)));
-    PB->DOUT |= ((1UL << 10) | (1UL << 15));
 
     i2c_slave_init();
 

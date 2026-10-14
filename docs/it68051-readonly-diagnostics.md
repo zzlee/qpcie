@@ -82,3 +82,32 @@ sudo ~/qpcie_dbg/qpcie_mcu_scan --set-ctrl 0x02
 ```
 
 Do not use CTRL bit0=1 to mean "HPD on": it is a raw GPIO level.
+
+## VER03 firmware and TTL output inspection
+
+VER03 firmware has now been built (not yet programmed). It preloads PB.10 LOW
+before selecting push-pull output, defaults CTRL=02, and reports VER=03. The
+host tool accepts VER02 and VER03. Legacy PB.15 and clock setup are unchanged.
+Generated `test_mcu_nuc100_slave/mcu_nuc100_slave_ver03.bin`: 2624 bytes,
+SHA256 `4f20812807ffc23a072e68b566f8dcdf99df6e80da2e07c0b7bb209f0eae9118`.
+
+Guide page35 documents selector 0F[2:0]. Tool `--bank 1` preserves/restores
+the original selector and verifies restoration. Read bank1 C0..CF:
+`00 00 00 00 00 7F FF 7F 1F 89 89 99 FF FF FF FF`.
+Original selector 00 was restored and receiver remained locked (13=BF,19=BA).
+
+- 1C0=00: single-pixel mode, TTL output clock disabled, LVDS disabled.
+- 1C1=00: DDR and embedded-sync controls disabled.
+- 1C6=FF: dual-pixel data and video-control IO tri-stated.
+- 1C8=1F: auxiliary SCDT/EVODD/3DR pin tri-state controls set.
+- Block0 6B=40: output-depth bits[1:0]=00 (8-bit setting); this is not a
+  measurement of the HDMI source's bit depth.
+
+Only selector 0F was changed temporarily; no output or clock registers were
+written. Receiver lock is established, but TTL-to-FPGA traffic is not.
+
+Next hardware step: add input-only PL telemetry for TM0_PCLK(E13), DE(D18),
+HS(E17), VS(B17), with proper CDC/reset handling. Then configure TTL per guide
+for the board's 60-bit dual-pixel interface, verify readback, and observe actual
+PCLK/DE/frame counts before connecting the capture engine. Keep TPG selectable.
+No DMA claim until a captured host buffer has been checked.
