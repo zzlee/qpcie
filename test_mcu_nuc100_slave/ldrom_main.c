@@ -22,25 +22,11 @@ void ProcessHardFault(void)
 
 void I2C0_IRQHandler(void)
 {
-    if (I2C0->I2CTOC & I2C_I2CTOC_TIF_Msk) {
-        I2C0->I2CTOC |= I2C_I2CTOC_TIF_Msk;
-        g_c0.rx_len = 0;
-        g_c0.upg = 0;
-        I2C_SET_CONTROL_REG(I2C0, I2C_I2CON_SI_AA);
-        return;
-    }
     i2c_slave_isr(I2C0, &g_c0);
 }
 
 void I2C1_IRQHandler(void)
 {
-    if (I2C1->I2CTOC & I2C_I2CTOC_TIF_Msk) {
-        I2C1->I2CTOC |= I2C_I2CTOC_TIF_Msk;
-        g_c1.rx_len = 0;
-        g_c1.upg = 0;
-        I2C_SET_CONTROL_REG(I2C1, I2C_I2CON_SI_AA);
-        return;
-    }
     i2c_slave_isr(I2C1, &g_c1);
 }
 

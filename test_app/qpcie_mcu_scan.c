@@ -220,16 +220,25 @@ static uint8_t crc8_poly07(const uint8_t *data, uint32_t len)
     return crc;
 }
 
-/* One upgrade command write: [0xAA CMD ...] + STOP. */
+#define MCU_CONTROL_ADDR 0x2A
+#define MCU_UPGRADE_ADDR 0x2B
+
+/* Upgrade commands go directly to 0x2B (address selects upgrade routing). */
 static int upg_cmd(volatile uint8_t *bar1, const uint8_t *cmd, int cmdlen)
 {
-    uint8_t *tmp = malloc(cmdlen);
+    uint8_t *tmp;
     int r;
+    if (cmdlen < 1)
+        return -EINVAL;
+    if (cmdlen == 1) {
+        tmp = calloc(1, 1);
+    } else {
+        tmp = malloc(cmdlen - 1);
+    }
     if (!tmp)
         return -ENOMEM;
     memcpy(tmp, cmd + 1, cmdlen - 1);
-    /* wr_regs sends off=first byte then data */
-    r = wr_regs(bar1, 0x2A, cmd[0], tmp, cmdlen - 1);
+    r = wr_regs(bar1, MCU_UPGRADE_ADDR, cmd[0], tmp, cmdlen - 1);
     free(tmp);
     return r;
 }
@@ -241,7 +250,7 @@ static int upg_cmd_rsp(volatile uint8_t *bar1, const uint8_t *cmd, int cmdlen,
     int r = upg_cmd(bar1, cmd, cmdlen);
     if (r)
         return r;
-    return rd_raw(bar1, 0x2A, rsp, rsplen);
+    return rd_raw(bar1, MCU_UPGRADE_ADDR, rsp, rsplen);
 }
 
 /* PCIe-driven APROM update. Image = app.bin (header @0, NOT bundle).
@@ -308,7 +317,7 @@ static int flash_aprom(volatile uint8_t *bar1, const char *path)
 
     /* HELLO (retry: target may be mid-boot). */
     for (i = 0; i < 30; i++) {
-        r = upg_cmd_rsp(bar1, (uint8_t[]){0xAA, 0x01}, 2, rsp, 4);
+        r = upg_cmd_rsp(bar1, (uint8_t[]){0x01}, 1, rsp, 4);
         if (r == 0)
             break;
         usleep(500000);
@@ -328,10 +337,10 @@ static int flash_aprom(volatile uint8_t *bar1, const char *path)
 
     /* BEGIN */
     {
-        uint8_t cmd[8] = {0xAA, 0x02, len & 0xFF, (len >> 8) & 0xFF,
+        uint8_t cmd[7] = {0x02, len & 0xFF, (len >> 8) & 0xFF,
                           crc & 0xFF, (crc >> 8) & 0xFF,
                           (crc >> 16) & 0xFF, (crc >> 24) & 0xFF};
-        r = upg_cmd_rsp(bar1, cmd, 8, rsp, 1);
+        r = upg_cmd_rsp(bar1, cmd, 7, rsp, 1);
         if (r || rsp[0]) {
             fprintf(stderr, "BEGIN failed (%d/%u)\n", r, r ? 0 : rsp[0]);
             free(img);
@@ -344,23 +353,22 @@ static int flash_aprom(volatile uint8_t *bar1, const char *path)
         uint32_t n = len - off > 32 ? 32 : len - off;
         uint8_t cmd[40];
         int tries;
-        cmd[0] = 0xAA;
-        cmd[1] = 0x03;
-        cmd[2] = off & 0xFF;
-        cmd[3] = (off >> 8) & 0xFF;
-        cmd[4] = n;
-        memcpy(cmd + 5, img + off, n);
+        cmd[0] = 0x03;
+        cmd[1] = off & 0xFF;
+        cmd[2] = (off >> 8) & 0xFF;
+        cmd[3] = n;
+        memcpy(cmd + 4, img + off, n);
         /* CRC8 over OFF_L,OFF_H,N,DATA */
         {
             uint8_t cbuf[35];
-            cbuf[0] = cmd[2];
-            cbuf[1] = cmd[3];
-            cbuf[2] = cmd[4];
+            cbuf[0] = cmd[1];
+            cbuf[1] = cmd[2];
+            cbuf[2] = cmd[3];
             memcpy(cbuf + 3, img + off, n);
-            cmd[5 + n] = crc8_poly07(cbuf, 3 + n);
+            cmd[4 + n] = crc8_poly07(cbuf, 3 + n);
         }
         for (tries = 0; tries < 3; tries++) {
-            r = upg_cmd_rsp(bar1, cmd, (int)(6 + n), rsp, 1);
+            r = upg_cmd_rsp(bar1, cmd, (int)(5 + n), rsp, 1);
             if (r == 0 && rsp[0] == 0)
                 break;
             usleep(50000);
@@ -378,15 +386,39 @@ static int flash_aprom(volatile uint8_t *bar1, const char *path)
 
     /* COMMIT, then allow handoff + flashing + resets. */
     {
-        uint8_t cmd[2] = {0xAA, 0x04};
-        r = upg_cmd_rsp(bar1, cmd, 2, rsp, 1);
+        uint8_t cmd[1] = { 0x04 };
+        r = upg_cmd_rsp(bar1, cmd, 1, rsp, 1);
         if (r || rsp[0]) {
             fprintf(stderr, "COMMIT rejected (%d/%u)\n", r, r ? 0 : rsp[0]);
             free(img);
             return 1;
         }
     }
-    printf("committed, waiting for reflash + reboot...\n");
+    printf("committed, re-attaching to LDROM console...\n");
+
+    /* Re-establish the session in the console (chunks already staged). */
+    {
+        uint8_t begin_cmd[7] = { 0x02, len & 0xFF, (len >> 8) & 0xFF,
+                                crc & 0xFF, (crc >> 8) & 0xFF,
+                                (crc >> 16) & 0xFF, (crc >> 24) & 0xFF };
+        uint8_t commit_cmd[1] = { 0x04 };
+        int deadline = 90;
+        for (int tries = 0; tries < deadline; tries++) {
+            r = upg_cmd_rsp(bar1, begin_cmd, 7, rsp, 1);
+            if (r == 0 && rsp[0] == 0) {
+                r = upg_cmd_rsp(bar1, commit_cmd, 1, rsp, 1);
+                if (r == 0 && rsp[0] == 0)
+                    break;
+            }
+            sleep(1);
+        }
+        if (r || rsp[0]) {
+            fprintf(stderr, "console re-commit failed (%d/%u)\n", r, r ? 0 : rsp[0]);
+            free(img);
+            return 1;
+        }
+    }
+    printf("reflash accepted, waiting for reboot...\n");
     sleep(10);
 
     /* Re-probe until the running firmware reports the file version. */
@@ -764,7 +796,7 @@ int main(int argc, char **argv)
                        (g_slv == NUC_ADDR && dump_offset + i == 2) ? " STATUS" :
                        (g_slv == NUC_ADDR && dump_offset + i == 3) ? " CTRL" : "");
             if (g_slv == NUC_ADDR && dump_offset == 0 && n >= 2 &&
-                (regs[0] != 0x2A || (regs[1] != 0x02 && regs[1] != 0x03))) {
+                (regs[0] != 0x2A || (regs[1] != 0x02 && regs[1] != 0x03 && regs[1] != 0x04))) {
                 printf("WARN: MAGIC/VER mismatch (fw mismatch?)\n");
                 rc = 1;
             }

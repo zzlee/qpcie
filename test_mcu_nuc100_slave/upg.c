@@ -5,12 +5,10 @@
 #include "upg.h"
 #include "NUC100Series.h"
 
-#define UPG_CMD_MAX 40U /* escape + CMD + worst args (CHUNK header + 32B + CRC8) */
 
 __attribute__((section(".stage"))) static uint8_t upg_stage[UPG_STAGE_MAX];
 
-static uint8_t  upg_cmdbuf[UPG_CMD_MAX];
-static uint8_t  upg_cmdlen;
+static uint8_t upg_owner = 0xFFU;
 static uint8_t  upg_state_v = UPG_STATE_IDLE;
 static uint32_t upg_exp_len;
 static uint32_t upg_exp_crc;
@@ -19,8 +17,6 @@ static uint16_t upg_done_v;
 static uint8_t  upg_handoff; /* app path: BS=LDROM + reset */
 uint8_t upg_flashing;        /* LDROM path: program in upg_poll */
 
-static uint8_t  upg_shared_resp[8];
-static uint8_t  upg_shared_len;
 
 uint32_t upg_crc32(const uint8_t *data, uint32_t len)
 {
@@ -57,7 +53,13 @@ uint32_t upg_image_len(void)
 __attribute__((weak)) uint8_t upg_role(void) { return UPG_ROLE_APP; }
 __attribute__((weak)) uint8_t upg_writer_ready(void)
 {
-    return (*((volatile uint32_t *)UPG_LDROM_BASE) == UPG_LDROM_MAGIC) ? 1U : 0U;
+    volatile uint32_t *vecs = (volatile uint32_t *)UPG_LDROM_BASE;
+    if (vecs[0] < 0x20000000UL || vecs[0] > 0x20004000UL)
+        return 0U;
+    if (vecs[1] < UPG_LDROM_BASE || vecs[1] >= UPG_LDROM_BASE + 0x1000UL ||
+        !(vecs[1] & 1UL))
+        return 0U;
+    return 1U;
 }
 
 static void upg_unlock(void)
@@ -85,26 +87,29 @@ int upg_backend_commit(void)
     return 0;
 }
 
-void upg_rx_byte(uint8_t b)
-{
-    if (upg_cmdlen < UPG_CMD_MAX)
-        upg_cmdbuf[upg_cmdlen++] = b;
-}
-
-void upg_rx_abort(void)
-{
-    upg_cmdlen = 0;
-}
-
-void upg_rx_end(void)
+void upg_execute(uint8_t bus, const uint8_t *upg_cmdbuf, uint8_t upg_cmdlen,
+                 upg_resp_t *response)
 {
     uint8_t rsp[8] = {0, 0, 0, 0, 0, 0, 0, 0};
     uint8_t rlen = 1;
     uint32_t i, off, n;
 
-    upg_shared_len = 0;
-    if (upg_cmdlen == 0)
-        return;
+    if (upg_cmdlen == 0 || upg_cmdlen > UPG_CMD_MAX || bus > 1U) {
+        rsp[0] = UPG_ST_CRCERR;
+        goto respond;
+    }
+    if (
+        (upg_cmdbuf[0] != UPG_CMD_BEGIN &&
+         upg_cmdbuf[0] != UPG_CMD_CHUNK && upg_cmdlen != 1U)) {
+        rsp[0] = UPG_ST_CRCERR;
+        goto respond;
+    }
+    if (upg_owner != 0xFFU && upg_owner != bus &&
+        upg_cmdbuf[0] != UPG_CMD_HELLO &&
+        upg_cmdbuf[0] != UPG_CMD_PROGRESS) {
+        rsp[0] = UPG_ST_BUSY;
+        goto respond;
+    }
 
     switch (upg_cmdbuf[0]) {
     case UPG_CMD_HELLO:
@@ -120,11 +125,16 @@ void upg_rx_end(void)
             rsp[0] = UPG_ST_BUSY;
             break;
         }
-        if (upg_cmdlen < 8) {
+        if (upg_cmdlen != 7U) {
             rsp[0] = UPG_ST_CRCERR;
             break;
         }
-        upg_exp_len = (uint32_t)upg_cmdbuf[1] | ((uint32_t)upg_cmdbuf[2] << 8);
+        n = (uint32_t)upg_cmdbuf[1] | ((uint32_t)upg_cmdbuf[2] << 8);
+        if (n < UPG_APP_HDR_LEN || n > UPG_STAGE_MAX || (n & 3U)) {
+            rsp[0] = UPG_ST_TOOBIG;
+            break;
+        }
+        upg_exp_len = n;
         upg_exp_crc = (uint32_t)upg_cmdbuf[3] | ((uint32_t)upg_cmdbuf[4] << 8) |
                       ((uint32_t)upg_cmdbuf[5] << 16) | ((uint32_t)upg_cmdbuf[6] << 24);
         if (upg_exp_len == 0UL || upg_exp_len > UPG_STAGE_MAX) {
@@ -132,6 +142,7 @@ void upg_rx_end(void)
             break;
         }
         upg_state_v = UPG_STATE_RX;
+        upg_owner = bus;
         upg_err_v = 0;
         upg_done_v = 0;
         rsp[0] = UPG_ST_OK;
@@ -149,7 +160,7 @@ void upg_rx_end(void)
         }
         off = (uint32_t)upg_cmdbuf[1] | ((uint32_t)upg_cmdbuf[2] << 8);
         n = upg_cmdbuf[3];
-        if (n > UPG_MAXCHUNK || upg_cmdlen != (uint8_t)(5U + n) ||
+        if (n == 0U || n > UPG_MAXCHUNK || upg_cmdlen != (uint8_t)(5U + n) ||
             off + n > upg_exp_len) {
             rsp[0] = UPG_ST_BADOFF;
             break;
@@ -157,6 +168,21 @@ void upg_rx_end(void)
         calc = upg_crc8(&upg_cmdbuf[1], (uint32_t)(3U + n));
         if (calc != upg_cmdbuf[4U + n]) {
             rsp[0] = UPG_ST_CRCERR;
+            break;
+        }
+        /* Contiguous coverage, with idempotent retries of accepted bytes.
+         * Never count a high-offset chunk as proof of missing low bytes. */
+        if (off != upg_done_v) {
+            if (off + n > upg_done_v) {
+                rsp[0] = UPG_ST_BADOFF;
+                break;
+            }
+            for (i = 0; i < n; i++) {
+                if (upg_stage[off + i] != upg_cmdbuf[4U + i]) {
+                    rsp[0] = UPG_ST_BADOFF;
+                    break;
+                }
+            }
             break;
         }
         for (i = 0; i < n; i++)
@@ -173,6 +199,10 @@ void upg_rx_end(void)
             rsp[0] = UPG_ST_NOSESSION;
             break;
         }
+        if (upg_done_v != upg_exp_len) {
+            rsp[0] = UPG_ST_BADOFF;
+            break;
+        }
         if (upg_backend_commit() == 0) {
             upg_state_v = UPG_STATE_FLASH;
             rsp[0] = UPG_ST_OK;
@@ -184,7 +214,12 @@ void upg_rx_end(void)
         break;
 
     case UPG_CMD_ABORT:
+        if (upg_state_v == UPG_STATE_FLASH) {
+            rsp[0] = UPG_ST_BUSY;
+            break;
+        }
         upg_state_v = UPG_STATE_IDLE;
+        upg_owner = 0xFFU;
         upg_err_v = 0;
         upg_done_v = 0;
         rsp[0] = UPG_ST_OK;
@@ -209,19 +244,10 @@ void upg_rx_end(void)
         break;
     }
 
+respond:
     for (i = 0; i < rlen; i++)
-        upg_shared_resp[i] = rsp[i];
-    upg_shared_len = rlen;
-    upg_cmdlen = 0;
-}
-
-/* Fill transport response (idempotent; transport manages index/wrap). */
-void upg_tx_serve(upg_resp_t *r)
-{
-    uint8_t i;
-    for (i = 0; i < upg_shared_len && i < 8; i++)
-        r->resp[i] = upg_shared_resp[i];
-    r->resp_len = upg_shared_len;
+        response->resp[i] = rsp[i];
+    response->resp_len = rlen;
 }
 
 /* Main-loop context only. Handoff/flash never run in ISR. */

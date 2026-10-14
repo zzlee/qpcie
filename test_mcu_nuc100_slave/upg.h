@@ -23,6 +23,8 @@
 #include <stdint.h>
 
 #define UPG_ESCAPE        0xAAU
+#define UPG_ADDR          0x2BU
+#define UPG_CMD_MAX       40U
 #define UPG_PROTO_VER     0x01U
 #define UPG_ROLE_APP      0U
 #define UPG_ROLE_CONSOLE  1U
@@ -71,10 +73,8 @@ typedef struct {
 
 /* Feed one byte of an upgrade transaction (escape byte already consumed).
  * Decodes per-transaction buffer; executes command at transaction end. */
-void upg_rx_byte(uint8_t b);
-void upg_rx_end(void); /* call on STOP: executes buffered command */
-void upg_rx_abort(void); /* call on NACK/arbitration loss: discards partial */
-void upg_tx_serve(upg_resp_t *r); /* snapshot last response */
+void upg_execute(uint8_t bus, const uint8_t *cmd, uint8_t len,
+                 upg_resp_t *response);
 
 /* Called from main loop (NOT ISR): reboot countdown + LDROM-side flashing. */
 void upg_poll(void);

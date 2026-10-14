@@ -5,6 +5,9 @@
  * clocks/GPIO (HPD floats released by SR3). On any failure: LDROM console
  * if valid, else WFI (Nu-Link recovery only).
  */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Warray-bounds"
+
 #include "NUC100Series.h"
 #include "upg.h"
 
@@ -21,8 +24,8 @@ typedef struct {
     uint32_t resv[3];
 } app_hdr_t;
 
-static void (*s_i2c0h)(void);
-static void (*s_i2c1h)(void);
+/* App initialization owns low SRAM, including stage0's former BSS.
+ * IRQ targets must therefore live in flash, not cached stage0 globals. */
 
 void ProcessHardFault(void)
 {
@@ -30,17 +33,28 @@ void ProcessHardFault(void)
     }
 }
 
-/* Trampolines: forward to the validated app's handlers. */
+/* Trampolines: forward through the validated flash header. */
 void I2C0_IRQHandler(void)
 {
-    if (s_i2c0h)
-        s_i2c0h();
+    volatile app_hdr_t *hdr = (volatile app_hdr_t *)APP_HDR_BASE;
+    void (*handler)(void) = hdr->i2c0h;
+    if (handler)
+        handler();
 }
 
 void I2C1_IRQHandler(void)
 {
-    if (s_i2c1h)
-        s_i2c1h();
+    volatile app_hdr_t *hdr = (volatile app_hdr_t *)APP_HDR_BASE;
+    void (*handler)(void) = hdr->i2c1h;
+    if (handler)
+        handler();
+}
+
+/* No C stack access is legal after replacing MSP. Tail-branch to main;
+ * it never returns. r0/r1 are the incoming ABI arguments. */
+__attribute__((naked, noreturn)) static void app_enter(uint32_t, void (*)(void))
+{
+    __asm volatile("msr msp, r0\n\tbx r1");
 }
 
 static uint32_t crc32_step(uint32_t crc, uint8_t b)
@@ -104,10 +118,7 @@ int main(void)
     if (!app_valid(hdr))
         boot_ldrom();
 
-    /* Cache IRQ targets before enabling anything. */
-    s_i2c0h = hdr->i2c0h;
-    s_i2c1h = hdr->i2c1h;
-    if (!s_i2c0h || !s_i2c1h)
+    if (!hdr->i2c0h || !hdr->i2c1h)
         boot_ldrom();
 
     /* Init app .data/.bss (app startup is bypassed; we jump to main). */
@@ -123,8 +134,9 @@ int main(void)
     for (n = 0; n < (hdr->bss_end - hdr->bss_vma) / 4UL; n++)
         dst[n] = 0UL;
 
-    __set_MSP(hdr->sp);
-    hdr->entry();
-    while (1) {
-    }
+    app_enter((uint32_t)hdr->sp, (void (*)(void))hdr->entry);
 }
+
+#pragma GCC diagnostic pop
+
+#pragma GCC diagnostic pop

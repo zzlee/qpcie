@@ -15,7 +15,7 @@ OBJDUMP  := $(PREFIX)objdump
 CMSIS    := $(BSP)/Library/CMSIS/Include
 STDDRV   := $(BSP)/Library/StdDriver/inc
 CFLAGS   := -mcpu=cortex-m0 -mthumb -Os -ffunction-sections -fdata-sections \
-            -Wall -Wextra -I$(DEVDIR)/Include -I$(CMSIS) -I$(STDDRV) -I.
+            -flto -Wall -Wextra -I$(DEVDIR)/Include -I$(CMSIS) -I$(STDDRV) -I.
 SYS_SRC  := $(DEVDIR)/Source/system_NUC100Series.c
 STARTUP  := $(DEVDIR)/Source/GCC/startup_NUC100Series.S
 LDFLAGS  := -mcpu=cortex-m0 -mthumb -Wl,--gc-sections -specs=nosys.specs
@@ -25,11 +25,12 @@ LDROM_SRCS := ldrom_main.c i2c_slave.c upg.c writer.c
 STAGE0_SRCS := stage0.c
 
 all: stage0.bin app.bin ldrom.bin aprom_bundle.bin
+	python3 check_sizes.py
 	@echo "--- sizes (flash budgets: stage0<=2K app<=8K(upg staging) ldrom<=4K) ---"
 	@ls -la stage0.bin app.bin ldrom.bin aprom_bundle.bin
 
 stage0.elf: $(STAGE0_SRCS) $(STARTUP) $(SYS_SRC)
-	$(CC) $(CFLAGS) $(LDFLAGS) -Tstage0.ld $^ -o $@
+	$(CC) $(filter-out -flto,$(CFLAGS)) $(LDFLAGS) -Tstage0.ld $^ -o $@
 
 app.elf: $(APP_SRCS) $(STARTUP) $(SYS_SRC)
 	$(CC) $(CFLAGS) $(LDFLAGS) -Tapp.ld $^ -o $@
@@ -55,4 +56,13 @@ aprom_bundle.bin: stage0.bin app.bin
 clean:
 	rm -f *.elf *.bin *.map
 
-.PHONY: all clean
+test-stage0: all
+	python3 test_stage0_dispatch.py
+
+test-protocol:
+	gcc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -Itests -I. tests/protocol_test.c upg.c -o /tmp/opencode/mcu-protocol-test
+	/tmp/opencode/mcu-protocol-test
+	gcc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -Itests -I. tests/transport_test.c i2c_slave.c upg.c -o /tmp/opencode/mcu-transport-test
+	/tmp/opencode/mcu-transport-test
+
+.PHONY: all clean test-stage0 test-protocol

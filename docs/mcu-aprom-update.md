@@ -1,5 +1,32 @@
 # MCU APROM update over PCIe (with LDROM cooperation)
 
+> **Experimental — do not run `--flash-aprom` yet.** Build/CRC checks do
+> not establish working recovery. The current transport is still 0x2A,
+> not the approved 0x2B; LDROM readiness, reset handoff and host continuation
+> require correction and hardware validation. Earlier claims that both
+> upgrade phases were complete were incorrect.
+
+## 2026-10-14 boot/IRQ correction
+
+The original stage0 cached IRQ handlers at SRAM 0x20000028/0x2000002C.
+App BSS initialization covers those addresses and zeroes both handlers.
+Consequently an address ACK does not prove functioning interrupt service.
+Stage0 now reads handler addresses directly from the flash header and
+uses an assembly-only MSP/tail-branch handoff. `make test-stage0` checks
+the generated dispatch instructions and bundle layout; actual register
+reads and scratch loopback still require hardware validation.
+
+Hardware follow-up: both MCU and FRONT buses read MAGIC=2A, VER=04,
+CTRL=02; MCU scratch loopback passed. This validates app IRQ dispatch,
+not LDROM execution or update recovery.
+
+Protocol hardening now rejects overflow, malformed BEGIN length, zero
+chunks, gaps and inconsistent retries. BEGIN starts new coverage: a
+reset into LDROM requires retransmitting the entire image, not merely
+BEGIN+COMMIT. `make test-protocol` exercises these guards with host mocks
+and ASan/UBSan. The host flash entry is disabled pending completion.
+Current local binaries are development artifacts, not a new flash release.
+
 Target: NUC100LE3AN (U2) on M2_710. Host path: PCIe BAR1 I2C master
 (M05 MCU bus 0x5000 / M03 FRONT bus 0x3000) -> NUC100 I2C slave 0x2A.
 No FPGA/driver changes needed; flashing goes through

@@ -29,7 +29,7 @@ extern uint32_t __StackTop;
 int main(void);
 void I2C0_IRQHandler(void);
 void I2C1_IRQHandler(void);
-__attribute__((section(".app_header"))) const struct {
+__attribute__((used, section(".app_header"))) const struct {
     uint32_t magic, ver, len, crc;
     void (*entry)(void);
     void (*i2c0h)(void);

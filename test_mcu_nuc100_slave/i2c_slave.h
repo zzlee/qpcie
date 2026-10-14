@@ -17,6 +17,9 @@ typedef struct {
     volatile uint8_t ptr;
     volatile uint8_t rx_len;
     uint8_t  upg;             /* transaction routed to upgrade engine */
+    uint8_t  bus;
+    uint8_t  cmd[UPG_CMD_MAX];
+    uint8_t  cmdlen;          /* MAX+1 means overflow; never wraps */
     uint8_t  resp[8];         /* pending upgrade response */
     uint8_t  resp_len;
     uint8_t  resp_idx;
