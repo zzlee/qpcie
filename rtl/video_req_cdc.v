@@ -2,25 +2,29 @@
 // Module: video_req_cdc
 // Description: Crosses the NV12 capture engine's C2H request interface from
 //              the 150 MHz video clock domain to the 125 MHz PCIe requester
-//              domain. Supports dynamic packet lengths (e.g. 256B / 64 DW or
-//              128B / 32 DW):
-//              - One 128-bit header word carrying {eof, 52'd0, dw_len[10:0], addr[63:0]}
-//              - Followed by (dw_len/4) 128-bit payload data beats.
-//              - An EOF marker is retired only after all preceding writes.
+//              domain.
+//              Dual-FIFO architecture:
+//                1. u_hdr_fifo: 76-bit async FIFO for descriptor header and
+//                   frame-done (EOF) tokens.
+//                2. u_data_fifo: True Dual-Port Block RAM asymmetric async FIFO
+//                   (128-bit write @ 150 MHz, DATA_WIDTH-bit read @ 125 MHz).
+//                   Supports 256-bit native zero-bubble streaming for UltraScale+
+//                   and 128-bit native streaming for 7-series / A50T.
 //
 //              Determinism rules:
 //                * Writer ensures FIFO room for a packet before accepting it,
 //                  and advances a Gray-coded completion counter only after
-//                  the last word is pushed.
+//                  the entire packet is pushed.
 //                * Reader starts replaying packet N only after seeing completion N,
 //                  guaranteeing full residency with zero mid-TLP stalls.
 // ============================================================================
 `timescale 1ns / 1ps
 
 module video_req_cdc #(
-    parameter integer MAX_DWORDS = 64,      // Max 256-byte MWr payload (64 DW)
-    parameter integer FIFO_DEPTH = 512,
-    parameter integer DATA_WIDTH = 128
+    parameter integer MAX_DWORDS     = 64,      // Max 256-byte MWr payload (64 DW)
+    parameter integer FIFO_DEPTH     = 512,
+    parameter integer WR_DATA_WIDTH  = 128,     // Video engine beat width
+    parameter integer DATA_WIDTH     = 128      // Requester domain width (128 for A50T, 256 for ZU4EV)
 )(
     // Video (150 MHz) side: engine request source
     input  wire         wr_clk,
@@ -28,7 +32,7 @@ module video_req_cdc #(
     input  wire         s_req_valid,
     input  wire [63:0]  s_req_addr,
     input  wire [10:0]  s_req_dw_len,       // 64 for 256B, 32 for 128B
-    input  wire [DATA_WIDTH-1:0] s_req_data,
+    input  wire [WR_DATA_WIDTH-1:0] s_req_data,
     output reg          s_req_data_ready,
     output reg          s_req_ack,
     input  wire         s_frame_done,
@@ -46,58 +50,94 @@ module video_req_cdc #(
     output wire         m_fifo_empty,
     output wire [9:0]   m_fifo_count
 );
-    localparam integer DATA_DWORDS        = DATA_WIDTH / 32;                       // 128-bit beat = 4 DWs
-    localparam integer MAX_PAYLOAD_BEATS  = MAX_DWORDS / DATA_DWORDS; // 16 beats
-    localparam integer FIFO_COUNT_WIDTH   = $clog2(FIFO_DEPTH) + 1;
+    localparam integer WR_DWORDS       = WR_DATA_WIDTH / 32; // 4 DWs per 128-bit beat
+    localparam integer RD_DEPTH        = FIFO_DEPTH * WR_DATA_WIDTH / DATA_WIDTH;
+    localparam integer RD_COUNT_WIDTH  = $clog2(RD_DEPTH) + 1;
+    localparam integer WR_COUNT_WIDTH  = $clog2(FIFO_DEPTH) + 1;
+
+    wire cdc_rst_n = wr_rst_n && rd_rst_n;
 
     // ---------------------------------------------------------------------
-    // Asynchronous FIFO (FWFT: dout always shows the current head)
+    // Header FIFO: carries {eof, dw_len[10:0], addr[63:0]} (76 bits)
     // ---------------------------------------------------------------------
-    wire        fifo_empty;
-    wire        fifo_full;
-    wire [DATA_WIDTH:0] fifo_dout;
-    wire        fifo_wr_en;
-    wire [DATA_WIDTH:0] fifo_din;
-    wire        fifo_rd_en;
-    wire        fifo_prog_full;
-    wire        fifo_wr_rst_busy;
-    wire        fifo_rd_rst_busy;
-    wire [FIFO_COUNT_WIDTH-1:0] wr_data_count;
-    wire [FIFO_COUNT_WIDTH-1:0] rd_data_count;
-    wire        cdc_rst_n = wr_rst_n && rd_rst_n;
-
-    assign m_fifo_empty = fifo_empty;
-    assign m_fifo_count = rd_data_count[9:0];
+    wire        hdr_empty;
+    wire        hdr_full;
+    wire [75:0] hdr_dout;
+    reg         hdr_wr_en;
+    reg  [75:0] hdr_din;
+    reg         hdr_rd_en;
 
     xpm_fifo_async #(
-        .FIFO_MEMORY_TYPE("block"),
-        .FIFO_WRITE_DEPTH(FIFO_DEPTH),
-        .WRITE_DATA_WIDTH(DATA_WIDTH+1),
-        .READ_DATA_WIDTH(DATA_WIDTH+1),
+        .FIFO_MEMORY_TYPE("distributed"),
+        .FIFO_WRITE_DEPTH(32),
+        .WRITE_DATA_WIDTH(76),
+        .READ_DATA_WIDTH(76),
         .READ_MODE("fwft"),
-        .FIFO_READ_LATENCY(0),
-        .PROG_FULL_THRESH(FIFO_DEPTH - 32),
-        .RD_DATA_COUNT_WIDTH(FIFO_COUNT_WIDTH),
-        .WR_DATA_COUNT_WIDTH(FIFO_COUNT_WIDTH),
-        .USE_ADV_FEATURES("1F1F")
-    ) u_fifo (
+        .FIFO_READ_LATENCY(0)
+    ) u_hdr_fifo (
         .rst            (!cdc_rst_n),
         .wr_clk         (wr_clk),
-        .wr_en          (fifo_wr_en),
-        .din            (fifo_din),
-        .full           (fifo_full),
+        .wr_en          (hdr_wr_en),
+        .din            (hdr_din),
+        .full           (hdr_full),
         .rd_clk         (rd_clk),
-        .rd_en          (fifo_rd_en),
-        .dout           (fifo_dout),
-        .empty          (fifo_empty),
+        .rd_en          (hdr_rd_en),
+        .dout           (hdr_dout),
+        .empty          (hdr_empty),
         .sleep          (1'b0),
         .injectsbiterr  (1'b0),
         .injectdbiterr  (1'b0),
         .sbiterr        (),
         .dbiterr        (),
-        .wr_rst_busy    (fifo_wr_rst_busy),
-        .rd_rst_busy    (fifo_rd_rst_busy),
-        .prog_full      (fifo_prog_full),
+        .wr_rst_busy    (),
+        .rd_rst_busy    ()
+    );
+
+    // ---------------------------------------------------------------------
+    // Data FIFO: carries pure payload data beats
+    // ---------------------------------------------------------------------
+    wire        data_empty;
+    wire        data_full;
+    wire        data_prog_full;
+    wire        data_wr_rst_busy;
+    wire        data_rd_rst_busy;
+    wire [WR_COUNT_WIDTH-1:0] wr_data_count;
+    wire [RD_COUNT_WIDTH-1:0] rd_data_count;
+    reg         data_wr_en;
+    wire        data_rd_en;
+
+    assign m_fifo_empty = data_empty;
+    assign m_fifo_count = (RD_COUNT_WIDTH >= 10) ? rd_data_count[9:0] : {{(10-RD_COUNT_WIDTH){1'b0}}, rd_data_count};
+
+    xpm_fifo_async #(
+        .FIFO_MEMORY_TYPE("block"),
+        .FIFO_WRITE_DEPTH(FIFO_DEPTH),
+        .WRITE_DATA_WIDTH(WR_DATA_WIDTH),
+        .READ_DATA_WIDTH(DATA_WIDTH),
+        .READ_MODE("fwft"),
+        .FIFO_READ_LATENCY(0),
+        .PROG_FULL_THRESH(FIFO_DEPTH - 32),
+        .RD_DATA_COUNT_WIDTH(RD_COUNT_WIDTH),
+        .WR_DATA_COUNT_WIDTH(WR_COUNT_WIDTH),
+        .USE_ADV_FEATURES("1F1F")
+    ) u_data_fifo (
+        .rst            (!cdc_rst_n),
+        .wr_clk         (wr_clk),
+        .wr_en          (data_wr_en),
+        .din            (s_req_data),
+        .full           (data_full),
+        .rd_clk         (rd_clk),
+        .rd_en          (data_rd_en),
+        .dout           (m_req_data),
+        .empty          (data_empty),
+        .sleep          (1'b0),
+        .injectsbiterr  (1'b0),
+        .injectdbiterr  (1'b0),
+        .sbiterr        (),
+        .dbiterr        (),
+        .wr_rst_busy    (data_wr_rst_busy),
+        .rd_rst_busy    (data_rd_rst_busy),
+        .prog_full      (data_prog_full),
         .wr_data_count  (wr_data_count),
         .almost_full    (),
         .prog_empty     (),
@@ -106,80 +146,74 @@ module video_req_cdc #(
     );
 
     // ---------------------------------------------------------------------
-    // Writer FSM: reserve room for a whole packet, commit header word,
-    // then swallow (s_req_dw_len/4) payload beats.
+    // Writer FSM: push header to u_hdr_fifo, then swallow payload to u_data_fifo
     // ---------------------------------------------------------------------
-    localparam WR_IDLE = 2'd0, WR_ADDR = 2'd1, WR_DATA = 2'd2, WR_DRAIN = 2'd3;
+    localparam WR_IDLE  = 2'd0,
+               WR_DATA  = 2'd1,
+               WR_DRAIN = 2'd2;
     reg [1:0]   wr_state;
     reg [10:0]  wr_beats_left;
-    reg [63:0]  s_req_addr_reg;
-    reg [10:0]  s_req_dw_len_reg;
     reg         eof_pending;
 
-    wire wr_room_ok = !fifo_wr_rst_busy && !fifo_prog_full && !fifo_full;
+    wire wr_room_ok = !data_wr_rst_busy && !data_prog_full && !data_full && !hdr_full;
 
-    // A one-bit toggle loses events when complete packets are produced faster
-    // than the reader clock can sample it. Carry the packet completion count
-    // as Gray code instead; the FIFO bounds the outstanding count well below
-    // this 16-bit counter's wrap distance.
     reg [15:0] pkt_pushed_bin = 16'd0;
-    wire [15:0] pkt_pushed_gray =
-        (pkt_pushed_bin >> 1) ^ pkt_pushed_bin;
+    wire [15:0] pkt_pushed_gray = (pkt_pushed_bin >> 1) ^ pkt_pushed_bin;
 
     always @(posedge wr_clk or negedge cdc_rst_n) begin
         if (!cdc_rst_n) begin
-            wr_state          <= WR_IDLE;
-            wr_beats_left     <= 11'd0;
-            s_req_addr_reg    <= 64'd0;
-            s_req_dw_len_reg  <= 11'd0;
-            s_req_data_ready  <= 1'b0;
-            s_req_ack         <= 1'b0;
-            eof_pending       <= 1'b0;
-            pkt_pushed_bin    <= 16'd0;
-        end else if (fifo_wr_rst_busy) begin
-            wr_state          <= WR_IDLE;
-            wr_beats_left     <= 11'd0;
-            s_req_addr_reg    <= 64'd0;
-            s_req_dw_len_reg  <= 11'd0;
-            s_req_data_ready  <= 1'b0;
-            s_req_ack         <= 1'b0;
-            eof_pending       <= 1'b0;
-            pkt_pushed_bin    <= 16'd0;
+            wr_state         <= WR_IDLE;
+            wr_beats_left    <= 11'd0;
+            s_req_data_ready <= 1'b0;
+            s_req_ack        <= 1'b0;
+            eof_pending      <= 1'b0;
+            pkt_pushed_bin   <= 16'd0;
+            hdr_wr_en        <= 1'b0;
+            hdr_din          <= 76'd0;
+            data_wr_en       <= 1'b0;
+        end else if (data_wr_rst_busy) begin
+            wr_state         <= WR_IDLE;
+            wr_beats_left    <= 11'd0;
+            s_req_data_ready <= 1'b0;
+            s_req_ack        <= 1'b0;
+            eof_pending      <= 1'b0;
+            pkt_pushed_bin   <= 16'd0;
+            hdr_wr_en        <= 1'b0;
+            hdr_din          <= 76'd0;
+            data_wr_en       <= 1'b0;
         end else begin
-            s_req_ack <= 1'b0;
+            hdr_wr_en  <= 1'b0;
+            data_wr_en <= 1'b0;
+            s_req_ack  <= 1'b0;
+
             if (s_frame_done)
                 eof_pending <= 1'b1;
 
             case (wr_state)
                 WR_IDLE: begin
-                    if ((eof_pending || s_frame_done) && !fifo_full) begin
-                        eof_pending       <= 1'b0;
-                        pkt_pushed_bin    <= pkt_pushed_bin + 1'b1;
-                    end else if (s_req_valid && wr_room_ok && !fifo_full) begin
-                        s_req_addr_reg   <= s_req_addr;
-                        s_req_dw_len_reg <= (s_req_dw_len != 0) ? s_req_dw_len : 11'd64;
-                        wr_beats_left    <= (s_req_dw_len != 0) ? (s_req_dw_len / DATA_DWORDS) : (MAX_DWORDS / DATA_DWORDS);
-                        wr_state         <= WR_ADDR;
-                    end
-                end
-
-                WR_ADDR: begin
-                    if (fifo_full) begin
-                        wr_state <= WR_IDLE; // retry
-                    end else begin
-                        wr_state         <= WR_DATA;
+                    if ((eof_pending || s_frame_done) && !hdr_full) begin
+                        hdr_din        <= {1'b1, 11'd0, 64'd0}; // Bit 75 = 1 (EOF)
+                        hdr_wr_en      <= 1'b1;
+                        eof_pending    <= 1'b0;
+                        pkt_pushed_bin <= pkt_pushed_bin + 1'b1;
+                    end else if (s_req_valid && wr_room_ok) begin
+                        hdr_din          <= {1'b0, (s_req_dw_len != 0) ? s_req_dw_len : 11'd64, s_req_addr};
+                        hdr_wr_en        <= 1'b1;
+                        wr_beats_left    <= (s_req_dw_len != 0) ? (s_req_dw_len / WR_DWORDS) : (MAX_DWORDS / WR_DWORDS);
                         s_req_data_ready <= 1'b1;
+                        wr_state         <= WR_DATA;
                     end
                 end
 
                 WR_DATA: begin
                     if (s_req_valid && s_req_data_ready) begin
+                        data_wr_en    <= 1'b1;
                         wr_beats_left <= wr_beats_left - 1'b1;
                         if (wr_beats_left == 11'd1) begin
-                            s_req_ack         <= 1'b1;
-                            s_req_data_ready  <= 1'b0;
-                            pkt_pushed_bin    <= pkt_pushed_bin + 1'b1;
-                            wr_state          <= WR_DRAIN;
+                            s_req_ack        <= 1'b1;
+                            s_req_data_ready <= 1'b0;
+                            pkt_pushed_bin   <= pkt_pushed_bin + 1'b1;
+                            wr_state         <= WR_DRAIN;
                         end
                     end
                 end
@@ -194,29 +228,19 @@ module video_req_cdc #(
         end
     end
 
-    // Bit DATA_WIDTH distinguishes an ordered frame-completion marker from a request or payload data.
-    wire fifo_write_eof = (wr_state == WR_IDLE) &&
-                          (eof_pending || s_frame_done) &&
-                          !fifo_wr_rst_busy && !fifo_full;
-    assign fifo_din = fifo_write_eof       ? {1'b1, {DATA_WIDTH{1'b0}}} :
-                      (wr_state == WR_ADDR) ? {1'b0, {(DATA_WIDTH-128){1'b0}}, 1'b0, 51'd0, s_req_dw_len_reg, s_req_addr_reg} :
-                                              {1'b0, s_req_data};
-    assign fifo_wr_en = fifo_write_eof || (wr_state == WR_ADDR) ||
-                        (wr_state == WR_DATA && s_req_valid && s_req_data_ready);
-
     // ---------------------------------------------------------------------
-    // Reader FSM: Cut-Through FWFT direct streaming to PCIe Requiter.
-    // Zero-bubble cut-through eliminates store-and-forward serialization.
+    // Reader FSM: Direct streaming to PCIe Requester
     // ---------------------------------------------------------------------
-    localparam RD_IDLE   = 1'b0,
-               RD_STREAM = 1'b1;
-    reg        rd_state;
-    reg [15:0] rd_started;       // packets started
+    localparam RD_IDLE   = 2'd0,
+               RD_STREAM = 2'd1,
+               RD_WAIT   = 2'd2;
+    reg [1:0]  rd_state;
+    reg [15:0] rd_started;
 
     (* ASYNC_REG = "TRUE" *) reg [15:0] pkt_pushed_gray_sync1 = 16'd0;
     (* ASYNC_REG = "TRUE" *) reg [15:0] pkt_pushed_gray_sync2 = 16'd0;
     always @(posedge rd_clk or negedge cdc_rst_n) begin
-        if (!cdc_rst_n || fifo_rd_rst_busy) begin
+        if (!cdc_rst_n || data_rd_rst_busy) begin
             pkt_pushed_gray_sync1 <= 16'd0;
             pkt_pushed_gray_sync2 <= 16'd0;
         end else begin
@@ -237,72 +261,53 @@ module video_req_cdc #(
 
     wire [15:0] rd_completed = gray_to_bin(pkt_pushed_gray_sync2);
 
-    assign m_req_data = fifo_dout[DATA_WIDTH-1:0];
-
-    wire fifo_pop_hdr = !fifo_rd_rst_busy && (rd_state == RD_IDLE) &&
-                        !fifo_empty && (rd_completed != rd_started);
-    wire fifo_pop_next_hdr = !fifo_rd_rst_busy && (rd_state == RD_STREAM) &&
-                        m_req_ack && !fifo_empty &&
-                        (rd_completed != rd_started);
-    wire fifo_pop_data = !fifo_rd_rst_busy && (rd_state == RD_STREAM) &&
-                         m_req_data_ready && !m_req_ack;
-    wire fifo_head_is_eof = fifo_dout[DATA_WIDTH];
-
-    assign fifo_rd_en = fifo_pop_hdr || fifo_pop_next_hdr || fifo_pop_data;
+    assign data_rd_en = m_req_data_ready;
 
     always @(posedge rd_clk or negedge cdc_rst_n) begin
-        if (!cdc_rst_n) begin
+        if (!cdc_rst_n || data_rd_rst_busy) begin
             rd_state     <= RD_IDLE;
             rd_started   <= 16'd0;
             m_req_valid  <= 1'b0;
             m_req_addr   <= 64'd0;
             m_req_dw_len <= 11'd0;
             m_frame_done <= 1'b0;
-        end else if (fifo_rd_rst_busy) begin
-            rd_state     <= RD_IDLE;
-            rd_started   <= 16'd0;
-            m_req_valid  <= 1'b0;
-            m_req_addr   <= 64'd0;
-            m_req_dw_len <= 11'd0;
-            m_frame_done <= 1'b0;
+            hdr_rd_en    <= 1'b0;
         end else begin
             m_frame_done <= 1'b0;
+            hdr_rd_en    <= 1'b0;
+
             case (rd_state)
                 RD_IDLE: begin
-                    if (!fifo_empty && (rd_completed != rd_started)) begin
-                        rd_started   <= rd_started + 1'b1;
-                        if (fifo_head_is_eof) begin
-                            m_req_valid  <= 1'b0;
+                    if (!hdr_empty && (rd_completed != rd_started)) begin
+                        if (hdr_dout[75]) begin
                             m_frame_done <= 1'b1;
+                            hdr_rd_en    <= 1'b1;
+                            rd_started   <= rd_started + 1'b1;
+                            m_req_valid  <= 1'b0;
+                            rd_state     <= RD_WAIT;
                         end else begin
-                            m_req_addr   <= fifo_dout[63:0];
-                            m_req_dw_len <= (fifo_dout[74:64] != 0) ? fifo_dout[74:64] : 11'd64;
+                            m_req_addr   <= hdr_dout[63:0];
+                            m_req_dw_len <= (hdr_dout[74:64] != 0) ? hdr_dout[74:64] : 11'd64;
+                            m_req_valid  <= 1'b1;
                             rd_state     <= RD_STREAM;
                         end
                     end else begin
-                        m_req_valid  <= 1'b0;
+                        m_req_valid <= 1'b0;
                     end
                 end
 
                 RD_STREAM: begin
                     m_req_valid <= 1'b1;
                     if (m_req_ack) begin
-                        if (!fifo_empty && (rd_completed != rd_started)) begin
-                            rd_started   <= rd_started + 1'b1;
-                            if (fifo_head_is_eof) begin
-                                m_req_valid  <= 1'b0;
-                                m_frame_done <= 1'b1;
-                                rd_state     <= RD_IDLE;
-                            end else begin
-                                m_req_addr   <= fifo_dout[63:0];
-                                m_req_dw_len <= (fifo_dout[74:64] != 0) ? fifo_dout[74:64] : 11'd64;
-                                rd_state     <= RD_STREAM;
-                            end
-                        end else begin
-                            m_req_valid  <= 1'b0;
-                            rd_state     <= RD_IDLE;
-                        end
+                        hdr_rd_en   <= 1'b1;
+                        rd_started  <= rd_started + 1'b1;
+                        m_req_valid <= 1'b0;
+                        rd_state    <= RD_WAIT;
                     end
+                end
+
+                RD_WAIT: begin
+                    rd_state <= RD_IDLE;
                 end
 
                 default: rd_state <= RD_IDLE;

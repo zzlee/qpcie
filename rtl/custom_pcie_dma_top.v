@@ -568,7 +568,7 @@ module custom_pcie_dma_top #(
     wire [NUM_VIDEO_CH-1:0]                    v_c2h_req_valid;
     wire [(NUM_VIDEO_CH*64)-1:0]               v_c2h_req_addr;
     wire [(NUM_VIDEO_CH*11)-1:0]               v_c2h_req_dw_len;
-    wire [(NUM_VIDEO_CH*PCIE_DATA_WIDTH)-1:0]   v_c2h_req_data;
+    wire [(NUM_VIDEO_CH*PCIE_DATA_WIDTH)-1:0] v_c2h_req_data;
     wire [NUM_VIDEO_CH-1:0]                    v_c2h_req_last;
     wire [NUM_VIDEO_CH-1:0]                    v_c2h_req_data_ready;
     wire [NUM_VIDEO_CH-1:0]                    v_busy, v_done;
@@ -578,7 +578,7 @@ module custom_pcie_dma_top #(
     wire [NUM_AUDIO_CH-1:0]                    a_c2h_req_valid;
     wire [(NUM_AUDIO_CH*64)-1:0]               a_c2h_req_addr;
     wire [(NUM_AUDIO_CH*11)-1:0]               a_c2h_req_dw_len;
-    wire [(NUM_AUDIO_CH*PCIE_DATA_WIDTH)-1:0]   a_c2h_req_data;
+    wire [(NUM_AUDIO_CH*128)-1:0]              a_c2h_req_data;
     wire [NUM_AUDIO_CH-1:0]                    a_c2h_req_last;
     wire [NUM_AUDIO_CH-1:0]                    a_busy, a_done;
 
@@ -619,7 +619,7 @@ module custom_pcie_dma_top #(
     wire        sg_c2h_req_data_ready;
     wire [63:0] sg_c2h_req_addr;
     wire [10:0] sg_c2h_req_dw_len;
-    wire [PCIE_DATA_WIDTH-1:0] sg_c2h_req_data;
+    wire [127:0] sg_c2h_req_data;
     wire [31:0] sg_h2c_bytes, sg_c2h_bytes;
     wire        sg_h2c_busy, sg_c2h_busy;
 
@@ -770,7 +770,8 @@ module custom_pcie_dma_top #(
 
         if ((c2h_owner == 8'd1) || ((c2h_owner == 0) && sg_c2h_req_valid)) begin
             c2h_req_valid_mux = sg_c2h_req_valid; c2h_req_addr_mux = sg_c2h_req_addr;
-            c2h_req_dw_len_mux = sg_c2h_req_dw_len; c2h_req_data_mux = sg_c2h_req_data;
+            c2h_req_dw_len_mux = sg_c2h_req_dw_len;
+            c2h_req_data_mux = {{PCIE_DATA_WIDTH-128{1'b0}}, sg_c2h_req_data};
             c2h_req_last_mux = sg_c2h_req_last; c2h_arb_found = 1'b1;
             c2h_selected = 8'd1;
         end
@@ -791,7 +792,7 @@ module custom_pcie_dma_top #(
                 c2h_req_valid_mux = a_c2h_req_valid[i_arb];
                 c2h_req_addr_mux = a_c2h_req_addr[(i_arb*64)+:64];
                 c2h_req_dw_len_mux = a_c2h_req_dw_len[(i_arb*11)+:11];
-                c2h_req_data_mux = a_c2h_req_data[(i_arb*PCIE_DATA_WIDTH)+:PCIE_DATA_WIDTH];
+                c2h_req_data_mux = {{PCIE_DATA_WIDTH-128{1'b0}}, a_c2h_req_data[(i_arb*128)+:128]};
                 c2h_req_last_mux = a_c2h_req_last[i_arb]; c2h_arb_found = 1'b1;
                 c2h_selected = 8'd2+NUM_VIDEO_CH+i_arb;
             end
@@ -805,13 +806,13 @@ module custom_pcie_dma_top #(
     end
 
     assign sg_c2h_req_data_ready =
-        (c2h_owner == 8'd1) && c2h_req_data_ready_mux;
+        ((c2h_owner == 8'd1) || (c2h_owner == 8'd0 && c2h_selected == 8'd1)) && c2h_req_data_ready_mux;
     assign sg_c2h_req_ack = (c2h_owner == 8'd1) && c2h_req_ack_mux;
     genvar v_ack_i, a_ack_i;
     generate
         for (v_ack_i=0; v_ack_i<NUM_VIDEO_CH; v_ack_i=v_ack_i+1) begin : gen_v_ack
             assign v_c2h_req_data_ready[v_ack_i] =
-                (c2h_owner == (8'd2+v_ack_i)) && c2h_req_data_ready_mux;
+                ((c2h_owner == (8'd2+v_ack_i)) || (c2h_owner == 8'd0 && c2h_selected == (8'd2+v_ack_i))) && c2h_req_data_ready_mux;
             assign v_c2h_req_ack[v_ack_i] =
                 (c2h_owner == (8'd2+v_ack_i)) && c2h_req_ack_mux;
         end
@@ -1397,6 +1398,8 @@ module custom_pcie_dma_top #(
     assign thin_mrd_req_ack         = desc_req_ack;
 
     // 5. RQ TX Encoder
+    wire [PCIE_DATA_WIDTH-1:0] rq_c2h_req_data = c2h_req_data_mux;
+
     rq_tx_encoder #(
         .DATA_WIDTH(PCIE_DATA_WIDTH),
         .KEEP_WIDTH(PCIE_KEEP_WIDTH)
@@ -1432,7 +1435,7 @@ module custom_pcie_dma_top #(
         .c2h_req_valid(c2h_req_valid_mux),
         .c2h_req_addr(c2h_req_addr_mux),
         .c2h_req_dw_len(c2h_req_dw_len_mux),
-        .c2h_req_data(c2h_req_data_mux),
+        .c2h_req_data(rq_c2h_req_data),
         .c2h_req_last(c2h_req_last_mux),
         .c2h_req_data_ready(c2h_req_data_ready_mux),
         .c2h_req_ack(c2h_req_ack_mux)
@@ -1743,7 +1746,7 @@ module custom_pcie_dma_top #(
     wire [63:0] eng_frame_pts;
     wire        eng_req_valid, eng_req_ready, eng_req_ack;
     wire [63:0] eng_req_addr;
-    wire [PCIE_DATA_WIDTH-1:0] eng_req_data;
+    wire [127:0] eng_req_data;
 
     (* ASYNC_REG = "TRUE" *) reg [1:0] v_busy_sync = 2'b00;
 
@@ -1936,6 +1939,8 @@ module custom_pcie_dma_top #(
     assign v_drop_cnt[1] = 32'd0; assign v_drop_cnt[2] = 32'd0; assign v_drop_cnt[3] = 32'd0;
 `endif
 
+    assign v_c2h_req_last[0] = 1'b0;
+
     // ---- Request crossing: engine @150 MHz -> RQ arbiter @125 MHz --------
     wire [10:0] eng_req_dw_len;
 
@@ -2037,8 +2042,8 @@ module custom_pcie_dma_top #(
     // ---- The Channel 0 capture engine itself -----------------------------
     nv12_capture_engine #(
         .MAX_WIDTH(4096),
-        .PCIE_DATA_WIDTH(PCIE_DATA_WIDTH),
-        .FIFO_DEPTH(32),
+        .PCIE_DATA_WIDTH(128),
+        .FIFO_DEPTH(512),
         .MWR_PAYLOAD_BYTES(256)
     ) u_nv12_capture_engine (
         .clk(video_clk),
@@ -2139,10 +2144,10 @@ module custom_pcie_dma_top #(
             default: dest1_state <= DEST_IDLE;
         endcase
     end
-    wire eng1_req_valid, eng1_req_ready, eng1_req_ack; wire [63:0] eng1_req_addr; wire [10:0] eng1_req_dw_len; wire [PCIE_DATA_WIDTH-1:0] eng1_req_data; wire eng1_frame_done;
+    wire eng1_req_valid, eng1_req_ready, eng1_req_ack; wire [63:0] eng1_req_addr; wire [10:0] eng1_req_dw_len; wire [127:0] eng1_req_data; wire eng1_frame_done;
     assign ch1_sgl_y_rd_en = !ch1_sgl_y_empty && ch1_sgl_y_pop_ready && v_busy[1];
     assign ch1_sgl_uv_rd_en = !ch1_sgl_uv_empty && ch1_sgl_uv_pop_ready && v_busy[1];
-    nv12_capture_engine #(.MAX_WIDTH(4096), .PCIE_DATA_WIDTH(PCIE_DATA_WIDTH), .FIFO_DEPTH(32), .MWR_PAYLOAD_BYTES(256), .RAW_INPUT(1))
+    nv12_capture_engine #(.MAX_WIDTH(4096), .PCIE_DATA_WIDTH(128), .FIFO_DEPTH(32), .MWR_PAYLOAD_BYTES(256), .RAW_INPUT(1))
     u_nv12_capture_engine_ch1 (.clk(video_clk), .rst_n(video_rst_n), .desc_valid(eng1_desc_valid), .desc_ready(nv12_ch1_desc_ready_v), .desc_format(4'd2), .desc_sg_mode(eng1_desc_sg_mode), .plane_y_addr(eng1_y_addr), .plane_uv_addr(eng1_uv_addr), .frame_width(eng1_width), .frame_height(eng1_height), .frame_stride(eng1_stride),
         .sgl_y_wr_en(ch1_sgl_y_rd_en), .sgl_y_wr_addr(ch1_sgl_y_dout[63:0]), .sgl_y_wr_len(ch1_sgl_y_dout[95:64]), .sgl_y_wr_flags(ch1_sgl_y_dout[127:96]),
         .sgl_uv_wr_en(ch1_sgl_uv_rd_en), .sgl_uv_wr_addr(ch1_sgl_uv_dout[63:0]), .sgl_uv_wr_len(ch1_sgl_uv_dout[95:64]), .sgl_uv_wr_flags(ch1_sgl_uv_dout[127:96]),
@@ -2200,8 +2205,8 @@ module custom_pcie_dma_top #(
                     default: dest2_state <= DEST_IDLE;
                 endcase
             end
-            wire eng2_req_valid, eng2_req_ready, eng2_req_ack; wire [63:0] eng2_req_addr; wire [10:0] eng2_req_dw_len; wire [PCIE_DATA_WIDTH-1:0] eng2_req_data; wire eng2_frame_done;
-            nv12_capture_engine #(.MAX_WIDTH(4096), .PCIE_DATA_WIDTH(PCIE_DATA_WIDTH), .FIFO_DEPTH(32), .MWR_PAYLOAD_BYTES(256), .RAW_INPUT(1))
+            wire eng2_req_valid, eng2_req_ready, eng2_req_ack; wire [63:0] eng2_req_addr; wire [10:0] eng2_req_dw_len; wire [127:0] eng2_req_data; wire eng2_frame_done;
+            nv12_capture_engine #(.MAX_WIDTH(4096), .PCIE_DATA_WIDTH(128), .FIFO_DEPTH(32), .MWR_PAYLOAD_BYTES(256), .RAW_INPUT(1))
             u_nv12_capture_engine_ch2 (.clk(video_clk), .rst_n(video_rst_n), .desc_valid(eng2_desc_valid), .desc_ready(nv12_ch2_desc_ready_v), .desc_format(4'd2), .desc_sg_mode(eng2_desc_sg_mode), .plane_y_addr(eng2_y_addr), .plane_uv_addr(eng2_uv_addr), .frame_width(eng2_width), .frame_height(eng2_height), .frame_stride(eng2_stride),
                 .sgl_y_wr_en(!ch2_sgl_y_empty && ch2_sgl_y_pop_ready), .sgl_y_wr_addr(ch2_sgl_y_dout[63:0]), .sgl_y_wr_len(ch2_sgl_y_dout[95:64]), .sgl_y_wr_flags(ch2_sgl_y_dout[127:96]),
                 .sgl_uv_wr_en(!ch2_sgl_uv_empty && ch2_sgl_uv_pop_ready), .sgl_uv_wr_addr(ch2_sgl_uv_dout[63:0]), .sgl_uv_wr_len(ch2_sgl_uv_dout[95:64]), .sgl_uv_wr_flags(ch2_sgl_uv_dout[127:96]),
@@ -2266,8 +2271,8 @@ module custom_pcie_dma_top #(
                     default: dest3_state <= DEST_IDLE;
                 endcase
             end
-            wire eng3_req_valid, eng3_req_ready, eng3_req_ack; wire [63:0] eng3_req_addr; wire [10:0] eng3_req_dw_len; wire [PCIE_DATA_WIDTH-1:0] eng3_req_data; wire eng3_frame_done;
-            nv12_capture_engine #(.MAX_WIDTH(4096), .PCIE_DATA_WIDTH(PCIE_DATA_WIDTH), .FIFO_DEPTH(32), .MWR_PAYLOAD_BYTES(256), .RAW_INPUT(1))
+            wire eng3_req_valid, eng3_req_ready, eng3_req_ack; wire [63:0] eng3_req_addr; wire [10:0] eng3_req_dw_len; wire [127:0] eng3_req_data; wire eng3_frame_done;
+            nv12_capture_engine #(.MAX_WIDTH(4096), .PCIE_DATA_WIDTH(128), .FIFO_DEPTH(32), .MWR_PAYLOAD_BYTES(256), .RAW_INPUT(1))
             u_nv12_capture_engine_ch3 (.clk(video_clk), .rst_n(video_rst_n), .desc_valid(eng3_desc_valid), .desc_ready(nv12_ch3_desc_ready_v), .desc_format(4'd2), .desc_sg_mode(eng3_desc_sg_mode), .plane_y_addr(eng3_y_addr), .plane_uv_addr(eng3_uv_addr), .frame_width(eng3_width), .frame_height(eng3_height), .frame_stride(eng3_stride),
                 .sgl_y_wr_en(!ch3_sgl_y_empty && ch3_sgl_y_pop_ready), .sgl_y_wr_addr(ch3_sgl_y_dout[63:0]), .sgl_y_wr_len(ch3_sgl_y_dout[95:64]), .sgl_y_wr_flags(ch3_sgl_y_dout[127:96]),
                 .sgl_uv_wr_en(!ch3_sgl_uv_empty && ch3_sgl_uv_pop_ready), .sgl_uv_wr_addr(ch3_sgl_uv_dout[63:0]), .sgl_uv_wr_len(ch3_sgl_uv_dout[95:64]), .sgl_uv_wr_flags(ch3_sgl_uv_dout[127:96]),
@@ -2429,7 +2434,7 @@ module custom_pcie_dma_top #(
 
     audio_stream_engine #(
         .AUDIO_DATA_WIDTH(AUDIO_DATA_WIDTH),
-        .PCIE_DATA_WIDTH(PCIE_DATA_WIDTH)
+        .PCIE_DATA_WIDTH(128)
     ) u_audio_stream_engine_ch0 (
         .clk(clk),
         .rst_n(dma_rst_n),
@@ -2447,7 +2452,7 @@ module custom_pcie_dma_top #(
         .c2h_req_valid(a_c2h_req_valid[0]),
         .c2h_req_addr(a_c2h_req_addr[63:0]),
         .c2h_req_dw_len(a_c2h_req_dw_len[10:0]),
-        .c2h_req_data(a_c2h_req_data[PCIE_DATA_WIDTH-1:0]),
+        .c2h_req_data(a_c2h_req_data[127:0]),
         .c2h_req_last(a_c2h_req_last[0]),
         .c2h_req_ack(a_c2h_req_ack[0]),
         .audio_busy(a_busy[0]),
@@ -2458,7 +2463,7 @@ module custom_pcie_dma_top #(
 
     audio_stream_engine #(
         .AUDIO_DATA_WIDTH(AUDIO_DATA_WIDTH),
-        .PCIE_DATA_WIDTH(PCIE_DATA_WIDTH)
+        .PCIE_DATA_WIDTH(128)
     ) u_audio_stream_engine_ch1 (
         .clk(clk),
         .rst_n(dma_rst_n),
@@ -2476,7 +2481,7 @@ module custom_pcie_dma_top #(
         .c2h_req_valid(a_c2h_req_valid[1]),
         .c2h_req_addr(a_c2h_req_addr[(1*64)+:64]),
         .c2h_req_dw_len(a_c2h_req_dw_len[(1*11)+:11]),
-        .c2h_req_data(a_c2h_req_data[(1*PCIE_DATA_WIDTH)+:PCIE_DATA_WIDTH]),
+        .c2h_req_data(a_c2h_req_data[(1*128)+:128]),
         .c2h_req_last(a_c2h_req_last[1]),
         .c2h_req_ack(a_c2h_req_ack[1]),
         .audio_busy(a_busy[1]),
@@ -2489,7 +2494,7 @@ module custom_pcie_dma_top #(
         if (NUM_AUDIO_CH > 2) begin : gen_ach2_engine
             audio_stream_engine #(
                 .AUDIO_DATA_WIDTH(AUDIO_DATA_WIDTH),
-                .PCIE_DATA_WIDTH(PCIE_DATA_WIDTH)
+                .PCIE_DATA_WIDTH(128)
             ) u_audio_stream_engine_ch2 (
                 .clk(clk),
                 .rst_n(dma_rst_n),
@@ -2507,7 +2512,7 @@ module custom_pcie_dma_top #(
                 .c2h_req_valid(a_c2h_req_valid[2]),
                 .c2h_req_addr(a_c2h_req_addr[(2*64)+:64]),
                 .c2h_req_dw_len(a_c2h_req_dw_len[(2*11)+:11]),
-                .c2h_req_data(a_c2h_req_data[(2*PCIE_DATA_WIDTH)+:PCIE_DATA_WIDTH]),
+                .c2h_req_data(a_c2h_req_data[(2*128)+:128]),
                 .c2h_req_last(a_c2h_req_last[2]),
                 .c2h_req_ack(a_c2h_req_ack[2]),
                 .audio_busy(a_busy[2]),
@@ -2522,7 +2527,7 @@ module custom_pcie_dma_top #(
         if (NUM_AUDIO_CH > 3) begin : gen_ach3_engine
             audio_stream_engine #(
                 .AUDIO_DATA_WIDTH(AUDIO_DATA_WIDTH),
-                .PCIE_DATA_WIDTH(PCIE_DATA_WIDTH)
+                .PCIE_DATA_WIDTH(128)
             ) u_audio_stream_engine_ch3 (
                 .clk(clk),
                 .rst_n(dma_rst_n),
@@ -2540,7 +2545,7 @@ module custom_pcie_dma_top #(
                 .c2h_req_valid(a_c2h_req_valid[3]),
                 .c2h_req_addr(a_c2h_req_addr[(3*64)+:64]),
                 .c2h_req_dw_len(a_c2h_req_dw_len[(3*11)+:11]),
-                .c2h_req_data(a_c2h_req_data[(3*PCIE_DATA_WIDTH)+:PCIE_DATA_WIDTH]),
+                .c2h_req_data(a_c2h_req_data[(3*128)+:128]),
                 .c2h_req_last(a_c2h_req_last[3]),
                 .c2h_req_ack(a_c2h_req_ack[3]),
                 .audio_busy(a_busy[3]),

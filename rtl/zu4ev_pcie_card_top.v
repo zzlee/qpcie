@@ -1172,24 +1172,36 @@ module zu4ev_pcie_card_top #(
     reg [31:0] msi_int_reg;
     reg [3:0]  legacy_int_reg;
     reg        irq_ack_reg;
+    reg        msi_req_pending;
+    reg [11:0] msi_watchdog;
 
     always @(posedge pcie_user_clk or negedge pcie_user_rst_n) begin
         if (!pcie_user_rst_n) begin
-            msi_int_reg    <= 32'd0;
-            legacy_int_reg <= 4'd0;
-            irq_ack_reg    <= 1'b0;
+            msi_int_reg     <= 32'd0;
+            legacy_int_reg  <= 4'd0;
+            irq_ack_reg     <= 1'b0;
+            msi_req_pending <= 1'b0;
+            msi_watchdog    <= 12'd0;
         end else begin
             irq_ack_reg <= 1'b0;
+            msi_int_reg <= 32'd0; // Ensure cfg_interrupt_msi_int is strictly a 1-clock-cycle pulse per PG213
+
             if (cfg_interrupt_msi_enable[0]) begin
                 legacy_int_reg <= 4'd0;
-                if (usr_irq_req && !msi_int_reg[0]) begin
-                    msi_int_reg <= 32'h00000001; // Vector 0
-                end else if (cfg_interrupt_msi_sent || cfg_interrupt_msi_fail) begin
-                    msi_int_reg <= 32'd0;
-                    irq_ack_reg <= 1'b1;
+                if (usr_irq_req && !msi_req_pending) begin
+                    msi_int_reg     <= 32'h00000001; // Vector 0 (1-cycle pulse)
+                    msi_req_pending <= 1'b1;
+                    msi_watchdog    <= 12'd0;
+                end else if (msi_req_pending) begin
+                    msi_watchdog <= msi_watchdog + 1'b1;
+                    if (cfg_interrupt_msi_sent || cfg_interrupt_msi_fail || msi_watchdog[11]) begin
+                        msi_req_pending <= 1'b0;
+                        irq_ack_reg     <= 1'b1;
+                    end
                 end
             end else begin
-                msi_int_reg <= 32'd0;
+                msi_req_pending <= 1'b0;
+                msi_watchdog    <= 12'd0;
                 if (usr_irq_req && !legacy_int_reg[0]) begin
                     legacy_int_reg <= 4'b0001; // Assert INTA
                 end else if (cfg_interrupt_sent) begin

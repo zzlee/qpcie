@@ -164,6 +164,40 @@ static void usage(const char *prog)
             DEFAULT_FRAMES, DEFAULT_BENCHMARK_FRAMES, DEFAULT_BUFFERS);
 }
 
+static void dump_bar0_diag(void)
+{
+    int bar_fd = open("/sys/bus/pci/devices/0000:03:00.0/resource0", O_RDONLY | O_SYNC);
+    if (bar_fd < 0) {
+        bar_fd = open("/sys/class/video4linux/video0/device/resource0", O_RDONLY | O_SYNC);
+    }
+    if (bar_fd >= 0) {
+        uint32_t *bar = mmap(NULL, 0x1000, PROT_READ, MAP_SHARED, bar_fd, 0);
+        if (bar != MAP_FAILED) {
+            fprintf(stderr, "=== BAR0 DIAGNOSTIC SNAPSHOT BEFORE STREAMOFF ===\n");
+            fprintf(stderr, "0x000 (MAGIC/VER): 0x%08x\n", bar[0x000/4]);
+            fprintf(stderr, "0x018 (IRQ_TOP):   0x%08x\n", bar[0x018/4]);
+            fprintf(stderr, "0x028 (DMA_STAT):  0x%08x\n", bar[0x028/4]);
+            fprintf(stderr, "0x088 (SOF_CNT):   0x%08x\n", bar[0x088/4]);
+            fprintf(stderr, "0x08c (EOL_CNT):   0x%08x\n", bar[0x08c/4]);
+            fprintf(stderr, "0x090 (BEAT_CNT):  0x%08x\n", bar[0x090/4]);
+            fprintf(stderr, "0x0ac (PERF_TLP):  0x%08x\n", bar[0x0ac/4]);
+            fprintf(stderr, "0x0b0 (PERF_BYTES):0x%08x\n", bar[0x0b0/4]);
+            fprintf(stderr, "0x0c0 (PERF_STALL):0x%08x\n", bar[0x0c0/4]);
+            fprintf(stderr, "0x100 (VCH0_CTRL): 0x%08x\n", bar[0x100/4]);
+            fprintf(stderr, "0x104 (VCH0_STAT): 0x%08x\n", bar[0x104/4]);
+            fprintf(stderr, "0x128 (RING0_CFG): 0x%08x\n", bar[0x128/4]);
+            fprintf(stderr, "0x12c (RING0_HEAD):0x%08x\n", bar[0x12c/4]);
+            fprintf(stderr, "0x160 (FRAME_CNT): 0x%08x\n", bar[0x160/4]);
+            fprintf(stderr, "0x164 (DROP_CNT):  0x%08x\n", bar[0x164/4]);
+            fprintf(stderr, "0x168 (PTS):       0x%08x\n", bar[0x168/4]);
+            fprintf(stderr, "0x170 (VCH0_IRQ):  0x%08x\n", bar[0x170/4]);
+            fprintf(stderr, "=================================================\n");
+            munmap(bar, 0x1000);
+        }
+        close(bar_fd);
+    }
+}
+
 int main(int argc, char **argv)
 {
     const char *device = DEFAULT_DEVICE;
@@ -447,6 +481,7 @@ int main(int argc, char **argv)
         ready = select(fd + 1, &readfds, NULL, NULL, &timeout);
         if (ready <= 0) {
             fprintf(stderr, "[FAIL] select() timeout on frame %u\n", captured);
+            dump_bar0_diag();
             goto streamoff;
         }
 

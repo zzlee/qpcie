@@ -758,6 +758,21 @@ module axil_reg_space #(
                             8'h90: s_axil_rdata <= reg_beat_count;
                             8'h94: s_axil_rdata <= reg_overlay_ctrl;
                             8'hA0: s_axil_rdata <= {30'd0, reg_perf_reset_w1c, reg_perf_enable};
+                            8'hA4: s_axil_rdata <= reg_perf_cycles[31:0];
+                            8'hA8: s_axil_rdata <= reg_perf_cycles[63:32];
+                            8'hAC: s_axil_rdata <= reg_perf_tlp_count;
+                            8'hB0: s_axil_rdata <= reg_perf_payload_bytes[31:0];
+                            8'hB4: s_axil_rdata <= reg_perf_payload_bytes[63:32];
+                            8'hB8: s_axil_rdata <= reg_perf_tx_active_cycles;
+                            8'hBC: s_axil_rdata <= reg_perf_tx_idle_cycles;
+                            8'hC0: s_axil_rdata <= reg_perf_tready_stall_cycles;
+                            8'hC4: s_axil_rdata <= reg_perf_inter_tlp_gap;
+                            8'hC8: s_axil_rdata <= reg_perf_tlp_128b_count;
+                            8'hCC: s_axil_rdata <= reg_perf_tlp_256b_count;
+                            8'hD0: s_axil_rdata <= reg_perf_split_4k_count;
+                            8'hD4: s_axil_rdata <= {16'd0, reg_perf_max_queue_depth};
+                            8'hD8: s_axil_rdata <= reg_perf_idle_cdc_empty;
+                            8'hDC: s_axil_rdata <= reg_perf_idle_no_req;
                             default: s_axil_rdata <= 32'd0;
                         endcase
                     end
