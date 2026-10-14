@@ -1,6 +1,13 @@
-# test_mcu_nuc100_slave — minimal NUC100 APROM dual I2C slave (U2, M2_710)
+# test_mcu_nuc100_slave — NUC100 APROM firmware set (U2, M2_710)
 
 Target: `NUC100LE3AN` APROM on `M2 710 N1 HDMI 4KP60 V21` Sheet3.
+See `docs/mcu-aprom-update.md` for the PCIe update protocol, memory map,
+and the one-time Nu-Link transition bundle.
+
+Binaries (`make -C test_mcu_nuc100_slave clean all`):
+`stage0.bin` (dispatcher @0x0) + `app.bin` = `mcu_nuc100_slave.bin`
+(APROM app @0x0800, VER04) + `ldrom.bin` (console/writer @0x100000);
+`aprom_bundle.bin` = stage0 padded to 0x800 + app (single Nu-Link image).
 Retains the legacy HXT/CLKO and PB.15 setup, corrects `PB.10 HPD0_CTRL=LOW`,
 and adds a 16-byte EEPROM-like slave at
 7-bit `0x2A` on **both** I2C peripherals for `PCIe → FPGA I2C master → MCU`:

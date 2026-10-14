@@ -1,0 +1,32 @@
+/* Shared I2C slave engine (APROM app + LDROM console).
+ * One instance per bus. First W byte 0xAA escapes the transaction to the
+ * upgrade engine (upg.c); SLA+R serves the pending upgrade response if any,
+ * else the regfile hooks below.
+ */
+#ifndef I2C_SLAVE_H
+#define I2C_SLAVE_H
+
+#include <stdint.h>
+#include "NUC100Series.h"
+#include "i2c.h"
+#include "upg.h"
+
+#define UPG_ESCAPE_BYTE 0xAAU
+
+typedef struct {
+    volatile uint8_t ptr;
+    volatile uint8_t rx_len;
+    uint8_t  upg;             /* transaction routed to upgrade engine */
+    uint8_t  resp[8];         /* pending upgrade response */
+    uint8_t  resp_len;
+    uint8_t  resp_idx;
+} i2c_ch_t;
+
+/* Regfile hooks. Weak dummies (console has no regfile); app overrides. */
+uint8_t app_reg_read(uint8_t idx);
+void app_reg_write(uint8_t idx, uint8_t val);
+
+void i2c_slave_ch_init(I2C_T *i2c, i2c_ch_t *ch, uint8_t addr7);
+void i2c_slave_isr(I2C_T *i2c, i2c_ch_t *ch);
+
+#endif

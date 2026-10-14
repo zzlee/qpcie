@@ -22,6 +22,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <errno.h>
 #include <dirent.h>
 #include <time.h>
@@ -179,6 +180,237 @@ stop:
     return r;
 }
 
+/* Raw read: Sr + addr+R, N bytes (STOP on last). No preceding W phase. */
+static int rd_raw(volatile uint8_t *bar1, uint8_t addr7, uint8_t *buf, int len)
+{
+    int r = send_byte(bar1, (uint8_t)((addr7 << 1) | 1), I2C_CR_STA);
+    if (r)
+        goto stop;
+    for (int i = 0; i < len; i++) {
+        r = recv_byte(bar1, &buf[i], i == len - 1);
+        if (r)
+            return r;
+    }
+    return 0;
+stop:
+    write32(bar1, g_base + REG_I2C_CR, I2C_CR_STO);
+    wait_tip(bar1);
+    return r;
+}
+
+static uint32_t crc32_ieee(const uint8_t *data, uint32_t len)
+{
+    uint32_t crc = 0xFFFFFFFFUL;
+    for (uint32_t i = 0; i < len; i++) {
+        crc ^= data[i];
+        for (int j = 0; j < 8; j++)
+            crc = (crc & 1UL) ? (crc >> 1) ^ 0xEDB88320UL : (crc >> 1);
+    }
+    return ~crc;
+}
+
+static uint8_t crc8_poly07(const uint8_t *data, uint32_t len)
+{
+    uint8_t crc = 0;
+    for (uint32_t i = 0; i < len; i++) {
+        crc ^= data[i];
+        for (int j = 0; j < 8; j++)
+            crc = (crc & 0x80U) ? (uint8_t)((crc << 1) ^ 0x07U) : (uint8_t)(crc << 1);
+    }
+    return crc;
+}
+
+/* One upgrade command write: [0xAA CMD ...] + STOP. */
+static int upg_cmd(volatile uint8_t *bar1, const uint8_t *cmd, int cmdlen)
+{
+    uint8_t *tmp = malloc(cmdlen);
+    int r;
+    if (!tmp)
+        return -ENOMEM;
+    memcpy(tmp, cmd + 1, cmdlen - 1);
+    /* wr_regs sends off=first byte then data */
+    r = wr_regs(bar1, 0x2A, cmd[0], tmp, cmdlen - 1);
+    free(tmp);
+    return r;
+}
+
+/* Write command then Sr+R response read. */
+static int upg_cmd_rsp(volatile uint8_t *bar1, const uint8_t *cmd, int cmdlen,
+                       uint8_t *rsp, int rsplen)
+{
+    int r = upg_cmd(bar1, cmd, cmdlen);
+    if (r)
+        return r;
+    return rd_raw(bar1, 0x2A, rsp, rsplen);
+}
+
+/* PCIe-driven APROM update. Image = app.bin (header @0, NOT bundle).
+ * Flow works against app (role 0) and LDROM console (role 1) identically:
+ * HELLO -> BEGIN -> CHUNKs -> COMMIT -> wait -> VER poll.
+ * Returns 0 when the running firmware reports the file's version. */
+static int flash_aprom(volatile uint8_t *bar1, const char *path)
+{
+    int fd = open(path, O_RDONLY);
+    struct stat st;
+    uint8_t *img;
+    uint32_t len, crc, i;
+    uint8_t rsp[8];
+    int r;
+
+    if (fd < 0) {
+        perror("open image");
+        return 1;
+    }
+    if (fstat(fd, &st) < 0) {
+        perror("fstat");
+        close(fd);
+        return 1;
+    }
+    if (st.st_size < 64 || st.st_size > 8192 || (st.st_size & 3)) {
+        fprintf(stderr, "bad image size %ld (need 64..8192, multiple of 4)\n",
+                (long)st.st_size);
+        close(fd);
+        return 1;
+    }
+    len = st.st_size;
+    img = malloc(len);
+    if (!img) {
+        close(fd);
+        return 1;
+    }
+    if (read(fd, img, len) != (ssize_t)len) {
+        perror("read image");
+        free(img);
+        close(fd);
+        return 1;
+    }
+    close(fd);
+
+    /* Local header validation (matches stage0 checks). */
+    {
+        uint32_t magic = img[0] | (img[1] << 8) | (img[2] << 16) | ((uint32_t)img[3] << 24);
+        uint32_t hlen = img[8] | (img[9] << 8) | (img[10] << 16) | ((uint32_t)img[11] << 24);
+        uint32_t hcrc = img[12] | (img[13] << 8) | (img[14] << 16) | ((uint32_t)img[15] << 24);
+        uint8_t ver = img[5];
+        if (magic != 0x41505032 || hlen != len) {
+            fprintf(stderr, "bad app header (magic/len)\n");
+            free(img);
+            return 1;
+        }
+        crc = crc32_ieee(img + 64, len - 64);
+        if (crc != hcrc) {
+            fprintf(stderr, "image CRC mismatch\n");
+            free(img);
+            return 1;
+        }
+        printf("image: VER=%u len=%u crc=%08X\n", ver, len, crc);
+    }
+
+    /* HELLO (retry: target may be mid-boot). */
+    for (i = 0; i < 30; i++) {
+        r = upg_cmd_rsp(bar1, (uint8_t[]){0xAA, 0x01}, 2, rsp, 4);
+        if (r == 0)
+            break;
+        usleep(500000);
+    }
+    if (r) {
+        fprintf(stderr, "HELLO failed\n");
+        free(img);
+        return 1;
+    }
+    printf("target: proto=%u role=%s maxchunk=%u\n", rsp[0],
+           rsp[1] ? "LDROM-console" : "app", rsp[3]);
+    if (rsp[0] != 1 || rsp[3] < 16) {
+        fprintf(stderr, "incompatible target\n");
+        free(img);
+        return 1;
+    }
+
+    /* BEGIN */
+    {
+        uint8_t cmd[8] = {0xAA, 0x02, len & 0xFF, (len >> 8) & 0xFF,
+                          crc & 0xFF, (crc >> 8) & 0xFF,
+                          (crc >> 16) & 0xFF, (crc >> 24) & 0xFF};
+        r = upg_cmd_rsp(bar1, cmd, 8, rsp, 1);
+        if (r || rsp[0]) {
+            fprintf(stderr, "BEGIN failed (%d/%u)\n", r, r ? 0 : rsp[0]);
+            free(img);
+            return 1;
+        }
+    }
+
+    /* CHUNKs, 32B each, retry x3 on CRC error. */
+    for (uint32_t off = 0; off < len;) {
+        uint32_t n = len - off > 32 ? 32 : len - off;
+        uint8_t cmd[40];
+        int tries;
+        cmd[0] = 0xAA;
+        cmd[1] = 0x03;
+        cmd[2] = off & 0xFF;
+        cmd[3] = (off >> 8) & 0xFF;
+        cmd[4] = n;
+        memcpy(cmd + 5, img + off, n);
+        /* CRC8 over OFF_L,OFF_H,N,DATA */
+        {
+            uint8_t cbuf[35];
+            cbuf[0] = cmd[2];
+            cbuf[1] = cmd[3];
+            cbuf[2] = cmd[4];
+            memcpy(cbuf + 3, img + off, n);
+            cmd[5 + n] = crc8_poly07(cbuf, 3 + n);
+        }
+        for (tries = 0; tries < 3; tries++) {
+            r = upg_cmd_rsp(bar1, cmd, (int)(6 + n), rsp, 1);
+            if (r == 0 && rsp[0] == 0)
+                break;
+            usleep(50000);
+        }
+        if (r || rsp[0]) {
+            fprintf(stderr, "CHUNK @%u failed\n", off);
+            free(img);
+            return 1;
+        }
+        off += n;
+        printf("\r  staged %u/%u", off, len);
+        fflush(stdout);
+    }
+    printf("\n");
+
+    /* COMMIT, then allow handoff + flashing + resets. */
+    {
+        uint8_t cmd[2] = {0xAA, 0x04};
+        r = upg_cmd_rsp(bar1, cmd, 2, rsp, 1);
+        if (r || rsp[0]) {
+            fprintf(stderr, "COMMIT rejected (%d/%u)\n", r, r ? 0 : rsp[0]);
+            free(img);
+            return 1;
+        }
+    }
+    printf("committed, waiting for reflash + reboot...\n");
+    sleep(10);
+
+    /* Re-probe until the running firmware reports the file version. */
+    {
+        uint8_t want_ver = img[5];
+        time_t deadline = time(NULL) + 90;
+        while (time(NULL) < deadline) {
+            uint8_t regs[2];
+            /* NACKs/timeouts expected across resets: keep polling. */
+            if (probe(bar1, 0x2A) == 0 &&
+                rd_regs(bar1, 0x2A, 0x00, regs, 2) == 0 &&
+                regs[0] == 0x2A && regs[1] == want_ver) {
+                printf("PASS: running VER=%u\n", want_ver);
+                free(img);
+                return 0;
+            }
+            sleep(2);
+        }
+        fprintf(stderr, "timeout waiting for VER=%u\n", want_ver);
+        free(img);
+        return 1;
+    }
+}
+
 static int find_qpcie(void)
 {
     DIR *dir = opendir(SYSFS_PCI_BASE);
@@ -242,7 +474,7 @@ static void ensure_mem_enabled(void)
 
 static void usage(const char *p)
 {
-    printf("Usage: %s [--bus mcu|front] [--scan|--dump|--loopback|--status|--board-ver|--spy|--sniff SEC|--probe HEX|--set-ctrl HEX]\n", p);
+    printf("Usage: %s [--bus mcu|front] [--scan|--dump|--loopback|--status|--board-ver|--spy|--sniff SEC|--probe HEX|--set-ctrl HEX|--flash-aprom FILE]\n", p);
     printf("  Direct BAR MMIO: BAR1 I2C master (mcu=0x5000 default, front=0x3000);\n");
     printf("  BAR0 0x1008 board version. Unloads qpcie driver.\n");
     printf("  --dump --offset HEX --len 1..16: read register range (default offset 0).\n");
@@ -276,11 +508,13 @@ int main(int argc, char **argv)
         {"bank", required_argument, 0, 'K'},
         {"bus", required_argument, 0, 'B'},
         {"set-ctrl", required_argument, 0, 'c'},
+        {"flash-aprom", required_argument, 0, 'F'},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0}
     };
     int o;
-    while ((o = getopt_long(argc, argv, "sdlthbB:c:p:P:S:L:yn:T:O:K:", lo, NULL)) != -1) {
+    const char *flash_path = NULL;
+    while ((o = getopt_long(argc, argv, "sdlthbB:c:p:P:S:L:yn:T:O:K:F:", lo, NULL)) != -1) {
         switch (o) {
         case 's': do_scan = true; break;
         case 'd': do_dump = true; break;
@@ -327,10 +561,11 @@ int main(int argc, char **argv)
             }
             break;
         case 'c': ctrl_hex = optarg; break;
+        case 'F': flash_path = optarg; break;
         default: usage(argv[0]); return o == 'h' ? 0 : 1;
         }
     }
-    if (!do_scan && !do_dump && !do_lb && !do_status && !do_board && !ctrl_hex && !probe_hex && !do_spy && do_sniff < 0) {
+    if (!do_scan && !do_dump && !do_lb && !do_status && !do_board && !ctrl_hex && !probe_hex && !do_spy && do_sniff < 0 && !flash_path) {
         usage(argv[0]);
         return 1;
     }
@@ -387,6 +622,11 @@ int main(int argc, char **argv)
     write32(bar1, g_base + REG_I2C_PRER_LO, g_prer & 0xFF);
     write32(bar1, g_base + REG_I2C_PRER_HI, (g_prer >> 8) & 0xFF);
     write32(bar1, g_base + REG_I2C_CTR, I2C_CTR_EN);
+
+    if (flash_path) {
+        rc = flash_aprom(bar1, flash_path);
+        goto out;
+    }
 
     if (do_board) {
         char r0[600];
