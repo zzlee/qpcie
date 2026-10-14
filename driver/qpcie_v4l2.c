@@ -150,7 +150,7 @@ static int qpcie_program_tpg(struct qpcie_v4l2_channel *vch, u32 pattern_id,
     if (!qdev || !qdev->bar0_mmio || !qdev->bar1_mmio)
         return -ENODEV;
 
-    tpg = qdev->bar1_mmio + BAR1_OFFSET_TPG + (vch->channel_id * 0x100);
+    tpg = qdev->bar1_mmio + qdev->bar1_offset_tpg + (vch->channel_id * 0x100);
     if (reset_pipeline) {
         /* Pulse reset on both TPG (bit 0) and video capture engine/FIFO (bit 1) */
         iowrite32(3, qdev->bar0_mmio + REG_VIDEO_SUB_RESET);
@@ -198,7 +198,7 @@ static int qpcie_program_tpg_motion(struct qpcie_v4l2_channel *vch, u32 speed)
     if (!qdev || !qdev->bar1_mmio)
         return -ENODEV;
 
-    tpg = qdev->bar1_mmio + BAR1_OFFSET_TPG + (vch->channel_id * 0x100);
+    tpg = qdev->bar1_mmio + qdev->bar1_offset_tpg + (vch->channel_id * 0x100);
     expected_enable = speed ? 1 : 0;
     if (speed)
         iowrite32(speed, tpg + 0x38);
@@ -230,7 +230,7 @@ static int qpcie_tpg_pace_thread(void *data)
 
         if (READ_ONCE(qdev->tpg_pace_run) && qdev->bar1_mmio) {
             spin_lock_irqsave(&qdev->tpg_lock, flags);
-            iowrite32(0x01, qdev->bar1_mmio + BAR1_OFFSET_TPG + 0x00); /* AP_START */
+            iowrite32(0x01, qdev->bar1_mmio + qdev->bar1_offset_tpg + 0x00); /* AP_START */
             spin_unlock_irqrestore(&qdev->tpg_lock, flags);
             if (++pulse_cnt <= 5)
                 dev_info(&qdev->pdev->dev, "[TPG PACER] Pulse #%u AP_START fired\n", pulse_cnt);
@@ -996,7 +996,7 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
                 return ret;
             }
         } else {
-            void __iomem *tpg = qdev->bar1_mmio + BAR1_OFFSET_TPG;
+            void __iomem *tpg = qdev->bar1_mmio + qdev->bar1_offset_tpg;
             iowrite32(0x81, tpg + 0x00); /* Continuous AUTO_RESTART */
         }
     }
@@ -1038,7 +1038,7 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
 
     /* Halt TPG pacing and stop TPG FIRST before tearing down DMA */
     if (vch->channel_id == 0 && qdev->bar1_mmio) {
-        void __iomem *tpg = qdev->bar1_mmio + BAR1_OFFSET_TPG;
+        void __iomem *tpg = qdev->bar1_mmio + qdev->bar1_offset_tpg;
         qpcie_tpg_pace_stop(qdev);
         iowrite32(0x00, tpg + 0x00);
     }

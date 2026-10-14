@@ -11,12 +11,14 @@
 
 static inline u32 qpcie_i2c_read(struct qpcie_dev *qdev, u32 reg)
 {
-    return ioread32(qdev->bar1_mmio + BAR1_OFFSET_I2C + reg);
+    u32 offset = qdev->bar1_offset_i2c ? qdev->bar1_offset_i2c : BAR1_OFFSET_I2C;
+    return ioread32(qdev->bar1_mmio + offset + reg);
 }
 
 static inline void qpcie_i2c_write(struct qpcie_dev *qdev, u32 reg, u32 val)
 {
-    iowrite32(val, qdev->bar1_mmio + BAR1_OFFSET_I2C + reg);
+    u32 offset = qdev->bar1_offset_i2c ? qdev->bar1_offset_i2c : BAR1_OFFSET_I2C;
+    iowrite32(val, qdev->bar1_mmio + offset + reg);
 }
 
 static int qpcie_i2c_wait_tip(struct qpcie_dev *qdev)
@@ -232,10 +234,10 @@ int qpcie_i2c_init(struct qpcie_dev *qdev)
 
     mutex_init(&qdev->i2c_lock);
 
-    /* Check if BAR1 is mapped */
-    if (!qdev->bar1_mmio) {
-        dev_warn(&qdev->pdev->dev, "BAR1 MMIO not available, skipping I2C\n");
-        return -ENODEV;
+    /* Check if BAR1 is mapped and I2C is present on BAR1 */
+    if (!qdev->bar1_mmio || !qdev->bar1_offset_i2c) {
+        dev_info(&qdev->pdev->dev, "Front-end I2C master not present on BAR1 for this platform\n");
+        return 0;
     }
 
     /* Configure I2C Prescaler: 100 kHz @ 125 MHz clock (PRER = 249 = 0x00F9) */

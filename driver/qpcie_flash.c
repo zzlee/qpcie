@@ -19,13 +19,15 @@
 
 static inline u32 qpcie_spi_read(struct qpcie_dev *qdev, u32 reg)
 {
-    (void)ioread32(qdev->bar1_mmio + BAR1_OFFSET_SPI_FLASH + reg);
-    return ioread32(qdev->bar1_mmio + BAR1_OFFSET_SPI_FLASH + reg);
+    u32 offset = qdev->bar1_offset_spi_flash ? qdev->bar1_offset_spi_flash : BAR1_OFFSET_SPI_FLASH;
+    (void)ioread32(qdev->bar1_mmio + offset + reg);
+    return ioread32(qdev->bar1_mmio + offset + reg);
 }
 
 static inline void qpcie_spi_write(struct qpcie_dev *qdev, u32 reg, u32 val)
 {
-    iowrite32(val, qdev->bar1_mmio + BAR1_OFFSET_SPI_FLASH + reg);
+    u32 offset = qdev->bar1_offset_spi_flash ? qdev->bar1_offset_spi_flash : BAR1_OFFSET_SPI_FLASH;
+    iowrite32(val, qdev->bar1_mmio + offset + reg);
     wmb();
     udelay(10);
 }
@@ -241,8 +243,10 @@ int qpcie_flash_init(struct qpcie_dev *qdev)
 
     mutex_init(&qdev->flash_lock);
 
-    if (!qdev->bar1_mmio)
-        return -ENODEV;
+    if (!qdev->bar1_mmio || !qdev->bar1_offset_spi_flash) {
+        dev_info(&qdev->pdev->dev, "SPI Flash & ICAPE2 interface not present on this platform\n");
+        return 0;
+    }
 
     /* Initialize SPI Flash controller: deassert CS_N */
     qpcie_spi_set_cs(qdev, false);
@@ -271,7 +275,9 @@ err_reload:
 
 void qpcie_flash_remove(struct qpcie_dev *qdev)
 {
-    device_remove_bin_file(&qdev->pdev->dev, &flash_bin_attr);
-    device_remove_file(&qdev->pdev->dev, &dev_attr_flash_reload);
-    device_remove_file(&qdev->pdev->dev, &dev_attr_flash_id);
+    if (qdev->bar1_offset_spi_flash) {
+        device_remove_bin_file(&qdev->pdev->dev, &flash_bin_attr);
+        device_remove_file(&qdev->pdev->dev, &dev_attr_flash_reload);
+        device_remove_file(&qdev->pdev->dev, &dev_attr_flash_id);
+    }
 }

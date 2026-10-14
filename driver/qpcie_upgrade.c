@@ -105,6 +105,10 @@ static struct bin_attribute firmware_upgrade_attr = {
 int qpcie_upgrade_init(struct qpcie_dev *qdev)
 {
     int ret;
+
+    if (!qdev->is_zu4ev)
+        return 0;
+
     ret = device_create_bin_file(&qdev->pdev->dev, &firmware_upgrade_attr);
     if (ret)
         dev_warn(&qdev->pdev->dev, "Failed to create firmware_upgrade sysfs attribute: %d\n", ret);
@@ -115,5 +119,6 @@ int qpcie_upgrade_init(struct qpcie_dev *qdev)
 
 void qpcie_upgrade_remove(struct qpcie_dev *qdev)
 {
-    device_remove_bin_file(&qdev->pdev->dev, &firmware_upgrade_attr);
+    if (qdev->is_zu4ev)
+        device_remove_bin_file(&qdev->pdev->dev, &firmware_upgrade_attr);
 }

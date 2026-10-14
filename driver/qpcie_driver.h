@@ -89,12 +89,24 @@
 #define BAR0_OFFSET_ENV             0x1000  /* zzlab_env_ctrl: version/platform/board */
 
 /* BAR1 Offsets (PCIe host only) */
-#define BAR1_OFFSET_ENV             0x0000  /* DEPRECATED: DECERR hole since C_VERSION 26100805; use BAR0_OFFSET_ENV */
 #define BAR1_OFFSET_AUDIO_GEN       0x1000
 #define BAR1_OFFSET_EDID            0x2000
+
+/* Hardware-true BAR1 Offsets for A50T (P2140 / M2_710) */
+#define BAR1_A50T_OFFSET_TPG        0x0000
+#define BAR1_A50T_OFFSET_I2C        0x3000
+#define BAR1_A50T_OFFSET_SPI_FLASH  0x4000
+#define BAR1_A50T_OFFSET_I2C_MCU    0x5000
+
+/* Hardware-true BAR1 Offsets for ZU4EV (SC7F0) */
+#define BAR1_ZU4EV_OFFSET_ENV_HOLE  0x0000  /* DECERR hole since C_VERSION 26100805; use BAR0_OFFSET_ENV */
+#define BAR1_ZU4EV_OFFSET_TPG       0x3000
+
+/* Backward-compatible fallbacks (dynamic dispatch via qdev->bar1_offset_* preferred) */
+#define BAR1_OFFSET_ENV             0x0000
 #define BAR1_OFFSET_TPG             0x3000
-#define BAR1_OFFSET_I2C             0x4000
-#define BAR1_OFFSET_SPI_FLASH       0x5000
+#define BAR1_OFFSET_I2C             0x3000
+#define BAR1_OFFSET_SPI_FLASH       0x4000
 
 /* I2C Master Registers (BAR1 Offset 0x3000) */
 #define REG_I2C_PRER_LO             0x00
@@ -491,6 +503,12 @@ struct qpcie_dev {
 
     /* SPI Flash Lock */
     struct mutex flash_lock;
+
+    /* Dynamic Platform & BAR1 Offsets */
+    bool is_zu4ev;
+    u32 bar1_offset_tpg;
+    u32 bar1_offset_i2c;
+    u32 bar1_offset_spi_flash;
 };
 
 /* Submodule Function Declarations */

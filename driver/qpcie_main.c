@@ -277,6 +277,29 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
              caps, (caps >> 8) & 0xFF, (caps >> 16) & 0xFF, caps & 0xFF);
 
     /* ------------------------------------------------------------------------
+     * Hardware Platform Detection & Dynamic BAR1 Offset Assignment
+     * ------------------------------------------------------------------------ */
+    if (qdev->bar1_mmio) {
+        u32 bar1_zero = ioread32(qdev->bar1_mmio + 0x0000);
+        /* ZU4EV (SC7F0): 4 video channels or DECERR hole at BAR1 0x0000 (reads 0xFFFFFFFF) */
+        if (bar1_zero == 0xFFFFFFFF || ((caps >> 16) & 0x0F) == 4) {
+            qdev->is_zu4ev = true;
+            qdev->bar1_offset_tpg = BAR1_ZU4EV_OFFSET_TPG;
+            qdev->bar1_offset_i2c = 0;       /* No I2C on BAR1 for ZU4EV */
+            qdev->bar1_offset_spi_flash = 0; /* No SPI Flash on BAR1 for ZU4EV */
+            dev_info(&pdev->dev, "  Platform Identified : AMD ZynqMP ZU4EV (SC7F0), TPG @ BAR1 0x%04X\n",
+                     qdev->bar1_offset_tpg);
+        } else {
+            qdev->is_zu4ev = false;
+            qdev->bar1_offset_tpg = BAR1_A50T_OFFSET_TPG;
+            qdev->bar1_offset_i2c = BAR1_A50T_OFFSET_I2C;
+            qdev->bar1_offset_spi_flash = BAR1_A50T_OFFSET_SPI_FLASH;
+            dev_info(&pdev->dev, "  Platform Identified : Artix-7 A50T, TPG @ 0x%04X, I2C @ 0x%04X, SPI @ 0x%04X\n",
+                     qdev->bar1_offset_tpg, qdev->bar1_offset_i2c, qdev->bar1_offset_spi_flash);
+        }
+    }
+
+    /* ------------------------------------------------------------------------
      * 2. BAR0 Write & Read-back Test
      * ------------------------------------------------------------------------ */
     dev_info(&pdev->dev, "--- [2. BAR0 Write & Readback Test] ---\n");
