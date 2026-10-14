@@ -245,6 +245,7 @@ static void usage(const char *p)
     printf("Usage: %s [--bus mcu|front] [--scan|--dump|--loopback|--status|--board-ver|--spy|--sniff SEC|--probe HEX|--set-ctrl HEX]\n", p);
     printf("  Direct BAR MMIO: BAR1 I2C master (mcu=0x5000 default, front=0x3000);\n");
     printf("  BAR0 0x1008 board version. Unloads qpcie driver.\n");
+    printf("  --dump --offset HEX --len 1..16: read register range (default offset 0).\n");
 }
 
 int main(int argc, char **argv)
@@ -255,6 +256,7 @@ int main(int argc, char **argv)
     int do_sniff = -1;
     const char *probe_hex = NULL;
     const char *ctrl_hex = NULL;
+    unsigned int dump_offset = 0;
     static struct option lo[] = {
         {"scan", no_argument, 0, 's'},
         {"dump", no_argument, 0, 'd'},
@@ -268,13 +270,14 @@ int main(int argc, char **argv)
         {"slave", required_argument, 0, 'S'},
         {"step-ms", required_argument, 0, 'T'},
         {"len", required_argument, 0, 'L'},
+        {"offset", required_argument, 0, 'O'},
         {"bus", required_argument, 0, 'B'},
         {"set-ctrl", required_argument, 0, 'c'},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0}
     };
     int o;
-    while ((o = getopt_long(argc, argv, "sdlthbB:c:p:P:S:L:yn:T:", lo, NULL)) != -1) {
+    while ((o = getopt_long(argc, argv, "sdlthbB:c:p:P:S:L:yn:T:O:", lo, NULL)) != -1) {
         switch (o) {
         case 's': do_scan = true; break;
         case 'd': do_dump = true; break;
@@ -287,6 +290,16 @@ int main(int argc, char **argv)
         case 'P': g_prer = (uint32_t)strtoul(optarg, NULL, 0); break;
         case 'S': g_slv = (uint32_t)strtoul(optarg, NULL, 0); break;
         case 'L': g_len = (uint32_t)strtoul(optarg, NULL, 0); break;
+        case 'O': {
+            char *end;
+            unsigned long value = strtoul(optarg, &end, 0);
+            if (!*optarg || *end || value > 255) {
+                fprintf(stderr, "Invalid --offset (0..255)\n");
+                return 1;
+            }
+            dump_offset = (unsigned int)value;
+            break;
+        }
         case 'T': g_step_ms = atoi(optarg); break;
         case 'B':
             if (!strcmp(optarg, "front")) {
@@ -306,6 +319,14 @@ int main(int argc, char **argv)
     }
     if (!do_scan && !do_dump && !do_lb && !do_status && !do_board && !ctrl_hex && !probe_hex && !do_spy && do_sniff < 0) {
         usage(argv[0]);
+        return 1;
+    }
+    if (dump_offset && (!do_dump || do_status || do_lb || ctrl_hex)) {
+        fprintf(stderr, "--offset is for --dump only\n");
+        return 1;
+    }
+    if (g_len == 0 || g_len > 16 || dump_offset + g_len > 256) {
+        fprintf(stderr, "--len must be 1..16 without register address wrap\n");
         return 1;
     }
 
@@ -439,7 +460,7 @@ int main(int argc, char **argv)
     }
 
     if (do_dump || do_status || do_lb || ctrl_hex) {
-        uint8_t regs[16];
+        uint8_t regs[16] = {0};
         uint32_t n = g_len > 16 ? 16 : g_len;
         /* Quick presence check first */
         if (probe((volatile uint8_t *)bar1, (uint8_t)g_slv) != 0) {
@@ -448,7 +469,7 @@ int main(int argc, char **argv)
             rc = 1;
             goto out;
         }
-        if (rd_regs((volatile uint8_t *)bar1, (uint8_t)g_slv, 0x00, regs, (int)n) != 0) {
+        if (rd_regs((volatile uint8_t *)bar1, (uint8_t)g_slv, (uint8_t)dump_offset, regs, (int)n) != 0) {
             printf("ERROR: burst read failed.\n");
             rc = 1;
             goto out;
@@ -456,12 +477,12 @@ int main(int argc, char **argv)
         if (do_dump) {
             printf("--- slave 0x%02X regs ---\n", (unsigned)g_slv);
             for (uint32_t i = 0; i < n; i++)
-                printf("  [%02X] 0x%02X%s\n", i, regs[i],
-                       (g_slv == NUC_ADDR && i == 0) ? " MAGIC" :
-                       (g_slv == NUC_ADDR && i == 1) ? " VER" :
-                       (g_slv == NUC_ADDR && i == 2) ? " STATUS" :
-                       (g_slv == NUC_ADDR && i == 3) ? " CTRL" : "");
-            if (g_slv == NUC_ADDR && (regs[0] != 0x2A || regs[1] != 0x02)) {
+                printf("  [%02X] 0x%02X%s\n", dump_offset + i, regs[i],
+                       (g_slv == NUC_ADDR && dump_offset + i == 0) ? " MAGIC" :
+                       (g_slv == NUC_ADDR && dump_offset + i == 1) ? " VER" :
+                       (g_slv == NUC_ADDR && dump_offset + i == 2) ? " STATUS" :
+                       (g_slv == NUC_ADDR && dump_offset + i == 3) ? " CTRL" : "");
+            if (g_slv == NUC_ADDR && dump_offset == 0 && n >= 2 && (regs[0] != 0x2A || regs[1] != 0x02)) {
                 printf("WARN: MAGIC/VER mismatch (fw mismatch?)\n");
                 rc = 1;
             }
