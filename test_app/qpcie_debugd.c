@@ -35,12 +35,17 @@ static int start_job(struct job *j, const char *shell, char *command,
          * on commands that deliberately escape the process group. */
         prctl(PR_SET_PDEATHSIG, SIGKILL);
         if (getppid() != parent) _exit(125);
-        setpgid(0, 0);
+        if (setpgid(0, 0)) _exit(125);
         int in = open("/dev/null", O_RDONLY);
         if (in < 0 || dup2(in, 0) < 0 || dup2(a[1], 1) < 0 || dup2(b[1], 2) < 0)
             _exit(125);
-        close(in); close(a[0]); close(a[1]); close(b[0]); close(b[1]);
+        // A standalone daemon can start with closed stdio, so pipe fds
+        // themselves may be 0/1/2. Do not close newly duplicated stdio.
+        int inherited[] = {in, a[0], a[1], b[0], b[1]};
+        for (unsigned i=0; i<sizeof(inherited)/sizeof(inherited[0]); ++i)
+            if (inherited[i]>2) close(inherited[i]);
         signal(SIGINT, SIG_DFL); signal(SIGTERM, SIG_DFL);
+        signal(SIGPIPE, SIG_DFL);
         execl(shell, shell, "-c", command, (char *)NULL);
         _exit(127);
     }
@@ -49,8 +54,12 @@ static int start_job(struct job *j, const char *shell, char *command,
     setpgid(pid, pid);
     j->pid = pid; j->out[0] = a[0]; j->out[1] = b[0];
     j->id = id; j->budget = budget; j->started = db_now();
-    for (int i=0; i<2; ++i)
-        fcntl(j->out[i], F_SETFL, fcntl(j->out[i], F_GETFL) | O_NONBLOCK);
+    for (int i=0; i<2; ++i) {
+        int flags=fcntl(j->out[i], F_GETFL);
+        if (flags<0 || fcntl(j->out[i], F_SETFL, flags | O_NONBLOCK)<0) {
+            kill_job(j); return -1;
+        }
+    }
     return 0;
 }
 int main(int argc, char **argv)
@@ -65,6 +74,8 @@ int main(int argc, char **argv)
     }
     if (allow_exec && access(shell, X_OK)) { perror(shell); return 2; }
     signal(SIGTERM, stop_handler); signal(SIGINT, stop_handler);
+    signal(SIGCHLD, SIG_DFL); // preserve child PID until explicit wait/reap
+    signal(SIGPIPE, SIG_IGN);
     struct db_io io;
     if (db_open(&io,path,true,sim)) { db_close(&io); return 125; }
     if (!db_valid(&io)) {

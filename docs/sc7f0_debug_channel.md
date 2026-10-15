@@ -119,6 +119,8 @@ bash tb/qpcie_debug_rootfs_tb.sh
 source /opt/Xilinx/Vivado/2023.2/settings64.sh
 vivado -mode batch -source scripts/sim_qpcie_debug.tcl
 vivado -mode batch -source scripts/sim_zu4ev_ps_axi_protocol.tcl
+# After implementation, review new paths AND the whole-design timing report:
+vivado -mode batch -source scripts/report_sc7f0_debug_timing.tcl
 make -C driver clean && make -C driver
 make -C test_app clean && make -C test_app all qpcie_debugd
 ```
@@ -200,6 +202,7 @@ sudo ./test_app/sc7f0ctl exec 'sleep 30'
 - `include/qpcie_debug.h`, `driver/qpcie_debug.c`
 - `test_app/sc7f0ctl.c`, `test_app/qpcie_debugd.c`, `test_app/qpcie_debug_io.h`
 - `petalinux/.../recipes-apps/qpcie-debugd/`, `scripts/install_debug_rootfs.sh`
+- `scripts/strip_sc7f0_mmio_services.sh` (standalone installer only)
 - `tb/qpcie_debug_*`, `scripts/sim_qpcie_debug.tcl`
 
 ## Validation record (2026-10-15)
@@ -207,8 +210,9 @@ sudo ./test_app/sc7f0ctl exec 'sleep 30'
 - SSH/sudo: PASS; host kernel `7.0.0-38-generic`, `03:00.0` Gen3 x4,
   running driver `qpcie-dma`, existing PL `26101401`, upgrade IDLE. No live
   driver reload, board reboot, firmware COMMIT or eMMC write was performed.
-- Native RPC suite: PASS repeatedly, including 10 MiB random loopback;
-  also PASS under UBSan. GCC `-fanalyzer` found no remaining diagnostics.
+- Native RPC suite: PASS repeatedly, including 10 MiB random loopback,
+  Bash arrays, closed stdio and inherited SIGCHLD handling; also PASS under
+  UBSan. GCC `-fanalyzer` found no remaining diagnostics.
 - Mailbox AXI regression, production-crossbar regression: TB_PASS.
 - Existing PS AXI ID protocol, client-tag/RC, DDR readback, upgrade CSR and
   START CDC regressions: all TB_PASS.
@@ -216,14 +220,44 @@ sudo ./test_app/sc7f0ctl exec 'sleep 30'
   compiled on the SSH test host without being loaded. Old firmware correctly
   has no debug node; CLI refuses with 125 instead of probing new registers.
 - Static ARM64 daemon and Yocto `qpcie-debugd` recipe: compile/package PASS.
-- Rootfs install/enable/disable guard test: TB_PASS.
-- ZU4EV full synthesis: PASS, mailbox inferred as block RAM. Full bitstream,
-  timing review and XSA/PetaLinux release generation are in progress; see
-  `build/debug-channel/{vivado,release}.log` and corresponding `.exit` files.
+- Rootfs install/enable/disable, standalone installer removal of both MMIO
+  services/binaries/presets, and host-root guards: TB_PASS.
+- ZU4EV bitstream/XSA generation: completed, mailbox inferred as block RAM.
+  **Whole-design timing FAILS**: WNS -1.399 ns, TNS -5524.436 ns, WHS
+  +0.010 ns. clk_pl_0 intra-clock WNS +1.271 ns; pcie_user_clk +1.185 ns.
+  Mailbox register paths (1084 registers, both from/to): minimum reported
+  setup +3.596 ns and hold +0.030 ns. These positive paths do NOT waive the
+  inter-clock failures or 44831 unconstrained internal endpoints / 16124
+  no-clock pins reported for the full design. Historical `build_zu4ev.log`
+  already records global WNS -1.728 ns; non-closure predates this feature,
+  but that is not proof this candidate is safe to deploy.
+- New XSA imported into PetaLinux; both tracked XSA copies have identical
+  SHA-256. Full PetaLinux build, patched FSBL and BOOT.BIN packaging completed.
+  Rootfs archive contains Bash, debug daemon and enabled service; execution
+  remains disabled by default. Production upgrade-daemon injection and
+  execution-enabled installer publication were **intentionally blocked** by
+  the timing gate. Existing `release/zu4ev_sd_installer` was not overwritten.
+  The images/linux outputs are intermediate candidates, NOT installable
+  release artifacts. Logs: `build/debug-channel/{vivado,release}.log`;
+  exit markers are 0 (Vivado generation) and 2 (release withheld for timing).
 - Required A50T build was attempted separately and fails on missing
   `ila_ps_axi_0` in its build IP list; that unconditional instantiation already
   exists in baseline `bdda0a3`. This unrelated A50T build gap was not fixed.
   Previous A50T build directory was preserved/restored; failure log is
   `build/debug-channel/a50t.log`.
-- **No on-board command-channel acceptance has been performed.** Matching PL
-  and PS image must be installed by the user before those tests are possible.
+- **No on-board command-channel acceptance has been performed.** Timing/CDC
+  review or an explicit decision to build a restricted experimental image is
+  required before producing an installer; flashing remains user-operated.
+
+Intermediate artifact SHA-256 (not a release manifest):
+
+```text
+bit  44c4679c9d2924c2917420b51511ed63cf38d30305348411bb829fa08f29c559
+XSA  dc1a72d10397977655bd9b45a24065c565c40cc0cc0b803c19a074c82598a585
+BOOT 72342867e8896b0c53018161d184e922c4fe7e91695181d3f130a019eb7f15db
+FIT  68e439a287357049460db39aa569a6a30196ee8ebd6427f7d3f08d8b144d12ff
+```
+
+Bitstream embeds the build-start base Git ID `bdda0a3`; source was committed
+following tests/build, so use this record plus the XSA/bit hashes rather than
+claiming the embedded ID alone identifies the full feature changes.

@@ -43,11 +43,16 @@ def main():
         def wr(off, val):
             struct.pack_into("<I", m, off, val)
 
-        def launch(enabled=True):
-            args = [str(daemon), "--sim", str(memory)]
+        def launch(enabled=True, closed_stdio=False, shell="/bin/sh"):
+            args = [str(daemon), "--sim", str(memory), "--shell", shell]
             if enabled:
                 args += ["--allow-exec"]
-            p = sp.Popen(args, stdout=sp.DEVNULL, stderr=sp.DEVNULL)
+            def close_stdio():
+                for fd in range(3):
+                    os.close(fd)
+                signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+            p = sp.Popen(args, stdout=sp.DEVNULL, stderr=sp.DEVNULL,
+                         preexec_fn=close_stdio if closed_stdio else None)
             wait_for(lambda: rd(8) == 1)
             return p
 
@@ -130,6 +135,15 @@ def main():
             wr(0x30, 0xffffffff); wr(0x34, 0xffffffff)
             run("echo", "wrap")
             assert rd(0x1c) == 0 and rd(0x30) == 0
+            # Standalone daemon with closed stdio and inherited SIGCHLD=IGN:
+            # low-numbered pipe fds must not be closed after child dup2().
+            d.terminate(); d.wait(timeout=5)
+            d = launch(closed_stdio=True)
+            r = run("exec", "printf low-out; printf low-err >&2; exit 9", rc=9)
+            assert r.stdout == b"low-out" and r.stderr == b"low-err"
+            d.terminate(); d.wait(timeout=5)
+            d = launch(shell="/bin/bash")
+            assert run("exec", 'a=(one two); printf "%s" "${a[1]}"').stdout == b"two"
             # Service defaults to no execution; transport still works.
             d.terminate(); d.wait(timeout=5)
             d = launch(False)

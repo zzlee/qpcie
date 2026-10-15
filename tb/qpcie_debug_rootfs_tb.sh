@@ -21,4 +21,20 @@ grep -qx 'KillMode=control-group' "$WORK/lib/systemd/system/qpcie-debugd.service
 if bash "$ROOT/scripts/install_debug_rootfs.sh" / >/dev/null 2>&1; then
     echo 'FAIL: accepted host / as unpacked rootfs' >&2; exit 1
 fi
-echo 'TB_PASS: rootfs explicit exec opt-in, Bash selection, disable on reuse, service, root guard'
+# The standalone installer must strip both MMIO services, binaries and presets.
+mkdir -p "$WORK/lib/systemd/system-preset"
+touch "$WORK/lib/systemd/system-preset/98-qpcie-debugd.preset" \
+      "$WORK/lib/systemd/system-preset/98-qpcie-upgrade-daemon.preset" \
+      "$WORK/lib/systemd/system/qpcie-upgrade-daemon.service" \
+      "$WORK/usr/bin/qpcie_upgrade_daemon"
+ln -s /lib/systemd/system/qpcie-upgrade-daemon.service \
+    "$WORK/etc/systemd/system/multi-user.target.wants/qpcie-upgrade-daemon.service"
+bash "$ROOT/scripts/strip_sc7f0_mmio_services.sh" "$WORK"
+if find "$WORK" -iname '*qpcie*' | grep -q .; then
+    echo 'FAIL: standalone installer contains MMIO service artifacts' >&2; exit 1
+fi
+test -f "$WORK/usr/bin/bash" # unrelated files must be preserved
+if bash "$ROOT/scripts/strip_sc7f0_mmio_services.sh" / >/dev/null 2>&1; then
+    echo 'FAIL: stripper accepted host /' >&2; exit 1
+fi
+echo 'TB_PASS: rootfs exec opt-in, Bash selection, disable on reuse, installer strips MMIO services/presets, root guards'
