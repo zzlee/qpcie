@@ -2,13 +2,14 @@
 #ifndef MOCK_NUC100_H
 #define MOCK_NUC100_H
 #include <stdint.h>
-typedef struct { uint32_t REGWRPROT; } mock_sys_t;
+typedef struct { uint32_t REGWRPROT; uint32_t IPRSTC1; } mock_sys_t;
 typedef struct { uint32_t ISPCON; } mock_fmc_t;
 extern mock_sys_t mock_sys;
 extern mock_fmc_t mock_fmc;
 #define SYS (&mock_sys)
 #define FMC (&mock_fmc)
 #define FMC_ISPCON_BS_Msk 2U
+#define SYS_IPRSTC1_CHIP_RST_Msk 1U
 #define __NOP() ((void)0)
 #define __disable_irq() ((void)0)
 #define __enable_irq() ((void)0)

@@ -40,6 +40,16 @@ int main(void)
     SYS->REGWRPROT = 0x59UL;
     SYS->REGWRPROT = 0x16UL;
     SYS->REGWRPROT = 0x88UL;
+
+    CLK->AHBCLK |= CLK_AHBCLK_ISP_EN_Msk;
+    FMC->ISPCON |= FMC_ISPCON_ISPEN_Msk;
+    /* Map vector page to LDROM (0x00100000) so I2C IRQs vector to LDROM handlers */
+    FMC->ISPCMD = 0x2EUL;
+    FMC->ISPADR = 0x00100000UL;
+    FMC->ISPTRG = 0x1UL;
+    __ISB();
+    while (FMC->ISPTRG & 0x1UL);
+
     PA->PMD &= ~((0x3UL << (12 * 2)) | (0x3UL << (13 * 2)));
     PB->DOUT &= ~(1UL << 10);
     PB->DOUT |= (1UL << 15);

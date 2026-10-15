@@ -290,7 +290,7 @@ void upg_poll(void)
         if (rc == 0) {
             upg_unlock();
             FMC->ISPCON &= ~FMC_ISPCON_BS_Msk; /* boot APROM after reset */
-            NVIC_SystemReset();
+            SYS->IPRSTC1 = SYS_IPRSTC1_CHIP_RST_Msk; /* Whole-chip reset */
             while (1) {
             }
         }
