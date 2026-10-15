@@ -65,7 +65,7 @@ def check(directory):
     if not skew_values:
         raise ValueError('missing bus-skew summary (expected XPM FIFO constraints)')
     skew_min = min(float(row[2]) for row in skew_values)
-    if not math.isfinite(skew_min) or skew_min < 0:
+    if not math.isfinite(skew_min) or skew_min < 0 or '(VIOLATED)' in skew:
         errors.append('bus-skew failure')
     result = dict(pass_gate=not errors, margins_ns=margins, coverage=counts,
                   cdc=cdc_counts, bus_skew_min_ns=skew_min, errors=errors)

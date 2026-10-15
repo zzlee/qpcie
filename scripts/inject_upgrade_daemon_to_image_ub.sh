@@ -14,7 +14,9 @@ ROOTFS_BASE="$IMG_DIR/rootfs.cpio.gz"
 KERNEL_GZ="$IMG_DIR/Image.gz"
 DTB="$IMG_DIR/system.dtb"
 OUT_IMGUB="$IMG_DIR/image.ub"
-REL_TARGET_DIR="$ROOT_DIR/release/zu4ev_sd_installer/target_emmc"
+# Candidate builds can target an isolated directory without modifying the
+# currently published installer (which must never contain mixed revisions).
+REL_TARGET_DIR="${REL_TARGET_DIR:-$ROOT_DIR/release/zu4ev_sd_installer/target_emmc}"
 
 MKIMAGE="/opt/Xilinx/petalinux/2023.2/components/yocto/buildtools/sysroots/x86_64-petalinux-linux/usr/bin/mkimage"
 [ -x "$MKIMAGE" ] || MKIMAGE=$(which mkimage 2>/dev/null || true)

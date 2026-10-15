@@ -51,4 +51,5 @@ with tempfile.TemporaryDirectory() as tmp:
     run({'methodology.rpt': 'REPORT SUMMARY\nViolations found: 1\n'})
     run({'bus-skew.rpt': reports['bus-skew.rpt'].replace('7.500', '-0.001')})
     run({'bus-skew.rpt': ''})
+    run({'bus-skew.rpt': reports['bus-skew.rpt'] + 'Slack (VIOLATED) : -0.000ns\n'})
 print('TB_PASS timing gate rejects negative setup/hold/pulse/skew, incomplete coverage and invalid CDC/clocks')

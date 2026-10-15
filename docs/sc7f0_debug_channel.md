@@ -159,7 +159,10 @@ execution. An image without Bash can use `/bin/sh` (not Bash syntax).
 The existing production image injection flow can also include this service:
 
 ```bash
-INCLUDE_DEBUG_DAEMON=1 ENABLE_DEBUG_EXEC=1 \
+# Point copies at an isolated candidate directory, NOT the published installer.
+mkdir -p build/debug-first/candidate
+REL_TARGET_DIR="$PWD/build/debug-first/candidate" \
+  INCLUDE_DEBUG_DAEMON=1 ENABLE_DEBUG_EXEC=1 \
   bash scripts/inject_upgrade_daemon_to_image_ub.sh
 ```
 
