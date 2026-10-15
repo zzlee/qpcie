@@ -6,6 +6,7 @@
 
 mock_sys_t mock_sys;
 mock_fmc_t mock_fmc;
+mock_clk_t mock_clk;
 static unsigned commits;
 void NVIC_SystemReset(void) { assert(!"unexpected reset"); }
 uint8_t upg_role(void) { return UPG_ROLE_CONSOLE; }

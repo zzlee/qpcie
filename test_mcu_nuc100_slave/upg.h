@@ -54,8 +54,10 @@
 #define UPG_STATE_ERROR   5U
 
 /* Fixed SRAM staging (shared by APROM + LDROM builds via linker .stage). */
-#define UPG_STAGE_BASE    0x20001000UL
-#define UPG_STAGE_MAX     8192U
+#define UPG_STAGE_BASE      0x20001000UL
+#define UPG_STAGE_MAX       8192U
+#define UPG_HANDSHAKE_MAGIC 0x55AA1234UL
+#define UPG_HANDSHAKE_ADDR  0x20000FF0UL
 
 /* APROM layout shared by stage0 + writer + host tool.
  * 64-byte header @0x0800, code follows; CRC covers [0x840, base+len). */
@@ -95,6 +97,7 @@ uint8_t  upg_crc8(const uint8_t *data, uint32_t len);
 uint8_t upg_state(void);
 uint16_t upg_done(void);
 uint8_t upg_err(void);
+void upg_set_error(uint8_t err);
 uint8_t *upg_image_ptr(void);  /* staging base (fixed SRAM, both builds) */
 uint32_t upg_image_len(void);  /* validated length (0 unless committed) */
 

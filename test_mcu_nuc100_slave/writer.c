@@ -39,10 +39,6 @@ int writer_ldrom_valid(void)
     return 1;
 }
 
-#define WR_FMC_ISPCMD_VECMAP     0x2EUL
-#define WR_LDROM_BASE            0x00100000UL
-#define WR_APROM_BASE            0x00000000UL
-
 RAMFUNC int writer_program_aprom(uint32_t dst_addr, const uint32_t *src, uint32_t nwords)
 {
     uint32_t start_page, end_page, page, i;
@@ -62,13 +58,6 @@ RAMFUNC int writer_program_aprom(uint32_t dst_addr, const uint32_t *src, uint32_
     CLK->AHBCLK |= CLK_AHBCLK_ISP_EN_Msk;
     FMC->ISPCON |= FMC_ISPCON_ISPEN_Msk | FMC_ISPCON_APUEN_Msk;
 
-    /* Remap active execution vector page to LDROM so FMC hardware allows APROM erase/write */
-    FMC->ISPCMD = WR_FMC_ISPCMD_VECMAP;
-    FMC->ISPADR = WR_LDROM_BASE;
-    FMC->ISPTRG = 0x1UL;
-    __ISB();
-    while (FMC->ISPTRG & 0x1UL);
-
     /* Clear any stale ISPFF */
     if (FMC->ISPCON & FMC_ISPCON_ISPFF_Msk)
         FMC->ISPCON |= FMC_ISPCON_ISPFF_Msk;
@@ -81,15 +70,8 @@ RAMFUNC int writer_program_aprom(uint32_t dst_addr, const uint32_t *src, uint32_
         FMC->ISPADR = page;
         FMC->ISPTRG = 0x1UL;
         __ISB();
-        if (wr_wait_done() != 0) {
-            /* Restore VECMAP before returning on error */
-            FMC->ISPCMD = WR_FMC_ISPCMD_VECMAP;
-            FMC->ISPADR = WR_APROM_BASE;
-            FMC->ISPTRG = 0x1UL;
-            __ISB();
-            while (FMC->ISPTRG & 0x1UL);
+        if (wr_wait_done() != 0)
             return -3;
-        }
     }
 
     for (i = 0; i < nwords; i++) {
@@ -98,23 +80,9 @@ RAMFUNC int writer_program_aprom(uint32_t dst_addr, const uint32_t *src, uint32_
         FMC->ISPDAT = src[i];
         FMC->ISPTRG = 0x1UL;
         __ISB();
-        if (wr_wait_done() != 0) {
-            /* Restore VECMAP before returning on error */
-            FMC->ISPCMD = WR_FMC_ISPCMD_VECMAP;
-            FMC->ISPADR = WR_APROM_BASE;
-            FMC->ISPTRG = 0x1UL;
-            __ISB();
-            while (FMC->ISPTRG & 0x1UL);
+        if (wr_wait_done() != 0)
             return -4;
-        }
     }
-
-    /* Restore VECMAP back to APROM (0x00000000) */
-    FMC->ISPCMD = WR_FMC_ISPCMD_VECMAP;
-    FMC->ISPADR = WR_APROM_BASE;
-    FMC->ISPTRG = 0x1UL;
-    __ISB();
-    while (FMC->ISPTRG & 0x1UL);
 
     /* Verify by direct readback (CPU read, no ISP needed). */
     for (i = 0; i < nwords; i++) {

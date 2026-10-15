@@ -4,11 +4,16 @@
 #include <stdint.h>
 typedef struct { uint32_t REGWRPROT; uint32_t IPRSTC1; } mock_sys_t;
 typedef struct { uint32_t ISPCON; } mock_fmc_t;
+typedef struct { uint32_t AHBCLK; } mock_clk_t;
 extern mock_sys_t mock_sys;
 extern mock_fmc_t mock_fmc;
+extern mock_clk_t mock_clk;
 #define SYS (&mock_sys)
 #define FMC (&mock_fmc)
+#define CLK (&mock_clk)
+#define FMC_ISPCON_ISPEN_Msk 1U
 #define FMC_ISPCON_BS_Msk 2U
+#define CLK_AHBCLK_ISP_EN_Msk 4U
 #define SYS_IPRSTC1_CHIP_RST_Msk 1U
 #define __NOP() ((void)0)
 #define __disable_irq() ((void)0)

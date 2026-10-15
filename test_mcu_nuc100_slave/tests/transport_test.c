@@ -4,6 +4,7 @@
 
 mock_sys_t mock_sys;
 mock_fmc_t mock_fmc;
+mock_clk_t mock_clk;
 I2C_T mock_i2c0, mock_i2c1;
 uint32_t SystemCoreClock = 12000000;
 void SystemCoreClockUpdate(void) {}

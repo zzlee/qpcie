@@ -33,9 +33,14 @@ void ProcessHardFault(void)
     }
 }
 
-/* Trampolines: forward through the validated flash header. */
+/* Trampolines: forward through the validated flash header (or LDROM when BS=1). */
 void I2C0_IRQHandler(void)
 {
+    if (FMC->ISPCON & FMC_ISPCON_BS_Msk) {
+        void (*h)(void) = (void (*)(void))(*((uint32_t *)0x00100088UL));
+        if (h) h();
+        return;
+    }
     volatile app_hdr_t *hdr = (volatile app_hdr_t *)APP_HDR_BASE;
     void (*handler)(void) = hdr->i2c0h;
     if (handler)
@@ -44,6 +49,11 @@ void I2C0_IRQHandler(void)
 
 void I2C1_IRQHandler(void)
 {
+    if (FMC->ISPCON & FMC_ISPCON_BS_Msk) {
+        void (*h)(void) = (void (*)(void))(*((uint32_t *)0x0010008CUL));
+        if (h) h();
+        return;
+    }
     volatile app_hdr_t *hdr = (volatile app_hdr_t *)APP_HDR_BASE;
     void (*handler)(void) = hdr->i2c1h;
     if (handler)

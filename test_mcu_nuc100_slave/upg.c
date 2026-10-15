@@ -43,6 +43,11 @@ uint8_t upg_crc8(const uint8_t *data, uint32_t len)
 uint8_t upg_state(void) { return upg_state_v; }
 uint16_t upg_done(void) { return upg_done_v; }
 uint8_t upg_err(void) { return upg_err_v; }
+void upg_set_error(uint8_t err)
+{
+    upg_state_v = UPG_STATE_ERROR;
+    upg_err_v = err;
+}
 uint8_t *upg_image_ptr(void) { return upg_stage; }
 uint32_t upg_image_len(void)
 {
@@ -91,6 +96,14 @@ int upg_backend_commit(void)
 {
     if (upg_crc32(upg_stage, upg_exp_len) != upg_exp_crc)
         return 1;
+    if (upg_role() == UPG_ROLE_APP) {
+        volatile uint32_t *hs = (volatile uint32_t *)UPG_HANDSHAKE_ADDR;
+        hs[0] = UPG_HANDSHAKE_MAGIC;
+        hs[1] = upg_exp_len;
+        hs[2] = upg_exp_crc;
+        upg_handoff = 1U;
+        return 0;
+    }
     if (upg_request_flash() != 0)
         return 1;
     upg_flashing = 1U;
@@ -273,7 +286,8 @@ void upg_poll(void)
             __NOP();
         }
         upg_unlock();
-        FMC->ISPCON |= FMC_ISPCON_BS_Msk; /* boot LDROM after reset */
+        CLK->AHBCLK |= CLK_AHBCLK_ISP_EN_Msk;
+        FMC->ISPCON |= FMC_ISPCON_ISPEN_Msk | FMC_ISPCON_BS_Msk; /* boot LDROM after reset */
         NVIC_SystemReset();
         while (1) {
         }
