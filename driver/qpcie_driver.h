@@ -506,6 +506,7 @@ struct qpcie_dev {
 
     /* Dynamic Platform & BAR1 Offsets */
     bool is_zu4ev;
+    struct qpcie_debug *debug;
     u32 bar1_offset_tpg;
     u32 bar1_offset_i2c;
     u32 bar1_offset_spi_flash;
@@ -533,6 +534,9 @@ void qpcie_flash_remove(struct qpcie_dev *qdev);
 
 int qpcie_sysfs_init(struct qpcie_dev *qdev);
 void qpcie_sysfs_remove(struct qpcie_dev *qdev);
+
+int qpcie_debug_init(struct qpcie_dev *qdev);
+void qpcie_debug_remove(struct qpcie_dev *qdev);
 
 int qpcie_upgrade_init(struct qpcie_dev *qdev);
 void qpcie_upgrade_remove(struct qpcie_dev *qdev);

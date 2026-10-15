@@ -315,7 +315,7 @@ CONFIG_mtd-utils=y
 #
 # bash 
 #
-# CONFIG_bash is not set
+CONFIG_bash=y
 # CONFIG_bash-dbg is not set
 # CONFIG_bash-dev is not set
 
@@ -4081,6 +4081,7 @@ CONFIG_Init-manager-systemd=y
 #
 # CONFIG_gpio-demo is not set
 # CONFIG_peekpoke is not set
+CONFIG_qpcie-debugd=y
 CONFIG_qpcie-v4l2-bridge=y
 
 #

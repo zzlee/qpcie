@@ -78,6 +78,13 @@ else
            "$WORK_DIR/rootfs/etc/systemd/system/multi-user.target.wants/qpcie-upgrade-daemon.service"
 fi
 
+# Debug support is opt-in and only added to the production rootfs, never
+# the standalone SD installer. ENABLE_DEBUG_EXEC=1 is a separate explicit
+# authorization for root command execution in this lab image.
+if [ "${INCLUDE_DEBUG_DAEMON:-0}" = "1" ]; then
+    bash "$ROOT_DIR/scripts/install_debug_rootfs.sh" "$WORK_DIR/rootfs"
+fi
+
 echo "[3/4] Repacking rootfs.cpio.gz..."
 NEW_ROOTFS="$WORK_DIR/rootfs_with_daemon.cpio.gz"
 cd "$WORK_DIR/rootfs"

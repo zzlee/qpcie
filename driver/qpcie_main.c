@@ -447,6 +447,11 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
     /* Initialize PCIe H2C Firmware Upgrade Interface */
     qpcie_upgrade_init(qdev);
 
+    /* Optional debug endpoint: failure must not disable video/upgrade. */
+    ret = qpcie_debug_init(qdev);
+    if (ret)
+        dev_warn(&pdev->dev, "Debug mailbox unavailable: %d\n", ret);
+
     return 0;
 
 alsa_remove:
@@ -498,6 +503,7 @@ static void qpcie_remove(struct pci_dev *pdev)
 
     dev_info(&pdev->dev, "Removing QPCIe Driver (Minimal Diagnostic Mode)...\n");
 
+    qpcie_debug_remove(qdev);
     qpcie_upgrade_remove(qdev);
     qpcie_flash_remove(qdev);
     qpcie_i2c_remove(qdev);

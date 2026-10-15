@@ -1,0 +1,19 @@
+[Unit]
+Description=SC7F0 PCIe debug command mailbox
+After=local-fs.target
+
+[Service]
+Type=simple
+Environment=DEBUG_EXEC_ARGS=
+Environment=DEBUG_SHELL=/bin/sh
+EnvironmentFile=-/etc/default/qpcie-debugd
+ExecStart=/usr/bin/qpcie_debugd --shell ${DEBUG_SHELL} $DEBUG_EXEC_ARGS
+Restart=on-failure
+RestartSec=10
+KillMode=control-group
+TimeoutStopSec=5
+NoNewPrivileges=yes
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

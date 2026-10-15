@@ -11,7 +11,7 @@
 `timescale 1ns / 1ps
 
 module custom_pcie_dma_top #(
-    parameter [31:0] C_VERSION = 32'h2610_1401,
+    parameter [31:0] C_VERSION = 32'h2610_1501,
     parameter PCIE_DATA_WIDTH  = 128,
     parameter PCIE_KEEP_WIDTH  = PCIE_DATA_WIDTH / 8,
     parameter NUM_VIDEO_CH     = 2,
@@ -223,6 +223,26 @@ module custom_pcie_dma_top #(
     wire        env_axil_rvalid, env_axil_rready;
     wire [31:0] env_ap_rst_n;
 
+    // M02: dedicated 8 KiB debug mailbox, BAR0 0x2000..0x3fff.
+    wire [31:0] dbg_axil_awaddr, dbg_axil_wdata, dbg_axil_araddr, dbg_axil_rdata;
+    wire [3:0] dbg_axil_wstrb;
+    wire [1:0] dbg_axil_bresp, dbg_axil_rresp;
+    wire dbg_axil_awvalid, dbg_axil_awready, dbg_axil_wvalid, dbg_axil_wready;
+    wire dbg_axil_bvalid, dbg_axil_bready, dbg_axil_arvalid, dbg_axil_arready;
+    wire dbg_axil_rvalid, dbg_axil_rready;
+    qpcie_debug_mailbox u_debug_mailbox (
+        .clk(pl_clk0), .rst_n(sys_100m_rst_n),
+        .s_axi_awaddr(dbg_axil_awaddr[12:0]),
+        .s_axi_awvalid(dbg_axil_awvalid), .s_axi_awready(dbg_axil_awready),
+        .s_axi_wdata(dbg_axil_wdata), .s_axi_wstrb(dbg_axil_wstrb),
+        .s_axi_wvalid(dbg_axil_wvalid), .s_axi_wready(dbg_axil_wready),
+        .s_axi_bresp(dbg_axil_bresp), .s_axi_bvalid(dbg_axil_bvalid),
+        .s_axi_bready(dbg_axil_bready), .s_axi_araddr(dbg_axil_araddr[12:0]),
+        .s_axi_arvalid(dbg_axil_arvalid), .s_axi_arready(dbg_axil_arready),
+        .s_axi_rdata(dbg_axil_rdata), .s_axi_rresp(dbg_axil_rresp),
+        .s_axi_rvalid(dbg_axil_rvalid), .s_axi_rready(dbg_axil_rready)
+    );
+
     wire [31:0] cvt_bar0_axil_awaddr, cvt_bar0_axil_wdata, cvt_bar0_axil_araddr, cvt_bar0_axil_rdata;
     wire [3:0]  cvt_bar0_axil_wstrb;
     wire [1:0]  cvt_bar0_axil_bresp, cvt_bar0_axil_rresp;
@@ -322,10 +342,9 @@ module custom_pcie_dma_top #(
     axi_crossbar_1 u_axi_crossbar_1 (
         .aclk(pl_clk0),
         .aresetn(sys_100m_rst_n),
-        // S1 (MSB) = PS HPM0_FPD. NOTE: strip to 13-bit BAR0 offset — the
-        // M00/M01 windows only cover 0x000-0x1FFF. The PS address space
-        // maps this aperture at 0xA0000000; pass only the BAR0 offset here.
-        .s_axi_awaddr({{19'd0, s_axil_ps_awaddr[12:0]}, cvt_bar0_axil_awaddr}),
+        // Strip the PS 0xA0000000 base, preserving the full 1 MiB BAR0
+        // offset (not just 13 bits, which aliases the debug window to CSR).
+        .s_axi_awaddr({{12'd0, s_axil_ps_awaddr[19:0]}, cvt_bar0_axil_awaddr}),
         .s_axi_awprot(6'd0),
         .s_axi_awvalid({s_axil_ps_awvalid, cvt_bar0_axil_awvalid}),
         .s_axi_awready({s_axil_ps_awready, cvt_bar0_axil_awready}),
@@ -336,7 +355,7 @@ module custom_pcie_dma_top #(
         .s_axi_bresp({s_axil_ps_bresp, cvt_bar0_axil_bresp}),
         .s_axi_bvalid({s_axil_ps_bvalid, cvt_bar0_axil_bvalid}),
         .s_axi_bready({s_axil_ps_bready, cvt_bar0_axil_bready}),
-        .s_axi_araddr({{19'd0, s_axil_ps_araddr[12:0]}, cvt_bar0_axil_araddr}),
+        .s_axi_araddr({{12'd0, s_axil_ps_araddr[19:0]}, cvt_bar0_axil_araddr}),
         .s_axi_arprot(6'd0),
         .s_axi_arvalid({s_axil_ps_arvalid, cvt_bar0_axil_arvalid}),
         .s_axi_arready({s_axil_ps_arready, cvt_bar0_axil_arready}),
@@ -345,26 +364,26 @@ module custom_pcie_dma_top #(
         .s_axi_rvalid({s_axil_ps_rvalid, cvt_bar0_axil_rvalid}),
         .s_axi_rready({s_axil_ps_rready, cvt_bar0_axil_rready}),
 
-        // M01 (MSB) = zzlab_env_ctrl, M00 (LSB) = axil_reg_space
-        .m_axi_awaddr({env_axil_awaddr, arb_axil_awaddr}),
+        // M02 = debug mailbox, M01 = zzlab_env_ctrl, M00 = axil_reg_space
+        .m_axi_awaddr({dbg_axil_awaddr, env_axil_awaddr, arb_axil_awaddr}),
         .m_axi_awprot(),
-        .m_axi_awvalid({env_axil_awvalid, arb_axil_awvalid}),
-        .m_axi_awready({env_axil_awready, arb_axil_awready}),
-        .m_axi_wdata({env_axil_wdata, arb_axil_wdata}),
-        .m_axi_wstrb({env_axil_wstrb, arb_axil_wstrb}),
-        .m_axi_wvalid({env_axil_wvalid, arb_axil_wvalid}),
-        .m_axi_wready({env_axil_wready, arb_axil_wready}),
-        .m_axi_bresp({env_axil_bresp, arb_axil_bresp}),
-        .m_axi_bvalid({env_axil_bvalid, arb_axil_bvalid}),
-        .m_axi_bready({env_axil_bready, arb_axil_bready}),
-        .m_axi_araddr({env_axil_araddr, arb_axil_araddr}),
+        .m_axi_awvalid({dbg_axil_awvalid, env_axil_awvalid, arb_axil_awvalid}),
+        .m_axi_awready({dbg_axil_awready, env_axil_awready, arb_axil_awready}),
+        .m_axi_wdata({dbg_axil_wdata, env_axil_wdata, arb_axil_wdata}),
+        .m_axi_wstrb({dbg_axil_wstrb, env_axil_wstrb, arb_axil_wstrb}),
+        .m_axi_wvalid({dbg_axil_wvalid, env_axil_wvalid, arb_axil_wvalid}),
+        .m_axi_wready({dbg_axil_wready, env_axil_wready, arb_axil_wready}),
+        .m_axi_bresp({dbg_axil_bresp, env_axil_bresp, arb_axil_bresp}),
+        .m_axi_bvalid({dbg_axil_bvalid, env_axil_bvalid, arb_axil_bvalid}),
+        .m_axi_bready({dbg_axil_bready, env_axil_bready, arb_axil_bready}),
+        .m_axi_araddr({dbg_axil_araddr, env_axil_araddr, arb_axil_araddr}),
         .m_axi_arprot(),
-        .m_axi_arvalid({env_axil_arvalid, arb_axil_arvalid}),
-        .m_axi_arready({env_axil_arready, arb_axil_arready}),
-        .m_axi_rdata({env_axil_rdata, arb_axil_rdata}),
-        .m_axi_rresp({env_axil_rresp, arb_axil_rresp}),
-        .m_axi_rvalid({env_axil_rvalid, arb_axil_rvalid}),
-        .m_axi_rready({env_axil_rready, arb_axil_rready})
+        .m_axi_arvalid({dbg_axil_arvalid, env_axil_arvalid, arb_axil_arvalid}),
+        .m_axi_arready({dbg_axil_arready, env_axil_arready, arb_axil_arready}),
+        .m_axi_rdata({dbg_axil_rdata, env_axil_rdata, arb_axil_rdata}),
+        .m_axi_rresp({dbg_axil_rresp, env_axil_rresp, arb_axil_rresp}),
+        .m_axi_rvalid({dbg_axil_rvalid, env_axil_rvalid, arb_axil_rvalid}),
+        .m_axi_rready({dbg_axil_rready, env_axil_rready, arb_axil_rready})
     );
 
     // =========================================================================

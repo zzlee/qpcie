@@ -2,7 +2,7 @@
 
 Host can read these counters *after* the 3-second sysfs canary times out;
 no JTAG access is needed. The host tool accepts `0x26101205`,
-`0x26101206`, `0x26101301`, `0x26101302` and `0x26101401` only. Version 1206 changes PCIe IP tag and RC straddle modes;
+`0x26101206`, `0x26101301`, `0x26101302`, `0x26101401` and `0x26101501` only. Version 1206 changes PCIe IP tag and RC straddle modes;
 it is **not** proof that the upgrade is fixed, and this tool never writes eMMC.
 
 ## Registers in the existing PS/host-shared BAR0 CSR aperture

@@ -56,8 +56,8 @@ int main(int argc, char **argv) {
     volatile uint32_t *r = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (r == MAP_FAILED) { perror("mmap"); close(fd); free(expected); return 1; }
     int result = 1;
-    if (r[0] != 0x12abe380 || (r[1] != 0x26101301 && r[1] != 0x26101302 && r[1] != 0x26101401)) {
-        fprintf(stderr, "requires 26101301/26101302/26101401 readback RTL, got %08x\n", r[1]); goto out;
+    if (r[0] != 0x12abe380 || (r[1] != 0x26101301 && r[1] != 0x26101302 && r[1] != 0x26101401 && r[1] != 0x26101501)) {
+        fprintf(stderr, "requires 26101301/26101302/26101401/26101501 readback RTL, got %08x\n", r[1]); goto out;
     }
     if (r[0x780/4] & 1) { fprintf(stderr, "DMA START active; refusing\n"); goto out; }
     for (size_t off = 0; off < total; off += 16) {

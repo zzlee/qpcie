@@ -76,6 +76,8 @@ test_app/*.o
 test_app/qpcie_sanity_check
 test_app/qpcie_upgrade
 test_app/qpcie_upgrade_daemon
+test_app/sc7f0ctl
+test_app/qpcie_debugd
 test_app/qpcie_ddr_verify
 test_app/qpcie_dma_diag
 test_app/qpcie_stage_push

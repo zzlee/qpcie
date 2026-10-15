@@ -351,7 +351,18 @@ mkdir -p "$ROOTFS_WORK/etc/systemd/system/multi-user.target.wants"
 ln -sf /lib/systemd/system/qpcie-autoflash.service \
        "$ROOTFS_WORK/etc/systemd/system/multi-user.target.wants/qpcie-autoflash.service"
 
-# (Removed qpcie_upgrade_daemon from SD Installer RAMDisk to prevent AXI hang during standalone boot)
+# Keep ALL PS/PL MMIO daemons out of the standalone installer, including
+# when rootfs.cpio.gz now comes from the persistent debug Yocto recipe.
+# Production image.ub is separately copied to target_emmc below.
+for service in qpcie-debugd qpcie-upgrade-daemon; do
+    rm -f "$ROOTFS_WORK/etc/systemd/system/multi-user.target.wants/$service.service" \
+          "$ROOTFS_WORK/etc/systemd/system/$service.service" \
+          "$ROOTFS_WORK/lib/systemd/system/$service.service" \
+          "$ROOTFS_WORK/usr/lib/systemd/system/$service.service"
+done
+rm -f "$ROOTFS_WORK/usr/bin/qpcie_debugd" \
+      "$ROOTFS_WORK/usr/bin/qpcie_upgrade_daemon" \
+      "$ROOTFS_WORK/etc/default/qpcie-debugd"
 
 # Pack new installer_rootfs.cpio.gz
 INSTALLER_ROOTFS="$WORK_DIR/installer_rootfs.cpio.gz"
