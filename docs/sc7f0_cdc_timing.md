@@ -106,7 +106,15 @@ Candidate04 routed implementation has passed: WNS **+1.494 ns**, WHS
 no_clock/unconstrained/multiple-clock/invalid-generated-clock counts are zero.
 Critical CDC count is zero. Matching XSA SHA-256:
 `8260328d8d99f7002f375a6e3f933a43edcee825dc460e3fcb740226ba32b552`.
-On-board acceptance is still pending; these are NOT hardware acceptance results.
+After these gates and matching PetaLinux/patched FSBL packaging, PCIe VERIFY
+reached 0x05 (6.1 s, no eMMC write), COMMIT reached 0x04, and one board POR
+activated04. Host boot ID remained unchanged. On-board command-channel,
+10 MiB random/binary transfers, timeout/cancel, dead-client cleanup,
+daemon restart and actual live driver detach/rebind all passed. A separate
+4096-byte DMA→DDR/readback smoke test passed on NEW04 with IRQ/AV init disabled;
+no flash doorbell was used in that smoke test. PCIe Gen3 x4/AER remained clean.
+See [sc7f0_debug_channel.md](sc7f0_debug_channel.md) for installed usage and
+`release/sc7f0_debug_lab_26101504/BUILD_INFO.md` for exact artifact identities.
 
 `check_sc7f0_timing.py` fails closed before XSA export on negative whole-design
 setup/hold/pulse-width/skew, incomplete clock coverage, unconstrained internal

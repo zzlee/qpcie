@@ -1,9 +1,41 @@
 # SC7F0 PCIe PS command channel (ABI 1 / debug-first PL 26101504)
 
 Current scope/build/CDC status: [sc7f0_cdc_timing.md](sc7f0_cdc_timing.md).
-The `26101504` candidate disables external HDMI and skips host AV/I2C/SPI
-initialization. Its board acceptance is pending; the historical `26101501`
-artifacts below failed whole-design timing and must NOT be deployed.
+The **`26101504` LAB debug-first image is board-verified (2026-10-15)**.
+It disables external HDMI and skips host AV/I2C/SPI initialization. Whole-design
+routed gates passed before PCIe VERIFY → COMMIT → board POR; Host was NOT
+rebooted. The historical `26101501` artifacts below failed whole-design timing
+and must NOT be deployed. This is not an AV/production release.
+
+## Current test-host usage
+
+```sh
+ssh rd@sc7f0-test.local
+sudo sc7f0ctl status
+sudo sc7f0ctl exec 'uname -a; id'
+sudo sc7f0ctl --timeout 3 exec 'printf OUT; printf ERR >&2; exit 7'
+```
+
+`/usr/local/bin/sc7f0ctl` and the matching kernel module are installed on that
+Host (kernel `7.0.0-38-generic`). A kernel upgrade requires rebuilding/installing
+the module; no DKMS support is implied. Ctrl-C cancels the current PS command.
+The device is `/dev/qpcie-debug-0000:03:00.0`, root-owned mode 0600.
+
+Observed on the actual card: Bash arrays, separate binary stdout/stderr,
+exit7, 10 MiB random loopback, timeout124, Ctrl-C130, dead-client process-group
+cleanup, PS daemon restart/new epoch, and live driver detach/rebind without
+command replay. The new debug-only upgrade path also passed 4096-byte DMA
+staging plus byte-exact DDR readback, without a VERIFY/COMMIT doorbell.
+PCIe remains Gen3 x4 with no new AER errors.
+
+Repeat the command-channel suite explicitly (restarts only the PS debug service):
+`sudo python3 scripts/accept_sc7f0_debug.py /usr/local/bin/sc7f0ctl --run`.
+The optional `accept_sc7f0_rebind.py CLIENT DIAG --run` additionally detaches
+ONLY this card's driver with a live client; run it only during an approved lab
+maintenance window. Neither script flashes firmware or reboots the Host.
+
+LAB artifacts/checksums: `release/sc7f0_debug_lab_26101504/`. The previous SD
+installer was deliberately preserved, not mixed with these new target images.
 
 ## Goal and boundaries
 
@@ -166,8 +198,10 @@ REL_TARGET_DIR="$PWD/build/debug-first/candidate" \
   bash scripts/inject_upgrade_daemon_to_image_ub.sh
 ```
 
-This explicit lab-only flag installs an execution-enabled config (selects
-Bash if present). Without ENABLE_DEBUG_EXEC, the rootfs helper explicitly
+This explicit lab-only flag installs an execution-enabled config. Bash
+selection resolves absolute Yocto alternatives and usrmerge links inside the
+TARGET rootfs, never against the build host; `/usr/bin/bash`-only layouts also
+use the correct executable path. Without ENABLE_DEBUG_EXEC, the helper explicitly
 clears execution even on a reused rootfs. **Never inject the debug/upgrade
 services into the standalone SD installer RAMDisk.**
 
@@ -185,10 +219,11 @@ IP; PCI BDF is currently `0000:03:00.0`. Host reboot need not power-cycle the
 board; use the established PCIe flash-image upgrade/reboot workflow.
 
 1. Verify BAR0 magic/version using existing safe tools, PCIe Gen3 x4 and no
-   concurrent upgrades/video stress. Load the rebuilt host driver only after
-   the validated PL 26101504 is confirmed. Preserve old driver/artifacts.
+   concurrent upgrades/video stress. Bind the rebuilt driver to validated PL
+   26101504; a module preloaded before POR must be held from probing old PL
+   using a card-specific driver_override. Preserve old driver/artifacts.
 2. Node `/dev/qpcie-debug-0000:03:00.0` should exist, mode 0600.
-3. Run these **proposed acceptance commands**, not evidence of completed tests:
+3. Reference commands (the current04 completed acceptance record is above):
 
 ```bash
 sudo ./test_app/sc7f0ctl status
@@ -256,8 +291,8 @@ sudo ./test_app/sc7f0ctl exec 'sleep 30'
   exists in baseline `bdda0a3`. This unrelated A50T build gap was not fixed.
   Previous A50T build directory was preserved/restored; failure log is
   `build/debug-channel/a50t.log`.
-- **No on-board command-channel acceptance has been performed.** Timing/CDC
-  review and passing release gates are required before producing an installable
+- **At this historical01 stage, no on-board command-channel acceptance had
+  been performed.** Timing/CDC review and passing gates were required before producing an installable
   image. The later user authorization permits PCIe update after those gates;
   it does not waive them or approve this failed 26101501 candidate.
 
