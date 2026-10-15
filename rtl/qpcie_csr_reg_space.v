@@ -2,7 +2,7 @@
 // Ordered configuration/events to PCIe; coherent telemetry back to PS.
 `timescale 1ns / 1ps
 module qpcie_csr_reg_space #(
-    parameter [31:0]   C_VERSION    = 32'h2610_1503, // Mandatory hardware version YYMMDDpp
+    parameter [31:0]   C_VERSION    = 32'h2610_1504, // Mandatory hardware version YYMMDDpp
     parameter integer NUM_VIDEO_CH = 4,
     parameter integer NUM_AUDIO_CH = 4,
     parameter integer CDC_ENABLE = 0
@@ -349,15 +349,9 @@ module qpcie_csr_reg_space #(
     wire [31:0] csr_out_hdmi_tx_res;
     wire [31:0] csr_out_hdmi_tx_fps;
     wire ps_ready_pcie, pcie_ready_ps, status_valid;
-    xpm_cdc_async_rst #(.DEST_SYNC_FF(3), .RST_ACTIVE_HIGH(0)) u_xrun_reset (
-        .src_arst(rst_n), .dest_clk(pcie_clk), .dest_arst(ps_ready_pcie));
+    // Controls, telemetry and xrun lifecycle share one peer reset
+    // synchronizer per domain. No reset fan-out/reconvergence.
     wire xrun_reset = !ps_ready_pcie || !pcie_rst_n;
-    reg pcie_running = 1'b0;
-    always @(posedge pcie_clk or negedge pcie_rst_n)
-        if (!pcie_rst_n) pcie_running <= 1'b0;
-        else pcie_running <= 1'b1;
-    xpm_cdc_async_rst #(.DEST_SYNC_FF(3), .RST_ACTIVE_HIGH(0)) u_pcie_offline (
-        .src_arst(pcie_running), .dest_clk(clk), .dest_arst(pcie_ready_ps));
     reg [31:0] xrun_count = 32'd0;
     always @(posedge pcie_clk or posedge xrun_reset)
         if (xrun_reset) xrun_count <= 32'd0;
@@ -377,6 +371,7 @@ module qpcie_csr_reg_space #(
         .src_clk(clk), .src_rst_n(rst_n),
         .dest_clk(pcie_clk), .dest_rst_n(pcie_rst_n),
         .src_commit(csr_commit), .src_ready(csr_ready), .src_online(csr_online),
+        .src_peer_ready(pcie_ready_ps), .dest_peer_ready(ps_ready_pcie),
         .src_level({csr_reg_dma_ctrl, csr_reg_h2c_ring_addr, csr_reg_h2c_ring_size, csr_reg_h2c_tail_ptr, csr_reg_c2h_ring_addr, csr_reg_c2h_ring_size, csr_reg_c2h_tail_ptr, csr_reg_irq_ctrl, csr_reg_pacer_ctrl, csr_reg_slice_height, csr_reg_video_ctrl, csr_reg_video_sub_reset, csr_perf_enable, csr_pt_y_wr_addr, csr_pt_y_wr_data, csr_pt_uv_wr_addr, csr_pt_uv_wr_data, csr_reg_audio_dma_addr, csr_reg_audio_dma_cfg, csr_reg_audio_dma_addr_ch1, csr_reg_audio_dma_cfg_ch1, csr_reg_audio_dma_addr_ch2, csr_reg_audio_dma_cfg_ch2, csr_reg_audio_dma_addr_ch3, csr_reg_audio_dma_cfg_ch3, csr_h2c_fifo_wr_data, csr_reg_audio_loopback_ctrl, csr_out_vch0_ctrl, csr_out_vch0_width, csr_out_vch0_height, csr_out_vch0_stride0, csr_out_vch0_stride1, csr_out_map_mode_new, csr_out_overlay_en, csr_out_vch0_irq_en, csr_out_vch1_ctrl, csr_out_vch1_width, csr_out_vch1_height, csr_out_vch1_stride0, csr_out_vch1_stride1, csr_out_vch1_ring0_base, csr_out_vch1_ring0_size, csr_out_vch1_ring0_tail, csr_out_vch1_irq_en, csr_out_adev0_ctrl, csr_out_adev0_rate, csr_out_adev0_period_bytes, csr_out_adev0_buffer_bytes, csr_out_adev0_ring0_base, csr_out_adev0_ring0_cfg, csr_out_hdmi_tx_ctrl, csr_out_hdmi_tx_res, csr_out_hdmi_tx_fps, out_dma_upg_ctrl, out_dma_upg_size, out_dma_upg_host_addr}),
         .src_event({csr_reg_irq_status_w1c, csr_perf_reset, csr_pt_y_wr_en, csr_pt_uv_wr_en, csr_h2c_fifo_wr_en_ch1, csr_h2c_fifo_wr_en_ch2, csr_h2c_fifo_wr_en_ch3, csr_out_irq_top_status_w1c, csr_out_vch0_irq_status_w1c, csr_out_vch1_irq_status_w1c, csr_out_adev0_irq_status_w1c, csr_out_adev0_xrun_inject, csr_out_global_reset_pulse}),
         .dest_level(level_word), .dest_event(event_word)
@@ -386,7 +381,7 @@ module qpcie_csr_reg_space #(
 
     wire [1614:0] status_word;
     qpcie_status_cdc #(.WIDTH(1615)) u_status (
-        .src_clk(pcie_clk), .src_rst_n(pcie_rst_n),
+        .src_clk(pcie_clk), .src_rst_n(pcie_rst_n), .src_peer_ready(ps_ready_pcie),
         .dest_clk(clk), .dest_rst_n(rst_n), .dest_online(csr_online),
         .src_status({in_requester_id, reg_dma_status, reg_irq_status, reg_sof_count, reg_eol_count, reg_beat_count, completed_h2c_count, completed_c2h_count, reg_h2c_head_ptr, reg_c2h_head_ptr, reg_global_timestamp, reg_last_video_pts, reg_last_audio_pts, reg_frame_drop_count, reg_bandwidth_bps, reg_latency_max_ns, reg_perf_cycles, reg_perf_tlp_count, reg_perf_payload_bytes, reg_perf_tx_active_cycles, reg_perf_tx_idle_cycles, reg_perf_tready_stall_cycles, reg_perf_inter_tlp_gap, reg_perf_tlp_128b_count, reg_perf_tlp_256b_count, reg_perf_split_4k_count, reg_perf_max_queue_depth, reg_perf_idle_cdc_empty, reg_perf_idle_no_req, cur_y_page_idx, cur_uv_page_idx, reg_audio_dma_ptr, reg_audio_dma_ptr_ch1, reg_audio_dma_ptr_ch2, reg_audio_dma_ptr_ch3, h2c_fifo_count_ch1, h2c_fifo_count_ch2, h2c_fifo_count_ch3, h2c_fifo_full_ch1, h2c_fifo_full_ch2, h2c_fifo_full_ch3, h2c_fifo_empty_ch1, h2c_fifo_empty_ch2, h2c_fifo_empty_ch3, in_vch0_frame_count, in_vch0_drop_count, in_irq_top_status, in_vch0_irq_status, in_vch1_ring0_head, in_vch1_frame_count, in_vch1_drop_count, in_vch1_irq_status, in_adev0_running, xrun_count, in_adev0_position, in_adev0_irq_status, in_hdmi_rx_status, in_hdmi_rx_res, in_hdmi_rx_timing, in_hdmi_rx_audio, in_hdmi_tx_status}),
         .dest_status(status_word), .dest_valid(status_valid)

@@ -97,7 +97,7 @@ module sc7f0_csr_cdc_tb;
         read_reg(0, value);
         if (value !== 32'h12abe380) $fatal(1, "standalone magic %h", value);
         read_reg('h4, value);
-        if (value !== 32'h26101503) $fatal(1, "candidate hardware version %h", value);
+        if (value !== 32'h26101504) $fatal(1, "candidate hardware version %h", value);
 `ifdef SC7F0_DEBUG_ONLY
         read_reg('h8, value);
         if (value !== 32'h80000010) $fatal(1, "debug profile advertises AV hardware: %h", value);

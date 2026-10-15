@@ -1,7 +1,7 @@
-# SC7F0 PCIe PS command channel (ABI 1 / debug-first PL 26101503)
+# SC7F0 PCIe PS command channel (ABI 1 / debug-first PL 26101504)
 
 Current scope/build/CDC status: [sc7f0_cdc_timing.md](sc7f0_cdc_timing.md).
-The `26101503` candidate disables external HDMI and skips host AV/I2C/SPI
+The `26101504` candidate disables external HDMI and skips host AV/I2C/SPI
 initialization. Its board acceptance is pending; the historical `26101501`
 artifacts below failed whole-design timing and must NOT be deployed.
 
@@ -80,8 +80,8 @@ same-endpoint readback to flush posted writes; an SMP barrier alone is not
 sufficient. PS maps Device memory with /dev/mem O_SYNC and uses `dmb sy`.
 
 Before accessing the aperture, the host driver checks the explicit hardware
-allowlist `26101501/26101502/26101503`; the current PS daemon checks its exact
-build version `26101503` on the established CSR page. Neither accepts an open
+allowlist `26101501/26101502/26101504` (failed03 was never deployed); the current PS daemon checks its exact
+build version `26101504` on the established CSR page. Neither accepts an open
 version range or probes unknown old firmware. Mailbox ABI remains 1.
 
 ### Sessions and execution
@@ -186,7 +186,7 @@ board; use the established PCIe flash-image upgrade/reboot workflow.
 
 1. Verify BAR0 magic/version using existing safe tools, PCIe Gen3 x4 and no
    concurrent upgrades/video stress. Load the rebuilt host driver only after
-   the validated PL 26101503 is confirmed. Preserve old driver/artifacts.
+   the validated PL 26101504 is confirmed. Preserve old driver/artifacts.
 2. Node `/dev/qpcie-debug-0000:03:00.0` should exist, mode 0600.
 3. Run these **proposed acceptance commands**, not evidence of completed tests:
 

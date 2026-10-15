@@ -6,6 +6,8 @@ module qpcie_status_cdc #(
     parameter integer WIDTH = 32
 )(
     input wire src_clk, src_rst_n,
+    // Shared peer reset ALREADY synchronized to src_clk by control CDC.
+    input wire src_peer_ready,
     input wire dest_clk, dest_rst_n, dest_online,
     input wire [WIDTH-1:0] src_status,
     output reg [WIDTH-1:0] dest_status,
@@ -13,13 +15,9 @@ module qpcie_status_cdc #(
 );
     wire full, empty, wr_busy, rd_busy;
     wire [WIDTH-1:0] fifo_data;
-    wire dest_ready_src;
-    xpm_cdc_async_rst #(.DEST_SYNC_FF(3), .RST_ACTIVE_HIGH(0)) u_fifo_reset (
-        .src_arst(dest_rst_n), .dest_clk(src_clk), .dest_arst(dest_ready_src)
-    );
-    // XPM FIFO reset is synchronous to its write clock on release. Do not
-    // combine two clock domains before the reset synchronizer.
-    wire fifo_reset = !dest_ready_src || !src_rst_n;
+    // One synchronized peer reset is shared with controls and counters so
+    // they cannot leave reset on different cycles (CDC-11/reconvergence).
+    wire fifo_reset = !src_peer_ready || !src_rst_n;
     xpm_fifo_async #(
         .FIFO_MEMORY_TYPE("distributed"), .FIFO_WRITE_DEPTH(16),
         .WRITE_DATA_WIDTH(WIDTH), .READ_DATA_WIDTH(WIDTH),

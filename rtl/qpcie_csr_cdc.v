@@ -20,6 +20,9 @@ module qpcie_csr_cdc #(
     input wire src_commit,
     output wire src_ready,
     output wire src_online,
+    // Reuse these synchronized physical-reset levels for ALL consumers in
+    // each receiving domain; never independently synchronize the same reset.
+    output wire src_peer_ready, dest_peer_ready,
     output reg [LEVEL_WIDTH-1:0] dest_level,
     output reg [EVENT_WIDTH-1:0] dest_event
 );
@@ -66,6 +69,7 @@ module qpcie_csr_cdc #(
     // Registered timeout: do not drive asynchronous FIFO reset with a binary
     // counter's combinational terminal-count decode (which can glitch).
     assign src_online = pcie_ready && clock_alive;
+    assign src_peer_ready = pcie_ready;
 
     wire full, empty, wr_busy, rd_busy;
     wire [LEVEL_WIDTH+EVENT_WIDTH-1:0] fifo_data;
@@ -77,6 +81,7 @@ module qpcie_csr_cdc #(
         .src_arst(src_rst_n), .dest_clk(dest_clk), .dest_arst(ps_ready_pcie)
     );
     // Combine resets only AFTER the PS reset has crossed into PCIe.
+    assign dest_peer_ready = ps_ready_pcie;
     wire bank_reset = !ps_ready_pcie || !dest_rst_n;
     wire fifo_read = !bank_reset && !rd_busy && !empty;
     assign src_ready = !src_online || (!wr_busy && !full && !pending && !initialize);

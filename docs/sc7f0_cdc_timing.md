@@ -1,6 +1,6 @@
 # SC7F0 debug-first profile, CSR CDC and release gates
 
-Status: candidate `0x26101503`, ABI 1. **Not yet board-validated or released.**
+Status: candidate `0x26101504`, ABI 1. **Not yet board-validated or released.**
 The user's priority is a working PCIe → PS Linux command/debug path, not HDMI
 bring-up. The user now explicitly permits PCIe flash-image upgrades and a board
 reboot if needed, AFTER design/clock/timing/integrity validation. Never reboot
@@ -45,6 +45,15 @@ at `build/cdc-timing/constrain-hdmi-clocks-experiment.tcl`; it is not production
 source. The user-stopped build was later cancelled (exit143), never exported
 as the new XSA, never deployed. Its logs/checkpoints are historical diagnostics.
 
+The debug-first `26101503` placed design had no HDMI cells, only four PCIe
+GTHE4 channels, zero no-clock pins/unconstrained internal endpoints, and no
+invalid clock methodology. Review caught three CDC-11 reset fan-outs: one PS
+reset independently synchronized for controls, telemetry and xrun counters.
+That build was cancelled before XSA export or deployment. Candidate04 shares
+ONE peer-reset synchronizer per domain across those consumers, preventing
+one-cycle deassertion/reconvergence differences. Historical03 reports and the
+placed checkpoint are preserved under `build/debug-first/attempt03/`.
+
 ## Actual CDC repair
 
 The authoritative CSR and AXI responses stay on independent PS `pl_clk0`.
@@ -68,14 +77,17 @@ Never relocate BAR0 to PCIe: Linux must retain access without host/slot clock.
 * Foreign reset is synchronized BEFORE combining with the receiving domain's
   local reset. PCIe-online crossing uses a source-clock registered level, not
   a combinational core reset/link expression. Assertions remain asynchronous;
-  deassertion is synchronized in the destination.
+  deassertion is synchronized in the destination. Each domain reuses ONE
+  synchronized peer-reset level for control bank, status FIFO and counters;
+  duplicate reset synchronizers are forbidden (CDC-11).
 * Existing diagnostic sticky bits are independent monotonic flags, not coherent
   payload: XPM array-single crosses their levels; XPM single crosses clear and
   ACK, with one additional ACK stage for sticky-clear settling.
 * `generate_sc7f0_csr_cdc.py` generates the width-checked wrapper; `--check` is
   mandatory after interface edits and is invoked before every main build.
-* Host debug allowlist is explicit `26101501/02/03`; the newly built PS daemon
-  requires its exact current `26101503` before probing the new aperture.
+* Host debug allowlist is explicit `26101501/02/04` (unreleased failed03 is
+  omitted); the newly built PS daemon requires exact current `26101504`
+  before probing the new aperture.
 
 ## Validation / gates
 
@@ -86,7 +98,7 @@ repair: no PCIe clock, full FIFO/backpressure, ordered config/START, 80 reset +
 write release, recovery without replay/phantom xrun, PCIe reset and PS reset.
 Upgrade sticky-clear/ACK, PS AXI ID protocol, diagnostic CSR, upgrade START
 CDC, DDR readback and production mailbox crossbar integration also pass.
-The debug CSR test verifies version03 and capability `0x80000010` while PCIe
+The debug CSR test verifies version04 and capability `0x80000010` while PCIe
 clock is absent. Artifacts are under `build/debug-first/`. Full implementation
 and on-board acceptance are still pending, not claimed passes.
 
