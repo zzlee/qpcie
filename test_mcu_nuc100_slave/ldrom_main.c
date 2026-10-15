@@ -33,26 +33,6 @@ void I2C1_IRQHandler(void)
 /* LDROM-strong upgrade hooks. */
 uint8_t upg_role(void) { return UPG_ROLE_CONSOLE; }
 
-int upg_request_flash(void)
-{
-    upg_flashing = 1U;
-    return 0;
-}
-
-int upg_do_flash_pages(void)
-{
-    uint32_t len = upg_image_len();
-    uint32_t nwords;
-    int rc;
-
-    if (len == 0UL || len > UPG_STAGE_MAX)
-        return -1;
-    nwords = (len + 3UL) / 4UL;
-    rc = writer_program_aprom(UPG_APP_BASE, (const uint32_t *)upg_image_ptr(),
-                              nwords);
-    return rc;
-}
-
 int main(void)
 {
     /* Minimal recovery init (no HXT/CLKO, no regfile): HIRC default clock,

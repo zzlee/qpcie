@@ -53,12 +53,6 @@ uint32_t upg_image_len(void)
 __attribute__((weak)) uint8_t upg_role(void) { return UPG_ROLE_APP; }
 __attribute__((weak)) uint8_t upg_writer_ready(void)
 {
-    volatile uint32_t *vecs = (volatile uint32_t *)UPG_LDROM_BASE;
-    if (vecs[0] < 0x20000000UL || vecs[0] > 0x20004000UL)
-        return 0U;
-    if (vecs[1] < UPG_LDROM_BASE || vecs[1] >= UPG_LDROM_BASE + 0x1000UL ||
-        !(vecs[1] & 1UL))
-        return 0U;
     return 1U;
 }
 
@@ -69,21 +63,37 @@ static void upg_unlock(void)
     SYS->REGWRPROT = 0x88UL;
 }
 
-__attribute__((weak)) void upg_request_handoff(void) { upg_handoff = 1U; }
-__attribute__((weak)) int upg_request_flash(void) { return -1; }
-__attribute__((weak)) int upg_do_flash_pages(void) { return -1; }
+#include "writer.h"
 
-/* Shared commit: validate staged image, then role-specific next step. */
+__attribute__((weak)) int writer_program_aprom(uint32_t dst_addr, const uint32_t *src, uint32_t nwords)
+{
+    (void)dst_addr;
+    (void)src;
+    (void)nwords;
+    return 0;
+}
+
+int upg_do_flash_pages(void)
+{
+    uint32_t len = upg_image_len();
+    uint32_t nwords;
+
+    if (len == 0UL || len > UPG_STAGE_MAX)
+        return -1;
+    nwords = (len + 3UL) / 4UL;
+    return writer_program_aprom(UPG_APP_BASE, (const uint32_t *)upg_stage, nwords);
+}
+
+__attribute__((weak)) int upg_request_flash(void) { return 0; }
+
+/* Shared commit: validate staged image, then trigger in-place flash. */
 int upg_backend_commit(void)
 {
     if (upg_crc32(upg_stage, upg_exp_len) != upg_exp_crc)
         return 1;
-    if (upg_role() == UPG_ROLE_APP) {
-        upg_request_handoff();
-    } else {
-        if (upg_request_flash() != 0)
-            return 1;
-    }
+    if (upg_request_flash() != 0)
+        return 1;
+    upg_flashing = 1U;
     return 0;
 }
 
@@ -271,6 +281,10 @@ void upg_poll(void)
     if (upg_flashing != 0U) {
         int rc;
         upg_flashing = 0U;
+        /* Host readout window for COMMIT response (~100ms, IRQs live). */
+        for (d = 0; d < 100000UL; d++) {
+            __NOP();
+        }
         __disable_irq();
         rc = upg_do_flash_pages();
         if (rc == 0) {

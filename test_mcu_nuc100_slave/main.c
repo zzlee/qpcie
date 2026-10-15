@@ -96,6 +96,12 @@ int main(void)
 
     while (1) {
         upg_poll();
+        if (!(I2C0->I2CON & I2C_I2CON_AA_Msk)) {
+            I2C_SET_CONTROL_REG(I2C0, I2C_I2CON_SI_AA);
+        }
+        if (!(I2C1->I2CON & I2C_I2CON_AA_Msk)) {
+            I2C_SET_CONTROL_REG(I2C1, I2C_I2CON_SI_AA);
+        }
         __WFI();
     }
 }

@@ -20,7 +20,7 @@ SYS_SRC  := $(DEVDIR)/Source/system_NUC100Series.c
 STARTUP  := $(DEVDIR)/Source/GCC/startup_NUC100Series.S
 LDFLAGS  := -mcpu=cortex-m0 -mthumb -Wl,--gc-sections -specs=nosys.specs
 
-APP_SRCS := main.c i2c_slave.c regfile.c board.c upg.c
+APP_SRCS := main.c i2c_slave.c regfile.c board.c upg.c writer.c
 LDROM_SRCS := ldrom_main.c i2c_slave.c upg.c writer.c
 STAGE0_SRCS := stage0.c
 

@@ -183,19 +183,24 @@ stop:
 /* Raw read: Sr + addr+R, N bytes (STOP on last). No preceding W phase. */
 static int rd_raw(volatile uint8_t *bar1, uint8_t addr7, uint8_t *buf, int len)
 {
-    int r = send_byte(bar1, (uint8_t)((addr7 << 1) | 1), I2C_CR_STA);
+    int r = -1;
+    for (int retry = 0; retry < 50; retry++) {
+        if (retry > 0)
+            usleep(1000);
+        r = send_byte(bar1, (uint8_t)((addr7 << 1) | 1), I2C_CR_STA);
+        if (r == 0)
+            break;
+        write32(bar1, g_base + REG_I2C_CR, I2C_CR_STO);
+        wait_tip(bar1);
+    }
     if (r)
-        goto stop;
+        return r;
     for (int i = 0; i < len; i++) {
         r = recv_byte(bar1, &buf[i], i == len - 1);
         if (r)
             return r;
     }
     return 0;
-stop:
-    write32(bar1, g_base + REG_I2C_CR, I2C_CR_STO);
-    wait_tip(bar1);
-    return r;
 }
 
 static uint32_t crc32_ieee(const uint8_t *data, uint32_t len)
@@ -240,6 +245,7 @@ static int upg_cmd_rsp(volatile uint8_t *bar1, const uint8_t *cmd, int cmdlen,
     int r = upg_cmd(bar1, cmd, cmdlen);
     if (r)
         return r;
+    usleep(2000); /* allow slave ISR to execute command and prepare response */
     return rd_raw(bar1, MCU_CONTROL_ADDR, rsp, rsplen);
 }
 
@@ -247,6 +253,73 @@ static int upg_cmd_rsp(volatile uint8_t *bar1, const uint8_t *cmd, int cmdlen,
  * Flow works against app (role 0) and LDROM console (role 1) identically:
  * HELLO -> BEGIN -> CHUNKs -> COMMIT -> wait -> VER poll.
  * Returns 0 when the running firmware reports the file's version. */
+static int send_image_chunks(volatile uint8_t *bar1, const uint8_t *img, uint32_t len, uint32_t crc)
+{
+    uint8_t rsp[8];
+    int r;
+
+    /* BEGIN */
+    uint8_t cmd[7] = {0x02, (uint8_t)(len & 0xFF), (uint8_t)((len >> 8) & 0xFF),
+                      (uint8_t)(crc & 0xFF), (uint8_t)((crc >> 8) & 0xFF),
+                      (uint8_t)((crc >> 16) & 0xFF), (uint8_t)((crc >> 24) & 0xFF)};
+    r = upg_cmd_rsp(bar1, cmd, 7, rsp, 1);
+    if (r || rsp[0]) {
+        fprintf(stderr, "BEGIN failed (%d/%u)\n", r, r ? 0 : rsp[0]);
+        return -1;
+    }
+
+    /* CHUNKs, 32B each, retry x3 on CRC error */
+    for (uint32_t off = 0; off < len;) {
+        uint32_t n = len - off > 32 ? 32 : len - off;
+        uint8_t chunk_cmd[40];
+        int tries;
+        chunk_cmd[0] = 0x03;
+        chunk_cmd[1] = off & 0xFF;
+        chunk_cmd[2] = (off >> 8) & 0xFF;
+        chunk_cmd[3] = n;
+        memcpy(chunk_cmd + 4, img + off, n);
+        /* CRC8 over OFF_L,OFF_H,N,DATA */
+        {
+            uint8_t cbuf[35];
+            cbuf[0] = chunk_cmd[1];
+            cbuf[1] = chunk_cmd[2];
+            cbuf[2] = chunk_cmd[3];
+            memcpy(cbuf + 3, img + off, n);
+            chunk_cmd[4 + n] = crc8_poly07(cbuf, 3 + n);
+        }
+        for (tries = 0; tries < 3; tries++) {
+            r = upg_cmd_rsp(bar1, chunk_cmd, (int)(5 + n), rsp, 1);
+            if (r == 0 && rsp[0] == 0)
+                break;
+            usleep(50000);
+        }
+        if (r || rsp[0]) {
+            fprintf(stderr, "\nCHUNK @%u failed (%d/%u)\n", off, r, r ? 0 : rsp[0]);
+            return -1;
+        }
+        off += n;
+        printf("\r  staged %u/%u", off, len);
+        fflush(stdout);
+    }
+    printf("\n");
+
+    /* COMMIT */
+    uint8_t commit_cmd[1] = { 0x04 };
+    r = upg_cmd(bar1, commit_cmd, 1);
+    if (r) {
+        fprintf(stderr, "COMMIT write failed (%d)\n", r);
+        return -1;
+    }
+    /* Try to read response (slave may disable IRQs to flash immediately) */
+    usleep(2000);
+    r = rd_raw(bar1, MCU_CONTROL_ADDR, rsp, 1);
+    if (r == 0 && rsp[0] != 0) {
+        fprintf(stderr, "COMMIT rejected (status %u)\n", rsp[0]);
+        return -1;
+    }
+    return 0;
+}
+
 static int flash_aprom(volatile uint8_t *bar1, const char *path)
 {
     int fd = open(path, O_RDONLY);
@@ -290,19 +363,19 @@ static int flash_aprom(volatile uint8_t *bar1, const char *path)
         uint32_t magic = img[0] | (img[1] << 8) | (img[2] << 16) | ((uint32_t)img[3] << 24);
         uint32_t hlen = img[8] | (img[9] << 8) | (img[10] << 16) | ((uint32_t)img[11] << 24);
         uint32_t hcrc = img[12] | (img[13] << 8) | (img[14] << 16) | ((uint32_t)img[15] << 24);
-        uint8_t ver = img[5];
+        uint8_t ver = img[4];
         if (magic != 0x41505032 || hlen != len) {
             fprintf(stderr, "bad app header (magic/len)\n");
             free(img);
             return 1;
         }
-        crc = crc32_ieee(img + 64, len - 64);
-        if (crc != hcrc) {
-            fprintf(stderr, "image CRC mismatch\n");
+        if (crc32_ieee(img + 64, len - 64) != hcrc) {
+            fprintf(stderr, "image header CRC mismatch\n");
             free(img);
             return 1;
         }
-        printf("image: VER=%u len=%u crc=%08X\n", ver, len, crc);
+        crc = crc32_ieee(img, len);
+        printf("image: VER=%u len=%u (header_crc=%08X stage_crc=%08X)\n", ver, len, hcrc, crc);
     }
 
     /* HELLO (retry: target may be mid-boot). */
@@ -325,96 +398,22 @@ static int flash_aprom(volatile uint8_t *bar1, const char *path)
         return 1;
     }
 
-    /* BEGIN */
-    {
-        uint8_t cmd[7] = {0x02, len & 0xFF, (len >> 8) & 0xFF,
-                          crc & 0xFF, (crc >> 8) & 0xFF,
-                          (crc >> 16) & 0xFF, (crc >> 24) & 0xFF};
-        r = upg_cmd_rsp(bar1, cmd, 7, rsp, 1);
-        if (r || rsp[0]) {
-            fprintf(stderr, "BEGIN failed (%d/%u)\n", r, r ? 0 : rsp[0]);
-            free(img);
-            return 1;
-        }
+    uint8_t initial_role = rsp[1];
+    printf("Transferring firmware to target (%s)...\n",
+           initial_role ? "LDROM-console" : "APROM-app");
+    if (send_image_chunks(bar1, img, len, crc) != 0) {
+        fprintf(stderr, "Firmware transfer failed\n");
+        free(img);
+        return 1;
     }
 
-    /* CHUNKs, 32B each, retry x3 on CRC error. */
-    for (uint32_t off = 0; off < len;) {
-        uint32_t n = len - off > 32 ? 32 : len - off;
-        uint8_t cmd[40];
-        int tries;
-        cmd[0] = 0x03;
-        cmd[1] = off & 0xFF;
-        cmd[2] = (off >> 8) & 0xFF;
-        cmd[3] = n;
-        memcpy(cmd + 4, img + off, n);
-        /* CRC8 over OFF_L,OFF_H,N,DATA */
-        {
-            uint8_t cbuf[35];
-            cbuf[0] = cmd[1];
-            cbuf[1] = cmd[2];
-            cbuf[2] = cmd[3];
-            memcpy(cbuf + 3, img + off, n);
-            cmd[4 + n] = crc8_poly07(cbuf, 3 + n);
-        }
-        for (tries = 0; tries < 3; tries++) {
-            r = upg_cmd_rsp(bar1, cmd, (int)(5 + n), rsp, 1);
-            if (r == 0 && rsp[0] == 0)
-                break;
-            usleep(50000);
-        }
-        if (r || rsp[0]) {
-            fprintf(stderr, "CHUNK @%u failed\n", off);
-            free(img);
-            return 1;
-        }
-        off += n;
-        printf("\r  staged %u/%u", off, len);
-        fflush(stdout);
-    }
-    printf("\n");
-
-    /* COMMIT, then allow handoff + flashing + resets. */
-    {
-        uint8_t cmd[1] = { 0x04 };
-        r = upg_cmd_rsp(bar1, cmd, 1, rsp, 1);
-        if (r || rsp[0]) {
-            fprintf(stderr, "COMMIT rejected (%d/%u)\n", r, r ? 0 : rsp[0]);
-            free(img);
-            return 1;
-        }
-    }
-    printf("committed, re-attaching to LDROM console...\n");
-
-    /* Re-establish the session in the console (chunks already staged). */
-    {
-        uint8_t begin_cmd[7] = { 0x02, len & 0xFF, (len >> 8) & 0xFF,
-                                crc & 0xFF, (crc >> 8) & 0xFF,
-                                (crc >> 16) & 0xFF, (crc >> 24) & 0xFF };
-        uint8_t commit_cmd[1] = { 0x04 };
-        int deadline = 90;
-        for (int tries = 0; tries < deadline; tries++) {
-            r = upg_cmd_rsp(bar1, begin_cmd, 7, rsp, 1);
-            if (r == 0 && rsp[0] == 0) {
-                r = upg_cmd_rsp(bar1, commit_cmd, 1, rsp, 1);
-                if (r == 0 && rsp[0] == 0)
-                    break;
-            }
-            sleep(1);
-        }
-        if (r || rsp[0]) {
-            fprintf(stderr, "console re-commit failed (%d/%u)\n", r, r ? 0 : rsp[0]);
-            free(img);
-            return 1;
-        }
-    }
-    printf("reflash accepted, waiting for reboot...\n");
-    sleep(10);
+    printf("Commit accepted! Waiting for in-system flash & reboot...\n");
+    sleep(2);
 
     /* Re-probe until the running firmware reports the file version. */
     {
-        uint8_t want_ver = img[5];
-        time_t deadline = time(NULL) + 90;
+        uint8_t want_ver = img[4];
+        time_t deadline = time(NULL) + 60;
         while (time(NULL) < deadline) {
             uint8_t regs[2];
             /* NACKs/timeouts expected across resets: keep polling. */
@@ -425,7 +424,7 @@ static int flash_aprom(volatile uint8_t *bar1, const char *path)
                 free(img);
                 return 0;
             }
-            sleep(2);
+            usleep(500000);
         }
         fprintf(stderr, "timeout waiting for VER=%u\n", want_ver);
         free(img);

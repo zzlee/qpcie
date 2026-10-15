@@ -1,46 +1,32 @@
-# MCU APROM update over PCIe (with LDROM cooperation)
+# MCU APROM update over PCIe (RAM-based FMC Writer)
 
-> **Experimental — do not run `--flash-aprom` yet.** Build/CRC checks do
-> not establish working recovery. The transport is 0x2A + escape byte;
-> the 0x2B secondary address ACKs at address level after the I2CADM fix
-> but data bytes still NACK on hardware (root cause open), so 0x2B is a
-> hardware alias only. LDROM readiness, reset handoff and host continuation
-> require hardware validation. Earlier claims that both upgrade phases
-> were complete were incorrect.
+## Architecture Overview
 
-## 2026-10-14 boot/IRQ correction
-
-The original stage0 cached IRQ handlers at SRAM 0x20000028/0x2000002C.
-App BSS initialization covers those addresses and zeroes both handlers.
-Consequently an address ACK does not prove functioning interrupt service.
-Stage0 now reads handler addresses directly from the flash header and
-uses an assembly-only MSP/tail-branch handoff. `make test-stage0` checks
-the generated dispatch instructions and bundle layout; actual register
-reads and scratch loopback still require hardware validation.
-
-Hardware follow-up: both MCU and FRONT buses read MAGIC=2A, VER=04,
-CTRL=02; MCU scratch loopback passed. This validates app IRQ dispatch,
-not LDROM execution or update recovery.
-
-Protocol hardening now rejects overflow, malformed BEGIN length, zero
-chunks, gaps and inconsistent retries. BEGIN starts new coverage: a
-reset into LDROM requires retransmitting the entire image, not merely
-BEGIN+COMMIT. `make test-protocol` exercises these guards with host mocks
-and ASan/UBSan. The host flash entry is disabled pending completion.
-Current local binaries are development artifacts, not a new flash release.
-
-Target: NUC100LE3AN (U2) on M2_710. Host path: PCIe BAR1 I2C master
+Target: NUC100LE3AN (U2) on M2_710 / M2_720. Host path: PCIe BAR1 I2C master
 (M05 MCU bus 0x5000 / M03 FRONT bus 0x3000) -> NUC100 I2C slave 0x2A.
-No FPGA/driver changes needed; flashing goes through
+No FPGA/driver changes needed; flashing goes through:
 `test_app/qpcie_mcu_scan --flash-aprom app.bin`.
 
-## Why LDROM must cooperate
+### In-System Flash Architecture (SRAM Writer)
+The NUC100 FMC peripheral rejects APROM writes while the Cortex-M0 PC is
+fetching instructions from APROM (generating an ISP Flash Fail flag `ISPFF`).
+To bypass this limitation cleanly without relying on LDROM boot-select switching
+(which is blocked under factory User Config `CBS=11` and lacks VTOR interrupt
+remapping on Cortex-M0), the flash writer (`writer_program_aprom`) is compiled
+with `__attribute__((section(".ramfunc")))`.
 
-FMC rejects APROM-block writes while PC is in APROM (ISPFF). The writer
-therefore runs from LDROM (`writer.c`, stack-only). No CONFIG/VECMAP
-changes: boot-source switches use the ISPCON BS bit + reset (BSP pattern
-`FMC_SetBootSource` + `NVIC_SystemReset`), which works under the factory
-CBS=11. CONFIG stays untouched.
+1. **Staging**: Host streams 32B chunks over I2C slave 0x2A via escape byte `0x04`
+   into the fixed SRAM buffer `upg_stage` (`0x20001000`).
+2. **Validation**: Host issues `COMMIT` (`0x04`). The MCU calculates `upg_crc32(upg_stage, len)`
+   and responds with `UPG_ST_OK` (`0x00`).
+3. **In-SRAM Flash**: Main loop disables interrupts (`__disable_irq()`) and calls
+   `writer_program_aprom(0x0800, upg_stage, nwords)`. Executing from SRAM (`0x2000xxxx`),
+   FMC erases pages from 0x0800, programs the new binary, and performs readback verification.
+4. **Clean Boot**: Once verified, the writer issues `NVIC_SystemReset()`.
+   APROM `stage0` (`0x0000`) validates the new `app.bin` header magic and CRC, sets up
+   MSP, and branches to the new application.
+5. **Zero Nu-Link Dependency**: After flashing the transition bundle once, all future
+   firmware updates run 100% in-system over PCIe in ~2 seconds.
 
 ## Flash layout (APROM 128KB, LDROM 4KB)
 

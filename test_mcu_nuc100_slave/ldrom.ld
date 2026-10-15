@@ -129,6 +129,7 @@ SECTIONS
 		__data_start__ = .;
 		*(vtable)
 		*(.data*)
+		*(.ramfunc*)
 
 		. = ALIGN(4);
 		/* preinit data */

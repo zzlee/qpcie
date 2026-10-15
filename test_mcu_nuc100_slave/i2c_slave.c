@@ -124,7 +124,7 @@ void i2c_slave_isr(I2C_T *i2c, i2c_ch_t *ch)
         I2C_SET_CONTROL_REG(i2c, I2C_I2CON_SI_AA);
     } else {
         I2C_SET_CONTROL_REG(i2c, I2C_I2CON_STO_SI);
-        I2C_SET_CONTROL_REG(i2c, I2C_I2CON_SI);
+        I2C_SET_CONTROL_REG(i2c, I2C_I2CON_SI_AA);
         ch->rx_len = 0U;
         ch->upg = 0U;
         ch->cmdlen = 0U;

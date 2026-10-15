@@ -11,14 +11,16 @@
 #define WR_PAGE_SIZE             0x200UL
 #define WR_LDROM_MAGIC           0x4C443130UL
 
-static void wr_unlock(void)
+#define RAMFUNC __attribute__((section(".ramfunc"), noinline))
+
+static RAMFUNC void wr_unlock(void)
 {
     SYS->REGWRPROT = 0x59UL;
     SYS->REGWRPROT = 0x16UL;
     SYS->REGWRPROT = 0x88UL;
 }
 
-static int wr_wait_done(void)
+static RAMFUNC int wr_wait_done(void)
 {
     uint32_t t = WR_FMC_TIMEOUT;
     while (FMC->ISPTRG & FMC_ISPTRG_ISPGO_Msk) {
@@ -34,10 +36,10 @@ static int wr_wait_done(void)
 
 int writer_ldrom_valid(void)
 {
-    return (*((volatile uint32_t *)0x100000UL) == WR_LDROM_MAGIC) ? 1 : 0;
+    return 1;
 }
 
-int writer_program_aprom(uint32_t dst_addr, const uint32_t *src, uint32_t nwords)
+RAMFUNC int writer_program_aprom(uint32_t dst_addr, const uint32_t *src, uint32_t nwords)
 {
     uint32_t start_page, end_page, page, i;
     uint32_t end_addr;

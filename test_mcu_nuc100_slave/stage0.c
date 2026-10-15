@@ -95,12 +95,6 @@ static int app_valid(volatile app_hdr_t *hdr)
 
 static void boot_ldrom(void)
 {
-    volatile uint32_t magic = *((volatile uint32_t *)UPG_LDROM_BASE);
-    if (magic != UPG_LDROM_MAGIC) {
-        while (1) {
-            __WFI(); /* No valid app and no LDROM: Nu-Link recovery only. */
-        }
-    }
     SYS->REGWRPROT = 0x59UL;
     SYS->REGWRPROT = 0x16UL;
     SYS->REGWRPROT = 0x88UL;
