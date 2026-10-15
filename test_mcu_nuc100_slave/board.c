@@ -4,24 +4,23 @@
 
 static void check_enable_iap(void)
 {
-    uint32_t cbs;
     uint32_t cfg0, cfg1;
 
-    /* If CBS has bit 0 set (non-IAP mode: CBS=11 or 01), set to APROM+IAP (CBS=10) */
     CLK->AHBCLK |= CLK_AHBCLK_ISP_EN_Msk;
     FMC->ISPCON |= FMC_ISPCON_ISPEN_Msk;
 
-    cbs = (FMC->ISPSTA & FMC_ISPSTA_CBS_Msk) >> FMC_ISPSTA_CBS_Pos;
-    if ((cbs & 1) != 0) {
-        FMC->ISPCON |= FMC_ISPCON_CFGUEN_Msk;
+    /* Read Config0 directly from 0x00300000 (FMC_CONFIG_BASE) */
+    FMC->ISPCMD = 0x00UL;
+    FMC->ISPADR = 0x00300000UL;
+    FMC->ISPTRG = 0x1UL;
+    __ISB();
+    while (FMC->ISPTRG & 0x1UL);
+    cfg0 = FMC->ISPDAT;
 
-        /* Read Config0 */
-        FMC->ISPCMD = 0x00UL;
-        FMC->ISPADR = 0x00300000UL;
-        FMC->ISPTRG = 0x1UL;
-        __ISB();
-        while (FMC->ISPTRG & 0x1UL);
-        cfg0 = FMC->ISPDAT;
+    /* Check if CBS (bits [7:6]) is 10'b (APROM + IAP mode).
+     * Factory default or erased CONFIG0 is 0xFF (CBS = 11'b, non-IAP mode). */
+    if ((cfg0 & 0xC0UL) != 0x80UL) {
+        FMC->ISPCON |= FMC_ISPCON_CFGUEN_Msk;
 
         /* Read Config1 */
         FMC->ISPCMD = 0x00UL;
@@ -31,33 +30,32 @@ static void check_enable_iap(void)
         while (FMC->ISPTRG & 0x1UL);
         cfg1 = FMC->ISPDAT;
 
-        if ((cfg0 & 0xC0UL) != 0x80UL) {
-            cfg0 &= ~0xC0UL;
-            cfg0 |= 0x80UL; /* Enable IAP mode: CBS = 10'b */
+        /* Set CBS to 10'b (APROM + IAP mode) */
+        cfg0 &= ~0xC0UL;
+        cfg0 |= 0x80UL;
 
-            /* Page Erase Config Page */
-            FMC->ISPCMD = 0x22UL;
-            FMC->ISPADR = 0x00300000UL;
-            FMC->ISPTRG = 0x1UL;
-            __ISB();
-            while (FMC->ISPTRG & 0x1UL);
+        /* Page Erase Config Page */
+        FMC->ISPCMD = 0x22UL;
+        FMC->ISPADR = 0x00300000UL;
+        FMC->ISPTRG = 0x1UL;
+        __ISB();
+        while (FMC->ISPTRG & 0x1UL);
 
-            /* Program Config0 */
-            FMC->ISPCMD = 0x21UL;
-            FMC->ISPADR = 0x00300000UL;
-            FMC->ISPDAT = cfg0;
-            FMC->ISPTRG = 0x1UL;
-            __ISB();
-            while (FMC->ISPTRG & 0x1UL);
+        /* Program Config0 */
+        FMC->ISPCMD = 0x21UL;
+        FMC->ISPADR = 0x00300000UL;
+        FMC->ISPDAT = cfg0;
+        FMC->ISPTRG = 0x1UL;
+        __ISB();
+        while (FMC->ISPTRG & 0x1UL);
 
-            /* Program Config1 */
-            FMC->ISPCMD = 0x21UL;
-            FMC->ISPADR = 0x00300004UL;
-            FMC->ISPDAT = cfg1;
-            FMC->ISPTRG = 0x1UL;
-            __ISB();
-            while (FMC->ISPTRG & 0x1UL);
-        }
+        /* Program Config1 */
+        FMC->ISPCMD = 0x21UL;
+        FMC->ISPADR = 0x00300004UL;
+        FMC->ISPDAT = cfg1;
+        FMC->ISPTRG = 0x1UL;
+        __ISB();
+        while (FMC->ISPTRG & 0x1UL);
 
         /* Must perform whole-chip reset for new User Config (CBS) to reload into FMC hardware */
         SYS->IPRSTC1 = SYS_IPRSTC1_CHIP_RST_Msk;
