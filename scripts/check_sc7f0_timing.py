@@ -11,6 +11,42 @@ import re
 import sys
 
 
+# Narrow reviewed structures, NOT clock exceptions or a blanket TIMING-9 waiver.
+# Data crosses FIFOs under synchronized Gray-pointer/empty/full protection.
+FIFO_ROOTS = (
+    'u_dma_top/u_axil_reg_space/u_controls/u_fifo/gnuram_async_fifo.xpm_fifo_base_inst',
+    'u_dma_top/u_axil_reg_space/u_status/u_fifo/gnuram_async_fifo.xpm_fifo_base_inst',
+    'u_dma_top/u_upg_cdc/inst/gen_async_conv.axisc_async_clock_converter_0/xpm_fifo_async_inst/gnuram_async_fifo.xpm_fifo_base_inst',
+)
+
+
+def reviewed_crossing(rule, src, dest):
+    if rule == 'CDC-6':
+        # These are independent sticky flags, never a coherent numeric bus.
+        root = 'u_dma_top/u_zu4ev_upg_diag/'
+        if src == root + 'pcie_sticky_reg[12:0]/C' and dest == root + 'u_levels/syncstages_ff_reg[0][12:0]/D':
+            return 'independent_sticky_flags'
+    if rule != 'CDC-15':
+        return None
+    for root in FIFO_ROOTS:
+        if src.startswith(root + '/') and dest.startswith(root + '/'):
+            return 'XPM_FIFO'
+    markers = (
+        '/U_CMD6_WR/U_WR_FIFO/SUBCORE_FIFO.xsdbm_v3_0_0_wrfifo_inst/inst_fifo_gen/',
+        '/U_CMD6_RD/U_RD_FIFO/SUBCORE_FIFO.xsdbm_v3_0_0_rdfifo_inst/inst_fifo_gen/',
+    )
+    if (src.startswith('dbg_hub/') and dest.startswith('dbg_hub/')
+            and any(marker in src and marker in dest for marker in markers)
+            and src.split('/inst_fifo_gen/')[0] == dest.split('/inst_fifo_gen/')[0]):
+        return 'vendor_debug_hub_FIFO'
+    # GT Wizard 1.7.17 disables testclk_en through two synchronizers, then
+    # waits 16 ref-clock cycles in HOLD before latching this 18-bit counter.
+    match = re.fullmatch(r'(u_pcie_ip/.*/gtwizard_ultrascale_v1_7_17_gthe4_cpll_cal_tx_i/U_TXOUTCLK_FREQ_COUNTER)/testclk_cnt_reg\[(\d+)\]/C', src)
+    if match and int(match[2]) < 18 and dest == match[1] + '/freq_cnt_o_reg[' + match[2] + ']/D':
+        return 'vendor_CPLL_held_counter'
+    return None
+
+
 def check(directory):
     directory = Path(directory)
     errors = []
@@ -31,7 +67,7 @@ def check(directory):
     if any(x < 0 for x in margins.values()) or any(values[i] != 0 for i in (1, 2, 5, 6, 9, 10)):
         errors.append('setup/hold/pulse-width failure')
     counts = {}
-    for name in ('no_clock', 'constant_clock', 'unconstrained_internal_endpoints',
+    for name in ('no_clock', 'constant_clock', 'pulse_width_clock', 'unconstrained_internal_endpoints',
                  'multiple_clock', 'generated_clocks', 'loops', 'latch_loops',
                  'partial_input_delay', 'partial_output_delay'):
         matches = re.findall(r'checking ' + name + r' \((\d+)\)', coverage)
@@ -51,6 +87,29 @@ def check(directory):
     for rule, severity, count in cdc_rows:
         if int(count) and (severity == 'Critical' or rule in ('CDC-5', 'CDC-7')):
             errors.append(rule + ' ' + severity + '=' + count)
+    # Account for EVERY warning in the detailed report. Summary-only reports,
+    # new/custom CE crossings and unexpected array synchronizers fail closed.
+    detail_counts = {}
+    reviewed = {}
+    unreviewed = []
+    for line in cdc.splitlines():
+        match = re.match(r'\s*\d+\s+(CDC-\d+)\s+Warning\s+', line)
+        if not match:
+            continue
+        rule = match[1]
+        detail_counts[rule] = detail_counts.get(rule, 0) + 1
+        src, dest = line.split()[-2:]
+        kind = reviewed_crossing(rule, src, dest)
+        if kind:
+            reviewed[kind] = reviewed.get(kind, 0) + 1
+        else:
+            unreviewed.append([rule, src, dest])
+    expected_details = {rule: int(count) for rule, severity, count in cdc_rows
+                        if severity == 'Warning' and int(count)}
+    if detail_counts != expected_details:
+        errors.append('missing/incomplete detailed CDC warnings')
+    if unreviewed:
+        errors.append('unreviewed CDC warnings: ' + str(len(unreviewed)))
     if 'REPORT SUMMARY' not in methodology:
         raise ValueError('missing methodology summary')
     method_rows = re.findall(
@@ -59,8 +118,14 @@ def check(directory):
     if not total or int(total[1]) != sum(int(row[2]) for row in method_rows):
         raise ValueError('missing/incomplete methodology summary')
     for rule, severity, count in method_rows:
-        if int(count) and (severity in ('Critical Warning', 'Error') or rule in ('TIMING-9', 'TIMING-24')):
+        if int(count) and (severity in ('Critical Warning', 'Error') or rule not in ('DPIR-2', 'LUTAR-1', 'TIMING-9')):
             errors.append(rule + ' ' + severity + '=' + count)
+        if rule == 'TIMING-9' and int(count):
+            # Vivado emits this aggregate warning for the legitimate held-data
+            # structures above as well. Permit it ONLY with complete path-level
+            # accounting, no unknown paths, and all other CDC/clock gates intact.
+            if int(count) != 1 or not reviewed or unreviewed or detail_counts != expected_details:
+                errors.append('TIMING-9 without complete reviewed CDC evidence')
     skew_values = re.findall(r'^\s*(?:Slow|Fast)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s*$', skew, re.M)
     if not skew_values:
         raise ValueError('missing bus-skew summary (expected XPM FIFO constraints)')
@@ -68,7 +133,8 @@ def check(directory):
     if not math.isfinite(skew_min) or skew_min < 0 or '(VIOLATED)' in skew:
         errors.append('bus-skew failure')
     result = dict(pass_gate=not errors, margins_ns=margins, coverage=counts,
-                  cdc=cdc_counts, bus_skew_min_ns=skew_min, errors=errors)
+                  cdc=cdc_counts, reviewed_cdc=reviewed, unreviewed_cdc=unreviewed[:10],
+                  bus_skew_min_ns=skew_min, errors=errors)
     return result
 
 

@@ -17,14 +17,38 @@ install -D -m 0644 \
 mkdir -p "$ROOTFS/etc/systemd/system/multi-user.target.wants"
 ln -sfn /lib/systemd/system/qpcie-debugd.service \
     "$ROOTFS/etc/systemd/system/multi-user.target.wants/qpcie-debugd.service"
+# Resolve symlinks as the TARGET root would, not against the build host.
+# Yocto update-alternatives uses absolute links (e.g. /bin/bash.bash);
+# a normal `test -f ROOTFS/bin/bash` follows those into the host filesystem.
+rootfs_regular_file() {
+    local remaining="${1#/}" current="$ROOTFS" part link links=0
+    while [[ -n "$remaining" ]]; do
+        if [[ "$remaining" == */* ]]; then
+            part="${remaining%%/*}"; remaining="${remaining#*/}"
+        else
+            part="$remaining"; remaining=
+        fi
+        case "$part" in
+            ''|.) continue ;;
+            ..) [[ "$current" == "$ROOTFS" ]] || current="${current%/*}"; continue ;;
+        esac
+        if [[ -L "$current/$part" ]]; then
+            if (( ++links > 40 )); then return 1; fi
+            link="$(readlink "$current/$part")" || return 1
+            if [[ "$link" == /* ]]; then current="$ROOTFS"; link="${link#/}"; fi
+            remaining="$link${remaining:+/$remaining}"
+        else
+            current="$current/$part"
+        fi
+    done
+    [[ -f "$current" ]]
+}
 if [[ "${ENABLE_DEBUG_EXEC:-0}" == 1 ]]; then
     mkdir -p "$ROOTFS/etc/default"
-    # /bin/sh is guaranteed by the existing image; Bash may be selected
-    # explicitly when present (recipe builds install it as a dependency).
     DEBUG_SHELL=/bin/sh
-    if [[ -f "$ROOTFS/bin/bash" || -f "$ROOTFS/usr/bin/bash" ]]; then
-        DEBUG_SHELL=/bin/bash
-    fi
+    for shell in /bin/bash /usr/bin/bash; do
+        if rootfs_regular_file "$shell"; then DEBUG_SHELL="$shell"; break; fi
+    done
     printf 'DEBUG_EXEC_ARGS=--allow-exec\nDEBUG_SHELL=%s\n' "$DEBUG_SHELL" > "$ROOTFS/etc/default/qpcie-debugd"
     chmod 0600 "$ROOTFS/etc/default/qpcie-debugd"
     echo "WARNING: this lab image permits root shell commands over PCIe."

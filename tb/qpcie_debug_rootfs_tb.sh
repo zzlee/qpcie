@@ -12,6 +12,22 @@ test "$(stat -c %a "$WORK/etc/default/qpcie-debugd")" = 600
 # A recipe-installed Bash should be selected for the explicit lab image.
 touch "$WORK/usr/bin/bash"
 ENABLE_DEBUG_EXEC=1 bash "$ROOT/scripts/install_debug_rootfs.sh" "$WORK" >/dev/null
+grep -qx 'DEBUG_SHELL=/usr/bin/bash' "$WORK/etc/default/qpcie-debugd"
+# Absolute Yocto alternatives must resolve inside the target, not the host.
+mkdir -p "$WORK/bin"
+mv "$WORK/usr/bin/bash" "$WORK/usr/bin/bash.bash"
+ln -s /usr/bin/bash.bash "$WORK/bin/bash"
+ln -s /bin/bash "$WORK/usr/bin/bash"
+ENABLE_DEBUG_EXEC=1 bash "$ROOT/scripts/install_debug_rootfs.sh" "$WORK" >/dev/null
+grep -qx 'DEBUG_SHELL=/bin/bash' "$WORK/etc/default/qpcie-debugd"
+# A target self-loop must not be mistaken for the host's real /bin/bash.
+ln -sfn /bin/bash "$WORK/bin/bash"
+ENABLE_DEBUG_EXEC=1 bash "$ROOT/scripts/install_debug_rootfs.sh" "$WORK" >/dev/null
+grep -qx 'DEBUG_SHELL=/bin/sh' "$WORK/etc/default/qpcie-debugd"
+# Also support usrmerge parent symlinks and relative alternatives with '..'.
+rm "$WORK/bin/bash"; rmdir "$WORK/bin"; ln -s usr/bin "$WORK/bin"
+ln -sfn ../../usr/bin/bash.bash "$WORK/usr/bin/bash"
+ENABLE_DEBUG_EXEC=1 bash "$ROOT/scripts/install_debug_rootfs.sh" "$WORK" >/dev/null
 grep -qx 'DEBUG_SHELL=/bin/bash' "$WORK/etc/default/qpcie-debugd"
 # Reusing an enabled rootfs without the opt-in must DISABLE execution.
 ENABLE_DEBUG_EXEC=0 bash "$ROOT/scripts/install_debug_rootfs.sh" "$WORK" >/dev/null
@@ -33,7 +49,7 @@ bash "$ROOT/scripts/strip_sc7f0_mmio_services.sh" "$WORK"
 if find "$WORK" -iname '*qpcie*' | grep -q .; then
     echo 'FAIL: standalone installer contains MMIO service artifacts' >&2; exit 1
 fi
-test -f "$WORK/usr/bin/bash" # unrelated files must be preserved
+test -f "$WORK/usr/bin/bash.bash" # unrelated files must be preserved
 if bash "$ROOT/scripts/strip_sc7f0_mmio_services.sh" / >/dev/null 2>&1; then
     echo 'FAIL: stripper accepted host /' >&2; exit 1
 fi

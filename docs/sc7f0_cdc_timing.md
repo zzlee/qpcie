@@ -99,8 +99,14 @@ write release, recovery without replay/phantom xrun, PCIe reset and PS reset.
 Upgrade sticky-clear/ACK, PS AXI ID protocol, diagnostic CSR, upgrade START
 CDC, DDR readback and production mailbox crossbar integration also pass.
 The debug CSR test verifies version04 and capability `0x80000010` while PCIe
-clock is absent. Artifacts are under `build/debug-first/`. Full implementation
-and on-board acceptance are still pending, not claimed passes.
+clock is absent. Artifacts are under `build/debug-first/`.
+
+Candidate04 routed implementation has passed: WNS **+1.494 ns**, WHS
+**+0.010 ns**, WPWS **0.000 ns**, minimum bus-skew slack **+7.116 ns**;
+no_clock/unconstrained/multiple-clock/invalid-generated-clock counts are zero.
+Critical CDC count is zero. Matching XSA SHA-256:
+`8260328d8d99f7002f375a6e3f933a43edcee825dc460e3fcb740226ba32b552`.
+On-board acceptance is still pending; these are NOT hardware acceptance results.
 
 `check_sc7f0_timing.py` fails closed before XSA export on negative whole-design
 setup/hold/pulse-width/skew, incomplete clock coverage, unconstrained internal
@@ -108,8 +114,33 @@ endpoints, unknown/critical CDC, invalid clock methodology, or overridden
 CDC max-delay constraints. Unit regression `tb/sc7f0_timing_gate_tb.py` tests
 negative/missing/malformed reports, not just the pass case. The build also
 records detailed CDC, check_timing, clock-interaction and methodology reports.
-Remaining vendor XPM FIFO CE/LUTRAM/reset warnings require source-level review;
-a passing automated gate is necessary, not sufficient, for release.
+The remaining warnings were reviewed against the source and routed paths:
+
+* 2185 CDC-15 paths are inside three specifically named XPM asynchronous FIFOs
+  (control snapshot, status snapshot, upgrade AXIS clock converter). Gray-pointer
+  full/empty protection and destination enables hold payloads until valid.
+* Four CDC-15 paths are the vendor debug-hub read/write FIFOs, not custom RTL.
+* 72 CDC-15 paths are the four PCIe GT Wizard 1.7.17 CPLL frequency counters.
+  `gtwizard_ultrascale_v1_7_gthe4_cal_freqcnt.v` synchronizes count-enable into
+  the test clock, disables counting, waits 16 reference cycles in HOLD, then
+  latches each 18-bit count. This is a held-data measurement, not an unsafely
+  sampled live counter. The hardware/template constraints are unmodified.
+* One CDC-6 vector is exactly the 13 independent upgrade sticky flags through
+  XPM array-single; it is not treated as a coherent numeric payload. Clear ACK
+  has an additional synchronizer stage so flags settle first.
+* DPIR-2 is the DSP asynchronous-reset packing limitation. LUTAR-1 paths are
+  vendor reset trees or same-domain reset qualification; synchronized peer
+  reset is shared, and reset sources hold reset until safe release. No foreign
+  unsynchronized reset has been excused.
+
+Vivado also emits one aggregate TIMING-9 for these held-data structures. The
+checker permits that aggregate ONLY when every detailed warning path matches
+these narrow reviewed structures, detail counts exactly match the summary,
+and all other clock/CDC/timing checks pass. Summary-only reports, custom CE
+crossings, new array buses, critical CDC and unknown paths still fail closed.
+There are no new timing exceptions or Vivado waivers. Unit tests cover both
+this complete-evidence case and missing/unreviewed evidence. A passing automated
+gate remains necessary, not sufficient, for release.
 
 Only after final reports and integration tests pass: import the matching XSA,
 rebuild PetaLinux/patched FSBL/matching BOOT.BIN, explicitly opt the LAB image
