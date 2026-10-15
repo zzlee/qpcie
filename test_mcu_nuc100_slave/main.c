@@ -87,9 +87,21 @@ int main(void)
     regfile_init(APP_FW_VER, 0x02U);
     i2c_slave_ch_init(I2C0, &g_c0, 0x2AU);
     i2c_slave_ch_init(I2C1, &g_c1, 0x2AU);
-    /* Runtime diagnostic of upgrade secondary addresses (host reads reg 0x0A/B). */
+    /* Runtime diagnostic of upgrade secondary addresses and FMC CBS state. */
     app_reg_write(0x0A, (uint8_t)I2C0->I2CADDR1);
     app_reg_write(0x0B, (uint8_t)I2C1->I2CADDR1);
+    app_reg_write(0x0C, (uint8_t)(FMC->ISPSTA & 0xFFU));
+    app_reg_write(0x0D, (uint8_t)(FMC->ISPCON & 0xFFU));
+    {
+        CLK->AHBCLK |= CLK_AHBCLK_ISP_EN_Msk;
+        FMC->ISPCON |= FMC_ISPCON_ISPEN_Msk;
+        FMC->ISPCMD = 0x00UL;
+        FMC->ISPADR = 0x00300000UL;
+        FMC->ISPTRG = 0x1UL;
+        __ISB();
+        while (FMC->ISPTRG & 0x1UL);
+        app_reg_write(0x0E, (uint8_t)(FMC->ISPDAT & 0xFFU));
+    }
     NVIC_EnableIRQ(I2C0_IRQn);
     NVIC_EnableIRQ(I2C1_IRQn);
     SYS->REGWRPROT = 0x00UL;

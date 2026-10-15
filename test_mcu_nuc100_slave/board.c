@@ -4,13 +4,15 @@
 
 static void check_enable_iap(void)
 {
-    /* If CBS has bit 6 set (non-IAP mode), clear bit 6 to enable IAP (CBS=10) */
+    uint32_t cbs;
+    uint32_t cfg0, cfg1;
+
+    /* If CBS has bit 0 set (non-IAP mode: CBS=11 or 01), set to APROM+IAP (CBS=10) */
     CLK->AHBCLK |= CLK_AHBCLK_ISP_EN_Msk;
     FMC->ISPCON |= FMC_ISPCON_ISPEN_Msk;
 
-    if (((FMC->ISPSTA & FMC_ISPSTA_CBS_Msk) >> FMC_ISPSTA_CBS_Pos) & 1) {
-        uint32_t cfg0, cfg1;
-
+    cbs = (FMC->ISPSTA & FMC_ISPSTA_CBS_Msk) >> FMC_ISPSTA_CBS_Pos;
+    if ((cbs & 1) != 0) {
         FMC->ISPCON |= FMC_ISPCON_CFGUEN_Msk;
 
         /* Read Config0 */
@@ -29,8 +31,9 @@ static void check_enable_iap(void)
         while (FMC->ISPTRG & 0x1UL);
         cfg1 = FMC->ISPDAT;
 
-        if (cfg0 & 0x40UL) {
-            cfg0 &= ~0x40UL; /* Enable IAP mode (CBS=10) */
+        if ((cfg0 & 0xC0UL) != 0x80UL) {
+            cfg0 &= ~0xC0UL;
+            cfg0 |= 0x80UL; /* Enable IAP mode: CBS = 10'b */
 
             /* Page Erase Config Page */
             FMC->ISPCMD = 0x22UL;
@@ -54,11 +57,11 @@ static void check_enable_iap(void)
             FMC->ISPTRG = 0x1UL;
             __ISB();
             while (FMC->ISPTRG & 0x1UL);
-
-            /* Reset MCU for new User Config (CBS) to take effect */
-            NVIC_SystemReset();
-            while (1);
         }
+
+        /* Must perform whole-chip reset for new User Config (CBS) to reload into FMC hardware */
+        SYS->IPRSTC1 = SYS_IPRSTC1_CHIP_RST_Msk;
+        while (1);
     }
 }
 
