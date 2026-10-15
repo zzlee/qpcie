@@ -8,7 +8,7 @@
 `timescale 1ns / 1ps
 
 module axil_reg_space #(
-    parameter [31:0]   C_VERSION    = 32'h2610_1302, // Mandatory hardware version YYMMDDpp
+    parameter [31:0]   C_VERSION    = 32'h2610_1501, // Mandatory hardware version YYMMDDpp
     parameter integer NUM_VIDEO_CH = 4,
     parameter integer NUM_AUDIO_CH = 4
 )(
@@ -805,9 +805,9 @@ module axil_reg_space #(
                     4'h6: begin // HDMI RX & TX Block (0x0600 - 0x06FF)
                         case (s_axil_araddr[7:0])
                             8'h00: s_axil_rdata <= in_hdmi_rx_status;
-                            8'h04: s_axil_rdata <= reg_hdmi_rx_width;
-                            8'h08: s_axil_rdata <= reg_hdmi_rx_height;
-                            8'h0C: s_axil_rdata <= reg_hdmi_rx_pixelclk_lo;
+                            8'h04: s_axil_rdata <= (in_hdmi_rx_status[3]) ? {16'd0, in_hdmi_rx_res[15:0]} : reg_hdmi_rx_width;
+                            8'h08: s_axil_rdata <= (in_hdmi_rx_status[3]) ? {16'd0, in_hdmi_rx_res[31:16]} : reg_hdmi_rx_height;
+                            8'h0C: s_axil_rdata <= (in_hdmi_rx_status[3]) ? in_hdmi_rx_timing : reg_hdmi_rx_pixelclk_lo;
                             8'h10: s_axil_rdata <= reg_hdmi_tx_ctrl;
                             8'h14: s_axil_rdata <= reg_hdmi_tx_res;
                             8'h18: s_axil_rdata <= reg_hdmi_tx_fps;
@@ -825,7 +825,7 @@ module axil_reg_space #(
                             8'h58: s_axil_rdata <= reg_hdmi_rx_polarities;
                             8'h5C: s_axil_rdata <= reg_hdmi_rx_standards;
                             8'h60: s_axil_rdata <= reg_hdmi_rx_colorspace;
-                            8'h64: s_axil_rdata <= reg_hdmi_rx_audio_info;
+                            8'h64: s_axil_rdata <= (in_hdmi_rx_audio != 32'd0) ? in_hdmi_rx_audio : reg_hdmi_rx_audio_info;
                             default: s_axil_rdata <= 32'd0;
                         endcase
                     end

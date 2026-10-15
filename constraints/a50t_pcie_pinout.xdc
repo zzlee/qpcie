@@ -77,10 +77,16 @@ set_false_path -to [get_pins -quiet -hierarchical -regexp \
 # exclusively through proper CDC primitives (xpm_cdc_handshake,
 # xpm_fifo_async, video_req_cdc gray-pointer FIFO, ASYNC_REG 2FF stages).
 # Declare the two trees asynchronous so their crossings are not analyzed
-# as synchronous paths.
+# The 150 MHz video domain, HDMI RX domains, and the PCIe user-clock domain
+# exchange data exclusively through proper CDC primitives (xpm_fifo_async, etc.).
+create_clock -period 6.734 -name tm0_pclk [get_ports tm0_pclk]
+create_clock -period 81.380 -name tm0_i2s_sck [get_ports tm0_i2s_sck]
+
 set_clock_groups -name async_video_vs_pcie -asynchronous \
     -group [get_clocks -include_generated_clocks clk150_mmcm] \
-    -group [get_clocks -include_generated_clocks userclk2]
+    -group [get_clocks -include_generated_clocks userclk2] \
+    -group [get_clocks -include_generated_clocks tm0_pclk] \
+    -group [get_clocks -include_generated_clocks tm0_i2s_sck]
 
 # ------------------------------------------------------------------------------
 # 6. Front-End I2C Bus (IT68051 @ 0x48, TLV320ADC3101 @ 0x18)
@@ -130,6 +136,119 @@ set_property IOSTANDARD LVCMOS33 [get_ports spi_d03_hld_n]
 # ------------------------------------------------------------------------------
 set_property PACKAGE_PIN V12 [get_ports rstn_gpio_f]
 set_property IOSTANDARD LVCMOS33 [get_ports rstn_gpio_f]
+
+# ------------------------------------------------------------------------------
+# 8b. IT68051 HDMI Receiver Interface (Banks 15 & 34, LVCMOS33)
+# ------------------------------------------------------------------------------
+# Clock & Sync (Bank 15)
+set_property PACKAGE_PIN E13 [get_ports tm0_pclk]
+set_property IOSTANDARD LVCMOS33 [get_ports tm0_pclk]
+
+set_property PACKAGE_PIN D18 [get_ports tm0_de]
+set_property IOSTANDARD LVCMOS33 [get_ports tm0_de]
+
+set_property PACKAGE_PIN B17 [get_ports tm0_vs]
+set_property IOSTANDARD LVCMOS33 [get_ports tm0_vs]
+
+set_property PACKAGE_PIN E17 [get_ports tm0_hs]
+set_property IOSTANDARD LVCMOS33 [get_ports tm0_hs]
+
+set_property PACKAGE_PIN F15 [get_ports int_68051]
+set_property IOSTANDARD LVCMOS33 [get_ports int_68051]
+
+# Port A Pixel Data (Bank 15 - Blue [9:0])
+set_property PACKAGE_PIN D8  [get_ports {tm0_a_b[0]}]
+set_property PACKAGE_PIN C8  [get_ports {tm0_a_b[1]}]
+set_property PACKAGE_PIN D9  [get_ports {tm0_a_b[2]}]
+set_property PACKAGE_PIN C9  [get_ports {tm0_a_b[3]}]
+set_property PACKAGE_PIN B9  [get_ports {tm0_a_b[4]}]
+set_property PACKAGE_PIN A9  [get_ports {tm0_a_b[5]}]
+set_property PACKAGE_PIN C11 [get_ports {tm0_a_b[6]}]
+set_property PACKAGE_PIN B11 [get_ports {tm0_a_b[7]}]
+set_property PACKAGE_PIN B10 [get_ports {tm0_a_b[8]}]
+set_property PACKAGE_PIN A10 [get_ports {tm0_a_b[9]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {tm0_a_b[*]}]
+
+# Port A Pixel Data (Bank 15 - Green [9:0])
+set_property PACKAGE_PIN D11 [get_ports {tm0_a_g[0]}]
+set_property PACKAGE_PIN C12 [get_ports {tm0_a_g[1]}]
+set_property PACKAGE_PIN B12 [get_ports {tm0_a_g[2]}]
+set_property PACKAGE_PIN A12 [get_ports {tm0_a_g[3]}]
+set_property PACKAGE_PIN A13 [get_ports {tm0_a_g[4]}]
+set_property PACKAGE_PIN A14 [get_ports {tm0_a_g[5]}]
+set_property PACKAGE_PIN C14 [get_ports {tm0_a_g[6]}]
+set_property PACKAGE_PIN B15 [get_ports {tm0_a_g[7]}]
+set_property PACKAGE_PIN B14 [get_ports {tm0_a_g[8]}]
+set_property PACKAGE_PIN A15 [get_ports {tm0_a_g[9]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {tm0_a_g[*]}]
+
+# Port A Pixel Data (Bank 15 - Red [9:0])
+set_property PACKAGE_PIN D13 [get_ports {tm0_a_r[0]}]
+set_property PACKAGE_PIN C13 [get_ports {tm0_a_r[1]}]
+set_property PACKAGE_PIN D14 [get_ports {tm0_a_r[2]}]
+set_property PACKAGE_PIN E15 [get_ports {tm0_a_r[3]}]
+set_property PACKAGE_PIN D15 [get_ports {tm0_a_r[4]}]
+set_property PACKAGE_PIN E16 [get_ports {tm0_a_r[5]}]
+set_property PACKAGE_PIN D16 [get_ports {tm0_a_r[6]}]
+set_property PACKAGE_PIN B16 [get_ports {tm0_a_r[7]}]
+set_property PACKAGE_PIN A17 [get_ports {tm0_a_r[8]}]
+set_property PACKAGE_PIN C16 [get_ports {tm0_a_r[9]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {tm0_a_r[*]}]
+
+# Port B Pixel Data (Bank 34 - Blue [9:0])
+set_property PACKAGE_PIN K6 [get_ports {tm0_b_b[0]}]
+set_property PACKAGE_PIN K5 [get_ports {tm0_b_b[1]}]
+set_property PACKAGE_PIN J5 [get_ports {tm0_b_b[2]}]
+set_property PACKAGE_PIN J4 [get_ports {tm0_b_b[3]}]
+set_property PACKAGE_PIN K2 [get_ports {tm0_b_b[4]}]
+set_property PACKAGE_PIN K1 [get_ports {tm0_b_b[5]}]
+set_property PACKAGE_PIN K3 [get_ports {tm0_b_b[6]}]
+set_property PACKAGE_PIN L2 [get_ports {tm0_b_b[7]}]
+set_property PACKAGE_PIN L4 [get_ports {tm0_b_b[8]}]
+set_property PACKAGE_PIN L3 [get_ports {tm0_b_b[9]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {tm0_b_b[*]}]
+
+# Port B Pixel Data (Bank 34 - Green [9:0])
+set_property PACKAGE_PIN L5 [get_ports {tm0_b_g[0]}]
+set_property PACKAGE_PIN M5 [get_ports {tm0_b_g[1]}]
+set_property PACKAGE_PIN M2 [get_ports {tm0_b_g[2]}]
+set_property PACKAGE_PIN M1 [get_ports {tm0_b_g[3]}]
+set_property PACKAGE_PIN M6 [get_ports {tm0_b_g[4]}]
+set_property PACKAGE_PIN N6 [get_ports {tm0_b_g[5]}]
+set_property PACKAGE_PIN N1 [get_ports {tm0_b_g[6]}]
+set_property PACKAGE_PIN P1 [get_ports {tm0_b_g[7]}]
+set_property PACKAGE_PIN M4 [get_ports {tm0_b_g[8]}]
+set_property PACKAGE_PIN N4 [get_ports {tm0_b_g[9]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {tm0_b_g[*]}]
+
+# Port B Pixel Data (Bank 34 - Red [9:0])
+set_property PACKAGE_PIN N3 [get_ports {tm0_b_r[0]}]
+set_property PACKAGE_PIN N2 [get_ports {tm0_b_r[1]}]
+set_property PACKAGE_PIN P4 [get_ports {tm0_b_r[2]}]
+set_property PACKAGE_PIN P3 [get_ports {tm0_b_r[3]}]
+set_property PACKAGE_PIN V3 [get_ports {tm0_b_r[4]}]
+set_property PACKAGE_PIN V2 [get_ports {tm0_b_r[5]}]
+set_property PACKAGE_PIN T4 [get_ports {tm0_b_r[6]}]
+set_property PACKAGE_PIN T3 [get_ports {tm0_b_r[7]}]
+set_property PACKAGE_PIN U4 [get_ports {tm0_b_r[8]}]
+set_property PACKAGE_PIN V4 [get_ports {tm0_b_r[9]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {tm0_b_r[*]}]
+
+# I2S Audio (Bank 34)
+set_property PACKAGE_PIN R2 [get_ports tm0_i2s_mck]
+set_property PACKAGE_PIN R3 [get_ports tm0_i2s_sck]
+set_property PACKAGE_PIN P6 [get_ports tm0_i2s_ws]
+set_property PACKAGE_PIN P5 [get_ports tm0_i2s_d0]
+set_property PACKAGE_PIN U6 [get_ports {tm0_i2s_d[1]}]
+set_property PACKAGE_PIN U5 [get_ports {tm0_i2s_d[2]}]
+set_property PACKAGE_PIN R5 [get_ports {tm0_i2s_d[3]}]
+set_property PACKAGE_PIN T5 [get_ports {tm0_i2s_d[4]}]
+set_property PACKAGE_PIN R7 [get_ports {tm0_i2s_d[5]}]
+set_property IOSTANDARD LVCMOS33 [get_ports tm0_i2s_mck]
+set_property IOSTANDARD LVCMOS33 [get_ports tm0_i2s_sck]
+set_property IOSTANDARD LVCMOS33 [get_ports tm0_i2s_ws]
+set_property IOSTANDARD LVCMOS33 [get_ports tm0_i2s_d0]
+set_property IOSTANDARD LVCMOS33 [get_ports {tm0_i2s_d[*]}]
 
 # ------------------------------------------------------------------------------
 # 9. Bitstream Configuration Properties

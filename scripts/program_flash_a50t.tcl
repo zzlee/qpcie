@@ -6,7 +6,7 @@
 # ============================================================================
 
 set bit_file "./build/qpcie_a50t_proj/qpcie_a50t_card.runs/impl_1/a50t_pcie_card_top.bit"
-set bin_file "/home/zzlee/qpcie/build/a50t_pcie_card_top_spix1.bin"
+set bin_file "./build/a50t_pcie_card_top_spix1.bin"
 
 if {![file exists $bit_file]} {
     puts "ERROR: Bitstream file $bit_file does not exist!"

@@ -44,7 +44,25 @@ module a50t_pcie_card_top #(
     output wire                                             spi_d03_hld_n,
 
     // Front-end Peripheral Reset (IT68051 HDMI Receiver via SU8 AND gate)
-    output wire                                             rstn_gpio_f
+    output wire                                             rstn_gpio_f,
+
+    // IT68051 HDMI Receiver Interface (Banks 15 & 34, 3.3V LVCMOS)
+    input  wire                                             tm0_pclk,
+    input  wire                                             tm0_de,
+    input  wire                                             tm0_vs,
+    input  wire                                             tm0_hs,
+    input  wire                                             int_68051,
+    input  wire [9:0]                                       tm0_a_r,
+    input  wire [9:0]                                       tm0_a_g,
+    input  wire [9:0]                                       tm0_a_b,
+    input  wire [9:0]                                       tm0_b_r,
+    input  wire [9:0]                                       tm0_b_g,
+    input  wire [9:0]                                       tm0_b_b,
+    input  wire                                             tm0_i2s_mck,
+    input  wire                                             tm0_i2s_sck,
+    input  wire                                             tm0_i2s_ws,
+    input  wire                                             tm0_i2s_d0,
+    input  wire [5:1]                                       tm0_i2s_d
 );
 
     // Keep IT68051 frontend out of reset
@@ -626,8 +644,102 @@ module a50t_pcie_card_top #(
         .m_axis_tready(tpg_capture_tready)
     );
 
+    // HDMI RX Probe & Telemetry Wires
+    wire [31:0] hdmi_rx_status;
+    wire [31:0] hdmi_rx_res;
+    wire [31:0] hdmi_rx_timing;
+    wire [31:0] hdmi_rx_audio;
+    wire [31:0] hdmi_tx_ctrl;
+
+    // Runtime Selection Mux (BAR0 0x0610):
+    // Bit 0: Video Source Select (0 = Internal TPG, 1 = Live HDMI RX)
+    // Bit 1: Audio Source Select (0 = Audio Gen,   1 = Live HDMI I2S)
+    // Bit 2: HDMI RX Capture FIFO Reset
+    wire video_src_sel     = hdmi_tx_ctrl[0];
+    wire audio_src_sel     = hdmi_tx_ctrl[1];
+    wire hdmi_rx_fifo_rst  = hdmi_tx_ctrl[2];
+
+    // Hardware Telemetry & Probe Module
+    hdmi_rx_probe u_hdmi_rx_probe (
+        .clk_125m(pcie_user_clk),
+        .rst_n_125m(pcie_user_rst_n),
+        .tm0_pclk(tm0_pclk),
+        .tm0_de(tm0_de),
+        .tm0_vs(tm0_vs),
+        .tm0_hs(tm0_hs),
+        .tm0_i2s_sck(tm0_i2s_sck),
+        .tm0_i2s_ws(tm0_i2s_ws),
+        .tm0_i2s_d0(tm0_i2s_d0),
+        .int_68051(int_68051),
+        .out_hdmi_rx_status(hdmi_rx_status),
+        .out_hdmi_rx_res(hdmi_rx_res),
+        .out_hdmi_rx_timing(hdmi_rx_timing),
+        .out_hdmi_rx_audio(hdmi_rx_audio)
+    );
+
+    // Live HDMI Dual-Pixel Video Bridge (TM0_PCLK -> video_clk_150)
+    wire [127:0] hdmi_video_tdata;
+    wire         hdmi_video_tvalid;
+    wire         hdmi_video_tlast;
+    wire [0:0]   hdmi_video_tuser;
+    wire         hdmi_video_tready;
+
+    hdmi_dual_pixel_bridge #(
+        .FIFO_DEPTH(512)
+    ) u_hdmi_video_bridge (
+        .tm0_pclk(tm0_pclk),
+        .tm0_rst_n(pcie_user_rst_n && !hdmi_rx_fifo_rst),
+        .tm0_de(tm0_de),
+        .tm0_vs(tm0_vs),
+        .tm0_hs(tm0_hs),
+        .tm0_a_r(tm0_a_r),
+        .tm0_a_g(tm0_a_g),
+        .tm0_a_b(tm0_a_b),
+        .tm0_b_r(tm0_b_r),
+        .tm0_b_g(tm0_b_g),
+        .tm0_b_b(tm0_b_b),
+        .video_clk(video_clk_150),
+        .video_rst_n(video_engine_rst_n && !hdmi_rx_fifo_rst),
+        .m_axis_video_tdata(hdmi_video_tdata),
+        .m_axis_video_tvalid(hdmi_video_tvalid),
+        .m_axis_video_tlast(hdmi_video_tlast),
+        .m_axis_video_tuser(hdmi_video_tuser),
+        .m_axis_video_tready(hdmi_video_tready)
+    );
+
+    // Live HDMI I2S Audio Bridge (TM0_I2S_SCK -> pcie_user_clk 125MHz)
+    wire [31:0] hdmi_audio_tdata;
+    wire        hdmi_audio_tvalid;
+    wire        hdmi_audio_tlast;
+    wire        hdmi_audio_tready;
+
+    hdmi_i2s_bridge #(
+        .FIFO_DEPTH(512)
+    ) u_hdmi_audio_bridge (
+        .i2s_sck(tm0_i2s_sck),
+        .i2s_rst_n(pcie_user_rst_n && !hdmi_rx_fifo_rst),
+        .i2s_ws(tm0_i2s_ws),
+        .i2s_d0(tm0_i2s_d0),
+        .pcie_user_clk(pcie_user_clk),
+        .pcie_user_rst_n(pcie_user_rst_n && !hdmi_rx_fifo_rst),
+        .m_axis_audio_tdata(hdmi_audio_tdata),
+        .m_axis_audio_tvalid(hdmi_audio_tvalid),
+        .m_axis_audio_tlast(hdmi_audio_tlast),
+        .m_axis_audio_tready(hdmi_audio_tready)
+    );
+
+    // Video Channel 0 Stream Multiplexer (TPG vs Live HDMI RX)
+    wire [127:0] video_src_mux_tdata  = (video_src_sel) ? hdmi_video_tdata  : tpg_capture_tdata;
+    wire         video_src_mux_tvalid = (video_src_sel) ? hdmi_video_tvalid : tpg_capture_tvalid;
+    wire         video_src_mux_tlast  = (video_src_sel) ? hdmi_video_tlast  : tpg_capture_tlast;
+    wire [0:0]   video_src_mux_tuser  = (video_src_sel) ? hdmi_video_tuser  : tpg_capture_tuser;
+    wire         video_src_mux_tready;
+
+    assign hdmi_video_tready  = (video_src_sel) ? video_src_mux_tready : 1'b0;
+    assign tpg_capture_tready = (video_src_sel) ? 1'b1 : video_src_mux_tready;
+
     // The NV12 capture engine now lives in the 150 MHz video domain and
-    // consumes the TPG stream directly (same clock). Its C2H requests cross
+    // consumes the TPG or HDMI stream directly (same clock). Its C2H requests cross
     // back to the PCIe domain through u_video_req_cdc inside the DMA top.
     assign s_video_tvalid[0]    = 1'b0;
     assign s_video_tlast[0]     = 1'b0;
@@ -640,7 +752,7 @@ module a50t_pcie_card_top #(
     assign m_video_tready[NUM_VIDEO_CH-1:1]    = s_video_tready[NUM_VIDEO_CH-1:1];
     assign m_video_tready[0]                   = 1'b1;
 
-    // Multi-Channel Audio Streams
+    // Multi-Channel Audio Streams with Channel 0 Live I2S vs Audio Gen Multiplexing
     wire [(NUM_AUDIO_CH*AUDIO_DATA_WIDTH)-1:0] s_audio_tdata;
     wire [NUM_AUDIO_CH-1:0]                    s_audio_tvalid;
     wire [NUM_AUDIO_CH-1:0]                    s_audio_tlast;
@@ -651,10 +763,11 @@ module a50t_pcie_card_top #(
     wire [NUM_AUDIO_CH-1:0]                    m_audio_tlast;
     wire [NUM_AUDIO_CH-1:0]                    m_audio_tready;
 
-    assign s_audio_tdata[31:0] = aud_pat_axis_tdata;
-    assign s_audio_tvalid[0]   = aud_pat_axis_tvalid;
-    assign s_audio_tlast[0]    = aud_pat_axis_tlast;
-    assign aud_pat_axis_tready = s_audio_tready[0];
+    assign s_audio_tdata[31:0]  = (audio_src_sel) ? hdmi_audio_tdata  : aud_pat_axis_tdata;
+    assign s_audio_tvalid[0]    = (audio_src_sel) ? hdmi_audio_tvalid : aud_pat_axis_tvalid;
+    assign s_audio_tlast[0]     = (audio_src_sel) ? hdmi_audio_tlast  : aud_pat_axis_tlast;
+    assign hdmi_audio_tready    = (audio_src_sel) ? s_audio_tready[0] : 1'b0;
+    assign aud_pat_axis_tready  = (audio_src_sel) ? 1'b1 : s_audio_tready[0];
 
     assign s_audio_tdata[(NUM_AUDIO_CH*AUDIO_DATA_WIDTH)-1:AUDIO_DATA_WIDTH] = m_audio_tdata[(NUM_AUDIO_CH*AUDIO_DATA_WIDTH)-1:AUDIO_DATA_WIDTH];
     assign s_audio_tvalid[NUM_AUDIO_CH-1:1]   = m_audio_tvalid[NUM_AUDIO_CH-1:1];
@@ -884,7 +997,7 @@ module a50t_pcie_card_top #(
 
     // Instantiate Custom PCIe DMA Controller Top Module (256-bit internal CQ descriptor bus)
     custom_pcie_dma_top #(
-        .C_VERSION(32'h26101303), // byte-gap/repeated-START I2C fix
+        .C_VERSION(32'h26101501), // HDMI RX probe & dual-pixel capture bridge
         .PCIE_DATA_WIDTH(PCIE_DATA_WIDTH),
         .NUM_VIDEO_CH(NUM_VIDEO_CH),
         .NUM_AUDIO_CH(NUM_AUDIO_CH),
@@ -971,11 +1084,11 @@ module a50t_pcie_card_top #(
 
         .video_clk(video_clk_150),
         .video_rst_n(video_engine_rst_n),
-        .video_ch0_tdata(tpg_capture_tdata),
-        .video_ch0_tvalid(tpg_capture_tvalid),
-        .video_ch0_tlast(tpg_capture_tlast),
-        .video_ch0_tuser(tpg_capture_tuser),
-        .video_ch0_tready(tpg_capture_tready),
+        .video_ch0_tdata(video_src_mux_tdata),
+        .video_ch0_tvalid(video_src_mux_tvalid),
+        .video_ch0_tlast(video_src_mux_tlast),
+        .video_ch0_tuser(video_src_mux_tuser),
+        .video_ch0_tready(video_src_mux_tready),
 
         .m_axis_video_tdata(m_video_tdata),
         .m_axis_video_tvalid(m_video_tvalid),
@@ -1000,7 +1113,15 @@ module a50t_pcie_card_top #(
         .overlay_width(dma_overlay_width),
         .overlay_height(dma_overlay_height),
         .usr_irq_req(usr_irq_req),
-        .usr_irq_ack(usr_irq_ack)
+        .usr_irq_ack(usr_irq_ack),
+
+        // HDMI RX & TX Telemetry and Source Control
+        .in_hdmi_rx_status(hdmi_rx_status),
+        .in_hdmi_rx_res(hdmi_rx_res),
+        .in_hdmi_rx_timing(hdmi_rx_timing),
+        .in_hdmi_rx_audio(hdmi_rx_audio),
+        .in_hdmi_tx_status(32'd0),
+        .out_hdmi_tx_ctrl(hdmi_tx_ctrl)
     );
 
 endmodule
