@@ -105,11 +105,16 @@ static int app_valid(volatile app_hdr_t *hdr)
 
 static void boot_ldrom(void)
 {
-    SYS->REGWRPROT = 0x59UL;
-    SYS->REGWRPROT = 0x16UL;
-    SYS->REGWRPROT = 0x88UL;
-    FMC->ISPCON |= FMC_ISPCON_BS_Msk; /* boot LDROM after reset */
-    NVIC_SystemReset();
+    uint32_t ldrom_sp = *((volatile uint32_t *)0x00100000UL);
+    void (*ldrom_entry)(void) = (void (*)(void))(*((volatile uint32_t *)0x00100004UL));
+    if (ldrom_sp != 0xFFFFFFFFUL && (uint32_t)ldrom_entry != 0xFFFFFFFFUL && ((uint32_t)ldrom_entry & 1UL)) {
+        SYS->REGWRPROT = 0x59UL;
+        SYS->REGWRPROT = 0x16UL;
+        SYS->REGWRPROT = 0x88UL;
+        CLK->AHBCLK |= CLK_AHBCLK_ISP_EN_Msk;
+        FMC->ISPCON |= FMC_ISPCON_ISPEN_Msk | FMC_ISPCON_BS_Msk;
+        app_enter(ldrom_sp, ldrom_entry);
+    }
     while (1) {
     }
 }
@@ -119,11 +124,11 @@ int main(void)
     volatile app_hdr_t *hdr = (volatile app_hdr_t *)APP_HDR_BASE;
     uint32_t *src, *dst, n;
 
-    if (!app_valid(hdr))
+    if ((FMC->ISPCON & FMC_ISPCON_BS_Msk) ||
+        (*((volatile uint32_t *)UPG_HANDSHAKE_ADDR) == UPG_HANDSHAKE_MAGIC) ||
+        !app_valid(hdr) || !hdr->i2c0h || !hdr->i2c1h) {
         boot_ldrom();
-
-    if (!hdr->i2c0h || !hdr->i2c1h)
-        boot_ldrom();
+    }
 
     /* Init app .data/.bss (app startup is bypassed; we jump to main). */
     if (hdr->data_end < hdr->data_vma || hdr->bss_end < hdr->bss_vma ||
