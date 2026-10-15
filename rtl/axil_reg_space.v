@@ -8,12 +8,16 @@
 `timescale 1ns / 1ps
 
 module axil_reg_space #(
-    parameter [31:0]   C_VERSION    = 32'h2610_1501, // Mandatory hardware version YYMMDDpp
+    parameter [31:0]   C_VERSION    = 32'h2610_1503, // Mandatory hardware version YYMMDDpp
     parameter integer NUM_VIDEO_CH = 4,
-    parameter integer NUM_AUDIO_CH = 4
+    parameter integer NUM_AUDIO_CH = 4,
+    parameter integer CDC_ENABLE = 0
 )(
     input  wire        clk,
     input  wire        rst_n,
+    // Optional ordered write transport; reads stay independent of DMA clocks.
+    input  wire        cdc_write_ready,
+    output wire        cdc_write_commit,
     input  wire [15:0] in_requester_id,
 
     // AXI4-Lite Slave Interface
@@ -259,13 +263,17 @@ module axil_reg_space #(
 
     assign perf_enable = reg_perf_enable;
     assign perf_reset  = reg_perf_reset_w1c;
-    assign h2c_fifo_wr_data = s_axil_wdata;
+    assign h2c_fifo_wr_data = reg_debug_last_wdata;
 
     // Version & Capability Constants (Canonical v3.0.0 Specification)
     localparam [31:0] VERSION_ID_VAL      = 32'h0300_0000; // v3.0.0 (Canonical Phase 6 Breaking Release)
     localparam [31:0] GIT_COMMIT_HASH_VAL = `GIT_COMMIT_HASH_DEF;
     localparam [31:0] BUILD_TIMESTAMP_VAL = `BUILD_TIMESTAMP_DEF;
-`ifdef QPCIe_single_rgb24_path
+`ifdef SC7F0_DEBUG_ONLY
+    // Bit31 = debug-first ZU4EV profile. No advertised video/audio channels;
+    // bit4 = canonical register map. Internal DMA plumbing remains testable.
+    localparam [31:0] HARDWARE_CAPS_VAL   = 32'h8000_0010;
+`elsif QPCIe_single_rgb24_path
     // Single-path build: 4 Audio, 1 Video (RGB24 TPG only), Caps: 2D+AES3+DualBAR+Stream, [4]=NEW_MAP_PRESENT
     localparam [31:0] HARDWARE_CAPS_VAL   = 32'h0001_041F;
 `else
@@ -304,7 +312,7 @@ module axil_reg_space #(
         end else begin
             if (in_adev0_xrun || out_adev0_xrun_inject)
                 adev0_xrun_sticky <= 1'b1;
-            else if (s_axil_awvalid && s_axil_wvalid && (s_axil_awaddr[11:0] == 12'h504) && s_axil_wdata[1])
+            else if (cdc_write_commit && (s_axil_awaddr[11:0] == 12'h504) && s_axil_wdata[1])
                 adev0_xrun_sticky <= 1'b0;
         end
     end
@@ -419,6 +427,10 @@ module axil_reg_space #(
     assign out_dma_upg_doorbell = reg_dma_upg_doorbell;
     assign out_dma_upg_diag_clear_toggle = reg_dma_upg_diag_clear_toggle;
 
+
+    wire write_allowed = !CDC_ENABLE || cdc_write_ready;
+    assign cdc_write_commit = s_axil_awvalid && s_axil_wvalid &&
+                              !s_axil_bvalid && write_allowed;
 
     // Write Logic
     always @(posedge clk or negedge rst_n) begin
@@ -548,7 +560,7 @@ module axil_reg_space #(
             out_vch1_irq_status_w1c  <= 4'd0;
             out_adev0_irq_status_w1c <= 2'd0;
             out_adev0_xrun_inject    <= 1'b0;
-            if (s_axil_awvalid && s_axil_wvalid && !s_axil_bvalid) begin
+            if (cdc_write_commit) begin
                 s_axil_awready <= 1'b1;
                 s_axil_wready  <= 1'b1;
                 s_axil_bvalid  <= 1'b1;

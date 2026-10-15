@@ -17,7 +17,7 @@
 `timescale 1ns / 1ps
 
 module zu4ev_pcie_card_top #(
-    parameter [31:0] C_VERSION = 32'h2610_1501,
+    parameter [31:0] C_VERSION = 32'h2610_1503,
     parameter PCIE_DATA_WIDTH  = 256,
     parameter PCIE_KEEP_WIDTH  = PCIE_DATA_WIDTH / 32, // 8 DW keep for 256-bit
     parameter NUM_VIDEO_CH     = 4,
@@ -38,8 +38,9 @@ module zu4ev_pcie_card_top #(
 
     // Status LEDs (Bank 45)
     output wire                                             user_led_dma_active,
-    output wire                                             user_led_pcie_link_up,
-
+    output wire                                             user_led_pcie_link_up
+`ifndef SC7F0_DEBUG_ONLY
+    ,
     // Physical HDMI Reference Clocks (Bank 225/226 MGT)
     input  wire                                             hdmi_rx_clk_p,        // Pin B10 (Bank 226 MGTREFCLK1)
     input  wire                                             hdmi_rx_clk_n,        // Pin B9
@@ -71,6 +72,7 @@ module zu4ev_pcie_card_top #(
     // 300MHz Si5341B Clock for Multimedia IPs (Bank 64 LVDS)
     input  wire                                             pl_clk_300m_p,        // Pin AD17
     input  wire                                             pl_clk_300m_n         // Pin AE17
+`endif
 );
 
     // =========================================================================
@@ -107,6 +109,7 @@ module zu4ev_pcie_card_top #(
         .peripheral_aresetn(sys_100m_rst_n)
     );
 
+`ifndef SC7F0_DEBUG_ONLY
     // 300MHz Multimedia Clock Domain (Reserved for future)
     wire pl_clk_300m_ibufg;
     wire pl_clk_300m;
@@ -142,6 +145,7 @@ module zu4ev_pcie_card_top #(
     );
 
 
+`endif
     // Fine-grained sub-domain resets (BAR0 0x84)
     wire video_pipeline_reset;
     wire video_tpg_reset;
@@ -437,6 +441,10 @@ module zu4ev_pcie_card_top #(
     wire       edid_write_en = edid_aw_pending && edid_w_pending && !edid_bvalid_q;
     wire [7:0] edid_mem_addr = edid_write_en ? edid_awaddr_q : edid_axi_araddr[7:0];
 
+`ifdef SC7F0_DEBUG_ONLY
+    // No external DDC/EDID hardware in the debug-first profile.
+    assign edid_rdata_byte = 8'd0;
+`else
     hdmi_edid_ram u_hdmi_edid_ram (
         .clk(pcie_user_clk),
         .rst_n(pcie_user_rst_n),
@@ -449,6 +457,7 @@ module zu4ev_pcie_card_top #(
         .i2c_scl(hdmi_rx_ddc_scl),
         .i2c_sda(hdmi_rx_ddc_sda)
     );
+`endif
 
     assign edid_axi_awready = !edid_aw_pending && !edid_bvalid_q;
     assign edid_axi_wready  = !edid_w_pending && !edid_bvalid_q;
@@ -566,6 +575,7 @@ module zu4ev_pcie_card_top #(
     // =========================================================================
     // HDMI Transceiver Physical Clock Buffers (Bank 225/226 MGT)
     // =========================================================================
+`ifndef SC7F0_DEBUG_ONLY
     wire rx_mgtrefclk1, rx_mgtrefclk1_odiv2, rx_mgtrefclk1_odiv2_bufg;
     IBUFDS_GTE4 #(.REFCLK_HROW_CK_SEL(2'b00)) u_ibufds_rx_clk (
         .I(hdmi_rx_clk_p),
@@ -1032,6 +1042,24 @@ module zu4ev_pcie_card_top #(
         .m_axis_audio_tlast(tx_ss_audio_tlast)
     );
 
+`else
+    // Debug-first build: no HDMI IP, GT, external reference clock or pin.
+    // Keep the internal PCIe-clock TPG/loopback plumbing for DMA diagnostics.
+    wire [127:0] hdmi_rx_v_tdata = 128'd0;
+    wire hdmi_rx_v_tvalid = 1'b0, hdmi_rx_v_tlast = 1'b0, hdmi_rx_v_tuser = 1'b0;
+    wire hdmi_rx_v_tready;
+    wire [31:0] hdmi_rx_a_tdata = 32'd0;
+    wire hdmi_rx_a_tvalid = 1'b0, hdmi_rx_a_tlast = 1'b0;
+    wire hdmi_rx_a_tready;
+    assign hdmi_rx_status_w = 32'd0;
+    assign hdmi_rx_res_w = 32'd0;
+    assign hdmi_rx_timing_w = 32'd0;
+    assign hdmi_rx_audio_w = 32'd0;
+    assign hdmi_tx_status_w = 32'd0;
+    assign m_video_tready[1] = 1'b1;
+    assign m_audio_tready[1] = 1'b1;
+`endif
+
     // =========================================================================
     // Multi-Channel AXI4-Stream Audio Multiplexing:
     // Ch 0: HDMI RX (C2H)
@@ -1057,8 +1085,12 @@ module zu4ev_pcie_card_top #(
     //   2'b10 = Force HDMI RX.
     // =========================================================================
     wire [31:0] vch0_ctrl_w;
+`ifdef SC7F0_DEBUG_ONLY
+    wire ch0_use_tpg = 1'b1;
+`else
     wire ch0_use_tpg = (vch0_ctrl_w[21:20] == 2'b01) ||
                        (!sync_5v_det_q[1] && (vch0_ctrl_w[21:20] != 2'b10));
+`endif
 
     wire [127:0] video_ch0_mux_tdata  = ch0_use_tpg ? tpg_capture_tdata  : hdmi_rx_v_tdata;
     wire         video_ch0_mux_tvalid = ch0_use_tpg ? tpg_capture_tvalid : hdmi_rx_v_tvalid;

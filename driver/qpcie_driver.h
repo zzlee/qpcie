@@ -506,6 +506,7 @@ struct qpcie_dev {
 
     /* Dynamic Platform & BAR1 Offsets */
     bool is_zu4ev;
+    bool debug_only; /* Explicit debug-profile capability, not an AV failure fallback. */
     struct qpcie_debug *debug;
     u32 bar1_offset_tpg;
     u32 bar1_offset_i2c;

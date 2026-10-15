@@ -6,6 +6,7 @@
  */
 
 #include "qpcie_driver.h"
+#include "../include/qpcie_debug.h"
 #include <linux/delay.h>
 
 #define SG_PAGES 4
@@ -266,6 +267,8 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
     git = ioread32(qdev->bar0_mmio + REG_NEW_GLOBAL_GITHASH);
     date = ioread32(qdev->bar0_mmio + REG_NEW_GLOBAL_BUILDTIME);
     caps = ioread32(qdev->bar0_mmio + REG_NEW_GLOBAL_CAPS);
+    qdev->debug_only = ver == QDBG_HW_VERSION && (caps & QDBG_CAP_DEBUG_ONLY);
+    qdev->is_zu4ev = qdev->debug_only;
     ctrl = magic;
 
     dev_info(&pdev->dev, "  BAR0 [0x00] Magic Device ID: 0x%08X (Canonical v3.0 Map Active)\n", magic);
@@ -282,7 +285,7 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
     if (qdev->bar1_mmio) {
         u32 bar1_zero = ioread32(qdev->bar1_mmio + 0x0000);
         /* ZU4EV (SC7F0): 4 video channels or DECERR hole at BAR1 0x0000 (reads 0xFFFFFFFF) */
-        if (bar1_zero == 0xFFFFFFFF || ((caps >> 16) & 0x0F) == 4) {
+        if (qdev->debug_only || bar1_zero == 0xFFFFFFFF || ((caps >> 16) & 0x0F) == 4) {
             qdev->is_zu4ev = true;
             qdev->bar1_offset_tpg = BAR1_ZU4EV_OFFSET_TPG;
             qdev->bar1_offset_i2c = 0;       /* No I2C on BAR1 for ZU4EV */
@@ -350,7 +353,24 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
         dev_err(&pdev->dev, "[ERROR] Cannot request PCI IRQ: %d\n", ret);
         goto free_irq_vectors;
     }
-    iowrite32(0x3, qdev->bar0_mmio + REG_IRQ_CTRL);
+    iowrite32(qdev->debug_only ? 0 : 0x3, qdev->bar0_mmio + REG_IRQ_CTRL);
+
+    if (qdev->debug_only) {
+        // The command mailbox is independent of V4L2/ALSA/I2C/SPI bring-up.
+        // Do not advertise absent hardware or create its sysfs controls.
+        ret = qpcie_upgrade_init(qdev);
+        if (ret)
+            goto free_irq;
+        ret = qpcie_debug_init(qdev);
+        if (ret || !qdev->debug) {
+            qpcie_upgrade_remove(qdev);
+            if (!ret)
+                ret = -ENODEV;
+            goto free_irq;
+        }
+        dev_info(&pdev->dev, "Debug-only profile: mailbox + upgrade ready; AV/I2C/SPI disabled\n");
+        return 0;
+    }
 
     /* ------------------------------------------------------------------------
      * 3. Canonical v3.0 Native Mode: Thin Descriptor Ring Initialization
@@ -507,7 +527,8 @@ static void qpcie_remove(struct pci_dev *pdev)
     qpcie_upgrade_remove(qdev);
     qpcie_flash_remove(qdev);
     qpcie_i2c_remove(qdev);
-    qpcie_sysfs_remove(qdev);
+    if (!qdev->debug_only)
+        qpcie_sysfs_remove(qdev);
 
     /* 1. Halt all DMA engines and interrupt controller before freeing memory */
     if (qdev->bar0_mmio) {

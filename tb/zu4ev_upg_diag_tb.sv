@@ -8,6 +8,7 @@ module zu4ev_upg_diag_tb;
     reg [13:0] writer_events = 0;
     wire [31:0] pcie_sticky, writer_sticky;
     wire ack;
+    reg test_passed = 0;
     zu4ev_upg_diag dut (
         .clk_pcie(clk_pcie), .rst_pcie_n(rst_pcie_n),
         .clk_pl(clk_pl), .rst_pl_n(rst_pl_n),
@@ -48,6 +49,7 @@ module zu4ev_upg_diag_tb;
         repeat (5) @(negedge clk_pl);
         if (pcie_sticky !== 0 || writer_sticky !== 0)
             $fatal(1, "second clear failed");
+        test_passed = 1;
         $display("TB_PASS: sticky events, PCIe->PL CDC, clear/ack, second canary");
         $finish;
     end

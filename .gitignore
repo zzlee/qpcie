@@ -49,6 +49,7 @@ scripts/archive_debug/
 # ------------------------------------------------------------------------------
 tb/sim_*
 sim_*
+!scripts/sim_sc7f0_csr_cdc.tcl
 *.vvp
 *.out
 *.fst

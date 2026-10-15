@@ -9,6 +9,14 @@
 set project_name "qpcie_zu4ev_card"
 set project_dir  "./build/qpcie_zu4ev_proj"
 set device_part  "xczu4ev-fbvb900-2-e"
+# Debug-first is the default. The preserved full AV profile is unvalidated and
+# must undergo a new hardware revision/PHY bring-up before future publication.
+set profile "debug"
+if {[info exists ::env(SC7F0_PROFILE)]} {set profile $::env(SC7F0_PROFILE)}
+if {$profile ni {debug full}} {error "SC7F0_PROFILE must be debug or full"}
+set debug_profile [expr {$profile eq "debug"}]
+puts " SC7F0 profile: $profile"
+exec python3 ./scripts/generate_sc7f0_csr_cdc.py --check
 
 puts "================================================================="
 puts " Starting Vivado Build for ZU4EV SC7F0 (zu4ev_pcie_card_top.v)"
@@ -35,10 +43,16 @@ add_files [glob ./rtl/*.v]
 set_property top zu4ev_pcie_card_top [current_fileset]
 
 set verilog_defs [list GIT_COMMIT_HASH_DEF=$git_commit_hex BUILD_TIMESTAMP_DEF=$build_date_hex]
+if {$debug_profile} {lappend verilog_defs SC7F0_DEBUG_ONLY=1}
 set_property verilog_define $verilog_defs [current_fileset]
+set_property XPM_LIBRARIES {XPM_CDC XPM_FIFO XPM_MEMORY} [current_project]
 
-# 2. Add Constraints
-add_files -fileset constrs_1 ./constraints/zu4ev_pcie_pinout.xdc
+# 2. Add only constraints for physically present ports in this profile.
+if {$debug_profile} {
+    add_files -fileset constrs_1 ./constraints/zu4ev_debug_pinout.xdc
+} else {
+    add_files -fileset constrs_1 ./constraints/zu4ev_pcie_pinout.xdc
+}
 
 # 2.1 Generate ZU4EV Processing System Subsystem (zu4ev_ps_bd)
 puts "Generating ZU4EV Processing System Subsystem (zu4ev_ps_bd)..."
@@ -206,6 +220,7 @@ set_property -dict [list \
 ] [get_ips ila_ps_axi_0]
 generate_target all [get_ips ila_ps_axi_0]
 
+if {!$debug_profile} {
 # 6. Generate Video PHY Controller IP Core (vid_phy_controller_0 - Quad 226 HDMI RX/TX)
 puts "Generating Video PHY Controller IP Core (vid_phy_controller_0)..."
 create_ip -name vid_phy_controller -vendor xilinx.com -library ip -version 2.2 -module_name vid_phy_controller_0
@@ -268,6 +283,7 @@ set_property -dict [list \
 ] [get_ips v_hdmi_tx_ss_0]
 
 generate_target all [get_ips v_hdmi_tx_ss_0]
+}
 
 # 9. Update Compile Order
 update_compile_order -fileset sources_1
@@ -309,7 +325,22 @@ foreach f [glob -nocomplain "$impl_dir/*.bit"] {
 }
 puts "================================================================="
 
-report_timing_summary -file $project_dir/timing_summary.rpt
+report_timing_summary -delay_type min_max -report_unconstrained -file $project_dir/timing_summary.rpt
+check_timing -verbose -file $project_dir/check-timing.rpt
+report_cdc -details -file $project_dir/cdc.rpt
+report_methodology -file $project_dir/methodology.rpt
+report_bus_skew -file $project_dir/bus-skew.rpt
+report_clock_interaction -file $project_dir/clock-interaction.rpt
+if {$debug_profile} {
+    # A generated .bit is NOT a release. Refuse XSA export on an invalid
+    # whole-design clock/CDC/setup/hold/skew model, even if BRAM timing passes.
+    if {[catch {exec python3 ./scripts/check_sc7f0_timing.py $project_dir} gate_result]} {
+        puts "ERROR: Debug-profile timing gate failed; XSA NOT exported."
+        puts $gate_result
+        exit 2
+    }
+    puts $gate_result
+}
 
 set xsa_out "./hw_platform/sc7f0_base.xsa"
 file mkdir [file dirname $xsa_out]

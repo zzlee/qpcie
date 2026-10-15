@@ -118,10 +118,14 @@ int qpcie_debug_init(struct qpcie_dev *qdev)
 {
     struct qpcie_debug *d;
     int rc;
+    u32 version;
     /* Old bitstreams have no slave at 0x2000: don't even read that address.
      * Exact version gate until future maps have been explicitly reviewed. */
-    if (!qdev->is_zu4ev ||
-        ioread32(qdev->bar0_mmio + REG_NEW_GLOBAL_VERSION) != QDBG_HW_VERSION)
+    if (!qdev->is_zu4ev)
+        return 0;
+    version = ioread32(qdev->bar0_mmio + REG_NEW_GLOBAL_VERSION);
+    if (version != QDBG_HW_VERSION && version != QDBG_HW_VERSION_CDC &&
+        version != QDBG_HW_VERSION_INITIAL)
         return 0;
     if (pci_resource_len(qdev->pdev, 0) < QDBG_BAR_OFFSET + QDBG_SIZE)
         return -ENODEV;

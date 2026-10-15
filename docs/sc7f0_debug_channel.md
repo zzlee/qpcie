@@ -1,4 +1,9 @@
-# SC7F0 PCIe PS command channel (ABI 1 / PL 26101501)
+# SC7F0 PCIe PS command channel (ABI 1 / debug-first PL 26101503)
+
+Current scope/build/CDC status: [sc7f0_cdc_timing.md](sc7f0_cdc_timing.md).
+The `26101503` candidate disables external HDMI and skips host AV/I2C/SPI
+initialization. Its board acceptance is pending; the historical `26101501`
+artifacts below failed whole-design timing and must NOT be deployed.
 
 ## Goal and boundaries
 
@@ -74,9 +79,10 @@ equality, including u32 wrap. Host kernel uses ioread32/iowrite32 and a safe
 same-endpoint readback to flush posted writes; an SMP barrier alone is not
 sufficient. PS maps Device memory with /dev/mem O_SYNC and uses `dmb sy`.
 
-Driver and PS daemon **check exact PL version 26101501 on the established CSR
-page before accessing the new aperture**, avoiding unsafe probes on old
-bitstreams. Future PL revisions must explicitly update this allowlist.
+Before accessing the aperture, the host driver checks the explicit hardware
+allowlist `26101501/26101502/26101503`; the current PS daemon checks its exact
+build version `26101503` on the established CSR page. Neither accepts an open
+version range or probes unknown old firmware. Mailbox ABI remains 1.
 
 ### Sessions and execution
 
@@ -165,17 +171,19 @@ services into the standalone SD installer RAMDisk.**
 Hardware changes require C_VERSION, regenerated targets/XSA, PetaLinux
 hardware-description import, image/BOOT.BIN rebuild and release hashes. Do
 not combine a new daemon with an old PL and claim functional validation.
-Flashing, board reboot and eMMC updates remain user-operated handoff steps.
+The user explicitly authorizes PCIe flash-image update and necessary board
+reboot after validation. Preserve the old image/driver, require upgrade VERIFY
+before COMMIT, and never reboot the Host. Timing/CDC gates still apply.
 
-## Hardware acceptance after user installs matching image
+## Hardware acceptance after installing the matching image
 
 SSH reaches the **host**, not PS. Test host `rd@sc7f0-test.local` uses dynamic
 IP; PCI BDF is currently `0000:03:00.0`. Host reboot need not power-cycle the
-board; use the established user-operated installation/reboot workflow.
+board; use the established PCIe flash-image upgrade/reboot workflow.
 
 1. Verify BAR0 magic/version using existing safe tools, PCIe Gen3 x4 and no
    concurrent upgrades/video stress. Load the rebuilt host driver only after
-   the user-installed PL 26101501 is confirmed. Preserve old driver/artifacts.
+   the validated PL 26101503 is confirmed. Preserve old driver/artifacts.
 2. Node `/dev/qpcie-debug-0000:03:00.0` should exist, mode 0600.
 3. Run these **proposed acceptance commands**, not evidence of completed tests:
 
@@ -205,7 +213,7 @@ sudo ./test_app/sc7f0ctl exec 'sleep 30'
 - `scripts/strip_sc7f0_mmio_services.sh` (standalone installer only)
 - `tb/qpcie_debug_*`, `scripts/sim_qpcie_debug.tcl`
 
-## Validation record (2026-10-15)
+## Historical 26101501 validation record (2026-10-15; not a release)
 
 - SSH/sudo: PASS; host kernel `7.0.0-38-generic`, `03:00.0` Gen3 x4,
   running driver `qpcie-dma`, existing PL `26101401`, upgrade IDLE. No live
@@ -246,8 +254,9 @@ sudo ./test_app/sc7f0ctl exec 'sleep 30'
   Previous A50T build directory was preserved/restored; failure log is
   `build/debug-channel/a50t.log`.
 - **No on-board command-channel acceptance has been performed.** Timing/CDC
-  review or an explicit decision to build a restricted experimental image is
-  required before producing an installer; flashing remains user-operated.
+  review and passing release gates are required before producing an installable
+  image. The later user authorization permits PCIe update after those gates;
+  it does not waive them or approve this failed 26101501 candidate.
 
 Intermediate artifact SHA-256 (not a release manifest):
 

@@ -11,7 +11,7 @@
 `timescale 1ns / 1ps
 
 module custom_pcie_dma_top #(
-    parameter [31:0] C_VERSION = 32'h2610_1501,
+    parameter [31:0] C_VERSION = 32'h2610_1503,
     parameter PCIE_DATA_WIDTH  = 128,
     parameter PCIE_KEEP_WIDTH  = PCIE_DATA_WIDTH / 8,
     parameter NUM_VIDEO_CH     = 2,
@@ -674,14 +674,9 @@ module custom_pcie_dma_top #(
         .rlast(m_axi_hp0_rlast), .rvalid(m_axi_hp0_rvalid), .rready(m_axi_hp0_rready)
     );
 
-    // pl_clk0 -> pcie_user_clk synchronizer for the H2C upgrade trigger.
-    // The BAR0 CSR (axil_reg_space, pl_clk0) publishes dma_upg_ctrl_w[0] as
-    // START, but every consumer below (lb gate, descriptor trigger, RQ
-    // address/length) runs on pcie_user_clk `clk`. The 1204 CDC repair was
-    // necessary, but the canary still timed out; this was NOT proven to be
-    // the root cause. The driver programs SIZE/HOST_ADDR before
-    // asserting START and holds them until DMA_DONE, so capturing the stable
-    // bus on the synchronized rising edge is safe.
+    // H2C upgrade parameters now arrive as ordered coherent CSR snapshots.
+    // This local pipeline detects START only after preceding SIZE/HOST_ADDR
+    // writes have crossed the FIFO. No raw pl_clk0 bus sampling is required.
     reg  [1:0]  upg_start_sync;
     reg  [31:0] upg_size_pcie;
     reg  [63:0] upg_host_addr_pcie;
@@ -691,10 +686,10 @@ module custom_pcie_dma_top #(
             upg_size_pcie      <= 32'd0;
             upg_host_addr_pcie <= 64'd0;
         end else begin
-            upg_start_sync <= {upg_start_sync[0], dma_upg_ctrl_w[0]};
+            upg_start_sync <= {upg_start_sync[0], dma_upg_ctrl_pcie[0]};
             if (upg_start_sync == 2'b01) begin
-                upg_size_pcie      <= dma_upg_size_w;
-                upg_host_addr_pcie <= dma_upg_host_addr_w;
+                upg_size_pcie      <= dma_upg_size_pcie;
+                upg_host_addr_pcie <= dma_upg_host_addr_pcie;
             end
         end
     end
@@ -1055,14 +1050,20 @@ module custom_pcie_dma_top #(
     end
     wire vch0_overflow_pulse = (thin_drop_count != d_thin_drop_count);
 
-    // 3. BAR0 AXI4-Lite Register Space
-    axil_reg_space #(
+    wire [31:0] dma_upg_ctrl_pcie, dma_upg_size_pcie;
+    wire [63:0] dma_upg_host_addr_pcie;
+
+    // 3. PS-clock register bank, ordered DMA controls and coherent telemetry.
+    qpcie_csr_reg_space #(
         .C_VERSION(C_VERSION),
         .NUM_VIDEO_CH(NUM_VIDEO_CH),
         .NUM_AUDIO_CH(NUM_AUDIO_CH)
     ) u_axil_reg_space (
         .clk(pl_clk0),
         .rst_n(sys_100m_rst_n),
+        .pcie_clk(clk), .pcie_rst_n(rst_n),
+        .pcie_upg_ctrl(dma_upg_ctrl_pcie), .pcie_upg_size(dma_upg_size_pcie),
+        .pcie_upg_host_addr(dma_upg_host_addr_pcie),
         .in_requester_id(requester_id),
         .s_axil_awaddr(arb_axil_awaddr),
         .s_axil_awvalid(arb_axil_awvalid),

@@ -6,7 +6,10 @@
  * All accesses are aligned little-endian u32. Publish SEQ last, ACK only
  * after payload consumption. Never replay a command after reconnection.
  */
-#define QDBG_HW_VERSION 0x26101501U
+#define QDBG_HW_VERSION 0x26101503U
+#define QDBG_HW_VERSION_CDC 0x26101502U
+#define QDBG_CAP_DEBUG_ONLY 0x80000000U
+#define QDBG_HW_VERSION_INITIAL 0x26101501U
 #define QDBG_BAR_OFFSET 0x2000U
 #define QDBG_PS_ADDRESS 0xA0002000ULL
 #define QDBG_SIZE       0x2000U
