@@ -809,7 +809,7 @@ int main(int argc, char **argv)
                        (g_slv == NUC_ADDR && dump_offset + i == 2) ? " STATUS" :
                        (g_slv == NUC_ADDR && dump_offset + i == 3) ? " CTRL" : "");
             if (g_slv == NUC_ADDR && dump_offset == 0 && n >= 2 &&
-                (regs[0] != 0x2A || (regs[1] != 0x02 && regs[1] != 0x03 && regs[1] != 0x04))) {
+                (regs[0] != 0x2A || (regs[1] < 0x02 || regs[1] > 0x10))) {
                 printf("WARN: MAGIC/VER mismatch (fw mismatch?)\n");
                 rc = 1;
             }
