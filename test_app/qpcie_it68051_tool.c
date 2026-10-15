@@ -30,7 +30,7 @@
 
 #define SYSFS_PCI_BASE "/sys/bus/pci/devices"
 
-#define BAR0_REG_C_VERSION        0x0030
+#define BAR0_REG_C_VERSION        0x0004
 #define BAR0_REG_HDMI_RX_STATUS   0x0600
 #define BAR0_REG_HDMI_RX_WIDTH    0x0604
 #define BAR0_REG_HDMI_RX_HEIGHT   0x0608
@@ -270,70 +270,167 @@ static int load_edid(volatile uint8_t *bar1)
     }
     printf("EDID RAM @ 0x%02X responded ACK.\n", EDID_RAM_ADDR);
 
-    /* 4. Write 256 bytes in 16-byte blocks */
+    /* 4. Write 256 bytes in 16-byte blocks with 5ms write cycle delay */
     for (int blk = 0; blk < 256; blk += 16) {
         if (wr_regs(bar1, BAR1_OFFSET_I2C_FRONT, EDID_RAM_ADDR, (uint8_t)blk,
                     &g_sc710_edid[blk], 16) != 0) {
             printf("ERROR: Failed to write EDID block at offset 0x%02X\n", blk);
             return -1;
         }
+        usleep(5000);
     }
     printf("Successfully wrote 256 bytes to EDID RAM.\n");
 
-    /* 5. Set VSDB Start Address & Port Checksums */
-    uint8_t v0 = 0x00, v1 = 0x00, v2 = 0xFF;
-    wr_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, 0xC6, &v0, 1);
-    wr_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, 0xC7, &v1, 1);
-    wr_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, 0xC8, &v2, 1);
+    /* 5. Set VSDB Start Address & Port Checksums in Bank 0 */
+    it68051_set_bank(bar1, 0);
+    uint8_t pa_offset = 0xA5; // HDMI VSDB Physical Address offset in CTA extension
+    uint8_t pa_p0_ab = 0x10;  // Port 0 PA: 1.0.0.0
+    uint8_t pa_p0_cd = 0x00;
+    uint8_t sum0 = g_sc710_edid[0x7F]; // 0x9F
+    uint8_t sum1 = g_sc710_edid[0xFF]; // 0x2A
 
-    uint8_t sum0 = g_sc710_edid[0x7F];
-    uint8_t sum1 = g_sc710_edid[0xFF];
+    wr_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, 0xC6, &pa_offset, 1);
+    wr_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, 0xC7, &pa_p0_ab, 1);
+    wr_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, 0xC8, &pa_p0_cd, 1);
     wr_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, 0xC9, &sum0, 1);
     wr_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, 0xCA, &sum1, 1);
 
-    printf("EDID Checksums set: Bank0=0x%02X, Bank1=0x%02X\n", sum0, sum1);
+    /* 6. Port 1 settings in Bank 4 */
+    it68051_set_bank(bar1, 4);
+    uint8_t pa_p1_ab = 0x20;  // Port 1 PA: 2.0.0.0
+    wr_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, 0xC7, &pa_p1_ab, 1);
+    wr_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, 0xC8, &pa_p0_cd, 1);
+    wr_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, 0xC9, &sum0, 1);
+    wr_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, 0xCA, &sum1, 1);
+
+    it68051_set_bank(bar1, 0);
+    printf("EDID Checksums & PA set: Bank0=0x%02X,0x%02X PA=0x%02X (1.0.0.0)\n",
+           sum0, sum1, pa_offset);
     return 0;
 }
 
+struct it6805_reg_seq {
+    uint8_t bank;
+    uint8_t reg;
+    uint8_t mask;
+    uint8_t val;
+};
+
+static const struct it6805_reg_seq g_it6805_init_table[] = {
+    { 0x00, 0x22, 0xFF, 0x08 },
+    { 0x00, 0x22, 0xFF, 0x17 },
+    { 0x00, 0x23, 0xFF, 0x1F },
+    { 0x00, 0x2B, 0xFF, 0x1F },
+    { 0x00, 0x24, 0xFF, 0xF8 },
+    { 0x00, 0x22, 0xFF, 0x10 },
+    { 0x00, 0x23, 0xFF, 0xA0 },
+    { 0x00, 0x2B, 0xFF, 0xA0 },
+    { 0x00, 0x24, 0xFF, 0x00 },
+    { 0x00, 0x34, 0xFF, 0x00 }, // Unegate all backend clocks including PCLK
+    { 0x00, 0x35, 0xFF, 0x00 }, // Ensure MainPortSel = 0 (Port 0)
+    { 0x03, 0xAA, 0xFF, 0xEC },
+    { 0x03, 0xAC, 0xFF, 0x40 },
+    { 0x00, 0x3A, 0xFF, 0x89 },
+    { 0x00, 0x49, 0xFF, 0xE1 },
+    { 0x00, 0x43, 0xFF, 0x01 },
+    { 0x04, 0x43, 0xFF, 0x01 },
+    { 0x04, 0x3A, 0xFF, 0x89 },
+    { 0x03, 0xA8, 0xFF, 0x0B },
+    { 0x00, 0x4F, 0xFF, 0x84 },
+    { 0x00, 0x44, 0xFF, 0x19 },
+    { 0x00, 0x46, 0xFF, 0x15 },
+    { 0x00, 0x47, 0xFF, 0x88 },
+    { 0x00, 0xD9, 0xFF, 0x00 },
+    { 0x00, 0xF0, 0xFF, 0x78 },
+    { 0x00, 0xF1, 0xFF, 0x10 },
+    { 0x03, 0x3A, 0xFF, 0x02 },
+    { 0x00, 0x28, 0xFF, 0x88 },
+    { 0x00, 0x6E, 0xFF, 0x80 },
+    { 0x00, 0x77, 0xFF, 0x87 },
+    { 0x00, 0x7B, 0xFF, 0x00 },
+    { 0x00, 0x86, 0xFF, 0x00 },
+    { 0x00, 0x36, 0xFF, 0x06 },
+    { 0x00, 0x8F, 0xFF, 0x41 },
+    { 0x01, 0xC0, 0xFF, 0x43 }, // Dual-Pixel + Enable TTL Out!
+    { 0x01, 0xC1, 0xFF, 0x01 }, // Dual-Pixel Mode
+    { 0x01, 0xC4, 0xFF, 0x00 }, // DCLK normal phase
+    { 0x01, 0xC5, 0xFF, 0x00 }, // Release all video IO tristates
+    { 0x01, 0xC6, 0xFF, 0x00 }, // Release all dual-pixel data tristates
+    { 0x01, 0xC7, 0xFF, 0x00 }, // Release all audio I2S tristates
+    { 0x01, 0xC8, 0xFF, 0x00 }, // Release all control tristates
+    { 0x01, 0xC9, 0xFF, 0x99 }, // 10mA driving strength on Video
+    { 0x01, 0xCA, 0xFF, 0x99 }, // 10mA driving strength on Audio
+    { 0x00, 0x86, 0x0C, 0x08 },
+    { 0x00, 0x81, 0x80, 0x80 },
+    { 0x01, 0x10, 0xFF, 0x00 },
+    { 0x01, 0x11, 0xFF, 0x00 },
+    { 0x01, 0x12, 0xFF, 0x00 },
+    { 0x01, 0x13, 0xFF, 0x00 },
+    { 0x01, 0x28, 0xFF, 0x00 },
+    { 0x01, 0x29, 0xFF, 0x00 },
+    { 0x01, 0x2A, 0xFF, 0x00 },
+    { 0x01, 0x2B, 0xFF, 0x00 },
+    { 0x01, 0x2C, 0xFF, 0x00 },
+    { 0x01, 0xC0, 0xC0, 0x40 },
+    { 0x03, 0xE3, 0xFF, 0x07 },
+    { 0x03, 0x27, 0xFF, 0x9F },
+    { 0x03, 0x28, 0xFF, 0x9F },
+    { 0x03, 0x29, 0xFF, 0x9F },
+    { 0x03, 0xA7, 0x40, 0x40 },
+    { 0x07, 0xE3, 0xFF, 0x07 },
+    { 0x07, 0x27, 0xFF, 0x9F },
+    { 0x07, 0x28, 0xFF, 0x9F },
+    { 0x07, 0x29, 0xFF, 0x9F },
+    { 0x07, 0xA7, 0x40, 0x40 },
+    { 0x00, 0xF8, 0xFF, 0xC3 },
+    { 0x00, 0xF8, 0xFF, 0xA5 },
+    { 0x01, 0x5F, 0xFF, 0x04 },
+    { 0x01, 0x58, 0xFF, 0x12 },
+    { 0x01, 0x58, 0xFF, 0x02 },
+    { 0x01, 0x5F, 0xFF, 0x00 },
+    { 0x00, 0xF8, 0xFF, 0xFF },
+    { 0x05, 0x20, 0x03, 0x01 },
+    { 0x04, 0x3C, 0x20, 0x00 },
+    { 0x00, 0x91, 0x40, 0x40 },
+    { 0x03, 0xF0, 0xFF, 0xC0 },
+    { 0x00, 0x21, 0x40, 0x40 },
+    { 0x00, 0xCE, 0x30, 0x00 },
+    { 0x04, 0xCE, 0x30, 0x00 },
+    { 0x04, 0x42, 0xE0, 0xC0 },
+    { 0x00, 0x42, 0xE0, 0xC0 },
+    { 0x00, 0x7B, 0x10, 0x10 },
+    { 0x00, 0x3C, 0x21, 0x00 },
+    { 0x00, 0x3B, 0xFF, 0x23 },
+    { 0x00, 0xF6, 0xFF, 0x08 },
+    { 0x04, 0x3C, 0x21, 0x00 },
+    { 0x04, 0x3B, 0xFF, 0x23 },
+    { 0x00, 0x59, 0xFF, 0x00 }
+};
+
 static int enable_receiver_afe(volatile uint8_t *bar1)
 {
-    printf("--- Powering up IT68051 Clock Oscillators & AFE Channels ---\n");
+    printf("--- Executing Official IT68051 Receiver Base Sequence (%zu steps) ---\n",
+           sizeof(g_it6805_init_table) / sizeof(g_it6805_init_table[0]));
 
-    /* 1. Bank 3: Power up Ring Oscillator and Xtal Oscillator, configure EQ */
-    if (it68051_set_bank(bar1, 3) != 0) {
-        printf("ERROR: Failed to select Bank 3\n");
-        return -1;
+    int cur_bank = -1;
+    for (size_t i = 0; i < sizeof(g_it6805_init_table) / sizeof(g_it6805_init_table[0]); i++) {
+        const struct it6805_reg_seq *s = &g_it6805_init_table[i];
+        if (s->bank != cur_bank) {
+            it68051_set_bank(bar1, s->bank);
+            cur_bank = s->bank;
+        }
+        if (s->mask == 0xFF) {
+            wr_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, s->reg, &s->val, 1);
+        } else {
+            uint8_t cur = 0;
+            rd_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, s->reg, &cur, 1);
+            uint8_t new_val = (cur & ~s->mask) | (s->val & s->mask);
+            wr_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, s->reg, &new_val, 1);
+        }
     }
-    uint8_t ab = 0xCA; /* Reg 0x3AB: Power up XTAL and RING oscillators */
-    wr_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, 0xAB, &ab, 1);
 
-    uint8_t eq = 0x9F;
-    wr_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, 0x27, &eq, 1);
-    wr_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, 0x28, &eq, 1);
-    wr_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, 0x29, &eq, 1);
-
-    uint8_t cs0 = 0x1B, cs1 = 0x03;
-    wr_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, 0x20, &cs0, 1);
-    wr_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, 0x21, &cs1, 1);
-
-    uint8_t skew = 0x00;
-    wr_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, 0x2D, &skew, 1);
-
-    /* 2. Bank 0: Power up Port 0 logic, channels, and termination */
     it68051_set_bank(bar1, 0);
-    uint8_t p0_pwd = 0x00; /* Reg 0x26 = 0: All digital logic, IPLL, OPLL, channels active */
-    wr_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, 0x26, &p0_pwd, 1);
-
-    uint8_t rterm = 0x00; /* Reg 0x27 = 0: All channel differential terminations active */
-    wr_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, 0x27, &rterm, 1);
-
-    uint8_t afe_all = 0x00; /* Reg 0x28 = 0: All AFEs active */
-    wr_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, 0x28, &afe_all, 1);
-
-    uint8_t r55 = 0xFF;
-    wr_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, 0x55, &r55, 1);
-
-    printf("Oscillators & AFEs powered up, TMDS terminations active.\n");
+    printf("Receiver base sequence complete.\n");
     return 0;
 }
 
@@ -342,30 +439,32 @@ static int enable_ttl_output(volatile uint8_t *bar1)
     printf("--- Configuring IT68051 Output Bus (TTL Dual-Pixel + I2S) ---\n");
 
     /* Switch to Bank 1 */
-    if (it68051_set_bank(bar1, 1) != 0) {
-        printf("ERROR: Failed to select Bank 1\n");
-        return -1;
-    }
+    it68051_set_bank(bar1, 1);
 
-    /* 0xC0: Reg_TTLMode=1 (Dual pixel), Reg_EnTTLOut=1 (Enable TTL clock) -> 0x03 */
-    uint8_t c0 = 0x03;
+    /* 0xC0: Reg_TTLMode=1 (Dual pixel), Reg_EnTTLOut=1 (Enable TTL clock), IOMode=0x40 -> 0x43 */
+    uint8_t c0 = 0x43;
     wr_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, 0xC0, &c0, 1);
 
-    /* 0xC6: Reg_TriDVDIO=0, Reg_TriVIO=0 (Release video TTL IO tri-state) -> 0x00 */
-    uint8_t c6 = 0x00;
-    wr_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, 0xC6, &c6, 1);
+    uint8_t c1 = 0x01; // Dual pixel mode
+    wr_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, 0xC1, &c1, 1);
 
-    /* 0xC7: Reg_TriI2SIO=0, Reg_TriSPDIF=0 (Release audio IO tri-state) -> 0x00 */
-    uint8_t c7 = 0x00;
-    wr_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, 0xC7, &c7, 1);
+    uint8_t c4 = 0x00; // Normal DCLK phase
+    wr_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, 0xC4, &c4, 1);
 
-    /* 0xC9, 0xCA: Set driving strength to 10mA */
-    uint8_t drive = 0xAA;
+    uint8_t zero = 0x00;
+    wr_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, 0xC5, &zero, 1); // Release video IO tristates
+    wr_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, 0xC6, &zero, 1); // Release dual-pixel data tristates
+    wr_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, 0xC7, &zero, 1); // Release I2S audio tristates
+    wr_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, 0xC8, &zero, 1); // Release control tristates
+
+    uint8_t drive = 0x99; // 10mA driving strength
     wr_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, 0xC9, &drive, 1);
     wr_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, 0xCA, &drive, 1);
 
-    /* Restore Bank 0 */
+    /* Switch to Bank 0 and ungate all clocks */
     it68051_set_bank(bar1, 0);
+    wr_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, 0x34, &zero, 1);
+    wr_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, 0x35, &zero, 1);
 
     printf("TTL Dual-Pixel Video & I2S Audio Outputs Enabled (Active Drivers).\n");
     return 0;
@@ -476,6 +575,11 @@ static void monitor_loop(volatile uint8_t *bar1, volatile uint8_t *bar0)
             rd_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, 0x98, timing, 24);
             hactive = ((timing[0x9E - 0x98] & 0x3F) << 8) | timing[0x9D - 0x98];
             vactive = ((timing[0xA2 - 0x98] & 0x3F) << 8) | timing[0xA1 - 0x98];
+
+            if (!(last_s19 & 0x80)) {
+                /* Newly locked: ungate all clocks and release all output tristates */
+                enable_ttl_output(bar1);
+            }
         }
 
         uint32_t fpga_status = bar0 ? read32(bar0, BAR0_REG_HDMI_RX_STATUS) : 0;
@@ -553,13 +657,6 @@ int main(int argc, char **argv)
     if (find_qpcie() < 0) {
         printf("ERROR: QPCIe device (12ab:e380) not found!\n");
         return 1;
-    }
-
-    bool had_drv = (access("/sys/module/qpcie", F_OK) == 0);
-    if (had_drv) {
-        printf("Temporarily unloading qpcie driver for direct BAR MMIO...\n");
-        system("rmmod qpcie 2>/dev/null");
-        usleep(200000);
     }
 
     /* Map BAR0 (1M) */
@@ -641,11 +738,6 @@ int main(int argc, char **argv)
     if (bar0) {
         munmap((void *)bar0, 1048576);
         close(fd0);
-    }
-
-    if (had_drv) {
-        printf("Restoring qpcie driver...\n");
-        system("insmod /home/nvidia/qpcie/driver/qpcie.ko 2>/dev/null");
     }
 
     return 0;
