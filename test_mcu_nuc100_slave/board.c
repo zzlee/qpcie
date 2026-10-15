@@ -2,6 +2,66 @@
 #include "board.h"
 #include "NUC100Series.h"
 
+static void check_enable_iap(void)
+{
+    /* If CBS has bit 6 set (non-IAP mode), clear bit 6 to enable IAP (CBS=10) */
+    CLK->AHBCLK |= CLK_AHBCLK_ISP_EN_Msk;
+    FMC->ISPCON |= FMC_ISPCON_ISPEN_Msk;
+
+    if (((FMC->ISPSTA & FMC_ISPSTA_CBS_Msk) >> FMC_ISPSTA_CBS_Pos) & 1) {
+        uint32_t cfg0, cfg1;
+
+        FMC->ISPCON |= FMC_ISPCON_CFGUEN_Msk;
+
+        /* Read Config0 */
+        FMC->ISPCMD = 0x00UL;
+        FMC->ISPADR = 0x00300000UL;
+        FMC->ISPTRG = 0x1UL;
+        __ISB();
+        while (FMC->ISPTRG & 0x1UL);
+        cfg0 = FMC->ISPDAT;
+
+        /* Read Config1 */
+        FMC->ISPCMD = 0x00UL;
+        FMC->ISPADR = 0x00300004UL;
+        FMC->ISPTRG = 0x1UL;
+        __ISB();
+        while (FMC->ISPTRG & 0x1UL);
+        cfg1 = FMC->ISPDAT;
+
+        if (cfg0 & 0x40UL) {
+            cfg0 &= ~0x40UL; /* Enable IAP mode (CBS=10) */
+
+            /* Page Erase Config Page */
+            FMC->ISPCMD = 0x22UL;
+            FMC->ISPADR = 0x00300000UL;
+            FMC->ISPTRG = 0x1UL;
+            __ISB();
+            while (FMC->ISPTRG & 0x1UL);
+
+            /* Program Config0 */
+            FMC->ISPCMD = 0x21UL;
+            FMC->ISPADR = 0x00300000UL;
+            FMC->ISPDAT = cfg0;
+            FMC->ISPTRG = 0x1UL;
+            __ISB();
+            while (FMC->ISPTRG & 0x1UL);
+
+            /* Program Config1 */
+            FMC->ISPCMD = 0x21UL;
+            FMC->ISPADR = 0x00300004UL;
+            FMC->ISPDAT = cfg1;
+            FMC->ISPTRG = 0x1UL;
+            __ISB();
+            while (FMC->ISPTRG & 0x1UL);
+
+            /* Reset MCU for new User Config (CBS) to take effect */
+            NVIC_SystemReset();
+            while (1);
+        }
+    }
+}
+
 int board_early_init(void)
 {
     uint32_t timeout;
@@ -10,6 +70,8 @@ int board_early_init(void)
     SYS->REGWRPROT = 0x59UL;
     SYS->REGWRPROT = 0x16UL;
     SYS->REGWRPROT = 0x88UL;
+
+    check_enable_iap();
 
     CLK->PWRCON |= CLK_PWRCON_XTL12M_EN_Msk;
     timeout = HXT_TIMEOUT;
