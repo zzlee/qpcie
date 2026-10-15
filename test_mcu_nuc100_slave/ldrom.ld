@@ -1,7 +1,7 @@
 /* Linker script to configure memory regions. */
 MEMORY
 {
-  FLASH (rx) : ORIGIN = 0x00100000, LENGTH = 0x1000    /* 4k */
+  FLASH (rx) : ORIGIN = 0x00000000, LENGTH = 0x1000    /* 4k */
   RAM (rwx)  : ORIGIN = 0x20000000, LENGTH = 0x4000    /*  16k */
 }
 
@@ -194,7 +194,7 @@ SECTIONS
 
 	/* Check if data + heap + stack exceeds RAM limit */
 	ASSERT(__StackLimit >= __HeapLimit, "region RAM overflowed with stack")
-	ASSERT(__flash_end <= 0x101000, "LDROM overflowed 4KB")
+	ASSERT(__flash_end <= 0x1000, "LDROM overflowed 4KB")
 	.stage 0x20001000 (NOLOAD) :
 	{
 		KEEP(*(.stage))

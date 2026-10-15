@@ -33,14 +33,9 @@ void ProcessHardFault(void)
     }
 }
 
-/* Trampolines: forward through the validated flash header (or LDROM when BS=1). */
+/* Trampolines: forward through the validated flash header. */
 void I2C0_IRQHandler(void)
 {
-    if (FMC->ISPCON & FMC_ISPCON_BS_Msk) {
-        void (*h)(void) = (void (*)(void))(*((uint32_t *)0x00100088UL));
-        if (h) h();
-        return;
-    }
     volatile app_hdr_t *hdr = (volatile app_hdr_t *)APP_HDR_BASE;
     void (*handler)(void) = hdr->i2c0h;
     if (handler)
@@ -49,11 +44,6 @@ void I2C0_IRQHandler(void)
 
 void I2C1_IRQHandler(void)
 {
-    if (FMC->ISPCON & FMC_ISPCON_BS_Msk) {
-        void (*h)(void) = (void (*)(void))(*((uint32_t *)0x0010008CUL));
-        if (h) h();
-        return;
-    }
     volatile app_hdr_t *hdr = (volatile app_hdr_t *)APP_HDR_BASE;
     void (*handler)(void) = hdr->i2c1h;
     if (handler)
@@ -105,16 +95,12 @@ static int app_valid(volatile app_hdr_t *hdr)
 
 static void boot_ldrom(void)
 {
-    uint32_t ldrom_sp = *((volatile uint32_t *)0x00100000UL);
-    void (*ldrom_entry)(void) = (void (*)(void))(*((volatile uint32_t *)0x00100004UL));
-    if (ldrom_sp != 0xFFFFFFFFUL && (uint32_t)ldrom_entry != 0xFFFFFFFFUL && ((uint32_t)ldrom_entry & 1UL)) {
-        SYS->REGWRPROT = 0x59UL;
-        SYS->REGWRPROT = 0x16UL;
-        SYS->REGWRPROT = 0x88UL;
-        CLK->AHBCLK |= CLK_AHBCLK_ISP_EN_Msk;
-        FMC->ISPCON |= FMC_ISPCON_ISPEN_Msk | FMC_ISPCON_BS_Msk;
-        app_enter(ldrom_sp, ldrom_entry);
-    }
+    SYS->REGWRPROT = 0x59UL;
+    SYS->REGWRPROT = 0x16UL;
+    SYS->REGWRPROT = 0x88UL;
+    CLK->AHBCLK |= CLK_AHBCLK_ISP_EN_Msk;
+    FMC->ISPCON |= FMC_ISPCON_ISPEN_Msk | FMC_ISPCON_BS_Msk;
+    NVIC_SystemReset();
     while (1) {
     }
 }
@@ -124,9 +110,7 @@ int main(void)
     volatile app_hdr_t *hdr = (volatile app_hdr_t *)APP_HDR_BASE;
     uint32_t *src, *dst, n;
 
-    if ((FMC->ISPCON & FMC_ISPCON_BS_Msk) ||
-        (*((volatile uint32_t *)UPG_HANDSHAKE_ADDR) == UPG_HANDSHAKE_MAGIC) ||
-        !app_valid(hdr) || !hdr->i2c0h || !hdr->i2c1h) {
+    if (!app_valid(hdr) || !hdr->i2c0h || !hdr->i2c1h) {
         boot_ldrom();
     }
 

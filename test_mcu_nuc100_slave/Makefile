@@ -24,16 +24,19 @@ APP_SRCS := main.c i2c_slave.c regfile.c board.c upg.c writer.c
 LDROM_SRCS := ldrom_main.c i2c_slave.c upg.c writer.c
 STAGE0_SRCS := stage0.c
 
-all: stage0.bin app.bin ldrom.bin aprom_bundle.bin
+all: stage0.bin app.bin ldrom.bin aprom_bundle.bin app_v5.bin
 	python3 check_sizes.py
 	@echo "--- sizes (flash budgets: stage0<=2K app<=8K(upg staging) ldrom<=4K) ---"
-	@ls -la stage0.bin app.bin ldrom.bin aprom_bundle.bin
+	@ls -la stage0.bin app.bin ldrom.bin aprom_bundle.bin app_v5.bin
 
 stage0.elf: $(STAGE0_SRCS) $(STARTUP) $(SYS_SRC)
 	$(CC) $(filter-out -flto,$(CFLAGS)) $(LDFLAGS) -Tstage0.ld $^ -o $@
 
 app.elf: $(APP_SRCS) $(STARTUP) $(SYS_SRC)
 	$(CC) $(CFLAGS) $(LDFLAGS) -Tapp.ld $^ -o $@
+
+app_v5.elf: $(APP_SRCS) $(STARTUP) $(SYS_SRC)
+	$(CC) $(CFLAGS) -DAPP_FW_VER=0x05U $(LDFLAGS) -Tapp.ld $^ -o $@
 
 ldrom.elf: $(LDROM_SRCS) $(STARTUP) $(SYS_SRC)
 	$(CC) $(CFLAGS) $(LDFLAGS) -Tldrom.ld $^ -o $@
@@ -46,6 +49,11 @@ ldrom.elf: $(LDROM_SRCS) $(STARTUP) $(SYS_SRC)
 # CRC covers [0x0800,0x0900) + [0x0910,0x0800+len); gaps are objcopy zeros,
 # programmed as zero words, so both sides agree.
 app.bin: app.elf
+	$(OBJCOPY) -O binary $< $@
+	python3 patch_app_hdr.py $@
+	@ls -la $@
+
+app_v5.bin: app_v5.elf
 	$(OBJCOPY) -O binary $< $@
 	python3 patch_app_hdr.py $@
 	@ls -la $@

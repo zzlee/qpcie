@@ -84,9 +84,16 @@ RAMFUNC int writer_program_aprom(uint32_t dst_addr, const uint32_t *src, uint32_
             return -4;
     }
 
-    /* Verify by direct readback (CPU read, no ISP needed). */
+    /* Verify using FMC ISP Read because APROM [0..4KB) is shadowed by LDROM while BS=1 */
     for (i = 0; i < nwords; i++) {
-        if (*((volatile uint32_t *)(dst_addr + i * 4UL)) != src[i])
+        FMC->ISPCMD = WR_FMC_ISPCMD_READ;
+        FMC->ISPADR = dst_addr + i * 4UL;
+        FMC->ISPDAT = 0UL;
+        FMC->ISPTRG = 0x1UL;
+        __ISB();
+        if (wr_wait_done() != 0)
+            return -5;
+        if (FMC->ISPDAT != src[i])
             return -5;
     }
     return 0;

@@ -17,7 +17,9 @@
 #include "regfile.h"
 #include "upg.h"
 
+#ifndef APP_FW_VER
 #define APP_FW_VER 0x04U
+#endif
 
 /* App image header for stage0 (pinned @0x0800, len+crc patched post-link).
  * 64 bytes: stage0 validates magic/len/crc, inits app .data/.bss from these
@@ -47,7 +49,7 @@ __attribute__((used, section(".app_header"))) const struct {
               (uint32_t)&__data_end__,
               (uint32_t)&__bss_start__,
               (uint32_t)&__bss_end__,
-              0UL, 0UL, 0UL };
+              { 0UL, 0UL, 0UL } };
 
 static i2c_ch_t g_c0, g_c1;
 
