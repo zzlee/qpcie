@@ -654,11 +654,17 @@ int main(int argc, char **argv)
         int r2 = upg_cmd_rsp(bar1, hello, 1, rsp, 4);
         printf("UPG HELLO (0x2A + escape 0x%02X): rc=%d rsp=%02X %02X %02X %02X\n",
                UPG_ESCAPE_BYTE, r2, rsp[0], rsp[1], rsp[2], rsp[3]);
-        if (r2 == 0)
+        if (r2 == 0) {
             printf("  PROTO=%u ROLE=%u FLAGS=0x%02X MAXCHUNK=%u\n",
                    rsp[0], rsp[1], rsp[2], rsp[3]);
-        else
+            uint8_t prog_cmd[1] = { 0x06 };
+            uint8_t prog_rsp[4] = { 0 };
+            int r_prog = upg_cmd_rsp(bar1, prog_cmd, 1, prog_rsp, 4);
+            printf("UPG PROGRESS: rc=%d state=%u done=%u err=%u\n",
+                   r_prog, prog_rsp[0], (unsigned)prog_rsp[1] | ((unsigned)prog_rsp[2] << 8), prog_rsp[3]);
+        } else {
             rc = 1;
+        }
         goto out;
     }
 
