@@ -80,13 +80,17 @@ def check(directory):
     # synchronous I/O endpoint may be hidden by that classification.
     if re.search(r'There are [1-9]\d* [^\n]*\(HIGH\)', coverage):
         errors.append('uncovered HIGH-severity endpoint')
-    cdc_rows = re.findall(r'^(CDC-\d+)\s+(\w+)\s+(\d+)\s', cdc, re.M)
-    if not cdc_rows:
-        raise ValueError('missing CDC summary')
+    cdc_rows = re.findall(r'^(CDC-\d+)\s+([A-Za-z ]+?)\s+(\d+)\s', cdc, re.M)
+    raw_rows = re.findall(r'^CDC-\d+\b[^\n]*', cdc, re.M)
     cdc_counts = {rule: int(count) for rule, severity, count in cdc_rows}
+    if not cdc_rows or len(cdc_rows) != len(raw_rows) or len(cdc_counts) != len(cdc_rows):
+        raise ValueError('missing/malformed/duplicate CDC summary')
     for rule, severity, count in cdc_rows:
-        if int(count) and (severity == 'Critical' or rule in ('CDC-5', 'CDC-7')):
+        if int(count) and (severity not in ('Info', 'Warning') or rule in ('CDC-5', 'CDC-7')
+                           or (severity == 'Info' and rule not in ('CDC-3', 'CDC-9'))):
             errors.append(rule + ' ' + severity + '=' + count)
+    if re.search(r'^\s*\d+\s+CDC-\d+\s+(?:Critical(?: Warning)?|Error)\b', cdc, re.M):
+        errors.append('critical CDC detail (even if missing from summary)')
     # Account for EVERY warning in the detailed report. Summary-only reports,
     # new/custom CE crossings and unexpected array synchronizers fail closed.
     detail_counts = {}
