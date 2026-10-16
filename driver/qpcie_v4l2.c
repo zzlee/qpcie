@@ -285,6 +285,29 @@ static int qpcie_vidioc_g_fmt_vid_cap_mplane(struct file *file, void *priv,
     return 0;
 }
 
+static int qpcie_vidioc_g_fmt_vid_cap(struct file *file, void *priv, struct v4l2_format *f)
+{
+    struct qpcie_v4l2_channel *vch = video_drvdata(file);
+    const struct qpcie_video_mode *mode;
+
+    mode = qpcie_find_video_mode(vch->width, vch->height);
+    f->fmt.pix.width = mode->width;
+    f->fmt.pix.height = mode->height;
+    f->fmt.pix.field = V4L2_FIELD_NONE;
+    if (vch->pixelformat == V4L2_PIX_FMT_RGB24) {
+        f->fmt.pix.pixelformat = V4L2_PIX_FMT_RGB24;
+        f->fmt.pix.bytesperline = mode->width * 3;
+        f->fmt.pix.sizeimage = mode->width * 3 * mode->height;
+        f->fmt.pix.colorspace = V4L2_COLORSPACE_SRGB;
+    } else {
+        f->fmt.pix.pixelformat = V4L2_PIX_FMT_NV12;
+        f->fmt.pix.bytesperline = mode->width;
+        f->fmt.pix.sizeimage = mode->width * mode->height * 3 / 2;
+        f->fmt.pix.colorspace = V4L2_COLORSPACE_REC709;
+    }
+    return 0;
+}
+
 static int qpcie_vidioc_try_fmt_vid_cap_mplane(struct file *file, void *priv,
                                                 struct v4l2_format *f)
 {
@@ -554,9 +577,37 @@ static int qpcie_vidioc_subscribe_event(struct v4l2_fh *fh,
     }
 }
 
+static int qpcie_vidioc_enum_input(struct file *file, void *priv, struct v4l2_input *inp)
+{
+    if (inp->index > 0)
+        return -EINVAL;
+    inp->type = V4L2_INPUT_TYPE_CAMERA;
+    inp->std = 0;
+    inp->capabilities = V4L2_IN_CAP_DV_TIMINGS;
+    strscpy(inp->name, "HDMI / TPG Input", sizeof(inp->name));
+    return 0;
+}
+
+static int qpcie_vidioc_g_input(struct file *file, void *priv, unsigned int *i)
+{
+    *i = 0;
+    return 0;
+}
+
+static int qpcie_vidioc_s_input(struct file *file, void *priv, unsigned int i)
+{
+    if (i != 0)
+        return -EINVAL;
+    return 0;
+}
+
 static const struct v4l2_ioctl_ops qpcie_v4l2_ioctl_ops = {
     .vidioc_querycap                = qpcie_vidioc_querycap,
+    .vidioc_enum_input              = qpcie_vidioc_enum_input,
+    .vidioc_g_input                 = qpcie_vidioc_g_input,
+    .vidioc_s_input                 = qpcie_vidioc_s_input,
     .vidioc_enum_fmt_vid_cap        = qpcie_vidioc_enum_fmt_vid_cap_mplane,
+    .vidioc_g_fmt_vid_cap           = qpcie_vidioc_g_fmt_vid_cap,
     .vidioc_g_fmt_vid_cap_mplane    = qpcie_vidioc_g_fmt_vid_cap_mplane,
     .vidioc_try_fmt_vid_cap_mplane  = qpcie_vidioc_try_fmt_vid_cap_mplane,
     .vidioc_s_fmt_vid_cap_mplane    = qpcie_vidioc_s_fmt_vid_cap_mplane,
@@ -949,7 +1000,8 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
                                (vch->stride ? vch->stride : vch->width);
         u32 stride1 = is_rgb ? 0 :
                                (vch->stride1 ? vch->stride1 : (vch->stride ? vch->stride : vch->width));
-        u32 ch_ctrl = BIT(0) | ((is_rgb ? 1 : 2) << 4) | BIT(8); /* enable=1, format, irq_en=1 */
+        u32 ch_ctrl = BIT(0) | ((is_rgb ? 1 : 2) << 4) | BIT(8) |
+                      ((vch->video_source & 0x3) << 20); /* enable=1, format, irq_en=1, video_source */
 
         /* Program CH Geometry */
         iowrite32(vch->width, qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_WIDTH);
@@ -1193,6 +1245,16 @@ static int qpcie_s_ctrl(struct v4l2_ctrl *ctrl)
             ioread32(qdev->bar0_mmio + REG_VIDEO_OVERLAY);
         }
         break;
+    case V4L2_CID_QPCIE_VIDEO_SOURCE:
+        vch->video_source = ctrl->val;
+        if (qdev && qdev->bar0_mmio && vch->ch_reg_base) {
+            u32 cur_ctrl = ioread32(qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_CTRL);
+            cur_ctrl &= ~(0x3 << 20);
+            cur_ctrl |= ((vch->video_source & 0x3) << 20);
+            iowrite32(cur_ctrl, qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_CTRL);
+            ioread32(qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_CTRL);
+        }
+        break;
     }
     return 0;
 }
@@ -1260,6 +1322,24 @@ static const struct v4l2_ctrl_config qpcie_tpg_overlay_ctrl_config = {
     .max  = 1,
     .step = 1,
     .def  = 0,
+};
+
+static const char * const qpcie_video_source_strings[] = {
+    "Auto (HDMI RX / TPG Fallback)",
+    "Force TPG",
+    "Force HDMI RX",
+    NULL
+};
+
+static const struct v4l2_ctrl_config qpcie_video_source_ctrl_config = {
+    .ops   = &qpcie_ctrl_ops,
+    .id    = V4L2_CID_QPCIE_VIDEO_SOURCE,
+    .name  = "QPCIe Video Input Source",
+    .type  = V4L2_CTRL_TYPE_MENU,
+    .min   = 0,
+    .max   = 2,
+    .def   = 0,
+    .qmenu = qpcie_video_source_strings,
 };
 
 void qpcie_v4l2_check_source_change(struct qpcie_v4l2_channel *vch)
@@ -1413,7 +1493,7 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
 
         /* Initialize V4L2 Control Handler */
         dev_info(&qdev->pdev->dev, "[DEBUG STEP 2.3] Node %d: Initializing Control Handler...\n", i);
-        v4l2_ctrl_handler_init(&vch->ctrl_handler, i == 0 ? 5 : 1);
+        v4l2_ctrl_handler_init(&vch->ctrl_handler, i == 0 ? 6 : 1);
         if (i == 0) {
             v4l2_ctrl_new_std_menu_items(&vch->ctrl_handler, &qpcie_ctrl_ops,
                                          V4L2_CID_TEST_PATTERN,
@@ -1424,6 +1504,8 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
                                  &qpcie_frame_drop_ctrl_config, NULL);
             v4l2_ctrl_new_custom(&vch->ctrl_handler,
                                  &qpcie_tpg_overlay_ctrl_config, NULL);
+            v4l2_ctrl_new_custom(&vch->ctrl_handler,
+                                 &qpcie_video_source_ctrl_config, NULL);
         }
         v4l2_ctrl_new_custom(&vch->ctrl_handler,
                              &qpcie_pacer_ctrl_config, NULL);

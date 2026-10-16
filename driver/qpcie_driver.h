@@ -152,6 +152,7 @@
 #define V4L2_CID_QPCIE_TPG_MOTION_SPEED (V4L2_CID_USER_BASE + 0x1001)
 #define V4L2_CID_QPCIE_FRAME_DROP_COUNT (V4L2_CID_USER_BASE + 0x1002)
 #define V4L2_CID_QPCIE_TPG_OVERLAY      (V4L2_CID_USER_BASE + 0x1003)
+#define V4L2_CID_QPCIE_VIDEO_SOURCE     (V4L2_CID_USER_BASE + 0x1004)
 
 /* BAR0 DMA Register Offsets */
 #define REG_DMA_CTRL         0x00
@@ -405,6 +406,7 @@ struct qpcie_v4l2_channel {
     u32 error_count_start;
     bool pacer_enable;
     bool overlay_enable;
+    u32 video_source; /* 0=Auto (HDMI RX if 5V, else TPG), 1=Force TPG, 2=Force HDMI RX */
     enum v4l2_buf_type buf_type;
     /* Canonical v3.0: Per-channel register block & thin descriptor rings */
     u32 ch_reg_base;
