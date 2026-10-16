@@ -3,7 +3,7 @@
 # Generates zynq_ultra_ps_e with M_AXI_HPM0_FPD, S_AXI_HP0_FPD, and pl_ps_irq0
 # ==============================================================================
 
-proc create_zu4ev_ps_bd { } {
+proc create_zu4ev_ps_bd {{hdmi_control 0}} {
   set design_name "zu4ev_ps_bd"
   create_bd_design $design_name
   current_bd_design $design_name
@@ -1055,6 +1055,27 @@ Port;FD4A0000;FD4AFFFF;0|FPD;DPDMA;FD4C0000;FD4CFFFF;0|FPD;DDR_XMPU5_CFG;FD05000
   ] $zynq_ultra_ps_e_0
 
   # Create external interface ports
+  if {$hdmi_control} {
+    # Independent PS control path: HDMI remains configurable without PCIe.
+    set_property CONFIG.PSU__USE__M_AXI_GP1 {1} $zynq_ultra_ps_e_0
+    set pc [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_protocol_converter:2.1 hdmi_control_pc]
+    set_property -dict [list CONFIG.SI_PROTOCOL {AXI4} CONFIG.MI_PROTOCOL {AXI4LITE} CONFIG.DATA_WIDTH {32} CONFIG.ADDR_WIDTH {40} CONFIG.ID_WIDTH {16}] $pc
+    connect_bd_intf_net [get_bd_intf_pins zynq_ultra_ps_e_0/M_AXI_HPM1_FPD] [get_bd_intf_pins $pc/S_AXI]
+    set hdmi_axi [create_bd_intf_port -mode Master -vlnv xilinx.com:interface:aximm_rtl:1.0 M_AXI_HDMI]
+    set_property -dict [list CONFIG.PROTOCOL {AXI4LITE} CONFIG.DATA_WIDTH {32} CONFIG.ADDR_WIDTH {40} CONFIG.FREQ_HZ {99990005}] $hdmi_axi
+    connect_bd_intf_net [get_bd_intf_pins $pc/M_AXI] $hdmi_axi
+    connect_bd_net [get_bd_pins zynq_ultra_ps_e_0/pl_clk0] [get_bd_pins $pc/aclk] [get_bd_pins zynq_ultra_ps_e_0/maxihpm1_fpd_aclk]
+    set hrst [create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset:5.0 hdmi_control_reset]
+    connect_bd_net [get_bd_pins zynq_ultra_ps_e_0/pl_clk0] [get_bd_pins $hrst/slowest_sync_clk]
+    connect_bd_net [get_bd_pins zynq_ultra_ps_e_0/pl_resetn0] [get_bd_pins $hrst/ext_reset_in]
+    set one [create_bd_cell -type ip -vlnv xilinx.com:ip:xlconstant:1.1 hdmi_reset_locked]
+    set_property CONFIG.CONST_VAL {1} $one
+    set zero [create_bd_cell -type ip -vlnv xilinx.com:ip:xlconstant:1.1 hdmi_reset_unused]
+    set_property CONFIG.CONST_VAL {0} $zero
+    connect_bd_net [get_bd_pins $one/dout] [get_bd_pins $hrst/dcm_locked]
+    connect_bd_net [get_bd_pins $zero/dout] [get_bd_pins $hrst/aux_reset_in] [get_bd_pins $hrst/mb_debug_sys_rst]
+    connect_bd_net [get_bd_pins $hrst/peripheral_aresetn] [get_bd_pins $pc/aresetn]
+  }
   set m_axi [ create_bd_intf_port -mode Master -vlnv xilinx.com:interface:aximm_rtl:1.0 M_AXI_HPM0_FPD ]
   set_property -dict [list CONFIG.DATA_WIDTH {32} CONFIG.ADDR_WIDTH {40} CONFIG.FREQ_HZ {99990005}] $m_axi
   connect_bd_intf_net $m_axi [get_bd_intf_pins zynq_ultra_ps_e_0/M_AXI_HPM0_FPD]
@@ -1068,10 +1089,16 @@ Port;FD4A0000;FD4AFFFF;0|FPD;DPDMA;FD4C0000;FD4CFFFF;0|FPD;DDR_XMPU5_CFG;FD05000
 
   # Address mapping
   assign_bd_address
+  if {$hdmi_control} {
+    assign_bd_address -force -offset 0xB0000000 -range 0x00100000 -target_address_space [get_bd_addr_spaces zynq_ultra_ps_e_0/Data] [get_bd_addr_segs M_AXI_HDMI/Reg]
+  }
 
   # Export pl_clk0 (100MHz) and connect it to PS AXI interfaces
   create_bd_port -dir O -type clk -freq_hz 99990005 pl_clk0
   set_property -dict [list CONFIG.ASSOCIATED_BUSIF {M_AXI_HPM0_FPD:S_AXI_HP0_FPD}] [get_bd_ports pl_clk0]
+  if {$hdmi_control} {
+    set_property CONFIG.ASSOCIATED_BUSIF {M_AXI_HPM0_FPD:S_AXI_HP0_FPD:M_AXI_HDMI} [get_bd_ports pl_clk0]
+  }
   connect_bd_net [get_bd_pins zynq_ultra_ps_e_0/pl_clk0] [get_bd_ports pl_clk0]
   connect_bd_net [get_bd_pins zynq_ultra_ps_e_0/pl_clk0] [get_bd_pins zynq_ultra_ps_e_0/maxihpm0_fpd_aclk]
   connect_bd_net [get_bd_pins zynq_ultra_ps_e_0/pl_clk0] [get_bd_pins zynq_ultra_ps_e_0/saxihp0_fpd_aclk]
@@ -1081,6 +1108,9 @@ Port;FD4A0000;FD4AFFFF;0|FPD;DPDMA;FD4C0000;FD4CFFFF;0|FPD;DDR_XMPU5_CFG;FD05000
   connect_bd_net [get_bd_pins zynq_ultra_ps_e_0/pl_resetn0] [get_bd_ports pl_resetn0]
 
   validate_bd_design
+  if {$hdmi_control && [get_property CONFIG.C_EXT_RESET_HIGH [get_bd_cells hdmi_control_reset]] != 0} {
+    error "HDMI control reset must infer ACTIVE_LOW from PS pl_resetn0"
+  }
   save_bd_design
   puts "================================================================="
   puts " SUCCESS: zu4ev_ps_bd created & validated successfully!"

@@ -11,11 +11,12 @@ set -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
-PROJECT_DIR="$ROOT_DIR/build/qpcie_zu4ev_proj"
 
 source /opt/Xilinx/Vivado/2023.2/settings64.sh
 
-rm -rf "$PROJECT_DIR"
+# The Tcl script selects isolated debug/full directories and uses
+# create_project -force. Never delete the validated debug project here when
+# the caller selected the experimental HDMI profile.
 
 cd "$ROOT_DIR"
 vivado -mode batch -source scripts/build_zu4ev.tcl -nolog -nojournal

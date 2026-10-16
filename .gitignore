@@ -50,6 +50,8 @@ scripts/archive_debug/
 tb/sim_*
 sim_*
 !scripts/sim_sc7f0_csr_cdc.tcl
+!scripts/sim_sc7f0_hdmi_bridges.tcl
+!scripts/sim_sc7f0_hdmi_control.tcl
 *.vvp
 *.out
 *.fst
@@ -117,3 +119,7 @@ release/
 test_mcu_minimal/*.elf
 test_mcu_minimal/*.bin
 raw/NUC100BSP/
+raw/NUC1262BSP/
+test_mcu_nuc1262/*.elf
+test_mcu_nuc1262/*.bin
+test_mcu_nuc1262/*.tcl

@@ -7,9 +7,17 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-SINGLE_BIT="$ROOT_DIR/build/qpcie_zu4ev_proj/qpcie_zu4ev_card.runs/impl_1/zu4ev_pcie_card_top.bit"
-TANDEM1_BIT="$ROOT_DIR/build/qpcie_zu4ev_proj/qpcie_zu4ev_card.runs/impl_1/zu4ev_pcie_card_top_tandem1.bit"
-TANDEM2_BIT="$ROOT_DIR/build/qpcie_zu4ev_proj/qpcie_zu4ev_card.runs/impl_1/zu4ev_pcie_card_top_tandem2.bit"
+if [ -n "$SC7F0_BUILD_DIR" ]; then
+    PROJ_BUILD_DIR="$SC7F0_BUILD_DIR"
+elif [ "$SC7F0_PROFILE" = "hdmi" ] || [ "$SC7F0_PROFILE" = "full" ] || [ -f "$ROOT_DIR/build/qpcie_zu4ev_hdmi_proj/qpcie_zu4ev_card.runs/impl_1/zu4ev_pcie_card_top.bit" ]; then
+    PROJ_BUILD_DIR="$ROOT_DIR/build/qpcie_zu4ev_hdmi_proj"
+else
+    PROJ_BUILD_DIR="$ROOT_DIR/build/qpcie_zu4ev_proj"
+fi
+
+SINGLE_BIT="$PROJ_BUILD_DIR/qpcie_zu4ev_card.runs/impl_1/zu4ev_pcie_card_top.bit"
+TANDEM1_BIT="$PROJ_BUILD_DIR/qpcie_zu4ev_card.runs/impl_1/zu4ev_pcie_card_top_tandem1.bit"
+TANDEM2_BIT="$PROJ_BUILD_DIR/qpcie_zu4ev_card.runs/impl_1/zu4ev_pcie_card_top_tandem2.bit"
 
 IMG_DIR="$ROOT_DIR/petalinux/qpcie-zu4ev/images/linux"
 BIF_FILE="$IMG_DIR/bootgen.bif"

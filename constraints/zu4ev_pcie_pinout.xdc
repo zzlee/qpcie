@@ -24,7 +24,7 @@ set_property PACKAGE_PIN B10 [get_ports hdmi_rx_clk_p]
 set_property PACKAGE_PIN B9  [get_ports hdmi_rx_clk_n]
 create_clock -period 3.367 -name hdmi_rx_clk_p [get_ports hdmi_rx_clk_p]
 
-# DRU Reference Clock (Bank 225 MGTREFCLK0: F10/F9)
+# DRU Reference Clock (sheet11: Bank 225 MGTREFCLK1: F10/F9)
 set_property PACKAGE_PIN F10 [get_ports hdmi_dru_clk_p]
 set_property PACKAGE_PIN F9  [get_ports hdmi_dru_clk_n]
 create_clock -period 6.400 -name hdmi_dru_clk_p [get_ports hdmi_dru_clk_p]
@@ -39,6 +39,21 @@ set_property PACKAGE_PIN AH6 [get_ports hdmi_tx_tmds_clk_p]
 set_property PACKAGE_PIN AJ6 [get_ports hdmi_tx_tmds_clk_n]
 set_property IOSTANDARD LVDS [get_ports hdmi_tx_tmds_clk_p]
 set_property IOSTANDARD LVDS [get_ports hdmi_tx_tmds_clk_n]
+
+# Sheet11 U11-10, Quad226: lane index is the board D0/D1/D2 order.
+# Constrain the physical ports as well as the PHY CHANNEL_ENABLE sites.
+set_property PACKAGE_PIN D2 [get_ports {hdmi_rx_p[0]}]
+set_property PACKAGE_PIN D1 [get_ports {hdmi_rx_n[0]}]
+set_property PACKAGE_PIN C4 [get_ports {hdmi_rx_p[1]}]
+set_property PACKAGE_PIN C3 [get_ports {hdmi_rx_n[1]}]
+set_property PACKAGE_PIN B2 [get_ports {hdmi_rx_p[2]}]
+set_property PACKAGE_PIN B1 [get_ports {hdmi_rx_n[2]}]
+set_property PACKAGE_PIN D6 [get_ports {hdmi_tx_p[0]}]
+set_property PACKAGE_PIN D5 [get_ports {hdmi_tx_n[0]}]
+set_property PACKAGE_PIN C8 [get_ports {hdmi_tx_p[1]}]
+set_property PACKAGE_PIN C7 [get_ports {hdmi_tx_n[1]}]
+set_property PACKAGE_PIN B6 [get_ports {hdmi_tx_p[2]}]
+set_property PACKAGE_PIN B5 [get_ports {hdmi_tx_n[2]}]
 
 # HDMI RX Control (Bank 46 HD Bank, 3.3V)
 set_property PACKAGE_PIN B12 [get_ports hdmi_rx_hpd_out]
@@ -74,12 +89,8 @@ set_property LOC PCIE40E4_X0Y1 [get_cells -hierarchical -filter {NAME =~ *pcie_4
 create_clock -period 10.000 -name sys_clk [get_ports sys_clk_p]
 set_false_path -from [get_ports sys_rst_n]
 
-# Clock Groups (Asynchronous Domains)
-set_clock_groups -asynchronous \
-    -group [get_clocks -quiet -include_generated_clocks sys_clk] \
-    -group [get_clocks -quiet -include_generated_clocks hdmi_rx_clk_p] \
-    -group [get_clocks -quiet -include_generated_clocks hdmi_dru_clk_p] \
-    -group [get_clocks -quiet -include_generated_clocks hdmi_tx_clk_p]
+# Do not blanket-false-path the PCIe/HDMI clock groups. IP/XPM constraints
+# cover their actual CDC structures; report the remaining crossings for review.
 
 
 

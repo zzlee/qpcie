@@ -49,11 +49,14 @@ module hdmi_tx_video_bridge #(
     wire fifo_empty;
     wire [129:0] fifo_dout;
     wire fifo_rd_en;
+    wire wr_rst_busy, rd_rst_busy, fifo_rst;
 
-    assign s_axis_video_tready = !fifo_full;
-    assign fifo_rd_en          = m_axis_video_tready && !fifo_empty;
+    assign s_axis_video_tready = !fifo_full && !wr_rst_busy && !fifo_rst;
+    assign fifo_rd_en          = m_axis_video_tready && m_axis_video_tvalid;
 
-    wire fifo_rst = (!pcie_user_rst_n) || (!tx_video_rst_n) || (!tx_ctrl_reg[0]); // [0]=TX Output Enable
+    xpm_cdc_async_rst #(.DEST_SYNC_FF(4), .RST_ACTIVE_HIGH(1)) u_fifo_reset (
+        .src_arst(!pcie_user_rst_n || !tx_video_rst_n || !tx_ctrl_reg[0]),
+        .dest_clk(pcie_user_clk), .dest_arst(fifo_rst));
 
     // Write packed 128-bit stream + tlast + tuser into async FIFO
     xpm_fifo_async #(
@@ -73,16 +76,18 @@ module hdmi_tx_video_bridge #(
         .WR_DATA_COUNT_WIDTH (11),
         .RD_DATA_COUNT_WIDTH (11)
     ) u_tx_video_cdc (
+        .injectsbiterr  (1'b0),
+        .injectdbiterr  (1'b0),
         .sleep         (1'b0),
         .rst           (fifo_rst),
         .wr_clk        (pcie_user_clk),
-        .wr_en         (s_axis_video_tvalid && !fifo_full),
+        .wr_en         (s_axis_video_tvalid && s_axis_video_tready),
         .din           ({s_axis_video_tuser, s_axis_video_tlast, s_axis_video_tdata}),
         .full          (fifo_full),
         .prog_full     (),
         .wr_data_count (),
         .overflow      (),
-        .wr_rst_busy   (),
+        .wr_rst_busy   (wr_rst_busy),
         .almost_full   (),
         .wr_ack        (),
         .rd_clk        (tx_video_clk),
@@ -92,7 +97,7 @@ module hdmi_tx_video_bridge #(
         .prog_empty    (),
         .rd_data_count (),
         .underflow     (),
-        .rd_rst_busy   (),
+        .rd_rst_busy   (rd_rst_busy),
         .almost_empty  (),
         .data_valid    (),
         .dbiterr       (),
@@ -112,7 +117,7 @@ module hdmi_tx_video_bridge #(
         raw_packed[55:32],
         raw_packed[23:0]
     };
-    assign m_axis_video_tvalid = !fifo_empty;
+    assign m_axis_video_tvalid = !fifo_empty && !rd_rst_busy && tx_video_rst_n;
     assign m_axis_video_tlast  = fifo_dout[128];
     assign m_axis_video_tuser  = fifo_dout[129];
 
@@ -124,8 +129,9 @@ module hdmi_tx_video_bridge #(
             tx_status_reg <= 32'd0;
         end else begin
             sync_hpd      <= {sync_hpd[0], tx_hpd_in};
-            // [0]=Sink Connected (HPD), [1]=TX PLL Locked, [2]=Stream Active
-            tx_status_reg <= {29'd0, (!fifo_empty), 1'b1, sync_hpd[1]};
+            // [0]=Sink HPD; [1]=lock unknown (never fabricate a PLL lock).
+            // [2]=input stream accepted this cycle (PCIe domain).
+            tx_status_reg <= {29'd0, (s_axis_video_tvalid && s_axis_video_tready), 1'b0, sync_hpd[1]};
         end
     end
 

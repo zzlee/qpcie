@@ -40,13 +40,16 @@ module hdmi_rx_audio_bridge #(
     wire fifo_full;
     wire fifo_empty;
     wire fifo_rd_en;
+    wire wr_rst_busy, rd_rst_busy, fifo_rst;
 
-    assign s_axis_audio_tready = !fifo_full;
-    assign fifo_rd_en          = m_axis_audio_tready && !fifo_empty;
-    assign m_axis_audio_tvalid = !fifo_empty;
+    assign s_axis_audio_tready = !fifo_full && !wr_rst_busy && !fifo_rst;
+    assign fifo_rd_en          = m_axis_audio_tready && m_axis_audio_tvalid;
+    assign m_axis_audio_tvalid = !fifo_empty && !rd_rst_busy && pcie_user_rst_n;
     assign m_axis_audio_tlast  = 1'b0; // Audio stream is continuous
 
-    wire fifo_rst = (!rx_audio_rst_n) || (!pcie_user_rst_n);
+    xpm_cdc_async_rst #(.DEST_SYNC_FF(4), .RST_ACTIVE_HIGH(1)) u_fifo_reset (
+        .src_arst(!rx_audio_rst_n || !pcie_user_rst_n),
+        .dest_clk(rx_audio_clk), .dest_arst(fifo_rst));
 
     xpm_fifo_async #(
         .CDC_SYNC_STAGES     (4),
@@ -65,16 +68,18 @@ module hdmi_rx_audio_bridge #(
         .WR_DATA_COUNT_WIDTH (10),
         .RD_DATA_COUNT_WIDTH (10)
     ) u_audio_cdc_fifo (
+        .injectsbiterr  (1'b0),
+        .injectdbiterr  (1'b0),
         .sleep         (1'b0),
         .rst           (fifo_rst),
         .wr_clk        (rx_audio_clk),
-        .wr_en         (s_axis_audio_tvalid && !fifo_full),
+        .wr_en         (s_axis_audio_tvalid && s_axis_audio_tready),
         .din           (s_axis_audio_tdata),
         .full          (fifo_full),
         .prog_full     (),
         .wr_data_count (),
         .overflow      (),
-        .wr_rst_busy   (),
+        .wr_rst_busy   (wr_rst_busy),
         .almost_full   (),
         .wr_ack        (),
         .rd_clk        (pcie_user_clk),
@@ -84,20 +89,20 @@ module hdmi_rx_audio_bridge #(
         .prog_empty    (),
         .rd_data_count (),
         .underflow     (),
-        .rd_rst_busy   (),
+        .rd_rst_busy   (rd_rst_busy),
         .almost_empty  (),
         .data_valid    (),
         .dbiterr       (),
         .sbiterr       ()
     );
 
-    // Audio format telemetry: 48kHz (code 2), 2 channels, 24-bit word length
-    // [7:0]=Channels (2), [15:8]=Sample Rate Code (2: 48kHz), [23:16]=Bit Depth (24)
+    // Format is unknown until actual HDMI channel-status/ACR decoding exists.
+    // Do not advertise hardcoded 48 kHz / 24-bit stereo as measured telemetry.
     always @(posedge pcie_user_clk or negedge pcie_user_rst_n) begin
         if (!pcie_user_rst_n) begin
             rx_audio_reg <= 32'd0;
         end else begin
-            rx_audio_reg <= {8'd0, 8'd24, 8'd2, 8'd2};
+            rx_audio_reg <= 32'd0;
         end
     end
 

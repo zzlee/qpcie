@@ -15,6 +15,11 @@ set profile "debug"
 if {[info exists ::env(SC7F0_PROFILE)]} {set profile $::env(SC7F0_PROFILE)}
 if {$profile ni {debug full}} {error "SC7F0_PROFILE must be debug or full"}
 set debug_profile [expr {$profile eq "debug"}]
+# Keep experimental AV outputs separate from the validated debug04 project/XSA.
+if {!$debug_profile} {set project_dir "./build/qpcie_zu4ev_hdmi_proj"}
+set build_stage "bitstream"
+if {[info exists ::env(SC7F0_BUILD_STAGE)]} {set build_stage $::env(SC7F0_BUILD_STAGE)}
+if {$build_stage ni {ip synth bitstream}} {error "SC7F0_BUILD_STAGE must be ip, synth or bitstream"}
 puts " SC7F0 profile: $profile"
 exec python3 ./scripts/generate_sc7f0_csr_cdc.py --check
 
@@ -41,6 +46,8 @@ puts "   (GIT AUTO-INJECT) Commit Hash: 0x$git_raw, Build Date: $date_raw"
 
 add_files [glob ./rtl/*.v]
 set_property top zu4ev_pcie_card_top [current_fileset]
+# Full HDMI bring-up is a new hardware revision; debug04 remains unchanged.
+if {!$debug_profile} {set_property generic {C_VERSION=32'h26101601} [current_fileset]}
 
 set verilog_defs [list GIT_COMMIT_HASH_DEF=$git_commit_hex BUILD_TIMESTAMP_DEF=$build_date_hex]
 if {$debug_profile} {lappend verilog_defs SC7F0_DEBUG_ONLY=1}
@@ -57,7 +64,7 @@ if {$debug_profile} {
 # 2.1 Generate ZU4EV Processing System Subsystem (zu4ev_ps_bd)
 puts "Generating ZU4EV Processing System Subsystem (zu4ev_ps_bd)..."
 source ./scripts/create_zu4ev_ps_bd.tcl
-create_zu4ev_ps_bd
+create_zu4ev_ps_bd [expr {!$debug_profile}]
 generate_target all [get_files zu4ev_ps_bd.bd]
 set bd_wrapper [make_wrapper -files [get_files zu4ev_ps_bd.bd] -top]
 add_files -norecurse $bd_wrapper
@@ -221,6 +228,9 @@ set_property -dict [list \
 generate_target all [get_ips ila_ps_axi_0]
 
 if {!$debug_profile} {
+# PS HPM1 control aperture. All three IP register banks run on pl_clk0.
+source ./scripts/create_sc7f0_hdmi_crossbar.tcl
+create_sc7f0_hdmi_crossbar
 # 6. Generate Video PHY Controller IP Core (vid_phy_controller_0 - Quad 226 HDMI RX/TX)
 puts "Generating Video PHY Controller IP Core (vid_phy_controller_0)..."
 create_ip -name vid_phy_controller -vendor xilinx.com -library ip -version 2.2 -module_name vid_phy_controller_0
@@ -287,6 +297,11 @@ generate_target all [get_ips v_hdmi_tx_ss_0]
 
 # 9. Update Compile Order
 update_compile_order -fileset sources_1
+if {$build_stage eq "ip"} {
+    puts "IP_GENERATION_COMPLETE: $project_dir (not a bitstream or release)"
+    close_project
+    exit 0
+}
 
 # IP cache disable
 config_ip_cache -disable_cache
@@ -301,6 +316,11 @@ if {[get_property PROGRESS [get_runs synth_1]] != "100%" ||
     exit 1
 }
 
+if {$build_stage eq "synth"} {
+    puts "SYNTHESIS_COMPLETE: $project_dir (not a bitstream or release)"
+    close_project
+    exit 0
+}
 puts "Starting Implementation & Bitstream Generation (impl_1)..."
 launch_runs impl_1 -to_step write_bitstream -jobs 16
 wait_on_run impl_1
@@ -343,6 +363,9 @@ if {$debug_profile} {
 }
 
 set xsa_out "./hw_platform/sc7f0_base.xsa"
+if {!$debug_profile} {
+    set xsa_out "./hw_platform/sc7f0_hdmi.xsa"
+}
 file mkdir [file dirname $xsa_out]
 puts "Exporting updated Hardware Platform XSA ($xsa_out)..."
 write_hw_platform -fixed -include_bit -force $xsa_out
