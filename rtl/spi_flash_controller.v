@@ -334,6 +334,15 @@ module spi_flash_controller (
     reg        icap_csib;
     reg        icap_rdwrb;
     reg [3:0]  icap_step;
+    // ICAPE2 requires a >=10 ns clock period. The AXI/PCIe clock is
+    // 125 MHz, so run ICAP at 62.5 MHz using a dedicated clock buffer.
+    reg icap_clk_div = 1'b0;
+    wire icap_clk;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) icap_clk_div <= 1'b0;
+        else icap_clk_div <= ~icap_clk_div;
+    end
+    BUFG u_icap_clk_buf (.I(icap_clk_div), .O(icap_clk));
 
     // Bit-swap function for 7-Series ICAP 32-bit interface (Xilinx UG470 requirement)
     function [31:0] bitswap32(input [31:0] in);
@@ -356,7 +365,9 @@ module spi_flash_controller (
                 icap_busy      <= 1'b1;
                 reload_started <= 1'b0;
                 icap_step      <= 4'd0;
-            end else if (icap_busy) begin
+            end else if (icap_busy && icap_clk_div) begin
+                // Prepare words on the divided clock's falling edge; ICAP
+                // samples them on the next rising edge, eight ns later.
                 case (icap_step)
                     4'd0: begin // Dummy Word
                         icap_csib  <= 1'b0;
@@ -411,7 +422,7 @@ module spi_flash_controller (
         .SIM_CFG_FILE_NAME("NONE")
     ) u_icape2 (
         .O     (),
-        .CLK   (clk),
+        .CLK   (icap_clk),
         .CSIB  (icap_csib),
         .RDWRB (icap_rdwrb),
         .I     (icap_din)

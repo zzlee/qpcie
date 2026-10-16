@@ -658,6 +658,7 @@ module a50t_pcie_card_top #(
     wire video_src_sel     = hdmi_tx_ctrl[0];
     wire audio_src_sel     = hdmi_tx_ctrl[1];
     wire hdmi_rx_fifo_rst  = hdmi_tx_ctrl[2];
+    wire hdmi_single_pixel = hdmi_tx_ctrl[3];
 
     // Hardware Telemetry & Probe Module
     hdmi_rx_probe u_hdmi_rx_probe (
@@ -667,6 +668,7 @@ module a50t_pcie_card_top #(
         .tm0_de(tm0_de),
         .tm0_vs(tm0_vs),
         .tm0_hs(tm0_hs),
+        .single_pixel_mode(hdmi_single_pixel),
         .tm0_i2s_sck(tm0_i2s_sck),
         .tm0_i2s_ws(tm0_i2s_ws),
         .tm0_i2s_d0(tm0_i2s_d0),
@@ -692,6 +694,7 @@ module a50t_pcie_card_top #(
         .tm0_de(tm0_de),
         .tm0_vs(tm0_vs),
         .tm0_hs(tm0_hs),
+        .single_pixel_mode(hdmi_single_pixel),
         .tm0_a_r(tm0_a_r),
         .tm0_a_g(tm0_a_g),
         .tm0_a_b(tm0_a_b),
@@ -997,7 +1000,7 @@ module a50t_pcie_card_top #(
 
     // Instantiate Custom PCIe DMA Controller Top Module (256-bit internal CQ descriptor bus)
     custom_pcie_dma_top #(
-        .C_VERSION(32'h26101501), // HDMI RX probe & dual-pixel capture bridge
+        .C_VERSION(32'h26101601), // HDMI single/dual pixel capture; legal 62.5 MHz ICAP
         .PCIE_DATA_WIDTH(PCIE_DATA_WIDTH),
         .NUM_VIDEO_CH(NUM_VIDEO_CH),
         .NUM_AUDIO_CH(NUM_AUDIO_CH),

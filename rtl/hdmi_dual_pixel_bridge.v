@@ -25,6 +25,7 @@ module hdmi_dual_pixel_bridge #(
     input  wire        tm0_de,
     input  wire        tm0_vs,
     input  wire        tm0_hs,
+    input  wire        single_pixel_mode, // Stable across capture; reset FIFO when changing
 
     // Dual-Pixel Port A (Even pixels - Bank 15)
     input  wire [9:0]  tm0_a_r,
@@ -55,11 +56,16 @@ module hdmi_dual_pixel_bridge #(
     // =========================================================================
     reg        de_q = 1'b0;
     reg        vs_q = 1'b0;
-    reg        phase = 1'b0; // 0 = first pair (P0, P1), 1 = second pair (P2, P3)
+    reg [1:0]  pixel_count = 2'd0;
     reg        frame_start = 1'b0;
     reg        seen_vs = 1'b0;
 
-    reg [63:0] pair0_q = 64'd0;
+    reg [127:0] pixels_q = 128'd0;
+    reg [127:0] pending_data = 128'd0;
+    reg         pending_valid = 1'b0;
+    reg         pending_user = 1'b0;
+    (* ASYNC_REG = "TRUE" *) reg [1:0] single_sync = 2'b00;
+    always @(posedge tm0_pclk) single_sync <= {single_sync[0], single_pixel_mode};
 
     // 8-bit MSBs: Little-endian 32-bit pixel: {8'hFF, R, G, B}
     wire [31:0] p_a_dw = {8'hFF, tm0_a_r[9:2], tm0_a_g[9:2], tm0_a_b[9:2]};
@@ -75,10 +81,13 @@ module hdmi_dual_pixel_bridge #(
         if (!tm0_rst_n) begin
             de_q        <= 1'b0;
             vs_q        <= 1'b0;
-            phase       <= 1'b0;
+            pixel_count <= 2'd0;
             frame_start <= 1'b0;
             seen_vs     <= 1'b0;
-            pair0_q     <= 64'd0;
+            pixels_q    <= 128'd0;
+            pending_data <= 128'd0;
+            pending_valid <= 1'b0;
+            pending_user <= 1'b0;
             fifo_din_data <= 128'd0;
             fifo_din_last <= 1'b0;
             fifo_din_user <= 1'b0;
@@ -86,50 +95,65 @@ module hdmi_dual_pixel_bridge #(
         end else begin
             de_q <= tm0_de;
             vs_q <= tm0_vs;
+            fifo_wr_en <= 1'b0;
+
+            // Hold a complete word for one cycle: the DE falling edge then
+            // marks TLAST on the actual final word, never on an extra beat.
+            if (pending_valid) begin
+                fifo_din_data <= pending_data;
+                fifo_din_user <= pending_user;
+                fifo_din_last <= !tm0_de;
+                fifo_wr_en <= 1'b1;
+                pending_valid <= 1'b0;
+            end
 
             // Frame start detection on VS falling edge (active frame begins)
             if (vs_q && !tm0_vs) begin
                 frame_start <= 1'b1;
                 seen_vs     <= 1'b1;
-                phase       <= 1'b0;
-            end
-
-            // Line start resets phase
-            if (tm0_de && !de_q) begin
-                phase <= 1'b0;
+                pixel_count <= 2'd0;
             end
 
             if (tm0_de && seen_vs) begin
-                if (!phase) begin
-                    // Store first pair (P0, P1)
-                    pair0_q    <= current_pair;
-                    phase      <= 1'b1;
-                    fifo_wr_en <= 1'b0;
+                if (single_sync[1]) begin
+                    case (pixel_count)
+                        2'd0: pixels_q[31:0] <= p_a_dw;
+                        2'd1: pixels_q[63:32] <= p_a_dw;
+                        2'd2: pixels_q[95:64] <= p_a_dw;
+                        2'd3: begin
+                            pending_data <= {p_a_dw, pixels_q[95:0]};
+                            pending_valid <= 1'b1;
+                            pending_user <= frame_start;
+                            frame_start <= 1'b0;
+                        end
+                    endcase
+                    pixel_count <= pixel_count + 1'b1;
                 end else begin
-                    // Second pair (P2, P3) complete: pack into 128-bit beat
-                    fifo_din_data <= {current_pair, pair0_q}; // {P3, P2, P1, P0}
-                    fifo_din_user <= frame_start;
-                    fifo_din_last <= 1'b0;
-                    fifo_wr_en    <= 1'b1;
-                    phase         <= 1'b0;
-                    frame_start   <= 1'b0; // User pulse cleared after first beat
+                    if (pixel_count == 0) begin
+                        pixels_q[63:0] <= current_pair;
+                        pixel_count <= 2'd2;
+                    end else begin
+                        pending_data <= {current_pair, pixels_q[63:0]};
+                        pending_valid <= 1'b1;
+                        pending_user <= frame_start;
+                        pixel_count <= 2'd0;
+                        frame_start <= 1'b0;
+                    end
                 end
             end else if (de_q && !tm0_de && seen_vs) begin
-                // End of active line: assert TLAST on previous or padded word if odd
-                if (phase) begin
-                    // Odd 2-pixel residual: pad second half
-                    fifo_din_data <= {64'd0, pair0_q};
-                    fifo_din_user <= 1'b0;
+                // Pad an incomplete final word (capture widths normally /4).
+                if (pixel_count != 0) begin
+                    case (pixel_count)
+                        2'd1: fifo_din_data <= {96'd0, pixels_q[31:0]};
+                        2'd2: fifo_din_data <= {64'd0, pixels_q[63:0]};
+                        2'd3: fifo_din_data <= {32'd0, pixels_q[95:0]};
+                    endcase
+                    fifo_din_user <= frame_start;
                     fifo_din_last <= 1'b1;
                     fifo_wr_en    <= 1'b1;
-                    phase         <= 1'b0;
-                end else begin
-                    // Already emitted all words, mark last on last beat
-                    // (last was written in previous cycle or flush)
-                    fifo_wr_en    <= 1'b0;
+                    pixel_count <= 2'd0;
+                    frame_start <= 1'b0;
                 end
-            end else begin
-                fifo_wr_en <= 1'b0;
             end
         end
     end
@@ -142,10 +166,11 @@ module hdmi_dual_pixel_bridge #(
     wire fifo_empty;
     wire fifo_rd_en;
     wire [129:0] fifo_dout;
+    wire wr_rst_busy, rd_rst_busy;
     wire fifo_rst = (!tm0_rst_n) || (!video_rst_n);
 
-    assign fifo_rd_en          = m_axis_video_tready && !fifo_empty;
-    assign m_axis_video_tvalid = !fifo_empty;
+    assign fifo_rd_en          = m_axis_video_tready && !fifo_empty && !rd_rst_busy;
+    assign m_axis_video_tvalid = !fifo_empty && !rd_rst_busy;
     assign m_axis_video_tdata  = fifo_dout[127:0];
     assign m_axis_video_tlast  = fifo_dout[128];
     assign m_axis_video_tuser  = fifo_dout[129];
@@ -164,19 +189,19 @@ module hdmi_dual_pixel_bridge #(
         .USE_ADV_FEATURES    ("0707"),
         .WAKEUP_TIME         (0),
         .WRITE_DATA_WIDTH    (130),
-        .WR_DATA_COUNT_WIDTH (10),
-        .RD_DATA_COUNT_WIDTH (10)
+        .WR_DATA_COUNT_WIDTH ($clog2(FIFO_DEPTH)+1),
+        .RD_DATA_COUNT_WIDTH ($clog2(FIFO_DEPTH)+1)
     ) u_video_cdc_fifo (
         .sleep         (1'b0),
         .rst           (fifo_rst),
         .wr_clk        (tm0_pclk),
-        .wr_en         (fifo_wr_en && !fifo_full),
+        .wr_en         (fifo_wr_en && !fifo_full && !wr_rst_busy),
         .din           ({fifo_din_user, fifo_din_last, fifo_din_data}),
         .full          (fifo_full),
         .prog_full     (),
         .wr_data_count (),
         .overflow      (),
-        .wr_rst_busy   (),
+        .wr_rst_busy   (wr_rst_busy),
         .almost_full   (),
         .wr_ack        (),
         .rd_clk        (video_clk),
@@ -186,7 +211,7 @@ module hdmi_dual_pixel_bridge #(
         .prog_empty    (),
         .rd_data_count (),
         .underflow     (),
-        .rd_rst_busy   (),
+        .rd_rst_busy   (rd_rst_busy),
         .almost_empty  (),
         .data_valid    (),
         .dbiterr       (),

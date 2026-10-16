@@ -42,6 +42,7 @@ petalinux/*/project-spec/hw-description/psu_init*
 # ------------------------------------------------------------------------------
 tb/sim_*
 sim_*
+!scripts/sim_*.tcl
 *.vvp
 *.out
 *.fst
@@ -74,6 +75,8 @@ test_app/qpcie_a50t_tool
 test_app/qpcie_fw_daemon
 test_app/qpcie_hdmi_ctl
 test_app/qpcie_hdmi_daemon
+test_app/qpcie_it68051_tool
+test_app/qpcie_mcu_scan
 test_app/v4l2_test_app
 test_app/v4l2_rgb24_test_app
 test_app/alsa_test_app

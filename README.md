@@ -39,3 +39,4 @@ All comprehensive design documents, hardware specs, dataflow guides, and driver 
 * **[Linux V4L2 & ALSA Driver Guide](wiki/Linux-V4L2-ALSA-Driver-Guide.md)**
 * **[DMA Core Layer & Descriptor Structure](wiki/DMA-Core-Layer.md)**
 * **[Verification & Simulation Guide](wiki/Verification-and-Simulation.md)**
+* **[M2-710 / A50T Live HDMI Bring-up & Hardware Handoff (26101601)](wiki/HDMI-RX-BRINGUP-26101601.md)** — live ALSA verified; live V4L2 pending the new bitstream's hardware validation.

@@ -5,11 +5,12 @@
 CC ?= gcc
 CFLAGS ?= -O2 -Wall -I.
 LDFLAGS ?= -lm -pthread
+TEST_BUILD_DIR ?= ../build/test_app_tests
 
 # Cross compiler for ZU4EV target daemon
 AARCH64_CC ?= $(shell which aarch64-linux-gnu-gcc 2>/dev/null || which /opt/Xilinx/Vitis/2023.2/gnu/aarch64/lin/aarch64-linux/bin/aarch64-linux-gnu-gcc 2>/dev/null || echo aarch64-linux-gnu-gcc)
 
-TARGETS = qpcie_sanity_check qpcie_upgrade qpcie_flash qpcie_a50t_tool qpcie_hdmi_ctl qpcie_mcu_scan v4l2_test_app v4l2_rgb24_test_app alsa_test_app alsa_loopback_test_app dmabuf_p2p_test_app loopback_test_app
+TARGETS = qpcie_sanity_check qpcie_upgrade qpcie_flash qpcie_a50t_tool qpcie_hdmi_ctl qpcie_mcu_scan qpcie_it68051_tool v4l2_test_app v4l2_rgb24_test_app alsa_test_app alsa_loopback_test_app dmabuf_p2p_test_app loopback_test_app
 
 all: $(TARGETS)
 
@@ -37,6 +38,14 @@ qpcie_hdmi_ctl: qpcie_hdmi_ctl.c qpcie_control.h
 qpcie_mcu_scan: qpcie_mcu_scan.c
 	$(CC) $(CFLAGS) -o $@ qpcie_mcu_scan.c $(LDFLAGS)
 
+qpcie_it68051_tool: qpcie_it68051_tool.c
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+
+test-it68051:
+	mkdir -p $(TEST_BUILD_DIR)
+	$(CC) $(CFLAGS) -Wextra -Werror -o $(TEST_BUILD_DIR)/it68051_decode_test tests/it68051_decode_test.c $(LDFLAGS)
+	$(TEST_BUILD_DIR)/it68051_decode_test
+
 qpcie_sanity_check: qpcie_sanity_check.c
 
 	$(CC) $(CFLAGS) -o $@ qpcie_sanity_check.c $(LDFLAGS)
@@ -62,5 +71,4 @@ loopback_test_app: loopback_test_app.c qpcie_control.h
 clean:
 	rm -f $(TARGETS) qpcie_fw_daemon qpcie_hdmi_daemon *.o *.yuv *.pcm *.raw
 
-.PHONY: all clean qpcie_fw_daemon qpcie_hdmi_daemon
-
+.PHONY: all clean qpcie_fw_daemon qpcie_hdmi_daemon test-it68051

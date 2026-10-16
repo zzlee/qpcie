@@ -82,6 +82,10 @@ set_false_path -to [get_pins -quiet -hierarchical -regexp \
 create_clock -period 6.734 -name tm0_pclk [get_ports tm0_pclk]
 create_clock -period 81.380 -name tm0_i2s_sck [get_ports tm0_i2s_sck]
 
+# ICAPE2 is limited to 100 MHz; the SPI controller divides userclk2 by two.
+create_generated_clock -name icap_clk -source [get_pins u_spi_flash/icap_clk_div_reg/C] \
+    -divide_by 2 [get_pins u_spi_flash/icap_clk_div_reg/Q]
+
 set_clock_groups -name async_video_vs_pcie -asynchronous \
     -group [get_clocks -include_generated_clocks clk150_mmcm] \
     -group [get_clocks -include_generated_clocks userclk2] \
@@ -262,4 +266,3 @@ set_property BITSTREAM.STARTUP.STARTUPCLK CCLK [current_design]
 
 set_property SEVERITY {Warning} [get_drc_checks NSTD-1]
 set_property SEVERITY {Warning} [get_drc_checks UCIO-1]
-

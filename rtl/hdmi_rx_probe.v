@@ -23,6 +23,7 @@ module hdmi_rx_probe (
     input  wire        tm0_de,
     input  wire        tm0_vs,
     input  wire        tm0_hs,
+    input  wire        single_pixel_mode,
 
     // IT68051 Native Audio Pins
     input  wire        tm0_i2s_sck,
@@ -132,6 +133,8 @@ module hdmi_rx_probe (
     reg        de_d = 1'b0;
     reg        vs_d = 1'b0;
     reg        hs_d = 1'b0;
+    (* ASYNC_REG = "TRUE" *) reg [1:0] single_sync = 2'b00;
+    always @(posedge tm0_pclk) single_sync <= {single_sync[0], single_pixel_mode};
 
     reg [15:0] h_de_cnt    = 16'd0;
     reg [15:0] h_tot_cnt   = 16'd0;
@@ -155,14 +158,14 @@ module hdmi_rx_probe (
         if (tm0_de) begin
             h_de_cnt <= h_de_cnt + 1'b1;
         end else if (de_d && !tm0_de) begin
-            meas_h_active <= {h_de_cnt[14:0], 1'b0}; // * 2 for dual-pixel
+            meas_h_active <= single_sync[1] ? h_de_cnt : {h_de_cnt[14:0], 1'b0};
             h_de_cnt      <= 16'd0;
             v_de_lines    <= v_de_lines + 1'b1;
         end
 
         // Count HTotal between HS leading edges
         if (tm0_hs && !hs_d) begin
-            meas_h_total <= {h_tot_cnt[14:0], 1'b0}; // * 2
+            meas_h_total <= single_sync[1] ? h_tot_cnt + 1'b1 : ((h_tot_cnt + 1'b1) << 1);
             h_tot_cnt    <= 16'd0;
             v_tot_lines  <= v_tot_lines + 1'b1;
         end else begin
