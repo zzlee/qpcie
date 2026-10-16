@@ -18,11 +18,13 @@
 
 module tpg_marker_overlay #(
     parameter integer FRAME_WIDTH  = 4096,
-    parameter integer FRAME_HEIGHT = 2160
+    parameter integer FRAME_HEIGHT = 2160,
+    parameter integer FLUSH_ENABLE = 0
 )(
     input  wire         clk,
     input  wire         rst_n,
     input  wire         overlay_en,
+    input  wire         flush, // Discard buffered pixels, preserving watermark counter
     input  wire [15:0]  frame_width,
     input  wire [15:0]  frame_height,
     input  wire [127:0] s_axis_tdata,
@@ -68,6 +70,7 @@ module tpg_marker_overlay #(
     reg [15:0] frame_number;
     wire [12:0] pixel_x = s_axis_tuser ? 13'd0 : x_pos;
     wire [11:0] pixel_y = s_axis_tuser ? 12'd0 : y_pos;
+    wire        flushing = FLUSH_ENABLE && flush;
     wire        in_transfer = s_axis_tvalid && s_axis_tready;
 
     function [23:0] marker_pixel;
@@ -114,6 +117,9 @@ module tpg_marker_overlay #(
             x_pos        <= 13'd0;
             y_pos        <= 12'd0;
             frame_number <= 16'd0;
+        end else if (flushing) begin
+            x_pos <= 0;
+            y_pos <= 0;
         end else if (in_transfer) begin
             if (s_axis_tlast) begin
                 x_pos <= 13'd0;
@@ -142,7 +148,7 @@ module tpg_marker_overlay #(
     reg [129:0] skid_data;
     reg         skid_valid;
 
-    assign s_axis_tready = !skid_valid;
+    assign s_axis_tready = !skid_valid && !flushing;
 
     wire [129:0] in_packet = {s_axis_tuser, s_axis_tlast, marked_payload};
 
@@ -152,6 +158,9 @@ module tpg_marker_overlay #(
             reg_data   <= 130'd0;
             skid_valid <= 1'b0;
             skid_data  <= 130'd0;
+        end else if (flushing) begin
+            reg_valid <= 1'b0;
+            skid_valid <= 1'b0;
         end else begin
             if (m_axis_tready) begin
                 if (skid_valid) begin

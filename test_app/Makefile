@@ -53,7 +53,12 @@ qpcie_sanity_check: qpcie_sanity_check.c
 v4l2_test_app: v4l2_test_app.c qpcie_control.h
 	$(CC) $(CFLAGS) -o $@ v4l2_test_app.c $(LDFLAGS)
 
-v4l2_rgb24_test_app: v4l2_rgb24_test_app.c qpcie_control.h
+test-hdmi-stamp:
+	mkdir -p $(TEST_BUILD_DIR)
+	$(CC) $(CFLAGS) -Wextra -Werror -o $(TEST_BUILD_DIR)/hdmi_frame_stamp_test tests/hdmi_frame_stamp_test.c
+	$(TEST_BUILD_DIR)/hdmi_frame_stamp_test
+
+v4l2_rgb24_test_app: v4l2_rgb24_test_app.c qpcie_control.h hdmi_frame_stamp.h
 	$(CC) $(CFLAGS) -o $@ v4l2_rgb24_test_app.c $(LDFLAGS)
 
 alsa_test_app: alsa_test_app.c qpcie_control.h
@@ -71,4 +76,4 @@ loopback_test_app: loopback_test_app.c qpcie_control.h
 clean:
 	rm -f $(TARGETS) qpcie_fw_daemon qpcie_hdmi_daemon *.o *.yuv *.pcm *.raw
 
-.PHONY: all clean qpcie_fw_daemon qpcie_hdmi_daemon test-it68051
+.PHONY: all clean qpcie_fw_daemon qpcie_hdmi_daemon test-it68051 test-hdmi-stamp

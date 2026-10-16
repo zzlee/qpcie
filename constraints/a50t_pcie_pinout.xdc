@@ -79,7 +79,11 @@ set_false_path -to [get_pins -quiet -hierarchical -regexp \
 # Declare the two trees asynchronous so their crossings are not analyzed
 # The 150 MHz video domain, HDMI RX domains, and the PCIe user-clock domain
 # exchange data exclusively through proper CDC primitives (xpm_fifo_async, etc.).
-create_clock -period 6.734 -name tm0_pclk [get_ports tm0_pclk]
+# Native 3840x2160p60 dual-pixel SDR uses 297 MHz. Constrain at 300 MHz
+# rather than the 1080p-only 148.5 MHz used by the previous build.
+# External input delays still require IT68051/PCB characterization; IOB input
+# registers are not a substitute for board-level setup/hold sign-off.
+create_clock -period 3.333 -name tm0_pclk [get_ports tm0_pclk]
 create_clock -period 81.380 -name tm0_i2s_sck [get_ports tm0_i2s_sck]
 
 # ICAPE2 is limited to 100 MHz; the SPI controller divides userclk2 by two.

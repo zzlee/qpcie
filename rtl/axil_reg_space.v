@@ -191,6 +191,7 @@ module axil_reg_space #(
     input  wire [31:0] in_hdmi_rx_res,
     input  wire [31:0] in_hdmi_rx_timing,
     input  wire [31:0] in_hdmi_rx_audio,
+    input  wire [127:0] in_hdmi_bridge_debug,
     input  wire [31:0] in_hdmi_tx_status,
     output wire [31:0] out_hdmi_tx_ctrl,
     output wire [31:0] out_hdmi_tx_res,
@@ -826,6 +827,10 @@ module axil_reg_space #(
                             8'h5C: s_axil_rdata <= reg_hdmi_rx_standards;
                             8'h60: s_axil_rdata <= reg_hdmi_rx_colorspace;
                             8'h64: s_axil_rdata <= (in_hdmi_rx_audio != 32'd0) ? in_hdmi_rx_audio : reg_hdmi_rx_audio_info;
+                            8'h80: s_axil_rdata <= in_hdmi_bridge_debug[31:0];
+                            8'h84: s_axil_rdata <= in_hdmi_bridge_debug[63:32];
+                            8'h88: s_axil_rdata <= in_hdmi_bridge_debug[95:64];
+                            8'h8C: s_axil_rdata <= in_hdmi_bridge_debug[127:96];
                             default: s_axil_rdata <= 32'd0;
                         endcase
                     end

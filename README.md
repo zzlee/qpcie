@@ -40,4 +40,5 @@ All comprehensive design documents, hardware specs, dataflow guides, and driver 
 * **[DMA Core Layer & Descriptor Structure](wiki/DMA-Core-Layer.md)**
 * **[Verification & Simulation Guide](wiki/Verification-and-Simulation.md)**
 * **[M2-710 / A50T Live HDMI 1080p Validation](wiki/HDMI-1080P-LIVE-VALIDATION.md)** — live RGB24 V4L2: 3600 frames at 59.94 FPS; live ALSA verified. A50T driver: `make clean && make QPCIE_A50T=1`.
+* **[HDMI Stage Report & Merge Review (2026-10-16)](docs/HDMI_BRINGUP_STATUS_AND_MERGE_REVIEW_2026-10-16.md)** — 4K bring-up paused; image quality and protocol-error accounting remain unresolved. Not ready for a full feature-branch merge.
 * **[Initial HDMI Bring-up & Bitstream Handoff (26101601)](wiki/HDMI-RX-BRINGUP-26101601.md)**

@@ -26,6 +26,7 @@ module hdmi_dual_pixel_bridge #(
     input  wire        tm0_vs,
     input  wire        tm0_hs,
     input  wire        single_pixel_mode, // Stable across capture; reset FIFO when changing
+    input  wire        frame_stamp_enable, // Diagnostic: replace first 4 pixels of each line
 
     // Dual-Pixel Port A (Even pixels - Bank 15)
     input  wire [9:0]  tm0_a_r,
@@ -40,6 +41,8 @@ module hdmi_dual_pixel_bridge #(
     // Video Processing Clock Domain (150 MHz)
     input  wire        video_clk,
     input  wire        video_rst_n,
+    input  wire        capture_active, // video_clk domain: descriptor engine busy
+    output wire [127:0] debug_gray, // PCLK-domain Gray counters; synchronize before use
 
     // AXI4-Stream 128-bit Video Output (video_clk domain)
     output wire [127:0] m_axis_video_tdata,
@@ -59,6 +62,24 @@ module hdmi_dual_pixel_bridge #(
     reg [1:0]  pixel_count = 2'd0;
     reg        frame_start = 1'b0;
     reg        seen_vs = 1'b0;
+    reg [31:0] source_frames = 0, source_lines = 0;
+    reg [31:0] dropped_beats = 0, dropped_eols = 0;
+    reg [15:0] source_row = 0;
+    reg [11:0] line_words = 0;
+    (* ASYNC_REG = "TRUE" *) reg [1:0] stamp_sync = 0;
+    always @(posedge tm0_pclk) stamp_sync <= {stamp_sync[0], frame_stamp_enable};
+    // Four RGB24 pixels after the bridge strips alpha. Repeated on EVERY
+    // line to detect missing lines, torn frames and source-frame ID gaps.
+    wire [127:0] stamp_word = {
+        8'hFF, 8'h5A, ~source_row[15:8], ~source_row[7:0],
+        8'hFF, ~source_frames[23:16], ~source_frames[15:8], ~source_frames[7:0],
+        8'hFF, source_row[15:8], source_row[7:0], source_frames[23:16],
+        8'hFF, source_frames[15:8], source_frames[7:0], 8'hA5
+    };
+    // Register Gray codes alongside their binary counters. Do not expose
+    // combinational binary-to-Gray XOR glitches to the PCIe clock domain.
+    reg [31:0] frames_gray = 0, lines_gray = 0, drops_gray = 0, eols_gray = 0;
+    assign debug_gray = {eols_gray, drops_gray, lines_gray, frames_gray};
 
     reg [127:0] pixels_q = 128'd0;
     reg [127:0] pending_data = 128'd0;
@@ -76,6 +97,8 @@ module hdmi_dual_pixel_bridge #(
     reg         fifo_din_last = 1'b0;
     reg         fifo_din_user = 1'b0;
     reg         fifo_wr_en    = 1'b0;
+    wire fifo_full, fifo_empty;
+    wire wr_rst_busy, rd_rst_busy;
 
     always @(posedge tm0_pclk or negedge tm0_rst_n) begin
         if (!tm0_rst_n) begin
@@ -92,10 +115,22 @@ module hdmi_dual_pixel_bridge #(
             fifo_din_last <= 1'b0;
             fifo_din_user <= 1'b0;
             fifo_wr_en    <= 1'b0;
+            source_frames <= 0; source_lines <= 0;
+            dropped_beats <= 0; dropped_eols <= 0;
+            frames_gray <= 0; lines_gray <= 0; drops_gray <= 0; eols_gray <= 0;
+            source_row <= 0; line_words <= 0;
         end else begin
             de_q <= tm0_de;
             vs_q <= tm0_vs;
             fifo_wr_en <= 1'b0;
+            if (fifo_wr_en && fifo_full && !wr_rst_busy) begin
+                dropped_beats <= dropped_beats + 1'b1;
+                drops_gray <= ((dropped_beats + 1'b1) >> 1) ^ (dropped_beats + 1'b1);
+                if (fifo_din_last) begin
+                    dropped_eols <= dropped_eols + 1'b1;
+                    eols_gray <= ((dropped_eols + 1'b1) >> 1) ^ (dropped_eols + 1'b1);
+                end
+            end
 
             // Hold a complete word for one cycle: the DE falling edge then
             // marks TLAST on the actual final word, never on an extra beat.
@@ -112,6 +147,10 @@ module hdmi_dual_pixel_bridge #(
                 frame_start <= 1'b1;
                 seen_vs     <= 1'b1;
                 pixel_count <= 2'd0;
+                source_frames <= source_frames + 1'b1;
+                frames_gray <= ((source_frames + 1'b1) >> 1) ^ (source_frames + 1'b1);
+                source_row <= 0;
+                line_words <= 0;
             end
 
             if (tm0_de && seen_vs) begin
@@ -121,7 +160,9 @@ module hdmi_dual_pixel_bridge #(
                         2'd1: pixels_q[63:32] <= p_a_dw;
                         2'd2: pixels_q[95:64] <= p_a_dw;
                         2'd3: begin
-                            pending_data <= {p_a_dw, pixels_q[95:0]};
+                            pending_data <= (stamp_sync[1] && line_words == 0) ?
+                                            stamp_word : {p_a_dw, pixels_q[95:0]};
+                            line_words <= line_words + 1'b1;
                             pending_valid <= 1'b1;
                             pending_user <= frame_start;
                             frame_start <= 1'b0;
@@ -133,7 +174,9 @@ module hdmi_dual_pixel_bridge #(
                         pixels_q[63:0] <= current_pair;
                         pixel_count <= 2'd2;
                     end else begin
-                        pending_data <= {current_pair, pixels_q[63:0]};
+                        pending_data <= (stamp_sync[1] && line_words == 0) ?
+                                        stamp_word : {current_pair, pixels_q[63:0]};
+                        line_words <= line_words + 1'b1;
                         pending_valid <= 1'b1;
                         pending_user <= frame_start;
                         pixel_count <= 2'd0;
@@ -141,6 +184,10 @@ module hdmi_dual_pixel_bridge #(
                     end
                 end
             end else if (de_q && !tm0_de && seen_vs) begin
+                source_lines <= source_lines + 1'b1;
+                lines_gray <= ((source_lines + 1'b1) >> 1) ^ (source_lines + 1'b1);
+                source_row <= source_row + 1'b1;
+                line_words <= 0;
                 // Pad an incomplete final word (capture widths normally /4).
                 if (pixel_count != 0) begin
                     case (pixel_count)
@@ -162,15 +209,16 @@ module hdmi_dual_pixel_bridge #(
     // 2. Asynchronous CDC FIFO (TM0_PCLK -> video_clk 150 MHz)
     // Width: 130 bits (128-bit data + 1-bit last + 1-bit user)
     // =========================================================================
-    wire fifo_full;
-    wire fifo_empty;
     wire fifo_rd_en;
     wire [129:0] fifo_dout;
-    wire wr_rst_busy, rd_rst_busy;
     wire fifo_rst = (!tm0_rst_n) || (!video_rst_n);
 
-    assign fifo_rd_en          = m_axis_video_tready && !fifo_empty && !rd_rst_busy;
-    assign m_axis_video_tvalid = !fifo_empty && !rd_rst_busy;
+    // A camera cannot be backpressured. Drain stale data while no descriptor
+    // is active, rather than filling the FIFO before STREAMON. The engine
+    // still waits for SOF after accepting a descriptor. capture_active only
+    // deasserts after the descriptor completes/aborts, not during AXIS stalls.
+    assign fifo_rd_en          = (!capture_active || m_axis_video_tready) && !fifo_empty && !rd_rst_busy;
+    assign m_axis_video_tvalid = capture_active && !fifo_empty && !rd_rst_busy;
     assign m_axis_video_tdata  = fifo_dout[127:0];
     assign m_axis_video_tlast  = fifo_dout[128];
     assign m_axis_video_tuser  = fifo_dout[129];
@@ -193,6 +241,8 @@ module hdmi_dual_pixel_bridge #(
         .RD_DATA_COUNT_WIDTH ($clog2(FIFO_DEPTH)+1)
     ) u_video_cdc_fifo (
         .sleep         (1'b0),
+        .injectsbiterr  (1'b0),
+        .injectdbiterr  (1'b0),
         .rst           (fifo_rst),
         .wr_clk        (tm0_pclk),
         .wr_en         (fifo_wr_en && !fifo_full && !wr_rst_busy),

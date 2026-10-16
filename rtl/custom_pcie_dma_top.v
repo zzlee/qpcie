@@ -17,7 +17,8 @@ module custom_pcie_dma_top #(
     parameter NUM_VIDEO_CH     = 2,
     parameter NUM_AUDIO_CH     = 2,
     parameter VIDEO_DATA_WIDTH = 32,
-    parameter AUDIO_DATA_WIDTH = 32
+    parameter AUDIO_DATA_WIDTH = 32,
+    parameter HDMI_BRIDGE_DEBUG = 0
 )(
     input  wire                                             clk,
     input  wire                                             pl_clk0,
@@ -103,6 +104,8 @@ module custom_pcie_dma_top #(
     input  wire                                             video_ch0_tlast,
     input  wire                                             video_ch0_tuser,
     output wire                                             video_ch0_tready,
+    output wire                                             video_ch0_busy,
+    input  wire [127:0]                                     in_hdmi_bridge_debug,
 
     output wire [(NUM_VIDEO_CH*VIDEO_DATA_WIDTH)-1:0]       m_axis_video_tdata,
     output wire [NUM_VIDEO_CH-1:0]                          m_axis_video_tvalid,
@@ -1010,6 +1013,7 @@ module custom_pcie_dma_top #(
         .reg_sof_count(gray_to_bin(sof_gray_sync2)),
         .reg_eol_count(gray_to_bin(eol_gray_sync2)),
         .reg_beat_count(gray_to_bin(beat_gray_sync2)),
+        .in_hdmi_bridge_debug(HDMI_BRIDGE_DEBUG ? in_hdmi_bridge_debug : 128'd0),
 
         // Hardware Performance Monitor Ports
         .perf_enable(perf_enable),
@@ -1951,6 +1955,7 @@ module custom_pcie_dma_top #(
     );
 
     // ---- The Channel 0 capture engine itself -----------------------------
+    assign video_ch0_busy = eng_busy;
     nv12_capture_engine #(
         .MAX_WIDTH(4096),
         .PCIE_DATA_WIDTH(PCIE_DATA_WIDTH),

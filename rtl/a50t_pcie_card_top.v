@@ -623,26 +623,11 @@ module a50t_pcie_card_top #(
     end
     wire video_overlay_en = overlay_en_sync[1];
 
-    tpg_marker_overlay #(
-        .FRAME_WIDTH(4096),
-        .FRAME_HEIGHT(2160)
-    ) u_tpg_marker_overlay (
-        .clk(video_clk_150),
-        .rst_n(video_engine_rst_n),
-        .overlay_en(video_overlay_en),
-        .frame_width(overlay_w_sync),
-        .frame_height(overlay_h_sync),
-        .s_axis_tdata(tpg_padded_tdata),
-        .s_axis_tvalid(tpg_axis_tvalid),
-        .s_axis_tlast(tpg_axis_tlast),
-        .s_axis_tuser(tpg_axis_tuser),
-        .s_axis_tready(tpg_axis_tready),
-        .m_axis_tdata(tpg_capture_tdata),
-        .m_axis_tvalid(tpg_capture_tvalid),
-        .m_axis_tlast(tpg_capture_tlast),
-        .m_axis_tuser(tpg_capture_tuser),
-        .m_axis_tready(tpg_capture_tready)
-    );
+    assign tpg_capture_tdata = tpg_padded_tdata;
+    assign tpg_capture_tvalid = tpg_axis_tvalid;
+    assign tpg_capture_tlast = tpg_axis_tlast;
+    assign tpg_capture_tuser = tpg_axis_tuser;
+    assign tpg_axis_tready = tpg_capture_tready;
 
     // HDMI RX Probe & Telemetry Wires
     wire [31:0] hdmi_rx_status;
@@ -659,15 +644,25 @@ module a50t_pcie_card_top #(
     wire audio_src_sel     = hdmi_tx_ctrl[1];
     wire hdmi_rx_fifo_rst  = hdmi_tx_ctrl[2];
     wire hdmi_single_pixel = hdmi_tx_ctrl[3];
+    wire hdmi_frame_stamp = hdmi_tx_ctrl[4];
+    wire hdmi_de_q, hdmi_vs_q, hdmi_hs_q;
+    wire [9:0] hdmi_ar_q, hdmi_ag_q, hdmi_ab_q, hdmi_br_q, hdmi_bg_q, hdmi_bb_q;
+    hdmi_parallel_input u_hdmi_parallel_input (
+        .pclk(tm0_pclk),
+        .pixel_data({tm0_a_r, tm0_a_g, tm0_a_b, tm0_b_r, tm0_b_g, tm0_b_b}),
+        .de(tm0_de), .vs(tm0_vs), .hs(tm0_hs),
+        .sampled_data({hdmi_ar_q, hdmi_ag_q, hdmi_ab_q, hdmi_br_q, hdmi_bg_q, hdmi_bb_q}),
+        .sampled_de(hdmi_de_q), .sampled_vs(hdmi_vs_q), .sampled_hs(hdmi_hs_q)
+    );
 
     // Hardware Telemetry & Probe Module
     hdmi_rx_probe u_hdmi_rx_probe (
         .clk_125m(pcie_user_clk),
         .rst_n_125m(pcie_user_rst_n),
         .tm0_pclk(tm0_pclk),
-        .tm0_de(tm0_de),
-        .tm0_vs(tm0_vs),
-        .tm0_hs(tm0_hs),
+        .tm0_de(hdmi_de_q),
+        .tm0_vs(hdmi_vs_q),
+        .tm0_hs(hdmi_hs_q),
         .single_pixel_mode(hdmi_single_pixel),
         .tm0_i2s_sck(tm0_i2s_sck),
         .tm0_i2s_ws(tm0_i2s_ws),
@@ -685,24 +680,46 @@ module a50t_pcie_card_top #(
     wire         hdmi_video_tlast;
     wire [0:0]   hdmi_video_tuser;
     wire         hdmi_video_tready;
+    wire         video_ch0_busy;
+    wire [127:0] hdmi_debug_gray;
+    (* ASYNC_REG = "TRUE" *) reg [127:0] hdmi_debug_meta = 0, hdmi_debug_sync = 0;
+    always @(posedge pcie_user_clk) begin
+        hdmi_debug_meta <= hdmi_debug_gray;
+        hdmi_debug_sync <= hdmi_debug_meta;
+    end
+    function [31:0] hdmi_gray_to_bin(input [31:0] gray);
+        integer b;
+        begin
+            hdmi_gray_to_bin[31] = gray[31];
+            for (b = 30; b >= 0; b = b - 1)
+                hdmi_gray_to_bin[b] = hdmi_gray_to_bin[b+1] ^ gray[b];
+        end
+    endfunction
+    wire [127:0] hdmi_debug = {
+        hdmi_gray_to_bin(hdmi_debug_sync[127:96]), hdmi_gray_to_bin(hdmi_debug_sync[95:64]),
+        hdmi_gray_to_bin(hdmi_debug_sync[63:32]), hdmi_gray_to_bin(hdmi_debug_sync[31:0])
+    };
 
     hdmi_dual_pixel_bridge #(
-        .FIFO_DEPTH(512)
+        .FIFO_DEPTH(2048)
     ) u_hdmi_video_bridge (
         .tm0_pclk(tm0_pclk),
         .tm0_rst_n(pcie_user_rst_n && !hdmi_rx_fifo_rst),
-        .tm0_de(tm0_de),
-        .tm0_vs(tm0_vs),
-        .tm0_hs(tm0_hs),
+        .tm0_de(hdmi_de_q),
+        .tm0_vs(hdmi_vs_q),
+        .tm0_hs(hdmi_hs_q),
         .single_pixel_mode(hdmi_single_pixel),
-        .tm0_a_r(tm0_a_r),
-        .tm0_a_g(tm0_a_g),
-        .tm0_a_b(tm0_a_b),
-        .tm0_b_r(tm0_b_r),
-        .tm0_b_g(tm0_b_g),
-        .tm0_b_b(tm0_b_b),
+        .frame_stamp_enable(hdmi_frame_stamp),
+        .tm0_a_r(hdmi_ar_q),
+        .tm0_a_g(hdmi_ag_q),
+        .tm0_a_b(hdmi_ab_q),
+        .tm0_b_r(hdmi_br_q),
+        .tm0_b_g(hdmi_bg_q),
+        .tm0_b_b(hdmi_bb_q),
         .video_clk(video_clk_150),
         .video_rst_n(video_engine_rst_n && !hdmi_rx_fifo_rst),
+        .capture_active(video_ch0_busy && video_src_sel),
+        .debug_gray(hdmi_debug_gray),
         .m_axis_video_tdata(hdmi_video_tdata),
         .m_axis_video_tvalid(hdmi_video_tvalid),
         .m_axis_video_tlast(hdmi_video_tlast),
@@ -740,6 +757,26 @@ module a50t_pcie_card_top #(
 
     assign hdmi_video_tready  = (video_src_sel) ? video_src_mux_tready : 1'b0;
     assign tpg_capture_tready = (video_src_sel) ? 1'b1 : video_src_mux_tready;
+
+    // One shared spatial overlay for BOTH TPG and live HDMI. Its counter is
+    // downstream of the camera FIFO: use the separate PCLK source stamps to
+    // detect upstream frame loss. Flush stale skid words between HDMI
+    // descriptors without restarting the downstream watermark counter.
+    wire [127:0] video_marked_tdata;
+    wire video_marked_tvalid, video_marked_tlast, video_marked_tuser, video_marked_tready;
+    tpg_marker_overlay #(
+        .FRAME_WIDTH(4096), .FRAME_HEIGHT(2160), .FLUSH_ENABLE(1)
+    ) u_tpg_marker_overlay (
+        .clk(video_clk_150), .rst_n(video_engine_rst_n),
+        .overlay_en(video_overlay_en), .flush(video_src_sel && !video_ch0_busy),
+        .frame_width(overlay_w_sync), .frame_height(overlay_h_sync),
+        .s_axis_tdata(video_src_mux_tdata), .s_axis_tvalid(video_src_mux_tvalid),
+        .s_axis_tlast(video_src_mux_tlast), .s_axis_tuser(video_src_mux_tuser),
+        .s_axis_tready(video_src_mux_tready),
+        .m_axis_tdata(video_marked_tdata), .m_axis_tvalid(video_marked_tvalid),
+        .m_axis_tlast(video_marked_tlast), .m_axis_tuser(video_marked_tuser),
+        .m_axis_tready(video_marked_tready)
+    );
 
     // The NV12 capture engine now lives in the 150 MHz video domain and
     // consumes the TPG or HDMI stream directly (same clock). Its C2H requests cross
@@ -1000,12 +1037,13 @@ module a50t_pcie_card_top #(
 
     // Instantiate Custom PCIe DMA Controller Top Module (256-bit internal CQ descriptor bus)
     custom_pcie_dma_top #(
-        .C_VERSION(32'h26101601), // HDMI single/dual pixel capture; legal 62.5 MHz ICAP
+        .C_VERSION(32'h26101603), // 300 MHz HDMI input, source stamps and shared corner overlay
         .PCIE_DATA_WIDTH(PCIE_DATA_WIDTH),
         .NUM_VIDEO_CH(NUM_VIDEO_CH),
         .NUM_AUDIO_CH(NUM_AUDIO_CH),
         .VIDEO_DATA_WIDTH(VIDEO_DATA_WIDTH),
-        .AUDIO_DATA_WIDTH(AUDIO_DATA_WIDTH)
+        .AUDIO_DATA_WIDTH(AUDIO_DATA_WIDTH),
+        .HDMI_BRIDGE_DEBUG(1)
     ) u_dma_top (
         .clk(pcie_user_clk),
         .rst_n(pcie_user_rst_n),
@@ -1087,11 +1125,13 @@ module a50t_pcie_card_top #(
 
         .video_clk(video_clk_150),
         .video_rst_n(video_engine_rst_n),
-        .video_ch0_tdata(video_src_mux_tdata),
-        .video_ch0_tvalid(video_src_mux_tvalid),
-        .video_ch0_tlast(video_src_mux_tlast),
-        .video_ch0_tuser(video_src_mux_tuser),
-        .video_ch0_tready(video_src_mux_tready),
+        .video_ch0_tdata(video_marked_tdata),
+        .video_ch0_tvalid(video_marked_tvalid),
+        .video_ch0_tlast(video_marked_tlast),
+        .video_ch0_tuser(video_marked_tuser),
+        .video_ch0_tready(video_marked_tready),
+        .video_ch0_busy(video_ch0_busy),
+        .in_hdmi_bridge_debug(hdmi_debug),
 
         .m_axis_video_tdata(m_video_tdata),
         .m_axis_video_tvalid(m_video_tvalid),

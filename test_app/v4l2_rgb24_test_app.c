@@ -18,6 +18,7 @@
 #include <sys/select.h>
 #include <time.h>
 #include <unistd.h>
+#include "hdmi_frame_stamp.h"
 
 #define DEFAULT_DEVICE          "/dev/video0"
 #define DEFAULT_WIDTH           1920U
@@ -157,6 +158,7 @@ static void usage(const char *prog)
             "  -S           Use static Solid White and require every frame to match frame 0\n"
             "  -M           Verify fixed TPG marker blocks (requires marker bitstream)\n"
             "  -W           Log TPG frame-number watermark; continue on bad frames\n"
+            "  -F           Require HDMI frame-ID continuity and stamps on every line (26101603+)\n"
             "  -o <file>    Dump raw RGB24 frames to file\n"
             "  -P           Probe supported formats and exit\n"
             "  -H           Show this help\n",
@@ -179,6 +181,8 @@ int main(int argc, char **argv)
     int static_verify = 0;
     int marker_verify = 0;
     int watermark_verify = 0;
+    int hdmi_verify = 0, have_hdmi_id = 0;
+    uint32_t previous_hdmi_id = 0;
     int static_expected_fill = -1;
     int probe_only = 0;
     int fd = -1;
@@ -207,7 +211,7 @@ int main(int argc, char **argv)
     uint32_t bench_frames = 0;
     uint32_t i;
 
-    while ((opt = getopt(argc, argv, "d:w:h:f:n:p:bSMWo:PH")) != -1) {
+    while ((opt = getopt(argc, argv, "d:w:h:f:n:p:bSMWFo:PH")) != -1) {
         switch (opt) {
         case 'd': device = optarg; break;
         case 'w': width = strtoul(optarg, NULL, 0); break;
@@ -219,6 +223,7 @@ int main(int argc, char **argv)
         case 'S': static_verify = 1; break;
         case 'M': marker_verify = 1; break;
         case 'W': watermark_verify = 1; break;
+        case 'F': hdmi_verify = 1; break;
         case 'o': output_name = optarg; break;
         case 'P': probe_only = 1; break;
         case 'H': usage(argv[0]); return EXIT_SUCCESS;
@@ -231,6 +236,14 @@ int main(int argc, char **argv)
 
     if (static_verify && (marker_verify || watermark_verify)) {
         fprintf(stderr, "[ERROR] -S cannot be combined with -M or -W\n");
+        return EXIT_FAILURE;
+    }
+    if (hdmi_verify && (static_verify || marker_verify || watermark_verify)) {
+        fprintf(stderr, "[ERROR] -F cannot be combined with TPG verification options\n");
+        return EXIT_FAILURE;
+    }
+    if (hdmi_verify && frame_target < 2) {
+        fprintf(stderr, "[ERROR] -F requires at least two frames to check continuity\n");
         return EXIT_FAILURE;
     }
 
@@ -361,16 +374,17 @@ int main(int argc, char **argv)
     }
 
     /* Diagnostic Overlay control */
-    if (marker_verify || watermark_verify) {
+    if (marker_verify || watermark_verify || hdmi_verify) {
         memset(&ctrl, 0, sizeof(ctrl));
         ctrl.id = V4L2_CID_QPCIE_TPG_OVERLAY;
-        ctrl.value = 1;
-        if (xioctl(fd, VIDIOC_S_CTRL, &ctrl) == 0) {
-            printf("[PASS] Diagnostic TPG Marker Overlay enabled via V4L2 control\n");
-        } else {
-            (void)!system("echo 1 > /sys/bus/pci/devices/*/tpg_overlay 2>/dev/null || true");
-            printf("[PASS] Diagnostic TPG Marker Overlay enabled via sysfs fallback\n");
+        ctrl.value = hdmi_verify ? 0 : 1;
+        if (xioctl(fd, VIDIOC_S_CTRL, &ctrl) < 0 ||
+            xioctl(fd, VIDIOC_G_CTRL, &ctrl) < 0 || ctrl.value != (hdmi_verify ? 0 : 1)) {
+            fprintf(stderr, "[FAIL] Cannot verify diagnostic overlay control state\n");
+            goto out;
         }
+        printf("[PASS] Corner overlay %s (HDMI line stamps require corner overlay OFF)\n",
+               hdmi_verify ? "OFF" : "ON");
     }
 
     /* REQBUFS */
@@ -495,6 +509,21 @@ int main(int argc, char **argv)
                 sequence_violation = 1;
             }
             expected_sequence = buf.sequence + 1;
+            if (hdmi_verify) {
+                uint32_t id = 0, bad_row = 0;
+                int stamp_rc = hdmi_stamp_check(buffers[buf.index].plane[0].addr,
+                                               planes[0].bytesused, stride, height,
+                                               &id, &bad_row);
+                if (stamp_rc || (have_hdmi_id && !hdmi_stamp_follows(previous_hdmi_id, id))) {
+                    fprintf(stderr, "[FAIL] HDMI stamp host=%u rc=%d row=%u id=%u previous=%u\n",
+                            captured, stamp_rc, bad_row, id, previous_hdmi_id);
+                    goto streamoff;
+                }
+                if (captured < 5 || captured % 60 == 0)
+                    printf("[HDMI ID] host=%u source=%u all %u rows valid\n", captured, id, height);
+                previous_hdmi_id = id;
+                have_hdmi_id = 1;
+            }
 
             if (watermark_verify) {
                 uint16_t watermark;
@@ -592,6 +621,8 @@ int main(int argc, char **argv)
         printf("[PASS] TPG marker integrity: %u frames verified\n", captured);
     if (watermark_verify && !sequence_violation)
         printf("[PASS] TPG frame watermark: %u frames continuous\n", captured);
+    if (hdmi_verify)
+        printf("[PASS] HDMI source frame IDs: %u frames continuous; every line validated\n", captured);
 
     end_ms = monotonic_ms();
     rc = EXIT_SUCCESS;

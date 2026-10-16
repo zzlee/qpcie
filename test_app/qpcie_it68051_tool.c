@@ -69,6 +69,7 @@ static char g_device_path[512] = {0};
 static char g_bdf[256] = {0};
 static bool g_single_pixel;
 static bool g_downscale_1080p;
+static bool g_native_4k_rgb;
 static int g_i2c_error;
 
 /* Genuine YUAN SC710 4K HDR EDID Table (256 bytes) */
@@ -842,7 +843,7 @@ static int enable_ttl_output(volatile uint8_t *bar1)
      * profile despite the independent timing probe locking. C4=00 restores
      * line-end sampling and live capture. Keep the legacy dual-pixel setting
      * separate: this is not a validated 297 MHz/4K sampling phase. */
-    uint8_t c4 = g_downscale_1080p ? 0x00 : 0xB0;
+    uint8_t c4 = (g_downscale_1080p || g_native_4k_rgb) ? 0x00 : 0xB0;
     wr_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, 0xC4, &c4, 1);
     if (it68051_update(bar1, 1, 0xBD, 0x30, g_single_pixel ? 0 : 0x10) ||
         it68051_update(bar1, 5, 0xD0, 0xFF, 0xF3)) return -EIO;
@@ -962,7 +963,7 @@ static bool it68051_supported_uhd60(const uint8_t *timing, const uint8_t *avi)
            !(timing[0] & 2);
 }
 
-static int it68051_output_1080p(volatile uint8_t *bar1)
+static int it68051_output_rgb24(volatile uint8_t *bar1, bool downscale)
 {
     uint8_t timing[24], avi[5], status;
     it68051_set_bank(bar1, 0);
@@ -973,30 +974,35 @@ static int it68051_output_1080p(volatile uint8_t *bar1)
     unsigned width = timing[5] | ((timing[6] & 0x3F) << 8);
     unsigned height = timing[12] | ((timing[13] & 0x3F) << 8);
     if (!it68051_supported_uhd60(timing, avi)) {
-        fprintf(stderr, "ERROR: downscale profile requires 3840x2160p60 BT.709 limited YUV444 8-bit (VIC 97)\n");
+        fprintf(stderr, "ERROR: RGB24 profile requires 3840x2160p60 BT.709 limited YUV444 8-bit (VIC 97)\n");
         fprintf(stderr, "Input %ux%u Reg98=%02X AVI=%02X %02X %02X %02X %02X\n",
                 width, height, timing[0], avi[0], avi[1], avi[2], avi[3], avi[4]);
         it68051_set_bank(bar1, 0);
         return -EINVAL;
     }
-    int rc = it68051_update(bar1, 0, 0x33, 0x08, 0x08);
-    /* Source dimensions, horizontal 1/2 ratio (endpoint-aligned). */
-    const uint16_t geometry[] = {3840, 2160, 3838, 1919, 1919};
-    for (unsigned i = 0; i < sizeof(geometry)/sizeof(geometry[0]); i++) {
-        rc |= it68051_update(bar1, 5, 0x21 + i*2, 0xFF, geometry[i]);
-        rc |= it68051_update(bar1, 5, 0x22 + i*2, 0xFF, geometry[i] >> 8);
+    int rc = 0;
+    if (downscale) {
+        rc |= it68051_update(bar1, 0, 0x33, 0x08, 0x08);
+        /* Source dimensions, horizontal 1/2 ratio (endpoint-aligned). */
+        const uint16_t geometry[] = {3840, 2160, 3838, 1919, 1919};
+        for (unsigned i = 0; i < sizeof(geometry)/sizeof(geometry[0]); i++) {
+            rc |= it68051_update(bar1, 5, 0x21 + i*2, 0xFF, geometry[i]);
+            rc |= it68051_update(bar1, 5, 0x22 + i*2, 0xFF, geometry[i] >> 8);
+        }
+        const uint8_t clamp[] = {0xFF, 0, 0x0F, 0xFF, 0, 0x0F};
+        for (unsigned i = 0; i < sizeof(clamp); i++)
+            rc |= it68051_update(bar1, 5, 0x2B + i, 0xFF, clamp[i]);
+        rc |= it68051_update(bar1, 5, 0x31, 0xFF, 0x1B);
+        const uint16_t output_timing[] = {88, 44, 148, 1920, 4, 5, 36, 1080};
+        for (unsigned i = 0; i < sizeof(output_timing)/sizeof(output_timing[0]); i++) {
+            rc |= it68051_update(bar1, 5, 0x32 + i*2, 0xFF, output_timing[i]);
+            rc |= it68051_update(bar1, 5, 0x33 + i*2, 0x3F, output_timing[i] >> 8);
+        }
+        rc |= it68051_update(bar1, 5, 0x20, 0x73, 0x31);
+        rc |= it68051_update(bar1, 0, 0x33, 0x08, 0);
+    } else {
+        rc |= it68051_update(bar1, 5, 0x20, 0x40, 0x40);
     }
-    const uint8_t clamp[] = {0xFF, 0, 0x0F, 0xFF, 0, 0x0F};
-    for (unsigned i = 0; i < sizeof(clamp); i++)
-        rc |= it68051_update(bar1, 5, 0x2B + i, 0xFF, clamp[i]);
-    rc |= it68051_update(bar1, 5, 0x31, 0xFF, 0x1B);
-    const uint16_t output_timing[] = {88, 44, 148, 1920, 4, 5, 36, 1080};
-    for (unsigned i = 0; i < sizeof(output_timing)/sizeof(output_timing[0]); i++) {
-        rc |= it68051_update(bar1, 5, 0x32 + i*2, 0xFF, output_timing[i]);
-        rc |= it68051_update(bar1, 5, 0x33 + i*2, 0x3F, output_timing[i] >> 8);
-    }
-    rc |= it68051_update(bar1, 5, 0x20, 0x73, 0x31);
-    rc |= it68051_update(bar1, 0, 0x33, 0x08, 0);
     /* ITU709 limited YUV -> full RGB matrix, hardware register encoding. */
     const uint8_t matrix[] = {0x04,0x00,0xA7,0x4F,0x09,0xBA,0x3B,0x4B,0x3E,
                              0x4F,0x09,0x57,0x0E,0x02,0x00,0x4F,0x09,0xFE,0x3F,0xE8,0x10,0x00};
@@ -1018,7 +1024,9 @@ static int it68051_output_1080p(volatile uint8_t *bar1)
     rc |= it68051_update(bar1, 0, 0x8C, 0x58, 0x10);
     rc |= it68051_update(bar1, 0, 0x8C, 0x10, 0);
     it68051_set_bank(bar1, 0);
-    printf("RX output profile: 1920x1080p60 RGB single-pixel SDR, RGB24 byte order (%s)\n", rc ? "FAILED" : "registers verified");
+    printf("RX output profile: %s RGB SDR, RGB24 byte order (%s)\n",
+           downscale ? "1920x1080p60 single-pixel" : "3840x2160p60 dual-pixel",
+           rc ? "FAILED" : "registers verified");
     printf("Capture with v4l2_rgb24_test_app; this RGB profile is NOT NV12/YUV444 input.\n");
     usleep(1200000); // Let the output PLL, format detector and audio settle
     return rc ? -EIO : 0;
@@ -1246,7 +1254,13 @@ static void show_fpga_probe(volatile uint8_t *bar0)
     printf("  Hardware Capture Source: Video=%s, Audio=%s (CTRL=0x%02X)\n",
            (ctrl & 0x01) ? "Live HDMI RX" : "Internal TPG",
            (ctrl & 0x02) ? "Live HDMI I2S" : "Audio Pattern Gen",
-           ctrl);
+            ctrl);
+    if (ver >= 0x26101603) {
+        printf("  HDMI frame/line stamps : %s (first 4 pixels of every line)\n", (ctrl & 0x10) ? "ON" : "OFF");
+        printf("  HDMI bridge counters  : frames=%u lines=%u dropped beats=%u dropped EOL=%u\n",
+               read32(bar0, 0x680), read32(bar0, 0x684),
+               read32(bar0, 0x688), read32(bar0, 0x68C));
+    }
 }
 
 static void monitor_loop(volatile uint8_t *bar1, volatile uint8_t *bar0)
@@ -1314,6 +1328,7 @@ int main(int argc, char **argv)
     bool do_mux_hdmi = false;
     bool do_mux_tpg  = false;
     bool do_pixel_mode = false;
+    int frame_stamp = -1;
     int exit_code = 0;
 
     static struct option long_options[] = {
@@ -1334,6 +1349,9 @@ int main(int argc, char **argv)
         {"single-pixel", no_argument, 0, 1007},
         {"dual-pixel", no_argument, 0, 1008},
         {"downscale-1080p", no_argument, 0, 1009},
+        {"native-4k-rgb", no_argument, 0, 1010},
+        {"frame-stamp", no_argument, 0, 1011},
+        {"no-frame-stamp", no_argument, 0, 1012},
         {0, 0, 0, 0}
     };
 
@@ -1361,6 +1379,12 @@ int main(int argc, char **argv)
                 g_single_pixel = true;
                 g_downscale_1080p = true;
                 break;
+            case 1010:
+                do_pixel_mode = true;
+                g_native_4k_rgb = true;
+                break;
+            case 1011: frame_stamp = 1; break;
+            case 1012: frame_stamp = 0; break;
             default:
                 printf("Usage: %s [options]\n"
                        "  --status|-s         Display current chip and FPGA telemetry\n"
@@ -1378,10 +1402,22 @@ int main(int argc, char **argv)
                        "  --mux-tpg           Route Internal TPG & Tone Gen to DMA\n"
                        "  --single-pixel      Select FPGA single-pixel mode (26101601+)\n"
                        "  --dual-pixel        Select FPGA dual-pixel mode (26101601+)\n"
-                       "  --downscale-1080p   RX VIC97/YUV444 -> RGB1080p single pixel\n",
+                       "  --downscale-1080p   RX VIC97/YUV444 -> RGB1080p single pixel\n"
+                       "  --native-4k-rgb     RX VIC97/YUV444 -> RGB4K dual pixel (experimental)\n"
+                       "  --frame-stamp       Enable diagnostic frame/line stamps (26101603+)\n"
+                       "  --no-frame-stamp    Disable diagnostic stamps (26101603+)\n",
                        argv[0]);
                 return 1;
         }
+    }
+
+    if (g_native_4k_rgb && (g_downscale_1080p || g_single_pixel)) {
+        fprintf(stderr, "ERROR: --native-4k-rgb conflicts with single-pixel/downscale mode\n");
+        return 1;
+    }
+    if (g_native_4k_rgb) {
+        g_single_pixel = false;
+        if (do_init) is_4k = true;
     }
 
     if (!do_status && !do_init && !do_edid && !do_hpd && !do_ttl && !do_dump && !do_service && !do_monitor && !do_probe && !do_mux_hdmi && !do_mux_tpg)
@@ -1422,6 +1458,14 @@ int main(int argc, char **argv)
         if (bar0) { munmap((void *)bar0, 1048576); close(fd0); }
         return 1;
     }
+
+    if (frame_stamp >= 0 && (!bar0 || read32(bar0, BAR0_REG_C_VERSION) < 0x26101603)) {
+        fprintf(stderr, "ERROR: HDMI frame stamps require C_VERSION 26101603+\n");
+        exit_code = 1;
+        goto cleanup;
+    }
+    if (g_native_4k_rgb && bar0 && read32(bar0, BAR0_REG_C_VERSION) < 0x26101603)
+        fprintf(stderr, "WARNING: legacy bitstream is NOT constrained for 297 MHz HDMI; diagnostic use only\n");
 
     /* Initialize FRONT I2C Master and MCU I2C Master (PRER=249 ~100kHz) */
     write32(bar1, BAR1_OFFSET_I2C_FRONT + REG_I2C_PRER_LO, 249 & 0xFF);
@@ -1484,7 +1528,7 @@ int main(int argc, char **argv)
         goto cleanup;
     }
 
-    if ((do_init || do_edid || do_hpd || do_ttl || do_service || do_monitor || g_downscale_1080p) &&
+    if ((do_init || do_edid || do_hpd || do_ttl || do_service || do_monitor || g_downscale_1080p || g_native_4k_rgb) &&
         it68051_enable_register_clock(bar1)) {
         munmap((void *)bar1, 65536);
         close(fd);
@@ -1539,7 +1583,8 @@ int main(int argc, char **argv)
         sleep(3);
         /* Run link servicing (EQ calibration, PHY mode selection, unmuting) */
         if (it6805_service_link(bar1)) { exit_code = 1; goto cleanup; }
-        if (g_downscale_1080p && it68051_output_1080p(bar1)) exit_code = 1;
+        if ((g_downscale_1080p || g_native_4k_rgb) &&
+            it68051_output_rgb24(bar1, g_downscale_1080p)) exit_code = 1;
         show_status(bar1);
         if (bar0) show_fpga_probe(bar0);
     } else {
@@ -1554,8 +1599,8 @@ int main(int argc, char **argv)
             show_status(bar1);
             if (bar0) show_fpga_probe(bar0);
         }
-        if (g_downscale_1080p &&
-            (enable_ttl_output(bar1) || it68051_output_1080p(bar1))) exit_code = 1;
+        if ((g_downscale_1080p || g_native_4k_rgb) &&
+            (enable_ttl_output(bar1) || it68051_output_rgb24(bar1, g_downscale_1080p))) exit_code = 1;
         if (do_dump) {
             dump_all_registers(bar1);
         }
@@ -1580,6 +1625,14 @@ int main(int argc, char **argv)
             write32(bar0, BAR0_REG_HDMI_TX_CTRL, ctrl);
             printf("FPGA pixel mode: %s\n", g_single_pixel ? "single" : "dual");
         }
+    }
+    if (frame_stamp >= 0 && !exit_code) {
+        uint32_t ctrl = read32(bar0, BAR0_REG_HDMI_TX_CTRL) & ~0x14u;
+        if (frame_stamp) ctrl |= 0x10;
+        write32(bar0, BAR0_REG_HDMI_TX_CTRL, ctrl | 4);
+        usleep(1000);
+        write32(bar0, BAR0_REG_HDMI_TX_CTRL, ctrl);
+        printf("HDMI frame/line stamps: %s\n", frame_stamp ? "ON (diagnostic pixels)" : "OFF");
     }
     if (do_monitor && !exit_code) monitor_loop(bar1, bar0);
 
