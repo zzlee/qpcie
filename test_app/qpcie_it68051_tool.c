@@ -831,14 +831,18 @@ static int enable_ttl_output(volatile uint8_t *bar1)
     uint8_t c0 = g_single_pixel ? 0x42 : 0x43;
     int r_c0 = wr_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, 0xC0, &c0, 1);
 
-    /* The FPGA bridge samples rising edges only: always dual-pixel SDR.
+    /* The FPGA bridge samples rising edges only: single/dual-pixel SDR.
      * Scrambling is an input-link property, not a TTL DDR format selector. */
     uint8_t c1 = 0x00;
     int r_c1 = wr_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, 0xC1, &c1, 1);
     printf("  [Debug] Write Bank 1: set_bank=%d, C0=%d (val=0x%02X), C1=%d (val=0x%02X)\n",
            r_b1, r_c0, c0, r_c1, c1);
 
-    uint8_t c4 = 0xB0; // Inverted DCLK, delay 3: empirically valid sampling phase
+    /* On this A50T board, B0 loses every TLAST in the 148.5 MHz single-pixel
+     * profile despite the independent timing probe locking. C4=00 restores
+     * line-end sampling and live capture. Keep the legacy dual-pixel setting
+     * separate: this is not a validated 297 MHz/4K sampling phase. */
+    uint8_t c4 = g_downscale_1080p ? 0x00 : 0xB0;
     wr_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, 0xC4, &c4, 1);
     if (it68051_update(bar1, 1, 0xBD, 0x30, g_single_pixel ? 0 : 0x10) ||
         it68051_update(bar1, 5, 0xD0, 0xFF, 0xF3)) return -EIO;
@@ -1000,6 +1004,11 @@ static int it68051_output_1080p(volatile uint8_t *bar1)
         rc |= it68051_update(bar1, 1, 0x70 + i, 0xFF, matrix[i]);
     rc |= it68051_update(bar1, 0, 0x6B, 0x7F, 0x60);
     rc |= it68051_update(bar1, 0, 0x6C, 0x03, 0x03);
+    /* The bridge packs B,G,R into ascending byte addresses. Swap RX R/B
+     * so the packed RGB24 DMA path actually delivers V4L2 RGB24 (R,G,B),
+     * not BGR. Do not feed this RGB profile to the YUV444->NV12 engine. */
+    rc |= it68051_update(bar1, 1, 0xC2, 0x0C, 0x08);
+    rc |= it68051_update(bar1, 1, 0xC4, 0xF0, 0x00);
     rc |= it68051_update(bar1, 0, 0x22, 0x01, 0x01);
     usleep(1000);
     rc |= it68051_update(bar1, 0, 0x22, 0x01, 0);
@@ -1009,7 +1018,8 @@ static int it68051_output_1080p(volatile uint8_t *bar1)
     rc |= it68051_update(bar1, 0, 0x8C, 0x58, 0x10);
     rc |= it68051_update(bar1, 0, 0x8C, 0x10, 0);
     it68051_set_bank(bar1, 0);
-    printf("RX output profile: 1920x1080p60 RGB single-pixel SDR (%s)\n", rc ? "FAILED" : "registers verified");
+    printf("RX output profile: 1920x1080p60 RGB single-pixel SDR, RGB24 byte order (%s)\n", rc ? "FAILED" : "registers verified");
+    printf("Capture with v4l2_rgb24_test_app; this RGB profile is NOT NV12/YUV444 input.\n");
     usleep(1200000); // Let the output PLL, format detector and audio settle
     return rc ? -EIO : 0;
 }
@@ -1171,11 +1181,19 @@ static void show_status(volatile uint8_t *bar1)
     uint8_t b1_b0 = 0;
     rd_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, 0xB0, &b1_b0, 1);
     it68051_set_bank(bar1, 0);
+    uint8_t color = 0;
+    rd_regs(bar1, BAR1_OFFSET_I2C_FRONT, IT68051_ADDR, 0x6B, &color, 1);
 
     printf("\n[Output Bus Status (Bank 1 0xC0=0x%02X, 0xC6=0x%02X, 0xC7=0x%02X)]\n",
            b1[0], b1[6], b1[7]);
     printf("  TTL Module Clock     : %s\n", (b1[0] & 0x02) ? "ENABLED" : "DISABLED");
     printf("  TTL Mode             : %s\n", (b1[0] & 0x01) ? "Dual Pixel" : "Single Pixel");
+    printf("  TTL DCLK phase (C4)  : 0x%02X (invert=%u, delay=%u)\n",
+           b1[4], b1[4] >> 7, (b1[4] >> 4) & 7);
+    printf("  TTL channel swap(C2) : 0x%02X\n", b1[2]);
+    printf("  Output color mode    : %s (B0:6B=0x%02X)\n",
+           (color & 0x0C) == 0 ? "RGB444" : (color & 0x0C) == 8 ? "YUV444" :
+           (color & 0x0C) == 4 ? "YUV422" : "reserved", color);
     printf("  DE Regeneration (B0): %s\n", (b1_b0 & 0x01) ? "ENABLED" : "DISABLED (pass-through)");
     printf("  Video Data IO (QD)   : %s\n", (b1[6] == 0x00) ? "DRIVING (Active)" : "TRISTATED");
     printf("  Audio I2S IO         : %s\n", (b1[7] == 0x00) ? "DRIVING (Active)" : "TRISTATED");

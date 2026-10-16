@@ -88,17 +88,20 @@
 /* BAR0 Offsets (PS + PCIe host shared, pl_clk0 domain) */
 #define BAR0_OFFSET_ENV             0x1000  /* zzlab_env_ctrl: version/platform/board */
 
-/* BAR1 Offsets (PCIe host only) */
+/* BAR1 layout is selected at build time: make QPCIE_A50T=1 for M2-710/A50T.
+ * The default preserves the ZU4EV layout. These maps are not interchangeable. */
 #define BAR1_OFFSET_ENV             0x0000  /* DEPRECATED: DECERR hole since C_VERSION 26100805; use BAR0_OFFSET_ENV */
 #define BAR1_OFFSET_AUDIO_GEN       0x1000
 #define BAR1_OFFSET_EDID            0x2000
+#ifdef QPCIE_A50T_BAR1
+#define BAR1_OFFSET_TPG             0x0000
+#define BAR1_OFFSET_I2C             0x3000
+#define BAR1_OFFSET_SPI_FLASH       0x4000
+#else
 #define BAR1_OFFSET_TPG             0x3000
 #define BAR1_OFFSET_I2C             0x4000
 #define BAR1_OFFSET_SPI_FLASH       0x5000
-/* NOTE (HW truth, a50t crossbar M00..M04): TPG=0x0000, AUDIO=0x1000,
- * EDID=0x2000, FRONT-I2C=0x3000, SPI=0x4000. The three _OFFSET names above
- * for TPG/I2C/SPI are stale; do not move them (user flows may depend on
- * them). New blocks must use the HW-true offsets below. */
+#endif
 /* MCU I2C Master Registers (BAR1 Offset 0x5000, M05; NUC100 slave @ 0x2A) */
 #define BAR1_OFFSET_I2C_MCU         0x5000
 #define NUC100_SLAVE_ADDR           0x2A

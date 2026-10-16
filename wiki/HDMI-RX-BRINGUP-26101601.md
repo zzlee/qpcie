@@ -1,5 +1,10 @@
 # M2-710 HDMI RX 接手紀錄 — 26101601
 
+> **後續實測已更新：** [Live 1080p V4L2 驗證](HDMI-1080P-LIVE-VALIDATION.md)。
+> 26101601 已透過 PCIe 燒錄並回讀驗證；調整 RX C4=00、C2=08，使用 A50T map driver
+> 與 **RGB24 app** 後，已取得真實遊戲畫面及連續 3600 幀。本頁以下保留最初交接時的狀態；
+> 舊的 NV12 app 指令不適用於 RGB downscale profile。
+
 ## 已證實／尚未證實
 
 2026-10-15 在 Jetson `192.168.191.32`，使用本倉庫的

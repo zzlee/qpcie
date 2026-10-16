@@ -246,7 +246,7 @@ int main(int argc, char **argv)
     frame_bytes = (uint64_t)stride * height;
 
     printf("=================================================================\n"
-           " QPCIe Video TPG -> RGB24 Capture Test Application\n"
+           " QPCIe RGB24 Capture Test Application (source selected externally)\n"
            " Device: %s, Resolution: %ux%u, Stride: %u Bytes\n"
            " Format: V4L2_PIX_FMT_RGB24 (Packed 24-bit RGB, 1 Plane)\n"
            " Frames: %u, Frame Size: %" PRIu64 " Bytes (%.2f MiB)\n"
@@ -461,6 +461,12 @@ int main(int argc, char **argv)
             perror("VIDIOC_DQBUF");
             goto streamoff;
         }
+        if (buf.index >= req.count || planes[0].bytesused != frame_bytes ||
+            planes[0].bytesused > buffers[buf.index].plane[0].length) {
+            fprintf(stderr, "[FAIL] invalid RGB24 buffer: index=%u bytes=%u expected=%zu\n",
+                    buf.index, planes[0].bytesused, (size_t)frame_bytes);
+            goto streamoff;
+        }
 
         if (benchmark_mode && captured == BENCHMARK_WARMUP_FRAMES) {
             bench_start_ms = monotonic_ms();
@@ -558,8 +564,11 @@ int main(int argc, char **argv)
             }
 
             if (output) {
-                fwrite(buffers[buf.index].plane[0].addr, 1,
-                       buffers[buf.index].plane[0].length, output);
+                if (fwrite(buffers[buf.index].plane[0].addr, 1,
+                           planes[0].bytesused, output) != planes[0].bytesused) {
+                    perror("write RGB24 output");
+                    goto streamoff;
+                }
             }
 
             captured++;
