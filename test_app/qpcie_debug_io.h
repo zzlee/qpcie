@@ -75,7 +75,7 @@ static inline int db_open(struct db_io *io, const char *path, bool card, bool si
         uint32_t magic = le32toh(regs[0]), version = le32toh(regs[1]);
         db_barrier();
         munmap(csr, 4096);
-        if (magic != 0x12abe380U || version != QDBG_HW_VERSION) {
+        if (magic != 0x12abe380U || version < QDBG_HW_VERSION_INITIAL) {
             fprintf(stderr,"Unsupported PL version %08x; debug aperture not accessed\n",version);
             return -1;
         }
