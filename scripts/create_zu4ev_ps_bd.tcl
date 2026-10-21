@@ -1043,6 +1043,7 @@ Port;FD4A0000;FD4AFFFF;0|FPD;DPDMA;FD4C0000;FD4CFFFF;0|FPD;DDR_XMPU5_CFG;FD05000
     CONFIG.PSU__USE__M_AXI_GP0 {1} \
     CONFIG.PSU__MAXIGP0__DATA_WIDTH {32} \
     CONFIG.PSU__USE__M_AXI_GP1 {0} \
+    CONFIG.PSU__MAXIGP1__DATA_WIDTH {32} \
     CONFIG.PSU__USE__S_AXI_GP0 {0} \
     CONFIG.PSU__USE__S_AXI_GP1 {0} \
     CONFIG.PSU__USE__S_AXI_GP2 {1} \
@@ -1057,24 +1058,14 @@ Port;FD4A0000;FD4AFFFF;0|FPD;DPDMA;FD4C0000;FD4CFFFF;0|FPD;DDR_XMPU5_CFG;FD05000
   # Create external interface ports
   if {$hdmi_control} {
     # Independent PS control path: HDMI remains configurable without PCIe.
-    set_property CONFIG.PSU__USE__M_AXI_GP1 {1} $zynq_ultra_ps_e_0
-    set pc [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_protocol_converter:2.1 hdmi_control_pc]
-    set_property -dict [list CONFIG.SI_PROTOCOL {AXI4} CONFIG.MI_PROTOCOL {AXI4LITE} CONFIG.DATA_WIDTH {32} CONFIG.ADDR_WIDTH {40} CONFIG.ID_WIDTH {16}] $pc
-    connect_bd_intf_net [get_bd_intf_pins zynq_ultra_ps_e_0/M_AXI_HPM1_FPD] [get_bd_intf_pins $pc/S_AXI]
-    set hdmi_axi [create_bd_intf_port -mode Master -vlnv xilinx.com:interface:aximm_rtl:1.0 M_AXI_HDMI]
-    set_property -dict [list CONFIG.PROTOCOL {AXI4LITE} CONFIG.DATA_WIDTH {32} CONFIG.ADDR_WIDTH {40} CONFIG.FREQ_HZ {99990005}] $hdmi_axi
-    connect_bd_intf_net [get_bd_intf_pins $pc/M_AXI] $hdmi_axi
-    connect_bd_net [get_bd_pins zynq_ultra_ps_e_0/pl_clk0] [get_bd_pins $pc/aclk] [get_bd_pins zynq_ultra_ps_e_0/maxihpm1_fpd_aclk]
-    set hrst [create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset:5.0 hdmi_control_reset]
-    connect_bd_net [get_bd_pins zynq_ultra_ps_e_0/pl_clk0] [get_bd_pins $hrst/slowest_sync_clk]
-    connect_bd_net [get_bd_pins zynq_ultra_ps_e_0/pl_resetn0] [get_bd_pins $hrst/ext_reset_in]
-    set one [create_bd_cell -type ip -vlnv xilinx.com:ip:xlconstant:1.1 hdmi_reset_locked]
-    set_property CONFIG.CONST_VAL {1} $one
-    set zero [create_bd_cell -type ip -vlnv xilinx.com:ip:xlconstant:1.1 hdmi_reset_unused]
-    set_property CONFIG.CONST_VAL {0} $zero
-    connect_bd_net [get_bd_pins $one/dout] [get_bd_pins $hrst/dcm_locked]
-    connect_bd_net [get_bd_pins $zero/dout] [get_bd_pins $hrst/aux_reset_in] [get_bd_pins $hrst/mb_debug_sys_rst]
-    connect_bd_net [get_bd_pins $hrst/peripheral_aresetn] [get_bd_pins $pc/aresetn]
+    set_property -dict [list \
+      CONFIG.PSU__USE__M_AXI_GP1 {1} \
+      CONFIG.PSU__MAXIGP1__DATA_WIDTH {32} \
+    ] $zynq_ultra_ps_e_0
+    set m_axi1 [ create_bd_intf_port -mode Master -vlnv xilinx.com:interface:aximm_rtl:1.0 M_AXI_HPM1_FPD ]
+    set_property -dict [list CONFIG.DATA_WIDTH {32} CONFIG.ADDR_WIDTH {40} CONFIG.FREQ_HZ {99990005}] $m_axi1
+    connect_bd_intf_net $m_axi1 [get_bd_intf_pins zynq_ultra_ps_e_0/M_AXI_HPM1_FPD]
+    connect_bd_net [get_bd_pins zynq_ultra_ps_e_0/pl_clk0] [get_bd_pins zynq_ultra_ps_e_0/maxihpm1_fpd_aclk]
   }
   set m_axi [ create_bd_intf_port -mode Master -vlnv xilinx.com:interface:aximm_rtl:1.0 M_AXI_HPM0_FPD ]
   set_property -dict [list CONFIG.DATA_WIDTH {32} CONFIG.ADDR_WIDTH {40} CONFIG.FREQ_HZ {99990005}] $m_axi
@@ -1084,20 +1075,27 @@ Port;FD4A0000;FD4AFFFF;0|FPD;DPDMA;FD4C0000;FD4CFFFF;0|FPD;DDR_XMPU5_CFG;FD05000
   set_property -dict [list CONFIG.DATA_WIDTH {128} CONFIG.ADDR_WIDTH {40} CONFIG.FREQ_HZ {99990005}] $s_axi
   connect_bd_intf_net $s_axi [get_bd_intf_pins zynq_ultra_ps_e_0/S_AXI_HP0_FPD]
 
-  create_bd_port -dir I -from 0 -to 0 -type intr pl_ps_irq0
+  # ZynqMP PL IRQ0[0..2] -> GIC IDs 121..123 (DT SPIs 89..91).
+  # Preserve the original upgrade/mailbox notification on bit 0.
+  set irq_msb 0
+  if {$hdmi_control} {set irq_msb 2}
+  # NUM_F2P0_INTR_INPUTS is read-only in IP Integrator: width propagates
+  # from this port at validate_bd_design, rather than a set_property override.
+  create_bd_port -dir I -from $irq_msb -to 0 -type intr pl_ps_irq0
   connect_bd_net [get_bd_ports pl_ps_irq0] [get_bd_pins zynq_ultra_ps_e_0/pl_ps_irq0]
 
   # Address mapping
   assign_bd_address
   if {$hdmi_control} {
-    assign_bd_address -force -offset 0xB0000000 -range 0x00100000 -target_address_space [get_bd_addr_spaces zynq_ultra_ps_e_0/Data] [get_bd_addr_segs M_AXI_HDMI/Reg]
+    assign_bd_address -force -offset 0xB0000000 -range 0x00100000 -target_address_space [get_bd_addr_spaces zynq_ultra_ps_e_0/Data] [get_bd_addr_segs M_AXI_HPM1_FPD/Reg]
   }
 
   # Export pl_clk0 (100MHz) and connect it to PS AXI interfaces
   create_bd_port -dir O -type clk -freq_hz 99990005 pl_clk0
-  set_property -dict [list CONFIG.ASSOCIATED_BUSIF {M_AXI_HPM0_FPD:S_AXI_HP0_FPD}] [get_bd_ports pl_clk0]
   if {$hdmi_control} {
-    set_property CONFIG.ASSOCIATED_BUSIF {M_AXI_HPM0_FPD:S_AXI_HP0_FPD:M_AXI_HDMI} [get_bd_ports pl_clk0]
+    set_property -dict [list CONFIG.ASSOCIATED_BUSIF {M_AXI_HPM0_FPD:M_AXI_HPM1_FPD:S_AXI_HP0_FPD}] [get_bd_ports pl_clk0]
+  } else {
+    set_property -dict [list CONFIG.ASSOCIATED_BUSIF {M_AXI_HPM0_FPD:S_AXI_HP0_FPD}] [get_bd_ports pl_clk0]
   }
   connect_bd_net [get_bd_pins zynq_ultra_ps_e_0/pl_clk0] [get_bd_ports pl_clk0]
   connect_bd_net [get_bd_pins zynq_ultra_ps_e_0/pl_clk0] [get_bd_pins zynq_ultra_ps_e_0/maxihpm0_fpd_aclk]
@@ -1108,9 +1106,6 @@ Port;FD4A0000;FD4AFFFF;0|FPD;DPDMA;FD4C0000;FD4CFFFF;0|FPD;DDR_XMPU5_CFG;FD05000
   connect_bd_net [get_bd_pins zynq_ultra_ps_e_0/pl_resetn0] [get_bd_ports pl_resetn0]
 
   validate_bd_design
-  if {$hdmi_control && [get_property CONFIG.C_EXT_RESET_HIGH [get_bd_cells hdmi_control_reset]] != 0} {
-    error "HDMI control reset must infer ACTIVE_LOW from PS pl_resetn0"
-  }
   save_bd_design
   puts "================================================================="
   puts " SUCCESS: zu4ev_ps_bd created & validated successfully!"

@@ -17,7 +17,13 @@ h2c_fifo_wr_en_ch1 h2c_fifo_wr_en_ch2 h2c_fifo_wr_en_ch3
 out_irq_top_status_w1c out_vch0_irq_status_w1c out_vch1_irq_status_w1c
 out_adev0_irq_status_w1c out_adev0_xrun_inject out_global_reset_pulse'''.split())
 LOCAL_OUTPUTS = set('''out_hdmi_ipc_cmd out_hdmi_ipc_arg out_hdmi_ipc_status
-out_hdmi_ipc_doorbell out_ddr_read_request out_ddr_read_offset'''.split())
+out_hdmi_ipc_doorbell out_ddr_read_request out_ddr_read_offset out_probe_ctrl'''.split())
+LOCAL_INPUTS = set('''in_probe_version in_probe_rx_clk_freq in_probe_dru_clk_freq in_probe_rxoutclk_freq
+in_probe_rx_video_clk_freq in_probe_tx_clk_freq in_probe_txoutclk_freq in_probe_tx_video_clk_freq
+in_probe_pins in_probe_pulse_cnt1 in_probe_ddc_cnt in_probe_irq_cnt
+in_probe_ch0_beats in_probe_ch1_beats in_probe_ch2_beats in_probe_rx_video_sof
+in_probe_rx_video_eol in_probe_rx_video_pix in_probe_raw_rx_clk in_probe_raw_dru_clk
+in_probe_raw_rxoutclk in_probe_raw_rx_video_clk in_probe_raw_refclk100'''.split())
 UPGRADE = {'out_dma_upg_ctrl': 'pcie_upg_ctrl',
            'out_dma_upg_size': 'pcie_upg_size',
            'out_dma_upg_host_addr': 'pcie_upg_host_addr'}
@@ -57,7 +63,8 @@ def generate():
                 continue
             (events if name in EVENTS else levels).append(name)
         elif not name.startswith(('in_dma_upg_', 'in_ddr_read_')):
-            statuses.append(name)
+            if name not in LOCAL_INPUTS:
+                statuses.append(name)
     assert EVENTS == set(events), 'Every pulse must have explicit event semantics'
     level_sources = ['csr_' + p for p in levels] + list(UPGRADE)
     level_targets = levels + list(UPGRADE.values())

@@ -15,6 +15,8 @@ import binascii
 import base64
 import subprocess
 import argparse
+import shlex
+import hashlib
 
 UPG_SLAVE_ADDR = 0x2A
 REG_SLAVE_ADDR = 0x32
@@ -40,8 +42,8 @@ class Flasher:
     def exec_card(self, cmd_str, timeout=30):
         """Execute a shell command inside ZU4EV PS Linux via sc7f0ctl exec."""
         if self.host:
-            ssh_cmd = ["ssh", "-o", "ConnectTimeout=5", self.host,
-                       f"sudo sc7f0ctl exec '{cmd_str}'"]
+            ssh_cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", self.host,
+                       "sudo -n sc7f0ctl exec " + shlex.quote(cmd_str)]
             res = subprocess.run(ssh_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=timeout)
         else:
             local_cmd = ["sudo", "sc7f0ctl", "exec", cmd_str]
@@ -53,9 +55,11 @@ class Flasher:
     def query_status(self):
         out = self.exec_card("i2ctransfer -y 0 w1@0x32 0x00 r36")
         vals = [int(x, 16) for x in out.split()]
-        if len(vals) < 16:
+        if len(vals) != 36 or any(not 0 <= x <= 255 for x in vals):
             raise RuntimeError(f"Unexpected status response: {out}")
         ver = vals[0] | (vals[1] << 8) | (vals[2] << 16) | (vals[3] << 24)
+        if ver >> 16 != 0x1262:
+            raise RuntimeError(f"Unexpected MCU identity: 0x{ver:08X}")
         patch = ver & 0xFF
         minor = (ver >> 8) & 0xFF
         ver_str = f"v1.{minor}.{patch} (0x{ver:08X})"
@@ -69,17 +73,20 @@ class Flasher:
         slaves = [f"0x{vals[17+i]:02x}" for i in range(min(num_slaves, 15))]
         return {
             "version": ver_str,
+            "version_raw": ver,
             "status_raw": hex(st),
             "it6663_present": bool(st & (1 << 4)),
             "nct7717_present": bool(st & (1 << 5)),
             "clock_locked_scdt": bool(st & (1 << 6)),
-            "hdmi_mode": "HDMI" if (st & (1 << 7)) else "DVI",
+            "hdmi_mode": ("HDMI" if (st & (1 << 7)) else "DVI") if (st & (1 << 6)) else "UNKNOWN (unlocked)",
             "hdmi_5v": bool(st & (1 << 1)),
             "hpd_asserted": bool(st & (1 << 2)),
             "vendor_id": ven,
             "device_id": dev,
             "temperature_c": temp,
-            "resolution": f"{h_act}x{v_act}" if (h_act and v_act) else "No Signal / Unlocked",
+            "resolution": f"{h_act}x{v_act} (raw counters)" if (st & (1 << 6) and h_act and v_act) else "No Signal / Invalid timing",
+            "raw_h_active": h_act,
+            "raw_v_active": v_act,
             "slaves": slaves,
         }
 
@@ -125,13 +132,13 @@ class Flasher:
             print(f"[+] Saved 256 bytes EDID to {out_path}")
         return bytes(edid)
 
-    def flash_binary(self, bin_path):
+    def flash_binary(self, bin_path, expected_version=None):
         with open(bin_path, "rb") as f:
             data = bytearray(f.read())
 
         orig_len = len(data)
-        if orig_len > UPG_STAGE_MAX:
-            raise ValueError(f"Binary size {orig_len} exceeds max staging size {UPG_STAGE_MAX}")
+        if not 0 < orig_len <= UPG_STAGE_MAX:
+            raise ValueError(f"Binary size {orig_len} outside staging range 1..{UPG_STAGE_MAX}")
 
         # Pad to 4-byte boundary
         if len(data) % 4 != 0:
@@ -157,11 +164,12 @@ class Flasher:
         hello_resp = self.exec_card("i2ctransfer -y 0 w1@0x2a 0x01 r4")
         hvals = [int(x, 16) for x in hello_resp.split()]
         print(f"    Response: {[hex(x) for x in hvals]}")
-        if len(hvals) < 4 or hvals[0] != 0x01:
+        if hvals != [0x01, 0x00, 0x02, MAX_CHUNK_SIZE]:
             raise RuntimeError(f"Invalid HELLO response: {hello_resp}")
 
-        # Step 3: Build burn script
-        cmds = ["#!/bin/sh", "set -e"]
+        # Step 3: Fail closed on every MCU response, not just Linux I2C exit.
+        cmds = ["#!/bin/sh", "set -e",
+                'check_ack() { r=$("$@") || return $?; [ "$r" = "0x00" ] || { echo "MCU rejected command: $r" >&2; return 1; }; }']
 
         # BEGIN: [0x02, len_l, len_h, crc0..3]
         len_l = total_len & 0xFF
@@ -170,7 +178,7 @@ class Flasher:
         c1 = (crc32_val >> 8) & 0xFF
         c2 = (crc32_val >> 16) & 0xFF
         c3 = (crc32_val >> 24) & 0xFF
-        cmds.append(f"i2ctransfer -y 0 w7@0x2a 0x02 0x{len_l:02x} 0x{len_h:02x} 0x{c0:02x} 0x{c1:02x} 0x{c2:02x} 0x{c3:02x} r1")
+        cmds.append(f"check_ack i2ctransfer -y 0 w7@0x2a 0x02 0x{len_l:02x} 0x{len_h:02x} 0x{c0:02x} 0x{c1:02x} 0x{c2:02x} 0x{c3:02x} r1")
 
         # CHUNKS: [0x03, off_l, off_h, n, data..., crc8]
         offset = 0
@@ -186,12 +194,12 @@ class Flasher:
             
             chunk_hex = " ".join(f"0x{b:02x}" for b in chunk)
             wlen = 1 + 2 + 1 + n + 1
-            cmds.append(f"i2ctransfer -y 0 w{wlen}@0x2a 0x03 0x{off_l:02x} 0x{off_h:02x} 0x{n:02x} {chunk_hex} 0x{crc8:02x} r1")
+            cmds.append(f"check_ack i2ctransfer -y 0 w{wlen}@0x2a 0x03 0x{off_l:02x} 0x{off_h:02x} 0x{n:02x} {chunk_hex} 0x{crc8:02x} r1")
             offset += n
             chunk_idx += 1
 
         # COMMIT: [0x04]
-        cmds.append("i2ctransfer -y 0 w1@0x2a 0x04 r1")
+        cmds.append("check_ack i2ctransfer -y 0 w1@0x2a 0x04 r1")
         script_content = "\n".join(cmds) + "\n"
 
         # Step 4: Stream burn script to card in chunks (< DB_PAYLOAD 3072 bytes)
@@ -201,13 +209,18 @@ class Flasher:
         batch_size = 8
         for i in range(0, len(cmds), batch_size):
             batch_slice = cmds[i : i + batch_size]
-            subcmds = [f'echo "{c}" >> /tmp/burn_mcu.sh' for c in batch_slice]
+            subcmds = [f"printf '%s\\n' {shlex.quote(c)} >> /tmp/burn_mcu.sh" for c in batch_slice]
             joined = " && ".join(subcmds)
+            if len(joined.encode()) >= 3072:
+                raise RuntimeError("MCU script batch exceeds debug mailbox payload; COMMIT not sent")
             self.exec_card(joined)
             pct = min(100, int((i + batch_size) * 100 / len(cmds)))
             print(f"    Progress: {pct}%", end="\r", flush=True)
         print("    Progress: 100% (Transfer complete)       ")
 
+        staged_hash = self.exec_card("sha256sum /tmp/burn_mcu.sh").split()
+        if not staged_hash or staged_hash[0] != hashlib.sha256(script_content.encode()).hexdigest():
+            raise RuntimeError("Staged MCU script hash mismatch; COMMIT not sent")
         self.exec_card("chmod +x /tmp/burn_mcu.sh")
 
         # Step 5: Execute in-system flash sequence
@@ -215,7 +228,7 @@ class Flasher:
         print("[*] Executing in-SRAM flash sequence over I2C...")
         out = self.exec_card("sh /tmp/burn_mcu.sh", timeout=60)
         elapsed = time.time() - t0
-        print(f"    Staging and verification complete ({elapsed:.2f}s). COMMIT returned OK.")
+        print(f"    All staging ACKs checked ({elapsed:.2f}s). COMMIT acknowledged; awaiting reset.")
 
         # Step 6: Wait for MCU to execute in-SRAM flash and reboot
         print("[*] Waiting for MCU in-SRAM flash programming and CPU reset...")
@@ -225,7 +238,12 @@ class Flasher:
         for attempt in range(10):
             try:
                 st_new = self.query_status()
-                print("[+] Upgrade SUCCESSFUL!")
+                if expected_version is not None and st_new["version_raw"] != expected_version:
+                    raise RuntimeError(f"MCU version 0x{st_new['version_raw']:08X}, expected 0x{expected_version:08X}")
+                if expected_version is not None:
+                    print("[+] Upgrade SUCCESSFUL: expected firmware version read back!")
+                else:
+                    print("[+] MCU responded after COMMIT (firmware identity not verified).")
                 print(f"    New MCU Version: {st_new['version']}")
                 print(f"    IT6663 Present:  {st_new['it6663_present']} ({st_new['vendor_id']} {st_new['device_id']})")
                 print(f"    Temperature:     {st_new['temperature_c']} C")
@@ -234,11 +252,12 @@ class Flasher:
             except Exception as e:
                 time.sleep(0.5)
 
-        raise RuntimeError("MCU failed to respond after in-system flash reset")
+        raise RuntimeError("MCU did not return the expected identity after COMMIT; do not retry flashing blindly")
 
 def main():
     parser = argparse.ArgumentParser(description="SC7F0 NUC1262 In-System MCU Flash Tool over PCIe")
     parser.add_argument("--bin", type=str, help="Path to MCU firmware .bin")
+    parser.add_argument("--expected-version", type=lambda x: int(x, 0), help="Require exact MCU version readback, e.g. 0x1262010D")
     parser.add_argument("--remote", type=str, default="rd@sc7f0-test.local", help="SSH remote host (default: rd@sc7f0-test.local)")
     parser.add_argument("--local", action="store_true", help="Run locally using sc7f0ctl directly")
     parser.add_argument("--status", action="store_true", help="Query MCU status only")
@@ -266,7 +285,7 @@ def main():
     if not args.bin:
         parser.error("--bin, --status, --set-edid, or --get-edid is required")
 
-    flasher.flash_binary(args.bin)
+    flasher.flash_binary(args.bin, expected_version=args.expected_version)
 
 if __name__ == "__main__":
     main()

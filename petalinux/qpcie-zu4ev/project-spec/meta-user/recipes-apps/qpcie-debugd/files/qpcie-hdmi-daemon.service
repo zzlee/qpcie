@@ -1,0 +1,20 @@
+[Unit]
+Description=SC7F0 HDMI RX telemetry publisher (BAR0 ABI 1.0)
+After=local-fs.target systemd-udevd.service
+# The PL register window is only reachable once the PCIe link/PL clock is up.
+After=qpcie-debugd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/qpcie_hdmi_daemon
+Restart=on-failure
+RestartSec=5
+# Exit 2 = telemetry ABI mismatch (wrong FPGA image). Do not loop forever.
+RestartPreventExitStatus=2
+KillMode=control-group
+TimeoutStopSec=5
+# /dev/mem access is required for the shared PS/host register window.
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -18,6 +18,8 @@ typedef struct {
     uint8_t proxy_rx_buf[32];
     uint8_t proxy_rx_len;
     uint8_t proxy_rx_idx;
+    uint8_t proxy_status; /* Extra response byte after requested data: 0=OK,
+                          * 1=SI timeout, 2=state/NACK, 3=STOP timeout, 4=bad request. */
     bool    reboot_requested;
     bool    edid_update_requested;
 } i2c0_state_t;

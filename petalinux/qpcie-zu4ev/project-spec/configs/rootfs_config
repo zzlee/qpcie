@@ -2414,7 +2414,7 @@ CONFIG_linux-xlnx-udev-rules=y
 #
 # hdmi-module
 #
-# CONFIG_kernel-module-hdmi is not set
+CONFIG_kernel-module-hdmi=y
 
 #
 # icu 

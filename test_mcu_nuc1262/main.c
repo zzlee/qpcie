@@ -17,6 +17,14 @@ void ProcessHardFault(void)
 
 void SH_Return(void) {}
 
+void exit(int status)
+{
+    (void)status;
+    while (1) {
+        __NOP();
+    }
+}
+
 int main(void)
 {
     /* 1. Initialize clocks, pin muxing, and GPIOs */

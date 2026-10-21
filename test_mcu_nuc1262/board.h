@@ -19,7 +19,7 @@
  *   PB.1  (pin 6)  -> I2C1_SCL (IT6663 / NCT7717 / EEPROM)
  */
 
-#define MCU_FW_VERSION   0x12620107UL  /* NUC1262 v1.1.7 */
+#define MCU_FW_VERSION   0x1262010FUL  /* NUC1262 v1.1.15: vendor-equivalent RX HPD */
 
 void board_init(void);
 void board_delay_ms(uint32_t ms);

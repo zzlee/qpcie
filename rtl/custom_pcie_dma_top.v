@@ -11,7 +11,7 @@
 `timescale 1ns / 1ps
 
 module custom_pcie_dma_top #(
-    parameter [31:0] C_VERSION = 32'h2610_1504,
+    parameter [31:0] C_VERSION = 32'h2610_1905,
     parameter PCIE_DATA_WIDTH  = 128,
     parameter PCIE_KEEP_WIDTH  = PCIE_DATA_WIDTH / 8,
     parameter NUM_VIDEO_CH     = 2,
@@ -147,6 +147,32 @@ module custom_pcie_dma_top #(
     output wire [31:0]                                      out_hdmi_ipc_arg,
     output wire [31:0]                                      out_hdmi_ipc_status,
     output wire [31:0]                                      out_hdmi_ipc_doorbell,
+
+    // Probing & Diagnostic Ports (BAR0 0x0680 - 0x06DC)
+    input  wire [31:0]                                      in_probe_version,
+    input  wire [31:0]                                      in_probe_rx_clk_freq,
+    input  wire [31:0]                                      in_probe_dru_clk_freq,
+    input  wire [31:0]                                      in_probe_rxoutclk_freq,
+    input  wire [31:0]                                      in_probe_rx_video_clk_freq,
+    input  wire [31:0]                                      in_probe_tx_clk_freq,
+    input  wire [31:0]                                      in_probe_txoutclk_freq,
+    input  wire [31:0]                                      in_probe_tx_video_clk_freq,
+    input  wire [31:0]                                      in_probe_pins,
+    input  wire [31:0]                                      in_probe_pulse_cnt1,
+    input  wire [31:0]                                      in_probe_ddc_cnt,
+    input  wire [31:0]                                      in_probe_irq_cnt,
+    input  wire [31:0]                                      in_probe_ch0_beats,
+    input  wire [31:0]                                      in_probe_ch1_beats,
+    input  wire [31:0]                                      in_probe_ch2_beats,
+    input  wire [31:0]                                      in_probe_rx_video_sof,
+    input  wire [31:0]                                      in_probe_rx_video_eol,
+    input  wire [31:0]                                      in_probe_rx_video_pix,
+    input  wire [31:0]                                      in_probe_raw_rx_clk,
+    input  wire [31:0]                                      in_probe_raw_dru_clk,
+    input  wire [31:0]                                      in_probe_raw_rxoutclk,
+    input  wire [31:0]                                      in_probe_raw_rx_video_clk,
+    input  wire [31:0]                                      in_probe_raw_refclk100,
+    output wire [31:0]                                      out_probe_ctrl,
 
     // PS ARM Linux AXI4-Lite Slave Interface (from PS M_AXI_HPM0_FPD)
     input  wire [31:0]                                      s_axil_ps_awaddr,
@@ -677,6 +703,8 @@ module custom_pcie_dma_top #(
     // H2C upgrade parameters now arrive as ordered coherent CSR snapshots.
     // This local pipeline detects START only after preceding SIZE/HOST_ADDR
     // writes have crossed the FIFO. No raw pl_clk0 bus sampling is required.
+    wire [31:0] dma_upg_ctrl_pcie, dma_upg_size_pcie;
+    wire [63:0] dma_upg_host_addr_pcie;
     reg  [1:0]  upg_start_sync;
     reg  [31:0] upg_size_pcie;
     reg  [63:0] upg_host_addr_pcie;
@@ -1050,8 +1078,6 @@ module custom_pcie_dma_top #(
     end
     wire vch0_overflow_pulse = (thin_drop_count != d_thin_drop_count);
 
-    wire [31:0] dma_upg_ctrl_pcie, dma_upg_size_pcie;
-    wire [63:0] dma_upg_host_addr_pcie;
 
     // 3. PS-clock register bank, ordered DMA controls and coherent telemetry.
     qpcie_csr_reg_space #(
@@ -1221,6 +1247,32 @@ module custom_pcie_dma_top #(
         .out_hdmi_ipc_arg(out_hdmi_ipc_arg),
         .out_hdmi_ipc_status(out_hdmi_ipc_status),
         .out_hdmi_ipc_doorbell(out_hdmi_ipc_doorbell),
+
+        // Probing & Diagnostic Ports
+        .in_probe_version(in_probe_version),
+        .in_probe_rx_clk_freq(in_probe_rx_clk_freq),
+        .in_probe_dru_clk_freq(in_probe_dru_clk_freq),
+        .in_probe_rxoutclk_freq(in_probe_rxoutclk_freq),
+        .in_probe_rx_video_clk_freq(in_probe_rx_video_clk_freq),
+        .in_probe_tx_clk_freq(in_probe_tx_clk_freq),
+        .in_probe_txoutclk_freq(in_probe_txoutclk_freq),
+        .in_probe_tx_video_clk_freq(in_probe_tx_video_clk_freq),
+        .in_probe_pins(in_probe_pins),
+        .in_probe_pulse_cnt1(in_probe_pulse_cnt1),
+        .in_probe_ddc_cnt(in_probe_ddc_cnt),
+        .in_probe_irq_cnt(in_probe_irq_cnt),
+        .in_probe_ch0_beats(in_probe_ch0_beats),
+        .in_probe_ch1_beats(in_probe_ch1_beats),
+        .in_probe_ch2_beats(in_probe_ch2_beats),
+        .in_probe_rx_video_sof(in_probe_rx_video_sof),
+        .in_probe_rx_video_eol(in_probe_rx_video_eol),
+        .in_probe_rx_video_pix(in_probe_rx_video_pix),
+        .in_probe_raw_rx_clk(in_probe_raw_rx_clk),
+        .in_probe_raw_dru_clk(in_probe_raw_dru_clk),
+        .in_probe_raw_rxoutclk(in_probe_raw_rxoutclk),
+        .in_probe_raw_rx_video_clk(in_probe_raw_rx_video_clk),
+        .in_probe_raw_refclk100(in_probe_raw_refclk100),
+        .out_probe_ctrl(out_probe_ctrl),
 
         // Firmware Upgrade CSR Ports (BAR0 0x0780 - 0x079C)
         .out_dma_upg_ctrl(dma_upg_ctrl_w),

@@ -327,10 +327,10 @@
 #define REG_HDMI_RX_HEIGHT          0x0608
 #define REG_HDMI_RX_PIXEL_CLK       0x060C
 
-#define HDMI_RX_STATUS_5V_DET       BIT(0)
-#define HDMI_RX_STATUS_HPD          BIT(1)
-#define HDMI_RX_STATUS_LNK_LOCK     BIT(2)
-#define HDMI_RX_STATUS_STREAM_UP    BIT(3)
+#define HDMI_RX_STATUS_5V_DET       BIT(0) /* live cable +5V (hardware-owned) */
+#define HDMI_RX_STATUS_HPD          BIT(1) /* HPD driven by the RX subsystem */
+/* Bits 2..31 are not driven by the current RTL. TMDS/video lock is reported
+ * only through the versioned telemetry ABI below, never inferred here. */
 
 /* HDMI TX Status / Control Registers (0x0610 - 0x0620) */
 #define REG_HDMI_TX_CTRL            0x0610
@@ -353,8 +353,54 @@
 #define REG_HDMI_RX_VBP             0x0654 /* Vertical Back Porch */
 #define REG_HDMI_RX_POLARITIES      0x0658 /* Bit 0: VSync Pos, Bit 1: HSync Pos */
 #define REG_HDMI_RX_STANDARDS       0x065C /* Standards (e.g. V4L2_DV_BT_STD_CEA861) */
-#define REG_HDMI_RX_COLOR_FMT       0x0660 /* Colorspace, Quantization, YCbCr Enc */
+#define REG_HDMI_RX_COLOR_FMT       0x0660 /* [7:0]=colorspace, [11:8]=quantization, [15:12]=ycbcr_enc, [19:16]=xfer_func, [27:24]=encoding */
 #define REG_HDMI_RX_AUDIO_FMT       0x0664 /* [15:0]=SampleRateHz, [23:16]=Channels, [31:24]=BitDepth */
+
+/* HDMI RX telemetry publication ABI (PS publisher, host reader).
+ * ABI_VERSION is read-only. A publisher brackets every update with an
+ * odd/even TELEMETRY_SEQ; the reader accepts a snapshot only when the seq is
+ * even and unchanged across the payload read. HEARTBEAT must advance at least
+ * once per second while the publisher is alive. */
+#define REG_HDMI_TLM_ABI_VERSION    0x0668
+#define REG_HDMI_TLM_SEQ            0x066C
+#define REG_HDMI_TLM_FLAGS          0x0670
+#define REG_HDMI_TLM_HEARTBEAT      0x0674
+#define REG_HDMI_TLM_MBUS_CODE      0x0678
+#define REG_HDMI_TLM_PIXELCLK_HI    0x067C
+
+#define HDMI_TLM_ABI_EXPECTED       0x00010000U
+#define HDMI_TLM_F_TIMING_VALID     BIT(0)
+#define HDMI_TLM_F_COLOR_VALID      BIT(1)
+#define HDMI_TLM_F_INTERLACED       BIT(2)
+#define HDMI_TLM_F_QUERY_ERROR      BIT(3)
+
+#define HDMI_TLM_HB_STALE_MS        5000   /* > 5 heartbeat periods */
+
+/* Coherent snapshot of the card-published HDMI RX telemetry. */
+struct qpcie_hdmi_tlm {
+    u32 abi_version;
+    u32 flags;
+    u32 heartbeat;
+    u32 mbus_code;
+    u32 width;
+    u32 height;
+    u32 hfp;
+    u32 hsw;
+    u32 hbp;
+    u32 vfp;
+    u32 vsw;
+    u32 vbp;
+    u32 polarities;
+    u32 standards;
+    u32 color_fmt;
+    u64 pixelclock;
+};
+
+struct qpcie_dev;
+
+int qpcie_hdmi_read_telemetry(struct qpcie_dev *qdev,
+                              struct qpcie_hdmi_tlm *t);
+bool qpcie_hdmi_telemetry_fresh(struct qpcie_dev *qdev, u32 heartbeat);
 
 /* Scatter-Gather Page Table & Status Registers (BAR0 Offsets 0xE0..0xEC) */
 #define REG_SG_PT_CTRL              0xE0 /* Page Table Target Address [10:0] */
@@ -422,6 +468,7 @@ struct qpcie_v4l2_channel {
     /* HDMI RX Telemetry Tracking & Polling Worker (Channel 0) */
     u32 last_rx_status;
     u32 last_rx_res;
+    u32 last_rx_tlm_sig;   /* timing-valid/interlaced/media-bus signature */
     struct delayed_work hdmi_monitor_work;
     bool hdmi_monitor_running;
 };
@@ -453,6 +500,13 @@ struct qpcie_dev {
     int irq;
     bool v4l2_registered;
     bool alsa_registered;
+
+    /* HDMI RX telemetry publication liveness (host-side observation). The
+     * card daemon advances HEARTBEAT at least once per second; a stalled
+     * counter means the published values must no longer be treated as valid. */
+    u32 tlm_last_heartbeat;
+    unsigned long tlm_last_change;
+    bool tlm_hb_valid;
 
     /* Saved MPS state when probe had to raise it for 256-byte MWr. */
     bool mps_modified;

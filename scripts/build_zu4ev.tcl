@@ -17,6 +17,7 @@ if {$profile ni {debug full}} {error "SC7F0_PROFILE must be debug or full"}
 set debug_profile [expr {$profile eq "debug"}]
 # Keep experimental AV outputs separate from the validated debug04 project/XSA.
 if {!$debug_profile} {set project_dir "./build/qpcie_zu4ev_hdmi_proj"}
+if {[info exists ::env(SC7F0_PROJECT_DIR)]} {set project_dir $::env(SC7F0_PROJECT_DIR)}
 set build_stage "bitstream"
 if {[info exists ::env(SC7F0_BUILD_STAGE)]} {set build_stage $::env(SC7F0_BUILD_STAGE)}
 if {$build_stage ni {ip synth bitstream}} {error "SC7F0_BUILD_STAGE must be ip, synth or bitstream"}
@@ -47,7 +48,7 @@ puts "   (GIT AUTO-INJECT) Commit Hash: 0x$git_raw, Build Date: $date_raw"
 add_files [glob ./rtl/*.v]
 set_property top zu4ev_pcie_card_top [current_fileset]
 # Full HDMI bring-up is a new hardware revision; debug04 remains unchanged.
-if {!$debug_profile} {set_property generic {C_VERSION=32'h26101601} [current_fileset]}
+if {!$debug_profile} {set_property generic {C_VERSION=32'h26101906} [current_fileset]}
 
 set verilog_defs [list GIT_COMMIT_HASH_DEF=$git_commit_hex BUILD_TIMESTAMP_DEF=$build_date_hex]
 if {$debug_profile} {lappend verilog_defs SC7F0_DEBUG_ONLY=1}
@@ -351,21 +352,22 @@ report_cdc -details -file $project_dir/cdc.rpt
 report_methodology -file $project_dir/methodology.rpt
 report_bus_skew -file $project_dir/bus-skew.rpt
 report_clock_interaction -file $project_dir/clock-interaction.rpt
-if {$debug_profile} {
-    # A generated .bit is NOT a release. Refuse XSA export on an invalid
-    # whole-design clock/CDC/setup/hold/skew model, even if BRAM timing passes.
-    if {[catch {exec python3 ./scripts/check_sc7f0_timing.py $project_dir} gate_result]} {
-        puts "ERROR: Debug-profile timing gate failed; XSA NOT exported."
-        puts $gate_result
-        exit 2
-    }
+# A generated .bit is NOT a release. Refuse XSA export on an invalid
+# whole-design clock/CDC/setup/hold/skew model, even if BRAM timing passes.
+# This applies to the full HDMI profile as well: the added RX/TX/PHY clock
+# domains are exactly where an unreviewed crossing would be most dangerous.
+if {[catch {exec python3 ./scripts/check_sc7f0_timing.py $project_dir} gate_result]} {
+    puts "ERROR: $profile-profile timing gate failed; XSA NOT exported."
     puts $gate_result
+    exit 2
 }
+puts $gate_result
 
 set xsa_out "./hw_platform/sc7f0_base.xsa"
 if {!$debug_profile} {
     set xsa_out "./hw_platform/sc7f0_hdmi.xsa"
 }
+if {[info exists ::env(SC7F0_XSA_OUT)]} {set xsa_out $::env(SC7F0_XSA_OUT)}
 file mkdir [file dirname $xsa_out]
 puts "Exporting updated Hardware Platform XSA ($xsa_out)..."
 write_hw_platform -fixed -include_bit -force $xsa_out

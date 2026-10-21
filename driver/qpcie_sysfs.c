@@ -777,11 +777,42 @@ static ssize_t hdmi_status_show(struct device *dev, struct device_attribute *att
 {
     struct pci_dev *pdev = to_pci_dev(dev);
     struct qpcie_dev *qdev = pci_get_drvdata(pdev);
+    struct qpcie_hdmi_tlm t;
     u32 width = 0, height = 0, fps = 0;
     bool locked = false;
 
     if (!qdev)
         return -ENODEV;
+
+    /*
+     * Prefer the card-published telemetry. It is the only source that reflects
+     * the actual Xilinx RX subsystem; the legacy IT68051 path below only makes
+     * sense on firmware that predates the telemetry ABI.
+     */
+    if (!qpcie_hdmi_read_telemetry(qdev, &t)) {
+        if (!qpcie_hdmi_telemetry_fresh(qdev, t.heartbeat))
+            return sysfs_emit(buf,
+                              "Status: Telemetry Stale (card publisher stopped)\n"
+                              "Receiver: Xilinx v_hdmi_rx_ss\n");
+        if (t.flags & HDMI_TLM_F_QUERY_ERROR)
+            return sysfs_emit(buf,
+                              "Status: Query Error (subdevice unavailable)\n"
+                              "Receiver: Xilinx v_hdmi_rx_ss\n");
+        if (t.flags & HDMI_TLM_F_TIMING_VALID)
+            return sysfs_emit(buf,
+                              "Status: Signal Locked\n"
+                              "Receiver: Xilinx v_hdmi_rx_ss\n"
+                              "Resolution: %ux%u%s\n"
+                              "Pixel clock: %llu Hz\n"
+                              "Color: fmt=0x%08x mbus=0x%04x\n",
+                              t.width, t.height,
+                              (t.flags & HDMI_TLM_F_INTERLACED) ? "i" : "p",
+                              (unsigned long long)t.pixelclock,
+                              t.color_fmt, t.mbus_code);
+        return sysfs_emit(buf,
+                          "Status: No Locked Timing\n"
+                          "Receiver: Xilinx v_hdmi_rx_ss\n");
+    }
 
     qpcie_it68051_get_status(qdev, &width, &height, &fps, &locked);
 

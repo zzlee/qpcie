@@ -37,6 +37,7 @@
 /* Must match the private control ID in driver/qpcie_driver.h. */
 #define V4L2_CID_QPCIE_PACER_ENABLE      (V4L2_CID_USER_BASE + 0x1000)
 #define V4L2_CID_QPCIE_TPG_MOTION_SPEED  (V4L2_CID_USER_BASE + 0x1001)
+#define V4L2_CID_QPCIE_VIDEO_SOURCE      (V4L2_CID_USER_BASE + 0x1004)
 
 struct plane_map {
     void *addr;
@@ -131,6 +132,8 @@ static void usage(const char *program)
            "  -o, --out FILE         save first frame as contiguous NV12\n"
            "  -b, --benchmark        disable the 60 FPS pacer and measure maximum DMA rate\n"
            "      --buffers COUNT    VB2 buffers to queue (default %u)\n"
+           "      --source MODE      input source: 0=auto, 1=force TPG, 2=force HDMI RX\n"
+           "      --timings          print HDMI RX QUERY_DV_TIMINGS and exit\n"
            "      --probe            control-plane probe only, no STREAMON\n"
            "      --help             show this help\n",
            program, DEFAULT_DEVICE, DEFAULT_FRAMES,
@@ -145,6 +148,7 @@ int main(int argc, char **argv)
     unsigned int width = DEFAULT_WIDTH, height = DEFAULT_HEIGHT;
     int pattern = 9, fps = 60, probe_only = 0;
     int benchmark_mode = 0, frames_set = 0, streamoff_ok = 0;
+    int source = -1, timings_only = 0, geometry_set = 0;
     int fd = -1, opt, rc = EXIT_FAILURE;
     struct v4l2_capability cap;
     struct v4l2_fmtdesc desc;
@@ -177,6 +181,8 @@ int main(int argc, char **argv)
         {"out", required_argument, NULL, 'o'},
         {"buffers", required_argument, NULL, 'n'},
         {"benchmark", no_argument, NULL, 'b'},
+        {"source", required_argument, NULL, 'S'},
+        {"timings", no_argument, NULL, 'T'},
         {"probe", no_argument, NULL, 'P'},
         {"help", no_argument, NULL, 'H'},
         {NULL, 0, NULL, 0}
@@ -188,12 +194,14 @@ int main(int argc, char **argv)
         case 'f': frame_target = strtoul(optarg, NULL, 0); frames_set = 1; break;
         case 'p': pattern = strtol(optarg, NULL, 0); break;
         case 'r': fps = strtol(optarg, NULL, 0); break;
-        case 'w': width = strtoul(optarg, NULL, 0); break;
-        case 'h': height = strtoul(optarg, NULL, 0); break;
+        case 'w': width = strtoul(optarg, NULL, 0); geometry_set = 1; break;
+        case 'h': height = strtoul(optarg, NULL, 0); geometry_set = 1; break;
         case 's': req_stride = strtoul(optarg, NULL, 0); break;
         case 'o': output_name = optarg; break;
         case 'n': num_buffers = strtoul(optarg, NULL, 0); break;
         case 'b': benchmark_mode = 1; break;
+        case 'S': source = strtol(optarg, NULL, 0); break;
+        case 'T': timings_only = 1; break;
         case 'P': probe_only = 1; break;
         case 'H': usage(argv[0]); return EXIT_SUCCESS;
         default: usage(argv[0]); return EXIT_FAILURE;
@@ -256,6 +264,66 @@ int main(int argc, char **argv)
         }
     }
 
+    /*
+     * For a real HDMI input the geometry must come from the card's locked
+     * timings, never from the 1080p default. The driver returns -ENOLINK when
+     * no cable is present and -ENODATA when there is no locked timing (or the
+     * telemetry publisher is absent/stale), so this fails instead of claiming
+     * a capture of a signal that does not exist.
+     */
+    if (timings_only || source == 2 || (source == 0 && !geometry_set)) {
+        struct v4l2_dv_timings t;
+
+        memset(&t, 0, sizeof(t));
+        if (xioctl(fd, VIDIOC_QUERY_DV_TIMINGS, &t) < 0) {
+            if (timings_only || source == 2) {
+                perror("VIDIOC_QUERY_DV_TIMINGS");
+                fprintf(stderr,
+                        "[FAIL] HDMI RX has no locked timings; refusing to capture\n");
+                goto out;
+            }
+            /* Auto mode with no valid HDMI timing falls back to the TPG,
+             * exactly like the driver's Auto source selection. */
+            fprintf(stderr,
+                    "[INFO] No locked HDMI timing; auto mode will use the TPG fallback\n");
+        } else if (t.type != V4L2_DV_BT_656_1120) {
+            fprintf(stderr, "[FAIL] Unexpected DV timings type %u\n", t.type);
+            goto out;
+        } else {
+        printf("[PASS] HDMI RX timings: %ux%u%s pclk=%llu Hz H=%u/%u/%u V=%u/%u/%u pol=0x%x std=0x%x\n",
+               t.bt.width, t.bt.height,
+               t.bt.interlaced ? "i" : "p",
+               (unsigned long long)t.bt.pixelclock,
+               t.bt.hfrontporch, t.bt.hsync, t.bt.hbackporch,
+               t.bt.vfrontporch, t.bt.vsync, t.bt.vbackporch,
+               t.bt.polarities, t.bt.standards);
+        if (timings_only) {
+            rc = EXIT_SUCCESS;
+            goto out;
+        }
+        if (!geometry_set) {
+            if (t.bt.width == 1920 && t.bt.height == 1080) {
+                width = 1920; height = 1080;
+            } else if (t.bt.width == 3840 && t.bt.height == 2160) {
+                width = 3840; height = 2160;
+            } else {
+                fprintf(stderr,
+                        "[FAIL] Locked HDMI mode %ux%u has no matching NV12M capture mode (only 1920x1080 and 3840x2160 are implemented; DCI 4096-wide is not silently cropped)\n",
+                        t.bt.width, t.bt.height);
+                goto out;
+            }
+            printf("[INFO] Using HDMI RX geometry %ux%u\n", width, height);
+            {
+                uint32_t eff_stride = req_stride ? req_stride : width;
+                y_frame_bytes = (uint64_t)eff_stride * height;
+                uv_frame_bytes = (uint64_t)eff_stride * (height / 2);
+                nv12_frame_bytes = y_frame_bytes + uv_frame_bytes;
+                nv12_mwr_per_frame = nv12_frame_bytes / NV12_MWR_PAYLOAD_BYTES;
+            }
+        }
+        }
+    }
+
     memset(&desc, 0, sizeof(desc));
     desc.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
     if (xioctl(fd, VIDIOC_ENUM_FMT, &desc) < 0 ||
@@ -301,6 +369,21 @@ int main(int argc, char **argv)
         }
     }
     printf("[PASS] Discrete modes: 1920x1080@60, 3840x2160@60\n");
+
+    if (source >= 0) {
+        static const char * const names[] = { "auto", "force TPG", "force HDMI RX" };
+
+        memset(&ctrl, 0, sizeof(ctrl));
+        ctrl.id = V4L2_CID_QPCIE_VIDEO_SOURCE;
+        ctrl.value = source;
+        if (xioctl(fd, VIDIOC_S_CTRL, &ctrl) < 0 ||
+            xioctl(fd, VIDIOC_G_CTRL, &ctrl) < 0 ||
+            ctrl.value != source) {
+            perror("QPCIe video source VIDIOC_S/G_CTRL");
+            goto out;
+        }
+        printf("[PASS] Video source: %s (%d)\n", names[source], source);
+    }
 
     memset(&fmt, 0, sizeof(fmt));
     fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
@@ -356,31 +439,37 @@ int main(int argc, char **argv)
     memset(&ctrl, 0, sizeof(ctrl));
     ctrl.id = V4L2_CID_TEST_PATTERN;
     ctrl.value = pattern == 9 ? 3 : pattern == 10 ? 4 : pattern;
-    if (xioctl(fd, VIDIOC_S_CTRL, &ctrl) < 0 ||
-        xioctl(fd, VIDIOC_G_CTRL, &ctrl) < 0) {
-        perror("TPG VIDIOC_S/G_CTRL");
-        goto out;
+    if (source != 2) {
+        if (xioctl(fd, VIDIOC_S_CTRL, &ctrl) < 0 ||
+            xioctl(fd, VIDIOC_G_CTRL, &ctrl) < 0) {
+            perror("TPG VIDIOC_S/G_CTRL");
+            goto out;
+        }
+        printf("[PASS] TPG menu value=%d (hardware pattern %d)\n", ctrl.value, pattern);
+    } else {
+        printf("[INFO] Force HDMI RX: TPG pattern control left untouched\n");
     }
-    printf("[PASS] TPG menu value=%d (hardware pattern %d)\n", ctrl.value, pattern);
 
     memset(&ctrl, 0, sizeof(ctrl));
     ctrl.id = V4L2_CID_QPCIE_TPG_MOTION_SPEED;
     ctrl.value = 0;
-    if (xioctl(fd, VIDIOC_S_CTRL, &ctrl) == 0) {
+    if (source != 2 && xioctl(fd, VIDIOC_S_CTRL, &ctrl) == 0) {
         printf("[PASS] TPG motion speed set to 0 (static)\n");
     }
 
     memset(&ctrl, 0, sizeof(ctrl));
     ctrl.id = V4L2_CID_QPCIE_PACER_ENABLE;
-    ctrl.value = benchmark_mode ? 0 : 1;
+    /* An external HDMI source is already paced by its own pixel clock; the
+     * internal 60 Hz pacer must not insert an extra inter-frame delay. */
+    ctrl.value = (benchmark_mode || source == 2) ? 0 : 1;
     if (xioctl(fd, VIDIOC_S_CTRL, &ctrl) < 0 ||
         xioctl(fd, VIDIOC_G_CTRL, &ctrl) < 0 ||
-        ctrl.value != (benchmark_mode ? 0 : 1)) {
+        ctrl.value != ((benchmark_mode || source == 2) ? 0 : 1)) {
         perror("QPCIe pacer VIDIOC_S/G_CTRL");
         goto out;
     }
     printf("[PASS] Hardware frame pacer: %s\n",
-           ctrl.value ? "enabled (60 FPS)" : "disabled (uncapped benchmark)");
+           ctrl.value ? "enabled (60 FPS)" : "disabled (source/uncapped pacing)");
 
     if (probe_only) {
         printf("[PASS] Control-plane probe complete; STREAMON was not issued.\n");

@@ -103,7 +103,7 @@ module video_req_cdc #(
     wire        data_rd_rst_busy;
     wire [WR_COUNT_WIDTH-1:0] wr_data_count;
     wire [RD_COUNT_WIDTH-1:0] rd_data_count;
-    reg         data_wr_en;
+    wire        data_wr_en;
     wire        data_rd_en;
 
     assign m_fifo_empty = data_empty;
@@ -156,6 +156,7 @@ module video_req_cdc #(
     reg         eof_pending;
 
     wire wr_room_ok = !data_wr_rst_busy && !data_prog_full && !data_full && !hdr_full;
+    assign data_wr_en = (wr_state == WR_DATA) && s_req_valid && s_req_data_ready;
 
     reg [15:0] pkt_pushed_bin = 16'd0;
     wire [15:0] pkt_pushed_gray = (pkt_pushed_bin >> 1) ^ pkt_pushed_bin;
@@ -170,7 +171,6 @@ module video_req_cdc #(
             pkt_pushed_bin   <= 16'd0;
             hdr_wr_en        <= 1'b0;
             hdr_din          <= 76'd0;
-            data_wr_en       <= 1'b0;
         end else if (data_wr_rst_busy) begin
             wr_state         <= WR_IDLE;
             wr_beats_left    <= 11'd0;
@@ -180,10 +180,8 @@ module video_req_cdc #(
             pkt_pushed_bin   <= 16'd0;
             hdr_wr_en        <= 1'b0;
             hdr_din          <= 76'd0;
-            data_wr_en       <= 1'b0;
         end else begin
             hdr_wr_en  <= 1'b0;
-            data_wr_en <= 1'b0;
             s_req_ack  <= 1'b0;
 
             if (s_frame_done)
@@ -207,7 +205,6 @@ module video_req_cdc #(
 
                 WR_DATA: begin
                     if (s_req_valid && s_req_data_ready) begin
-                        data_wr_en    <= 1'b1;
                         wr_beats_left <= wr_beats_left - 1'b1;
                         if (wr_beats_left == 11'd1) begin
                             s_req_ack        <= 1'b1;
@@ -261,7 +258,7 @@ module video_req_cdc #(
 
     wire [15:0] rd_completed = gray_to_bin(pkt_pushed_gray_sync2);
 
-    assign data_rd_en = m_req_data_ready;
+    assign data_rd_en = m_req_valid && m_req_data_ready;
 
     always @(posedge rd_clk or negedge cdc_rst_n) begin
         if (!cdc_rst_n || data_rd_rst_busy) begin

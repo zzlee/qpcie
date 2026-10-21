@@ -92,5 +92,11 @@ RAMFUNC int writer_program_aprom(uint32_t dst_addr, const uint32_t *src, uint32_
 
     /* Re-lock */
     SYS->REGLCTL = 0UL;
+
+    /* Execute system reset directly from SRAM so we never branch back into modified Flash */
+    NVIC_SystemReset();
+    while (1) {
+        __NOP();
+    }
     return 0;
 }

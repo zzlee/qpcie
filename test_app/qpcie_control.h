@@ -32,7 +32,7 @@
 #define AUD_REG_SAMPLE_CNT         0x10 /* Total Audio Subframes Generated Count */
 
 /* BAR0 HDMI Status and Control Registers (Block 4'h6: 0x0600 - 0x0664) */
-#define BAR0_REG_HDMI_RX_STATUS      0x0600 /* Bit 0: 5V Det, Bit 1: HPD Out, Bit 2: TMDS Lock, Bit 3: Vid Lock */
+#define BAR0_REG_HDMI_RX_STATUS      0x0600 /* Hardware-owned: bit0 = 5V detect, bit1 = HPD out; other bits reserved */
 #define BAR0_REG_HDMI_RX_WIDTH       0x0604 /* Active Width (e.g. 1920) */
 #define BAR0_REG_HDMI_RX_HEIGHT      0x0608 /* Active Height (e.g. 1080) */
 #define BAR0_REG_HDMI_RX_PIXEL_CLK   0x060C /* Pixel Clock in Hz (e.g. 148500000) */
@@ -57,7 +57,29 @@
 #define BAR0_REG_HDMI_RX_VBP         0x0654 /* V Back Porch */
 #define BAR0_REG_HDMI_RX_POLARITIES  0x0658 /* Bit 0: VSync Pos, Bit 1: HSync Pos */
 #define BAR0_REG_HDMI_RX_STANDARDS   0x065C /* Standards (e.g. V4L2_DV_BT_STD_CEA861) */
-#define BAR0_REG_HDMI_RX_COLOR_FMT   0x0660 /* Colorspace, Quantization, YCbCr Enc */
+#define BAR0_REG_HDMI_RX_COLOR_FMT   0x0660 /* [7:0]=colorspace, [11:8]=quantization, [15:12]=ycbcr_enc, [19:16]=xfer_func, [27:24]=encoding */
 #define BAR0_REG_HDMI_RX_AUDIO_FMT   0x0664 /* [15:0]=SampleRateHz, [23:16]=Channels, [31:24]=BitDepth */
+
+/* HDMI RX telemetry publication ABI (card daemon writes, host reads).
+ * ABI_VERSION is a read-only RTL constant. The publisher writes an odd SEQ,
+ * the payload, then the next even SEQ; readers reject torn snapshots. */
+#define BAR0_REG_HDMI_TLM_ABI_VERSION 0x0668
+#define BAR0_REG_HDMI_TLM_SEQ         0x066C
+#define BAR0_REG_HDMI_TLM_FLAGS       0x0670
+#define BAR0_REG_HDMI_TLM_HEARTBEAT   0x0674
+#define BAR0_REG_HDMI_TLM_MBUS_CODE   0x0678
+#define BAR0_REG_HDMI_TLM_PIXELCLK_HI 0x067C
+
+#define HDMI_TLM_ABI_EXPECTED      0x00010000U
+#define HDMI_TLM_F_TIMING_VALID    (1U << 0)
+#define HDMI_TLM_F_COLOR_VALID     (1U << 1)
+#define HDMI_TLM_F_INTERLACED      (1U << 2)
+#define HDMI_TLM_F_QUERY_ERROR     (1U << 3)
+
+/* 0x0660 encoding[27:24] */
+#define HDMI_COLOR_ENC_RGB         0U
+#define HDMI_COLOR_ENC_YUV444      1U
+#define HDMI_COLOR_ENC_YUV422      2U
+#define HDMI_COLOR_ENC_YUV420      3U
 
 #endif /* QPCIE_CONTROL_H */

@@ -3,7 +3,8 @@
  * QPCIe Card-Side V4L2 Bridge Driver
  *
  * Provides a master struct v4l2_device and media_device to bind the
- * official Xilinx HDMI RX Subsystem (xilinx-hdmirxss.c) without requiring
+ * official Xilinx HDMI 2.0 RX Subsystem (xilinx-hdmirx.c, hdmi-modules)
+ * without requiring
  * Xilinx Video IP Pipeline (xilinx-vipp.c) or frame buffer write (v_frmbuf_wr).
  *
  * This allows official HDMI RX driver to initialize Video PHY, manage EDID/HDCP,
@@ -28,6 +29,7 @@ struct qpcie_v4l2_bridge {
 	struct v4l2_async_notifier notifier;
 	struct v4l2_subdev *hdmirx_sd;
 	struct device_node *hdmirx_node;
+	bool media_registered;
 };
 
 static int qpcie_bridge_notify_bound(struct v4l2_async_notifier *notifier,
@@ -53,6 +55,10 @@ static void qpcie_bridge_notify_unbind(struct v4l2_async_notifier *notifier,
 	dev_info(bridge->dev, "HDMI RX subdevice '%s' unbound from bridge\n",
 		 subdev->name);
 	bridge->hdmirx_sd = NULL;
+	if (bridge->media_registered) {
+		media_device_unregister(&bridge->media_dev);
+		bridge->media_registered = false;
+	}
 }
 
 static int qpcie_bridge_notify_complete(struct v4l2_async_notifier *notifier)
@@ -69,11 +75,14 @@ static int qpcie_bridge_notify_complete(struct v4l2_async_notifier *notifier)
 	}
 
 	/* Register media controller (/dev/mediaX) */
+	if (bridge->media_registered)
+		return 0;
 	ret = media_device_register(&bridge->media_dev);
 	if (ret < 0) {
 		dev_err(bridge->dev, "Failed to register media device: %d\n", ret);
 		return ret;
 	}
+	bridge->media_registered = true;
 
 	dev_info(bridge->dev,
 		 "QPCIe V4L2 Bridge ready: /dev/v4l-subdev* and /dev/media* registered!\n");
@@ -100,9 +109,13 @@ static int qpcie_v4l2_bridge_probe(struct platform_device *pdev)
 	bridge->dev = &pdev->dev;
 	platform_set_drvdata(pdev, bridge);
 
-	/* 1. Find HDMI RX node from DTS phandle or compatible string */
-	if (pdev->dev.of_node)
+	/* An explicit DT instance must not silently bind another receiver. */
+	if (pdev->dev.of_node) {
 		np = of_parse_phandle(pdev->dev.of_node, "hdmirx", 0);
+		if (!np)
+			return dev_err_probe(bridge->dev, -EINVAL,
+					     "Missing hdmirx phandle\n");
+	}
 
 	if (!np)
 		np = of_find_compatible_node(NULL, NULL, "xlnx,v-hdmi-rx-ss-3.2");
@@ -112,6 +125,10 @@ static int qpcie_v4l2_bridge_probe(struct platform_device *pdev)
 	if (!np) {
 		dev_warn(bridge->dev, "No v_hdmi_rx_ss node found in device tree\n");
 		return -EPROBE_DEFER;
+	}
+	if (!of_device_is_available(np)) {
+		of_node_put(np);
+		return -ENODEV;
 	}
 	bridge->hdmirx_node = np;
 
@@ -133,7 +150,7 @@ static int qpcie_v4l2_bridge_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	/* 4. Initialize async notifier to wait for xilinx-hdmirxss */
+	/* 4. Wait for the official HDMI 2.0 RX subdevice. */
 	v4l2_async_nf_init(&bridge->notifier);
 	bridge->notifier.ops = &qpcie_bridge_notify_ops;
 
@@ -142,7 +159,7 @@ static int qpcie_v4l2_bridge_probe(struct platform_device *pdev)
 	if (IS_ERR(asd)) {
 		ret = PTR_ERR(asd);
 		dev_err(bridge->dev, "Failed to add hdmirx fwnode to notifier: %d\n", ret);
-		goto err_v4l2;
+		goto err_nf;
 	}
 
 	ret = v4l2_async_nf_register(&bridge->v4l2_dev, &bridge->notifier);
@@ -157,7 +174,6 @@ static int qpcie_v4l2_bridge_probe(struct platform_device *pdev)
 
 err_nf:
 	v4l2_async_nf_cleanup(&bridge->notifier);
-err_v4l2:
 	v4l2_device_unregister(&bridge->v4l2_dev);
 	media_device_cleanup(&bridge->media_dev);
 	of_node_put(np);
@@ -171,11 +187,11 @@ static int qpcie_v4l2_bridge_remove(struct platform_device *pdev)
 	v4l2_async_nf_unregister(&bridge->notifier);
 	v4l2_async_nf_cleanup(&bridge->notifier);
 
-	if (media_devnode_is_registered(bridge->media_dev.devnode))
+	if (bridge->media_registered)
 		media_device_unregister(&bridge->media_dev);
-	media_device_cleanup(&bridge->media_dev);
 
 	v4l2_device_unregister(&bridge->v4l2_dev);
+	media_device_cleanup(&bridge->media_dev);
 
 	if (bridge->hdmirx_node)
 		of_node_put(bridge->hdmirx_node);
@@ -203,18 +219,27 @@ static struct platform_device *qpcie_v4l2_bridge_pdev;
 
 static int __init qpcie_v4l2_bridge_init(void)
 {
+	struct device_node *np;
 	int ret;
 
 	ret = platform_driver_register(&qpcie_v4l2_bridge_driver);
 	if (ret)
 		return ret;
 
-	/* If not instantiated by DT, register virtual platform device */
+	/* DT presence, including status=disabled, overrides the legacy fallback. */
+	np = of_find_compatible_node(NULL, NULL, "yuan,qpcie-v4l2-bridge");
+	if (np) {
+		of_node_put(np);
+		return 0;
+	}
+
+	/* Legacy fallback for DTs without a bridge node. */
 	qpcie_v4l2_bridge_pdev = platform_device_register_simple(DRIVER_NAME, -1, NULL, 0);
 	if (IS_ERR(qpcie_v4l2_bridge_pdev)) {
-		pr_debug(DRIVER_NAME ": virtual platform_device register returned %ld\n",
-			 PTR_ERR(qpcie_v4l2_bridge_pdev));
+		ret = PTR_ERR(qpcie_v4l2_bridge_pdev);
 		qpcie_v4l2_bridge_pdev = NULL;
+		platform_driver_unregister(&qpcie_v4l2_bridge_driver);
+		return ret;
 	}
 
 	return 0;

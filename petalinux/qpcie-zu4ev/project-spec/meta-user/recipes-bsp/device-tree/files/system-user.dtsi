@@ -24,9 +24,15 @@
 
 #include "sc6f0-mcu.dtsi"
 
+/* Pair this image only with the HDMI RX IRQ-enabled hardware (26101906+). */
+#if defined(SC7F0_HDMI_RX_ENABLE) && SC7F0_HDMI_RX_ENABLE
+#include "sc7f0-hdmi-rx.dtsi"
+#else
+/* Never probe HDMI register apertures on the debug-only hardware. */
 / {
 	qpcie_v4l2_bridge {
 		compatible = "yuan,qpcie-v4l2-bridge";
-		status = "okay";
+		status = "disabled";
 	};
 };
+#endif

@@ -77,7 +77,20 @@ module nv12_capture_engine #(
     reg [3:0]  format_q;
     wire       is_rgb_mode = (format_q == 4'd1);
 
+    function [15:0] calc_line_bytes;
+        input [3:0]  fmt;
+        input [15:0] w;
+        begin
+            if (fmt == 4'd1)
+                calc_line_bytes = (w <= MAX_WIDTH) ? (w * 16'd3) : w;
+            else
+                calc_line_bytes = w;
+        end
+    endfunction
+
     reg [15:0] width_q, height_q, stride_q;
+    wire [15:0] active_line_bytes = calc_line_bytes(format_q, width_q);
+
     reg [15:0] stride_padding_q;
     reg [15:0] line_idx, beat_col;
     reg [63:0] y_send_addr, uv_send_addr;
@@ -204,16 +217,17 @@ module nv12_capture_engine #(
     wire [63:0] cur_y_target_addr  = desc_sg_mode ? y_walker_addr  : y_send_addr;
     wire [63:0] cur_uv_target_addr = desc_sg_mode ? uv_walker_addr : uv_send_addr;
 
-    // A 256-byte request must start below offset 0xF00 to remain within one
-    // 4KiB PCIe boundary. The walker may span pages; this packetizer enforces
-    // the request-level limit.
-    wire y_is_256  = (y_rem_bytes >= 16'd256) && (cur_y_target_addr[11:8] != 4'hF) && (!desc_sg_mode || (y_walker_bytes_left >= 256));
+    // A 256-byte request crosses a 4KiB PCIe boundary only if starting offset > 0xF00.
+    // At offset 0xF00, a 256-byte burst ends at 0x1000, exactly at the page boundary without crossing.
+    wire y_crosses_4k  = (cur_y_target_addr[11:8] == 4'hF) && (cur_y_target_addr[7:0] != 8'h00);
+    wire y_is_256      = (y_rem_bytes >= 16'd256) && !y_crosses_4k && (!desc_sg_mode || (y_walker_bytes_left >= 256));
     wire [10:0] y_next_dw_len = y_is_256 ? 11'd64 : 11'd32;
     wire [4:0]  y_next_beats  = y_is_256 ? 5'd16  : 5'd8;
     wire [15:0] y_next_bytes  = y_is_256 ? 16'd256: 16'd128;
     wire y_ready_to_send = (!desc_sg_mode || (y_seg_valid && y_walker_bytes_left > 0)) && (y_fifo_count >= y_next_beats);
 
-    wire uv_is_256 = (uv_rem_bytes >= 16'd256) && (cur_uv_target_addr[11:8] != 4'hF) && (!desc_sg_mode || (uv_walker_bytes_left >= 256));
+    wire uv_crosses_4k = (cur_uv_target_addr[11:8] == 4'hF) && (cur_uv_target_addr[7:0] != 8'h00);
+    wire uv_is_256     = (uv_rem_bytes >= 16'd256) && !uv_crosses_4k && (!desc_sg_mode || (uv_walker_bytes_left >= 256));
     wire [10:0] uv_next_dw_len = uv_is_256 ? 11'd64 : 11'd32;
     wire [4:0]  uv_next_beats  = uv_is_256 ? 5'd16  : 5'd8;
     wire [15:0] uv_next_bytes  = uv_is_256 ? 16'd256: 16'd128;
@@ -361,7 +375,8 @@ module nv12_capture_engine #(
                 width_q <= frame_width;
                 height_q <= frame_height;
                 stride_q <= frame_stride;
-                stride_padding_q <= (frame_stride > frame_width) ? (frame_stride - frame_width) : 16'd0;
+                stride_padding_q <= (frame_stride > calc_line_bytes(desc_format, frame_width)) ?
+                                    (frame_stride - calc_line_bytes(desc_format, frame_width)) : 16'd0;
                 line_idx <= 0;
                 beat_col <= 0;
                 y_pack <= 0;
@@ -381,7 +396,7 @@ module nv12_capture_engine #(
                 rgb_in_line_bytes <= 0;
                 if ((desc_format == 4'd1 ? (frame_width > MAX_WIDTH * 3) : (frame_width > MAX_WIDTH)) ||
                     frame_width[6:0] != 0 ||
-                    frame_height[0] || frame_stride < frame_width ||
+                    frame_height[0] || frame_stride < calc_line_bytes(desc_format, frame_width) ||
                     (MWR_PAYLOAD_BYTES != 128 && MWR_PAYLOAD_BYTES != 256) ||
                     (PCIE_DATA_WIDTH != 128 && PCIE_DATA_WIDTH != 256))
                     protocol_error_count <= protocol_error_count + 1'b1;
@@ -433,7 +448,7 @@ module nv12_capture_engine #(
                         else if (beat_col[1:0] == 2'b10)
                             rgb_hold_2 <= rgb_beat_96[95:64];
 
-                        if (s_axis_tlast != (rgb_in_line_bytes + 16'd12 >= width_q))
+                        if (s_axis_tlast != (rgb_in_line_bytes + 16'd12 >= active_line_bytes))
                             protocol_error_count <= protocol_error_count + 1'b1;
 
                         if (s_axis_tlast)
@@ -512,7 +527,7 @@ module nv12_capture_engine #(
             uv_line_start_addr <= plane_uv_addr;
             y_send_offset <= 0;
             uv_send_offset <= 0;
-            y_rem_bytes <= frame_width;
+            y_rem_bytes <= calc_line_bytes(desc_format, frame_width);
             uv_rem_bytes <= (desc_format == 4'd1) ? 16'd0 : frame_width;
             y_send_line <= 0;
             uv_send_line <= 0;
@@ -528,7 +543,7 @@ module nv12_capture_engine #(
                     active_req_bytes      <= pending_req_is_uv ? uv_next_bytes : y_next_bytes;
                     req_advance_bytes     <= pending_req_is_uv ?
                         ((uv_send_offset + uv_next_bytes >= width_q) ? (uv_next_bytes + stride_padding_q) : uv_next_bytes) :
-                        ((y_send_offset + y_next_bytes >= width_q) ? (y_next_bytes + stride_padding_q) : y_next_bytes);
+                        ((y_send_offset + y_next_bytes >= active_line_bytes) ? (y_next_bytes + stride_padding_q) : y_next_bytes);
                     c2h_req_valid         <= 1'b1;
                     prefer_uv             <= pending_req_is_uv ? 1'b0 : (is_rgb_mode ? 1'b0 : 1'b1);
                     pending_req_valid     <= 1'b0;
@@ -566,15 +581,15 @@ module nv12_capture_engine #(
                         uv_send_addr   <= uv_send_addr + active_req_bytes;
                     end
                 end else begin
-                    if (y_send_offset + active_req_bytes >= width_q) begin
+                    if (y_send_offset + active_req_bytes >= active_line_bytes) begin
                         y_send_offset     <= 16'd0;
-                        y_rem_bytes       <= width_q;
+                        y_rem_bytes       <= active_line_bytes;
                         y_send_line       <= y_send_line + 1'b1;
                         y_line_start_addr <= y_line_start_addr + stride_q;
                         y_send_addr       <= y_line_start_addr + stride_q;
                     end else begin
                         y_send_offset <= y_send_offset + active_req_bytes;
-                        y_rem_bytes   <= width_q - (y_send_offset + active_req_bytes);
+                        y_rem_bytes   <= active_line_bytes - (y_send_offset + active_req_bytes);
                         y_send_addr   <= y_send_addr + active_req_bytes;
                     end
                 end

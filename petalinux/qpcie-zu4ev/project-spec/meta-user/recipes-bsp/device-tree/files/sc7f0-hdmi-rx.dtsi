@@ -1,0 +1,91 @@
+/*
+ * SC7F0 HDMI 2.0 RX: requires HDMI hardware revision 0x26101906 or later
+ * with the same IRQ/address map. NOT for the debug-only or HDMI05 bitstream.
+ * Driver: Xilinx hdmi-modules xlnx_rel_v2023.2 (not the in-tree HDMI 2.1 driver).
+ */
+/ {
+	/* Si5341 OUT4, programmed by FSBL; GTH north refclk1 for the NI-DRU. */
+	sc7f0_dru_clk: hdmi-dru-clock {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <156250000>;
+	};
+
+	/* The PHY owns this recovered, variable-rate clock outside CCF. The
+	 * vendor RX driver only prepare/enables it, and never reads its rate.
+	 * Zero explicitly means unknown: do not claim a fixed 4K/1080p rate.
+	 * Signal/pixel-clock measurement comes from QUERY_DV_TIMINGS, not CCF.
+	 */
+	sc7f0_rx_video_clk: hdmi-rx-video-clock {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <0>;
+	};
+
+	qpcie_v4l2_bridge {
+		compatible = "yuan,qpcie-v4l2-bridge";
+		hdmirx = <&sc7f0_hdmirx>;
+		status = "okay";
+	};
+};
+
+&amba_pl {
+	/* Legacy common.dtsi placeholder aliases the real VPHY address. */
+	/delete-node/ zzlab_env@b0000000;
+
+	sc7f0_vphy: phy@b0000000 {
+		compatible = "xlnx,vid-phy-controller-2.2";
+		reg = <0x0 0xb0000000 0x0 0x1000>;
+		interrupt-parent = <&gic>;
+		/* PL IRQ0[1] = GIC ID 122 = SPI 90, level high. */
+		interrupts = <0 90 4>;
+		clock-names = "vid_phy_axi4lite_aclk", "drpclk", "dru-clk";
+		clocks = <&zynqmp_clk 71>, <&zynqmp_clk 71>, <&sc7f0_dru_clk>;
+
+		/* Values match vid_phy_controller_0 XCI and build_zu4ev.tcl. */
+		xlnx,transceiver-type = <5>; /* GTHE4 */
+		xlnx,transceiver-width = <4>;
+		xlnx,tx-buffer-bypass = <1>;
+		xlnx,input-pixels-per-clock = <4>;
+		xlnx,nidru = <1>;
+		xlnx,nidru-refclk-sel = <3>;
+		xlnx,rx-no-of-channels = <3>;
+		xlnx,tx-no-of-channels = <3>;
+		xlnx,rx-protocol = <1>;
+		xlnx,tx-protocol = <1>;
+		xlnx,rx-refclk-sel = <1>;
+		xlnx,tx-refclk-sel = <0>;
+		xlnx,rx-pll-selection = <0>;
+		xlnx,tx-pll-selection = <6>;
+		xlnx,hdmi-fast-switch = <1>;
+		xlnx,use-gt-ch4-hdmi = <0>;
+		status = "okay";
+
+		/* The vendor provider numbers children in declaration order. */
+		sc7f0_rxphy0: lane0 { #phy-cells = <4>; };
+		sc7f0_rxphy1: lane1 { #phy-cells = <4>; };
+		sc7f0_rxphy2: lane2 { #phy-cells = <4>; };
+	};
+
+	sc7f0_hdmirx: hdmi-rx@b0010000 {
+		/* 3.1 is the official 2023.2 module's backwards-compatible match. */
+		compatible = "xlnx,v-hdmi-rx-ss-3.2", "xlnx,v-hdmi-rx-ss-3.1";
+		reg = <0x0 0xb0010000 0x0 0x10000>;
+		reg-names = "hdmi-rxss";
+		interrupt-parent = <&gic>;
+		/* PL IRQ0[2] = GIC ID 123 = SPI 91, level high. */
+		interrupts = <0 91 4>;
+		interrupt-names = "irq";
+		clock-names = "s_axi_cpu_aclk", "s_axis_video_aclk";
+		clocks = <&zynqmp_clk 71>, <&sc7f0_rx_video_clk>;
+		phy-names = "hdmi-phy0", "hdmi-phy1", "hdmi-phy2";
+		phys = <&sc7f0_rxphy0 0 0 0 0>,
+		       <&sc7f0_rxphy1 0 0 0 0>,
+		       <&sc7f0_rxphy2 0 0 0 0>;
+		xlnx,input-pixels-per-clock = <4>;
+		xlnx,max-bits-per-component = <8>;
+		xlnx,edid-ram-size = <256>;
+		/* No HDCP/audio formatter nodes: those IPs are not instantiated. */
+		status = "okay";
+	};
+};

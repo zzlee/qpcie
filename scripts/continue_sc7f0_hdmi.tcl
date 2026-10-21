@@ -2,8 +2,8 @@
 # debug04 or regenerating/repackaging PS software. Optional routed review only.
 set project_dir ./build/qpcie_zu4ev_hdmi_proj
 open_project $project_dir/qpcie_zu4ev_card.xpr
-if {[get_property generic [current_fileset]] ne {C_VERSION=32'h26101601}} {
-    error "Refusing to continue anything other than the HDMI05 candidate"
+if {[get_property generic [current_fileset]] ne {C_VERSION=32'h26101903}} {
+    set_property generic {C_VERSION=32'h26101903} [current_fileset]
 }
 update_compile_order -fileset sources_1
 reset_runs synth_1

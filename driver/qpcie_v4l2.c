@@ -460,13 +460,132 @@ static int qpcie_vidioc_enum_frameintervals(struct file *file, void *priv, struc
     return 0;
 }
 
+/*
+ * Read one coherent telemetry snapshot from the PS publisher.
+ * The publisher brackets an update with an odd/even SEQUENCE; we accept the
+ * values only if SEQUENCE is even and identical before and after the payload
+ * read. No payload field is invented when the ABI is absent or the snapshot
+ * is torn: the caller must fail the query instead.
+ */
+int qpcie_hdmi_read_telemetry(struct qpcie_dev *qdev,
+                              struct qpcie_hdmi_tlm *t)
+{
+    int retries;
+
+    if (!qdev || !qdev->bar0_mmio)
+        return -ENODEV;
+
+    for (retries = 0; retries < 4; retries++) {
+        u32 seq1, seq2;
+
+        seq1 = ioread32(qdev->bar0_mmio + REG_HDMI_TLM_SEQ);
+        if (seq1 & 1U) {
+            /* This helper is also reachable from the hard IRQ frame-done
+             * path, so never sleep in interrupt context. */
+            if (in_interrupt())
+                cpu_relax();
+            else
+                usleep_range(100, 200);
+            continue;
+        }
+        rmb();
+
+        t->abi_version = ioread32(qdev->bar0_mmio + REG_HDMI_TLM_ABI_VERSION);
+        if (t->abi_version != HDMI_TLM_ABI_EXPECTED)
+            return -ENODATA;
+        t->flags = ioread32(qdev->bar0_mmio + REG_HDMI_TLM_FLAGS);
+        t->heartbeat = ioread32(qdev->bar0_mmio + REG_HDMI_TLM_HEARTBEAT);
+        t->mbus_code = ioread32(qdev->bar0_mmio + REG_HDMI_TLM_MBUS_CODE);
+        t->width = ioread32(qdev->bar0_mmio + REG_HDMI_RX_WIDTH);
+        t->height = ioread32(qdev->bar0_mmio + REG_HDMI_RX_HEIGHT);
+        t->hfp = ioread32(qdev->bar0_mmio + REG_HDMI_RX_HFP);
+        t->hsw = ioread32(qdev->bar0_mmio + REG_HDMI_RX_HSW);
+        t->hbp = ioread32(qdev->bar0_mmio + REG_HDMI_RX_HBP);
+        t->vfp = ioread32(qdev->bar0_mmio + REG_HDMI_RX_VFP);
+        t->vsw = ioread32(qdev->bar0_mmio + REG_HDMI_RX_VSW);
+        t->vbp = ioread32(qdev->bar0_mmio + REG_HDMI_RX_VBP);
+        t->polarities = ioread32(qdev->bar0_mmio + REG_HDMI_RX_POLARITIES);
+        t->standards = ioread32(qdev->bar0_mmio + REG_HDMI_RX_STANDARDS);
+        t->color_fmt = ioread32(qdev->bar0_mmio + REG_HDMI_RX_COLOR_FMT);
+        t->pixelclock = (u64)ioread32(qdev->bar0_mmio + REG_HDMI_RX_PIXEL_CLK) |
+                        ((u64)ioread32(qdev->bar0_mmio + REG_HDMI_TLM_PIXELCLK_HI) << 32);
+        rmb();
+
+        seq2 = ioread32(qdev->bar0_mmio + REG_HDMI_TLM_SEQ);
+        if (seq1 == seq2 && !(seq2 & 1U))
+            return 0;
+        if (in_interrupt())
+            cpu_relax();
+        else
+            usleep_range(100, 200);
+    }
+
+    return -EAGAIN;
+}
+
+/* Track publisher liveness using host time, not card clocks. */
+bool qpcie_hdmi_telemetry_fresh(struct qpcie_dev *qdev, u32 heartbeat)
+{
+    unsigned long now = jiffies;
+
+    if (!qdev->tlm_hb_valid || heartbeat != qdev->tlm_last_heartbeat) {
+        qdev->tlm_last_heartbeat = heartbeat;
+        qdev->tlm_last_change = now;
+        qdev->tlm_hb_valid = true;
+        return true;
+    }
+
+    return time_before(now, qdev->tlm_last_change +
+                            msecs_to_jiffies(HDMI_TLM_HB_STALE_MS));
+}
+
+/*
+ * A capture request for a real HDMI source may only succeed when the card
+ * actually reports locked timing. Otherwise STREAMON would start a DMA path
+ * with no valid geometry and report success for a stream that cannot work.
+ */
+static bool qpcie_hdmi_source_ready(struct qpcie_v4l2_channel *vch, int *err)
+{
+    struct qpcie_dev *qdev = vch->qdev;
+    struct qpcie_hdmi_tlm t;
+    u32 status = ioread32(qdev->bar0_mmio + REG_HDMI_RX_STATUS);
+
+    if (!(status & HDMI_RX_STATUS_5V_DET)) {
+        *err = -ENOLINK;
+        return false;
+    }
+    if (qpcie_hdmi_read_telemetry(qdev, &t)) {
+        *err = -EAGAIN;
+        return false;
+    }
+    if (!(t.flags & HDMI_TLM_F_TIMING_VALID) || !t.width || !t.height) {
+        *err = -ENOLINK;
+        return false;
+    }
+    /*
+     * The capture engine is programmed with the geometry from S_FMT. Starting
+     * it against a different incoming raster would DMA mis-framed data, so
+     * refuse instead of silently capturing garbage.
+     */
+    if (t.width != vch->width || t.height != vch->height) {
+        *err = -ERANGE;
+        return false;
+    }
+    if (!qpcie_hdmi_telemetry_fresh(qdev, t.heartbeat)) {
+        *err = -EAGAIN;
+        return false;
+    }
+    return true;
+}
+
 static int qpcie_vidioc_query_dv_timings(struct file *file, void *_fh,
                                          struct v4l2_dv_timings *timings)
 {
     struct qpcie_v4l2_channel *vch = video_drvdata(file);
     struct qpcie_dev *qdev = vch->qdev;
-    u32 status, width, height, clk_hz;
-    u32 hfp, hsw, hbp, vfp, vsw, vbp, pol, std;
+    struct qpcie_hdmi_tlm t;
+    u32 status;
+    int ret;
 
     if (vch->channel_id != 0)
         return -ENODATA;
@@ -478,41 +597,38 @@ static int qpcie_vidioc_query_dv_timings(struct file *file, void *_fh,
     if (!(status & HDMI_RX_STATUS_5V_DET))
         return -ENOLINK;
 
-    width  = ioread32(qdev->bar0_mmio + REG_HDMI_RX_WIDTH);
-    height = ioread32(qdev->bar0_mmio + REG_HDMI_RX_HEIGHT);
-    clk_hz = ioread32(qdev->bar0_mmio + REG_HDMI_RX_PIXEL_CLK);
+    ret = qpcie_hdmi_read_telemetry(qdev, &t);
+    if (ret)
+        return ret;
 
-    if (!width || !height) {
-        /* Default fallback if uninitialized */
-        width  = 1920;
-        height = 1080;
-        clk_hz = 148500000;
+    if (!(t.flags & HDMI_TLM_F_TIMING_VALID))
+        return -ENODATA;
+    if (!qpcie_hdmi_telemetry_fresh(qdev, t.heartbeat)) {
+        dev_warn_ratelimited(&qdev->pdev->dev,
+                             "HDMI RX telemetry publisher stalled (heartbeat=%u)\n",
+                             t.heartbeat);
+        return -ENODATA;
     }
-
-    hfp = ioread32(qdev->bar0_mmio + REG_HDMI_RX_HFP);
-    hsw = ioread32(qdev->bar0_mmio + REG_HDMI_RX_HSW);
-    hbp = ioread32(qdev->bar0_mmio + REG_HDMI_RX_HBP);
-    vfp = ioread32(qdev->bar0_mmio + REG_HDMI_RX_VFP);
-    vsw = ioread32(qdev->bar0_mmio + REG_HDMI_RX_VSW);
-    vbp = ioread32(qdev->bar0_mmio + REG_HDMI_RX_VBP);
-    pol = ioread32(qdev->bar0_mmio + REG_HDMI_RX_POLARITIES);
-    std = ioread32(qdev->bar0_mmio + REG_HDMI_RX_STANDARDS);
+    if (!t.width || !t.height || !t.pixelclock)
+        return -ENODATA;
 
     memset(timings, 0, sizeof(*timings));
     timings->type = V4L2_DV_BT_656_1120;
-    timings->bt.width = width;
-    timings->bt.height = height;
-    timings->bt.interlaced = V4L2_DV_PROGRESSIVE;
-    timings->bt.pixelclock = clk_hz ? (u64)clk_hz : 148500000ULL;
-    timings->bt.hfrontporch = hfp ? hfp : 88;
-    timings->bt.hsync = hsw ? hsw : 44;
-    timings->bt.hbackporch = hbp ? hbp : 148;
-    timings->bt.vfrontporch = vfp ? vfp : 4;
-    timings->bt.vsync = vsw ? vsw : 5;
-    timings->bt.vbackporch = vbp ? vbp : 36;
-    timings->bt.polarities = pol ? pol : (V4L2_DV_VSYNC_POS_POL | V4L2_DV_HSYNC_POS_POL);
-    timings->bt.standards = std ? std : V4L2_DV_BT_STD_CEA861;
-    timings->bt.flags = V4L2_DV_FL_IS_CE_VIDEO;
+    timings->bt.width = t.width;
+    timings->bt.height = t.height;
+    timings->bt.interlaced = (t.flags & HDMI_TLM_F_INTERLACED) ?
+                             V4L2_DV_INTERLACED : V4L2_DV_PROGRESSIVE;
+    timings->bt.pixelclock = t.pixelclock;
+    timings->bt.hfrontporch = t.hfp;
+    timings->bt.hsync = t.hsw;
+    timings->bt.hbackporch = t.hbp;
+    timings->bt.vfrontporch = t.vfp;
+    timings->bt.vsync = t.vsw;
+    timings->bt.vbackporch = t.vbp;
+    timings->bt.polarities = t.polarities;
+    timings->bt.standards = t.standards;
+    if (t.standards & V4L2_DV_BT_STD_CEA861)
+        timings->bt.flags |= V4L2_DV_FL_IS_CE_VIDEO;
     return 0;
 }
 
@@ -923,11 +1039,40 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
     struct qpcie_v4l2_channel *vch = vb2_get_drv_priv(vq);
     struct qpcie_dev *qdev = vch->qdev;
     u32 pacer_ctrl;
+    bool is_tpg_source = false;
     int ret;
 
     if (count < 2) {
         qpcie_return_all_buffers(vch, VB2_BUF_STATE_QUEUED);
         return -ENOBUFS;
+    }
+
+    /* Refuse to start a real HDMI capture that cannot work: no input, no
+     * locked timing, or a stalled telemetry publisher must fail STREAMON
+     * instead of silently DMA-ing invalid geometry to the host. */
+    if (vch->channel_id == 0 && vch->video_source != 1) {
+        u32 st = ioread32(qdev->bar0_mmio + REG_HDMI_RX_STATUS);
+        bool want_hdmi = (vch->video_source == 2) ||
+                         (vch->video_source == 0 && (st & HDMI_RX_STATUS_5V_DET));
+
+        if (want_hdmi) {
+            int src_err = 0;
+
+            if (!qpcie_hdmi_source_ready(vch, &src_err)) {
+                if (src_err == -ERANGE)
+                    dev_err(&qdev->pdev->dev,
+                            "STREAMON refused: requested %ux%u does not match locked HDMI timing; use QUERY_DV_TIMINGS and S_FMT to match the source\n",
+                            vch->width, vch->height);
+                else
+                    dev_err(&qdev->pdev->dev,
+                            "STREAMON refused: HDMI RX source not ready (5V=0x%08x, err=%d)\n",
+                            st, src_err);
+                qpcie_return_all_buffers(vch, VB2_BUF_STATE_QUEUED);
+                return src_err;
+            }
+            dev_info(&qdev->pdev->dev,
+                     "STREAMON: HDMI RX source locked\n");
+        }
     }
 
     vch->sequence = 0;
@@ -955,24 +1100,41 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
                                      V4L2_CID_QPCIE_TPG_MOTION_SPEED);
         pattern_id = qpcie_tpg_pattern_id(pattern_ctrl ? pattern_ctrl->val : 3);
 
-        /* Pulse reset on both TPG (bit 0) and video capture engine/FIFO (bit 1) */
-        iowrite32(3, qdev->bar0_mmio + REG_VIDEO_SUB_RESET);
-        ioread32(qdev->bar0_mmio + REG_VIDEO_SUB_RESET);
-        usleep_range(1000, 2000);
-        iowrite32(0, qdev->bar0_mmio + REG_VIDEO_SUB_RESET);
-        ioread32(qdev->bar0_mmio + REG_VIDEO_SUB_RESET);
-        usleep_range(1000, 2000);
+        is_tpg_source = (vch->video_source == 1) ||
+                        (vch->video_source == 0 &&
+                         !(ioread32(qdev->bar0_mmio + REG_HDMI_RX_STATUS) &
+                           HDMI_RX_STATUS_5V_DET));
 
-        if (qpcie_program_tpg(vch, pattern_id, false)) {
-            qpcie_return_all_buffers(vch, VB2_BUF_STATE_QUEUED);
-            return -EIO;
-        }
-        /* REG_VIDEO_SUB_RESET resets v_tpg controls, so restore the user
-         * selected motion state after the TPG configuration is reapplied. */
-        ret = qpcie_program_tpg_motion(vch, motion_ctrl ? motion_ctrl->val : 0);
-        if (ret) {
-            qpcie_return_all_buffers(vch, VB2_BUF_STATE_QUEUED);
-            return ret;
+        if (!is_tpg_source) {
+            /*
+             * REG_VIDEO_SUB_RESET bit 1 also drives the RX subsystem's
+             * s_axis_video_aresetn. Resetting a live HDMI receiver at
+             * STREAMON needlessly disturbs a locked video path, and the
+             * capture engine already re-aligns on the source SOF (tuser).
+             * Only reset/reprogram the video path for the internal TPG.
+             */
+            dev_info(&qdev->pdev->dev,
+                     "STREAMON: HDMI source, keeping RX video path out of reset\n");
+        } else {
+            /* Pulse reset on both TPG (bit 0) and video capture engine/FIFO (bit 1) */
+            iowrite32(3, qdev->bar0_mmio + REG_VIDEO_SUB_RESET);
+            ioread32(qdev->bar0_mmio + REG_VIDEO_SUB_RESET);
+            usleep_range(1000, 2000);
+            iowrite32(0, qdev->bar0_mmio + REG_VIDEO_SUB_RESET);
+            ioread32(qdev->bar0_mmio + REG_VIDEO_SUB_RESET);
+            usleep_range(1000, 2000);
+
+            if (qpcie_program_tpg(vch, pattern_id, false)) {
+                qpcie_return_all_buffers(vch, VB2_BUF_STATE_QUEUED);
+                return -EIO;
+            }
+            /* REG_VIDEO_SUB_RESET resets v_tpg controls, so restore the user
+             * selected motion state after the TPG configuration is reapplied. */
+            ret = qpcie_program_tpg_motion(vch, motion_ctrl ? motion_ctrl->val : 0);
+            if (ret) {
+                qpcie_return_all_buffers(vch, VB2_BUF_STATE_QUEUED);
+                return ret;
+            }
         }
 
         pacer_ctrl = ioread32(qdev->bar0_mmio + REG_PACER_CTRL);
@@ -1038,18 +1200,20 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
 
     /* Start TPG AFTER DMA is enabled so frame 1 starts cleanly without FIFO backpressure */
     if (vch->channel_id == 0) {
-        if (vch->pacer_enable) {
-            ret = qpcie_tpg_pace_start(qdev);
-            if (ret) {
-                dev_err(&qdev->pdev->dev,
-                        "Cannot start TPG pacing kthread: %d\n", ret);
-                iowrite32(0, qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_CTRL);
-                qpcie_return_all_buffers(vch, VB2_BUF_STATE_QUEUED);
-                return ret;
+        if (is_tpg_source) {
+            if (vch->pacer_enable) {
+                ret = qpcie_tpg_pace_start(qdev);
+                if (ret) {
+                    dev_err(&qdev->pdev->dev,
+                            "Cannot start TPG pacing kthread: %d\n", ret);
+                    iowrite32(0, qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_CTRL);
+                    qpcie_return_all_buffers(vch, VB2_BUF_STATE_QUEUED);
+                    return ret;
+                }
+            } else {
+                void __iomem *tpg = qdev->bar1_mmio + qdev->bar1_offset_tpg;
+                iowrite32(0x81, tpg + 0x00); /* Continuous AUTO_RESTART */
             }
-        } else {
-            void __iomem *tpg = qdev->bar1_mmio + qdev->bar1_offset_tpg;
-            iowrite32(0x81, tpg + 0x00); /* Continuous AUTO_RESTART */
         }
     }
 
@@ -1071,35 +1235,30 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
     struct qpcie_dev *qdev = vch->qdev;
     unsigned long timeout = jiffies + msecs_to_jiffies(500);
     bool drained = false;
-    u32 head;
+    bool last_stream;
+    u32 head = 0;
+    u32 stat_reg = vch->ch_reg_base + REG_VCH_OFFSET_STATUS;
 
-    qpcie_return_all_buffers(vch, VB2_BUF_STATE_ERROR);
+    /*
+     * Ordering is the whole point of this function: the card must be provably
+     * done writing into these buffers BEFORE they are handed back to userspace.
+     * Returning them first (as this code used to do) lets a still-running DMA
+     * write into memory the next STREAMON may have already re-queued.
+     */
 
-    /* Return any buffers still in active_buffers for this channel */
-    {
-        struct qpcie_v4l2_buffer *b, *tmp;
-        unsigned long flags;
-
-        spin_lock_irqsave(&vch->slock, flags);
-        list_for_each_entry_safe(b, tmp, &vch->active_buffers, list) {
-            list_del(&b->list);
-            vb2_buffer_done(&b->vb.vb2_buf, VB2_BUF_STATE_ERROR);
-        }
-        spin_unlock_irqrestore(&vch->slock, flags);
-    }
-
-    /* Halt TPG pacing and stop TPG FIRST before tearing down DMA */
+    /* 1. Stop the frame source so no new frame enters the pipeline. */
     if (vch->channel_id == 0 && qdev->bar1_mmio) {
         void __iomem *tpg = qdev->bar1_mmio + qdev->bar1_offset_tpg;
+
         qpcie_tpg_pace_stop(qdev);
         iowrite32(0x00, tpg + 0x00);
     }
 
-    /* Stop fetching descriptors for this channel immediately in hardware */
+    /* 2. Stop fetching descriptors for this channel immediately. */
     iowrite32(0, qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_CTRL);
     ioread32(qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_CTRL);
-    u32 stat_reg = vch->ch_reg_base + REG_VCH_OFFSET_STATUS;
 
+    /* 3. Wait for in-flight C2H writes to retire. */
     if (vch->channel_id == 0) {
         do {
             u32 status = ioread32(qdev->bar0_mmio + stat_reg);
@@ -1111,28 +1270,59 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
             usleep_range(1000, 2000);
         } while (time_before(jiffies, timeout));
 
-        /* Pulse reset on both TPG (bit 0) and video engine (bit 1) to abort in-flight frame and idle TPG */
-        iowrite32(3, qdev->bar0_mmio + REG_VIDEO_SUB_RESET);
-        ioread32(qdev->bar0_mmio + REG_VIDEO_SUB_RESET);
-        usleep_range(1000, 2000);
-        iowrite32(0, qdev->bar0_mmio + REG_VIDEO_SUB_RESET);
-        ioread32(qdev->bar0_mmio + REG_VIDEO_SUB_RESET);
-        timeout = jiffies + msecs_to_jiffies(500);
-        do {
-            u32 status = ioread32(qdev->bar0_mmio + stat_reg);
-
-            if ((status & (DMA_STATUS_VIDEO_TX_IDLE |
-                           DMA_STATUS_DESC_IDLE)) ==
-                (DMA_STATUS_VIDEO_TX_IDLE | DMA_STATUS_DESC_IDLE))
-                break;
+        /* Only abort with a reset when the graceful drain failed. The reset
+         * touches the shared capture engine, so it must not be issued while
+         * the drain already proved there is nothing in flight. */
+        if (!drained) {
+            dev_warn(&qdev->pdev->dev,
+                     "NV12M STREAMOFF Ch0 drain timeout; pulsing video sub-reset\n");
+            iowrite32(3, qdev->bar0_mmio + REG_VIDEO_SUB_RESET);
+            ioread32(qdev->bar0_mmio + REG_VIDEO_SUB_RESET);
             usleep_range(1000, 2000);
-        } while (time_before(jiffies, timeout));
+            iowrite32(0, qdev->bar0_mmio + REG_VIDEO_SUB_RESET);
+            ioread32(qdev->bar0_mmio + REG_VIDEO_SUB_RESET);
+            timeout = jiffies + msecs_to_jiffies(500);
+            do {
+                u32 status = ioread32(qdev->bar0_mmio + stat_reg);
+
+                if ((status & (DMA_STATUS_VIDEO_TX_IDLE |
+                               DMA_STATUS_DESC_IDLE)) ==
+                    (DMA_STATUS_VIDEO_TX_IDLE | DMA_STATUS_DESC_IDLE)) {
+                    drained = true;
+                    break;
+                }
+                usleep_range(1000, 2000);
+            } while (time_before(jiffies, timeout));
+        }
     } else {
         usleep_range(2000, 5000);
         drained = true;
     }
 
-    /* Cancel descriptors and rebase this channel's producer pointers */
+    last_stream = (atomic_read(&qdev->streaming_count) <= 1);
+
+    /* No new completion IRQ can be generated for a disabled, drained channel,
+     * but one may already be running for a buffer we are about to return. Let
+     * it finish before the buffers become visible to userspace again. */
+    synchronize_irq(qdev->irq);
+
+    /* 4. Global engine quiesce. This is what actually guarantees no further
+     *    PCIe writes to any buffer of any channel, so it happens before the
+     *    buffers are returned. */
+    if (last_stream) {
+        iowrite32(0, qdev->bar0_mmio + REG_PACER_CTRL);
+        qpcie_dma_soft_reset(qdev);
+        qpcie_reprogram_rings(qdev);
+        /* Freeze counters after all channel-0 writes have retired. */
+        iowrite32(0, qdev->bar0_mmio + REG_PERF_CTRL);
+        ioread32(qdev->bar0_mmio + REG_PERF_CTRL);
+        synchronize_irq(qdev->irq);
+        qdev->ring_published = 0;
+        qdev->ring_completed = 0;
+        qdev->ring_rejects = 0;
+    }
+
+    /* 5. Cancel descriptors and rebase this channel's producer pointers. */
     if (vch->thin_ring_virt) {
         head = ioread32(qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING0_HEAD) & 0xffff;
         vch->thin_ring_tail = head;
@@ -1150,31 +1340,16 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
         }
     }
 
-    /* Only reset global hardware and stop TPG if ALL active video channels have finished streaming */
-    if (atomic_dec_return(&qdev->streaming_count) > 0) {
+    /* 6. The card can no longer touch these buffers: return them now. */
+    qpcie_return_all_buffers(vch, VB2_BUF_STATE_ERROR);
+    atomic_dec(&qdev->streaming_count);
+
+    if (!last_stream) {
         dev_info(&qdev->pdev->dev,
                  "NV12M STREAMOFF (Ch%u): stream stopped, remaining active streams: %d\n",
                  vch->channel_id, atomic_read(&qdev->streaming_count));
         return;
     }
-
-    iowrite32(0, qdev->bar0_mmio + REG_PACER_CTRL);
-
-    qpcie_dma_soft_reset(qdev);
-    qpcie_reprogram_rings(qdev);
-
-
-    /* Freeze counters after all channel-0 writes have retired. */
-    iowrite32(0, qdev->bar0_mmio + REG_PERF_CTRL);
-    ioread32(qdev->bar0_mmio + REG_PERF_CTRL);
-    synchronize_irq(qdev->irq);
-
-    /* Re-anchor software in-flight counters after every pending completion
-     * IRQ has been processed (complete after synchronize_irq to avoid a
-     * late IRQ incrementing ring_completed past a zeroed ring_published). */
-    qdev->ring_published = 0;
-    qdev->ring_completed = 0;
-    qdev->ring_rejects = 0;
 
     {
         u32 errors = ioread32(qdev->bar0_mmio + REG_VIDEO_ERRORS);
@@ -1187,8 +1362,8 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
                     "NV12M video protocol errors increased: %u -> %u\n",
                     vch->error_count_start, errors);
         dev_info(&qdev->pdev->dev,
-                 "NV12M STREAMOFF: drained=%u head=%u tail=%u video_errors=%u\n",
-                 drained, head, head, errors);
+                 "NV12M STREAMOFF: drained=%u head=%u video_errors=%u\n",
+                 drained, head, errors);
     }
 }
 
@@ -1253,6 +1428,15 @@ static int qpcie_s_ctrl(struct v4l2_ctrl *ctrl)
             cur_ctrl |= ((vch->video_source & 0x3) << 20);
             iowrite32(cur_ctrl, qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_CTRL);
             ioread32(qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_CTRL);
+
+            if (vb2_is_streaming(&vch->queue) && vch->channel_id == 0) {
+                bool is_tpg = (vch->video_source == 1) ||
+                              (vch->video_source == 0 && !(ioread32(qdev->bar0_mmio + REG_HDMI_RX_STATUS) & HDMI_RX_STATUS_5V_DET));
+                if (is_tpg && vch->pacer_enable)
+                    qpcie_tpg_pace_start(qdev);
+                else
+                    qpcie_tpg_pace_stop(qdev);
+            }
         }
         break;
     }
@@ -1345,7 +1529,8 @@ static const struct v4l2_ctrl_config qpcie_video_source_ctrl_config = {
 void qpcie_v4l2_check_source_change(struct qpcie_v4l2_channel *vch)
 {
     struct qpcie_dev *qdev;
-    u32 cur_status, cur_width, cur_height, cur_res;
+    struct qpcie_hdmi_tlm t;
+    u32 cur_status, cur_res, cur_sig;
 
     if (!vch || vch->channel_id != 0)
         return;
@@ -1358,20 +1543,30 @@ void qpcie_v4l2_check_source_change(struct qpcie_v4l2_channel *vch)
     if (cur_status == 0xFFFFFFFF)
         return; /* PCIe link offline or unmapped: bail out immediately to prevent Tegra CBB error storm */
 
-    cur_width  = ioread32(qdev->bar0_mmio + REG_HDMI_RX_WIDTH);
-    cur_height = ioread32(qdev->bar0_mmio + REG_HDMI_RX_HEIGHT);
-    cur_res    = (cur_width << 16) | (cur_height & 0xFFFF);
+    if (qpcie_hdmi_read_telemetry(qdev, &t))
+        return; /* torn snapshot or no publisher: retry on the next poll */
 
-    if (cur_status != vch->last_rx_status || cur_res != vch->last_rx_res) {
+    if (t.flags & HDMI_TLM_F_TIMING_VALID)
+        cur_res = (t.width << 16) | (t.height & 0xFFFF);
+    else
+        cur_res = 0;
+    cur_sig = (t.mbus_code & 0xFFFF) |
+              ((t.flags & (HDMI_TLM_F_TIMING_VALID | HDMI_TLM_F_INTERLACED |
+                           HDMI_TLM_F_COLOR_VALID)) << 16);
+
+    if (cur_status != vch->last_rx_status || cur_res != vch->last_rx_res ||
+        cur_sig != vch->last_rx_tlm_sig) {
         static const struct v4l2_event ev = {
             .type = V4L2_EVENT_SOURCE_CHANGE,
             .u.src_change.changes = V4L2_EVENT_SRC_CH_RESOLUTION,
         };
         dev_info(&qdev->pdev->dev,
-                 "[V4L2 HDMI RX] Source change detected! status: 0x%08x -> 0x%08x, res: 0x%08x -> 0x%08x\n",
-                 vch->last_rx_status, cur_status, vch->last_rx_res, cur_res);
+                 "[V4L2 HDMI RX] Source change detected! status: 0x%08x -> 0x%08x, res: 0x%08x -> 0x%08x, tlm: 0x%08x -> 0x%08x\n",
+                 vch->last_rx_status, cur_status, vch->last_rx_res, cur_res,
+                 vch->last_rx_tlm_sig, cur_sig);
         vch->last_rx_status = cur_status;
         vch->last_rx_res = cur_res;
+        vch->last_rx_tlm_sig = cur_sig;
         v4l2_event_queue(&vch->vdev, &ev);
     }
 }
@@ -1603,9 +1798,19 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
     /* Start HDMI RX Telemetry & Plug/Unplug Background Monitor on Node 0 (Channel 0) */
     if (node_count > 0 && qdev->bar0_mmio) {
         struct qpcie_v4l2_channel *vch0 = &qdev->v4l2_ch[0];
-        u32 init_w = ioread32(qdev->bar0_mmio + REG_HDMI_RX_WIDTH);
-        u32 init_h = ioread32(qdev->bar0_mmio + REG_HDMI_RX_HEIGHT);
+        struct qpcie_hdmi_tlm tlm0;
+        u32 init_w = 0, init_h = 0;
+
         vch0->last_rx_status = ioread32(qdev->bar0_mmio + REG_HDMI_RX_STATUS);
+        memset(&tlm0, 0, sizeof(tlm0));
+        if (!qpcie_hdmi_read_telemetry(qdev, &tlm0) &&
+            (tlm0.flags & HDMI_TLM_F_TIMING_VALID)) {
+            init_w = tlm0.width;
+            init_h = tlm0.height;
+            vch0->last_rx_tlm_sig = (tlm0.mbus_code & 0xFFFF) |
+                ((tlm0.flags & (HDMI_TLM_F_TIMING_VALID | HDMI_TLM_F_INTERLACED |
+                                HDMI_TLM_F_COLOR_VALID)) << 16);
+        }
         vch0->last_rx_res = (init_w << 16) | (init_h & 0xFFFF);
         vch0->hdmi_monitor_running = true;
         INIT_DELAYED_WORK(&vch0->hdmi_monitor_work, qpcie_v4l2_hdmi_monitor_work_fn);

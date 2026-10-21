@@ -8,7 +8,7 @@
 `timescale 1ns / 1ps
 
 module axil_reg_space #(
-    parameter [31:0]   C_VERSION    = 32'h2610_1504, // Mandatory hardware version YYMMDDpp
+    parameter [31:0]   C_VERSION    = 32'h2610_1905, // Mandatory hardware version YYMMDDpp
     parameter integer NUM_VIDEO_CH = 4,
     parameter integer NUM_AUDIO_CH = 4,
     parameter integer CDC_ENABLE = 0
@@ -204,6 +204,32 @@ module axil_reg_space #(
     output wire [31:0] out_hdmi_ipc_status,
     output wire [31:0] out_hdmi_ipc_doorbell,
 
+    // Probing & Diagnostic Ports (BAR0 0x0680 - 0x06DC)
+    input  wire [31:0] in_probe_version,
+    input  wire [31:0] in_probe_rx_clk_freq,
+    input  wire [31:0] in_probe_dru_clk_freq,
+    input  wire [31:0] in_probe_rxoutclk_freq,
+    input  wire [31:0] in_probe_rx_video_clk_freq,
+    input  wire [31:0] in_probe_tx_clk_freq,
+    input  wire [31:0] in_probe_txoutclk_freq,
+    input  wire [31:0] in_probe_tx_video_clk_freq,
+    input  wire [31:0] in_probe_pins,
+    input  wire [31:0] in_probe_pulse_cnt1,
+    input  wire [31:0] in_probe_ddc_cnt,
+    input  wire [31:0] in_probe_irq_cnt,
+    input  wire [31:0] in_probe_ch0_beats,
+    input  wire [31:0] in_probe_ch1_beats,
+    input  wire [31:0] in_probe_ch2_beats,
+    input  wire [31:0] in_probe_rx_video_sof,
+    input  wire [31:0] in_probe_rx_video_eol,
+    input  wire [31:0] in_probe_rx_video_pix,
+    input  wire [31:0] in_probe_raw_rx_clk,
+    input  wire [31:0] in_probe_raw_dru_clk,
+    input  wire [31:0] in_probe_raw_rxoutclk,
+    input  wire [31:0] in_probe_raw_rx_video_clk,
+    input  wire [31:0] in_probe_raw_refclk100,
+    output wire [31:0] out_probe_ctrl,
+
     // Firmware Upgrade Ports (BAR0 0x0780 - 0x079C)
     output wire [31:0] out_dma_upg_ctrl,
     output wire [31:0] out_dma_upg_size,
@@ -359,6 +385,15 @@ module axil_reg_space #(
     reg  [31:0] reg_hdmi_rx_standards;
     reg  [31:0] reg_hdmi_rx_colorspace;
     reg  [31:0] reg_hdmi_rx_audio_info;
+    // Telemetry publication ABI (0x0668 - 0x067F), PS-writable / host-readable.
+    // The PS publisher must bracket an update with an odd/even TELEMETRY_SEQ so
+    // the host can reject a torn multi-register snapshot. ABI_VERSION is
+    // read-only so an old host can detect an incompatible publisher.
+    localparam [31:0] HDMI_TLM_ABI_VERSION = 32'h0001_0000;
+    reg  [31:0] reg_hdmi_tlm_seq;
+    reg  [31:0] reg_hdmi_tlm_flags;
+    reg  [31:0] reg_hdmi_tlm_heartbeat;
+    reg  [31:0] reg_hdmi_tlm_mbus_code;
 
     // HDMI RX & TX Block (New Map: 0x0600 - 0x06FF)
     reg  [31:0] reg_hdmi_tx_ctrl;
@@ -376,6 +411,10 @@ module axil_reg_space #(
     assign out_hdmi_ipc_arg      = reg_hdmi_ipc_arg;
     assign out_hdmi_ipc_status   = reg_hdmi_ipc_status;
     assign out_hdmi_ipc_doorbell = reg_hdmi_ipc_doorbell;
+
+    // Probing Control Register (BAR0 0x06DC)
+    reg  [31:0] reg_probe_ctrl;
+    assign out_probe_ctrl = reg_probe_ctrl;
 
 
     assign out_vch0_ctrl          = vch0_ctrl;
@@ -499,6 +538,7 @@ module axil_reg_space #(
             out_adev0_xrun_inject   <= 1'b0;
             dbg_pattern_gen         <= 32'd0;
             reg_overlay_ctrl        <= 32'd0;
+            reg_probe_ctrl          <= 32'd0;
             reg_fw_update_cmd       <= 32'd0;
             reg_fw_update_type      <= 32'd0;
             reg_fw_update_size      <= 32'd0;
@@ -519,20 +559,24 @@ module axil_reg_space #(
             reg_dma_upg_progress    <= 32'd0;
             reg_dma_upg_doorbell    <= 32'd0;
             reg_dma_upg_diag_clear_toggle <= 1'b0;
-            reg_hdmi_rx_width       <= 32'd1920;
-            reg_hdmi_rx_height      <= 32'd1080;
-            reg_hdmi_rx_pixelclk_lo <= 32'd148500000;
+            reg_hdmi_rx_width       <= 32'd0;
+            reg_hdmi_rx_height      <= 32'd0;
+            reg_hdmi_rx_pixelclk_lo <= 32'd0;
             reg_hdmi_rx_pixelclk_hi <= 32'd0;
-            reg_hdmi_rx_hfrontporch <= 32'd88;
-            reg_hdmi_rx_hsync       <= 32'd44;
-            reg_hdmi_rx_hbackporch  <= 32'd148;
-            reg_hdmi_rx_vfrontporch <= 32'd4;
-            reg_hdmi_rx_vsync       <= 32'd5;
-            reg_hdmi_rx_vbackporch  <= 32'd36;
-            reg_hdmi_rx_polarities  <= 32'd3;
-            reg_hdmi_rx_standards   <= 32'h01;
+            reg_hdmi_rx_hfrontporch <= 32'd0;
+            reg_hdmi_rx_hsync       <= 32'd0;
+            reg_hdmi_rx_hbackporch  <= 32'd0;
+            reg_hdmi_rx_vfrontporch <= 32'd0;
+            reg_hdmi_rx_vsync       <= 32'd0;
+            reg_hdmi_rx_vbackporch  <= 32'd0;
+            reg_hdmi_rx_polarities  <= 32'd0;
+            reg_hdmi_rx_standards   <= 32'd0;
             reg_hdmi_rx_colorspace  <= 32'd0;
-            reg_hdmi_rx_audio_info  <= 32'h0002_BB80;
+            reg_hdmi_rx_audio_info  <= 32'd0;
+            reg_hdmi_tlm_seq        <= 32'd0;
+            reg_hdmi_tlm_flags      <= 32'd0;
+            reg_hdmi_tlm_heartbeat  <= 32'd0;
+            reg_hdmi_tlm_mbus_code  <= 32'd0;
             reg_hdmi_tx_ctrl        <= 32'd0;
             reg_hdmi_tx_res         <= 32'h0438_0780; // Default 1920x1080 (1080p60)
             reg_hdmi_tx_fps         <= 32'd60;        // Default 60 fps
@@ -672,6 +716,12 @@ module axil_reg_space #(
                             8'h5C: reg_hdmi_rx_standards   <= s_axil_wdata;
                             8'h60: reg_hdmi_rx_colorspace  <= s_axil_wdata;
                             8'h64: reg_hdmi_rx_audio_info  <= s_axil_wdata;
+                            8'h6C: reg_hdmi_tlm_seq        <= s_axil_wdata;
+                            8'h70: reg_hdmi_tlm_flags      <= s_axil_wdata;
+                            8'h74: reg_hdmi_tlm_heartbeat  <= s_axil_wdata;
+                            8'h78: reg_hdmi_tlm_mbus_code  <= s_axil_wdata;
+                            8'h7C: reg_hdmi_rx_pixelclk_hi <= s_axil_wdata;
+                            8'hDC: reg_probe_ctrl          <= s_axil_wdata;
                             default: ;
                         endcase
                     end
@@ -871,6 +921,36 @@ module axil_reg_space #(
                             8'h5C: s_axil_rdata <= reg_hdmi_rx_standards;
                             8'h60: s_axil_rdata <= reg_hdmi_rx_colorspace;
                             8'h64: s_axil_rdata <= reg_hdmi_rx_audio_info;
+                            8'h68: s_axil_rdata <= HDMI_TLM_ABI_VERSION;
+                            8'h6C: s_axil_rdata <= reg_hdmi_tlm_seq;
+                            8'h70: s_axil_rdata <= reg_hdmi_tlm_flags;
+                            8'h74: s_axil_rdata <= reg_hdmi_tlm_heartbeat;
+                            8'h78: s_axil_rdata <= reg_hdmi_tlm_mbus_code;
+                            8'h7C: s_axil_rdata <= reg_hdmi_rx_pixelclk_hi;
+                            8'h80: s_axil_rdata <= in_probe_version;
+                            8'h84: s_axil_rdata <= in_probe_rx_clk_freq;
+                            8'h88: s_axil_rdata <= in_probe_dru_clk_freq;
+                            8'h8C: s_axil_rdata <= in_probe_rxoutclk_freq;
+                            8'h90: s_axil_rdata <= in_probe_rx_video_clk_freq;
+                            8'h94: s_axil_rdata <= in_probe_tx_clk_freq;
+                            8'h98: s_axil_rdata <= in_probe_txoutclk_freq;
+                            8'h9C: s_axil_rdata <= in_probe_tx_video_clk_freq;
+                            8'hA0: s_axil_rdata <= in_probe_pins;
+                            8'hA4: s_axil_rdata <= in_probe_pulse_cnt1;
+                            8'hA8: s_axil_rdata <= in_probe_ddc_cnt;
+                            8'hAC: s_axil_rdata <= in_probe_irq_cnt;
+                            8'hB0: s_axil_rdata <= in_probe_ch0_beats;
+                            8'hB4: s_axil_rdata <= in_probe_ch1_beats;
+                            8'hB8: s_axil_rdata <= in_probe_ch2_beats;
+                            8'hBC: s_axil_rdata <= in_probe_rx_video_sof;
+                            8'hC0: s_axil_rdata <= in_probe_rx_video_eol;
+                            8'hC4: s_axil_rdata <= in_probe_rx_video_pix;
+                            8'hC8: s_axil_rdata <= in_probe_raw_rx_clk;
+                            8'hCC: s_axil_rdata <= in_probe_raw_dru_clk;
+                            8'hD0: s_axil_rdata <= in_probe_raw_rxoutclk;
+                            8'hD4: s_axil_rdata <= in_probe_raw_rx_video_clk;
+                            8'hD8: s_axil_rdata <= in_probe_raw_refclk100;
+                            8'hDC: s_axil_rdata <= reg_probe_ctrl;
                             default: s_axil_rdata <= 32'd0;
                         endcase
                     end

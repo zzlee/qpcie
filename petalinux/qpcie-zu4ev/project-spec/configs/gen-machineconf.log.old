@@ -1,12 +1,5 @@
 [DEBUG] Using xsct from : /opt/Xilinx/petalinux/2023.2/tools/xsct/bin/xsct
 [DEBUG] Using conf/mconf from : /opt/Xilinx/petalinux/2023.2/components/yocto/buildtools/sysroots/x86_64-petalinux-linux/usr/bin/mconf
-[INFO] Generating Kconfig for project
-[DEBUG] Running CMD: xsct -sdx -nodisp /home/zzlee/qpcie/petalinux/qpcie-zu4ev/components/yocto/layers/meta-xilinx/meta-xilinx-core/gen-machine-conf/gen-machine-scripts/hw-description.tcl plnx_gen_hwsysconf /home/zzlee/qpcie/petalinux/qpcie-zu4ev/project-spec/hw-description/system.xsa /home/zzlee/qpcie/petalinux/qpcie-zu4ev/project-spec/configs/configs/Kconfig.syshw
-[DEBUG] WARNING: sdtgen package cannot be loaded. System Device tree commands will not 
- be available
-INFO: [Hsi 55-2053] elapsed time for repository (/opt/Xilinx/petalinux/2023.2/tools/xsct/data/embeddedsw) loading 0 seconds
-hsi::open_hw_design: Time (s): cpu = 00:00:05 ; elapsed = 00:00:05 . Memory (MB): peak = 701.477 ; gain = 116.426 ; free physical = 30008 ; free virtual = 57736
-
 [INFO] Silentconfig project
 [DEBUG] Running CMD: yes "" | env KCONFIG_CONFIG=/home/zzlee/qpcie/petalinux/qpcie-zu4ev/project-spec/configs/config conf /home/zzlee/qpcie/petalinux/qpcie-zu4ev/project-spec/configs/configs/Kconfig
 [DEBUG] *
@@ -433,7 +426,7 @@ haveged (haveged) [N/y/?]
 *
 * i2c-tools 
 *
-i2c-tools (i2c-tools) [N/y/?] 
+i2c-tools (i2c-tools) [Y/n/?] 
 i2c-tools-dev (i2c-tools-dev) [N/y/?] 
 i2c-tools-misc (i2c-tools-misc) [N/y/?] 
 i2c-tools-dbg (i2c-tools-dbg) [N/y/?] 
@@ -550,7 +543,7 @@ shared-mime-info-data (shared-mime-info-data) [N/y/?]
 *
 * bash 
 *
-bash (bash) [N/y/?] 
+bash (bash) [Y/n/?] 
 bash-dbg (bash-dbg) [N/y/?] 
 bash-dev (bash-dev) [N/y/?] 
 *
@@ -2369,7 +2362,7 @@ hicolor-icon-theme-dbg (hicolor-icon-theme-dbg) [N/y/?]
 *
 * hdmi-module
 *
-kernel-module-hdmi (kernel-module-hdmi) [N/y/?] 
+kernel-module-hdmi (kernel-module-hdmi) [Y/n/?] 
 *
 * icu 
 *
@@ -3821,6 +3814,7 @@ choice[1-2]: *
 *
 gpio-demo (gpio-demo) [N/y/?] 
 peekpoke (peekpoke) [N/y/?] 
+qpcie-debugd (qpcie-debugd) [Y/n/?] 
 qpcie-v4l2-bridge (qpcie-v4l2-bridge) [Y/n/?] 
 *
 * PetaLinux RootFS Settings

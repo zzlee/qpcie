@@ -100,3 +100,7 @@ set_property PACKAGE_PIN AE17 [get_ports pl_clk_300m_n]
 set_property IOSTANDARD LVDS [get_ports pl_clk_300m_p]
 set_property IOSTANDARD LVDS [get_ports pl_clk_300m_n]
 create_clock -period 3.333 -name pl_clk_300m [get_ports pl_clk_300m_p]
+
+## 8. Diagnostic Probing CDC Max Delay Constraints
+set_max_delay -datapath_only 10.0 -from [get_cells -hierarchical -filter {NAME =~ *u_meter*/*snapshot_test_reg[*]}] -to [get_cells -hierarchical -filter {NAME =~ *u_meter*/*measured_freq_hz_reg[*] || NAME =~ *u_meter*/*raw_cycle_count_reg[*]}]
+set_max_delay -datapath_only 10.0 -from [get_cells -hierarchical -filter {NAME =~ *u_hdmi_probe/*beat_ch*_cnt_reg[*] || NAME =~ *u_hdmi_probe/*vid_*_cnt_reg[*]}] -to [get_cells -hierarchical -filter {NAME =~ *u_hdmi_probe/reg_probe_*_reg[*]}]

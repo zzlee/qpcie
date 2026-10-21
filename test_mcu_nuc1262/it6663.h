@@ -26,11 +26,11 @@ typedef struct {
     uint8_t  rev_id;            /* Revision ID: 0xA0 */
     uint8_t  temperature;       /* From NCT7717 */
     bool     hdmi_5v;           /* 5V Cable Detect */
-    bool     clock_locked;      /* TMDS Clock Lock (SCDT) */
-    bool     hdmi_mode;         /* 1: HDMI, 0: DVI */
-    uint16_t pixel_clk_mhz;     /* Measured pixel clock */
-    uint16_t h_active;          /* Horizontal active pixels */
-    uint16_t v_active;          /* Vertical active lines */
+    bool     clock_locked;      /* Checked clock + symbols + SCDT, never retained TX state */
+    bool     hdmi_mode;         /* Meaningful only while clock_locked */
+    uint16_t pixel_clk_mhz;     /* 0: not measured */
+    uint16_t h_active;          /* Checked raw H counter; 0 if invalid, no color scaling */
+    uint16_t v_active;          /* Checked raw V counter; 0 if invalid */
     uint8_t  num_slaves;        /* Total slaves detected on I2C1 */
     uint8_t  slaves[16];        /* List of detected slave addresses */
 } it6663_info_t;
@@ -41,6 +41,11 @@ void it6663_init(it6663_info_t *info);
 int  it6663_probe(it6663_info_t *info);
 void it6663_poll_status(it6663_info_t *info);
 int  it6663_update_edid(const uint8_t *edid256);
+int  it6663_rx_hpd(bool enable);
+void it6663_tx_setup(uint8_t tx_addr, bool is_hdmi, bool is_hdmi20);
+void it6663_tx_power_down(uint8_t tx_addr);
+void it6663_tx_vclk_reset(uint8_t tx_addr);
+void it6663_tx_scdc_write(uint8_t tx_addr, uint8_t offset, uint8_t val);
 
 int  i2c1_write(uint8_t addr, const uint8_t *data, uint32_t len);
 int  i2c1_read(uint8_t addr, uint8_t *data, uint32_t len);

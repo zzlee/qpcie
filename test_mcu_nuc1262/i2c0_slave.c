@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 #include "i2c0_slave.h"
+#include "i2c_proxy_response.h"
 #include "board.h"
 #include "it6663.h"
 #include "writer.h"
@@ -241,31 +242,21 @@ static void handle_rx_complete(void)
         }
     } else if (s_active_addr == (I2C_ADDR_PROXY << 1)) {
         uint8_t raw_tgt = s_rx_buf[0];
-        bool is_read = (raw_tgt & 1) != 0;
         uint8_t target_7b = raw_tgt >> 1;
-
-        if (!is_read) {
-            /* Master Write: [target_addr, data...] */
-            if (s_rx_len > 1) {
-                i2c1_write(target_7b, &s_rx_buf[1], s_rx_len - 1);
-            }
-        } else {
-            /* Master Read: [target_addr | 1, rx_len, offset...] */
-            if (s_rx_len >= 2) {
-                uint8_t rx_len = s_rx_buf[1];
-                if (rx_len > sizeof(g_i2c0.proxy_rx_buf))
-                    rx_len = sizeof(g_i2c0.proxy_rx_buf);
-
-                if (s_rx_len > 2) {
-                    i2c1_transfer(target_7b, &s_rx_buf[2], s_rx_len - 2,
-                                  (uint8_t *)g_i2c0.proxy_rx_buf, rx_len);
-                } else {
-                    i2c1_read(target_7b, (uint8_t *)g_i2c0.proxy_rx_buf, rx_len);
-                }
-                g_i2c0.proxy_rx_len = rx_len;
-                g_i2c0.proxy_rx_idx = 0;
-            }
+        int rc = -4;
+        g_i2c0.proxy_rx_len = 0;
+        g_i2c0.proxy_rx_idx = 0;
+        if (!(raw_tgt & 1)) {
+            if (s_rx_len > 1)
+                rc = i2c1_write(target_7b, &s_rx_buf[1], s_rx_len - 1);
+        } else if (s_rx_len >= 2 && s_rx_buf[1]
+                   && s_rx_buf[1] <= sizeof(g_i2c0.proxy_rx_buf)) {
+            uint8_t len = s_rx_buf[1];
+            rc = i2c1_transfer(target_7b, &s_rx_buf[2], s_rx_len - 2,
+                               (uint8_t *)g_i2c0.proxy_rx_buf, len);
+            g_i2c0.proxy_rx_len = len;
         }
+        g_i2c0.proxy_status = (uint8_t)-rc;
     } else if (s_active_addr == (I2C_ADDR_UPG << 1)) {
         handle_upg_cmd(s_rx_buf, s_rx_len);
     } else if (s_active_addr == (I2C_ADDR_EDID << 1)) {
@@ -318,9 +309,8 @@ void I2C0_IRQHandler(void)
                 tx_byte = g_i2c0.regs[s_reg_ptr++];
             }
         } else if (s_active_addr == (I2C_ADDR_PROXY << 1)) {
-            if (g_i2c0.proxy_rx_idx < g_i2c0.proxy_rx_len) {
-                tx_byte = g_i2c0.proxy_rx_buf[g_i2c0.proxy_rx_idx++];
-            }
+            tx_byte = i2c_proxy_next(g_i2c0.proxy_rx_buf, g_i2c0.proxy_rx_len,
+                                      &g_i2c0.proxy_rx_idx, g_i2c0.proxy_status);
         } else if (s_active_addr == (I2C_ADDR_UPG << 1)) {
             if (s_upg.resp_idx < s_upg.resp_len) {
                 tx_byte = s_upg.resp[s_upg.resp_idx++];
@@ -340,9 +330,8 @@ void I2C0_IRQHandler(void)
                 tx_byte = g_i2c0.regs[s_reg_ptr++];
             }
         } else if (s_active_addr == (I2C_ADDR_PROXY << 1)) {
-            if (g_i2c0.proxy_rx_idx < g_i2c0.proxy_rx_len) {
-                tx_byte = g_i2c0.proxy_rx_buf[g_i2c0.proxy_rx_idx++];
-            }
+            tx_byte = i2c_proxy_next(g_i2c0.proxy_rx_buf, g_i2c0.proxy_rx_len,
+                                      &g_i2c0.proxy_rx_idx, g_i2c0.proxy_status);
         } else if (s_active_addr == (I2C_ADDR_UPG << 1)) {
             if (s_upg.resp_idx < s_upg.resp_len) {
                 tx_byte = s_upg.resp[s_upg.resp_idx++];
