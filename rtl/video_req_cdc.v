@@ -55,7 +55,12 @@ module video_req_cdc #(
     localparam integer RD_COUNT_WIDTH  = $clog2(RD_DEPTH) + 1;
     localparam integer WR_COUNT_WIDTH  = $clog2(FIFO_DEPTH) + 1;
 
-    wire cdc_rst_n = wr_rst_n && rd_rst_n;
+    // Assert for either domain's reset; release only on that domain's clock.
+    wire wr_reset, rd_reset;
+    xpm_cdc_async_rst #(.DEST_SYNC_FF(4), .RST_ACTIVE_HIGH(1)) u_wr_reset (
+        .src_arst(!wr_rst_n || !rd_rst_n), .dest_clk(wr_clk), .dest_arst(wr_reset));
+    xpm_cdc_async_rst #(.DEST_SYNC_FF(4), .RST_ACTIVE_HIGH(1)) u_rd_reset (
+        .src_arst(!wr_rst_n || !rd_rst_n), .dest_clk(rd_clk), .dest_arst(rd_reset));
 
     // ---------------------------------------------------------------------
     // Header FIFO: carries {eof, dw_len[10:0], addr[63:0]} (76 bits)
@@ -75,7 +80,7 @@ module video_req_cdc #(
         .READ_MODE("fwft"),
         .FIFO_READ_LATENCY(0)
     ) u_hdr_fifo (
-        .rst            (!cdc_rst_n),
+        .rst            (wr_reset),
         .wr_clk         (wr_clk),
         .wr_en          (hdr_wr_en),
         .din            (hdr_din),
@@ -121,7 +126,7 @@ module video_req_cdc #(
         .WR_DATA_COUNT_WIDTH(WR_COUNT_WIDTH),
         .USE_ADV_FEATURES("1F1F")
     ) u_data_fifo (
-        .rst            (!cdc_rst_n),
+        .rst            (wr_reset),
         .wr_clk         (wr_clk),
         .wr_en          (data_wr_en),
         .din            (s_req_data),
@@ -159,10 +164,10 @@ module video_req_cdc #(
     assign data_wr_en = (wr_state == WR_DATA) && s_req_valid && s_req_data_ready;
 
     reg [15:0] pkt_pushed_bin = 16'd0;
-    wire [15:0] pkt_pushed_gray = (pkt_pushed_bin >> 1) ^ pkt_pushed_bin;
 
-    always @(posedge wr_clk or negedge cdc_rst_n) begin
-        if (!cdc_rst_n) begin
+
+    always @(posedge wr_clk or posedge wr_reset) begin
+        if (wr_reset) begin
             wr_state         <= WR_IDLE;
             wr_beats_left    <= 11'd0;
             s_req_data_ready <= 1'b0;
@@ -234,34 +239,16 @@ module video_req_cdc #(
     reg [1:0]  rd_state;
     reg [15:0] rd_started;
 
-    (* ASYNC_REG = "TRUE" *) reg [15:0] pkt_pushed_gray_sync1 = 16'd0;
-    (* ASYNC_REG = "TRUE" *) reg [15:0] pkt_pushed_gray_sync2 = 16'd0;
-    always @(posedge rd_clk or negedge cdc_rst_n) begin
-        if (!cdc_rst_n || data_rd_rst_busy) begin
-            pkt_pushed_gray_sync1 <= 16'd0;
-            pkt_pushed_gray_sync2 <= 16'd0;
-        end else begin
-            pkt_pushed_gray_sync1 <= pkt_pushed_gray;
-            pkt_pushed_gray_sync2 <= pkt_pushed_gray_sync1;
-        end
-    end
-
-    function [15:0] gray_to_bin;
-        input [15:0] gray;
-        integer i;
-        begin
-            gray_to_bin[15] = gray[15];
-            for (i = 14; i >= 0; i = i - 1)
-                gray_to_bin[i] = gray_to_bin[i + 1] ^ gray[i];
-        end
-    endfunction
-
-    wire [15:0] rd_completed = gray_to_bin(pkt_pushed_gray_sync2);
+    // Register Gray encoding before crossing. XPM supplies timing/skew bounds.
+    wire [15:0] rd_completed;
+    xpm_cdc_gray #(.WIDTH(16), .DEST_SYNC_FF(4), .INIT_SYNC_FF(1)) u_packets_cdc (
+        .src_clk(wr_clk), .src_in_bin(pkt_pushed_bin),
+        .dest_clk(rd_clk), .dest_out_bin(rd_completed));
 
     assign data_rd_en = m_req_valid && m_req_data_ready;
 
-    always @(posedge rd_clk or negedge cdc_rst_n) begin
-        if (!cdc_rst_n || data_rd_rst_busy) begin
+    always @(posedge rd_clk or posedge rd_reset) begin
+        if (rd_reset || data_rd_rst_busy) begin
             rd_state     <= RD_IDLE;
             rd_started   <= 16'd0;
             m_req_valid  <= 1'b0;

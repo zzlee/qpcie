@@ -17,6 +17,8 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/select.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -135,9 +137,41 @@ static void usage(const char *program)
            "      --source MODE      input source: 0=auto, 1=force TPG, 2=force HDMI RX\n"
            "      --timings          print HDMI RX QUERY_DV_TIMINGS and exit\n"
            "      --probe            control-plane probe only, no STREAMON\n"
+           "      --diag             print channel diagnostics at start/timeout\n"
            "      --help             show this help\n",
            program, DEFAULT_DEVICE, DEFAULT_FRAMES,
            DEFAULT_WIDTH, DEFAULT_HEIGHT, DEFAULT_BUFFERS);
+}
+
+static void dump_bar0_diag(int fd)
+{
+    static const char * const names[] = {
+        "ch0_status", "ch0_head", "ch0_tail", "ch0_frames", "ch0_drops",
+        "hdmi_status", "perf_stats"
+    };
+    struct stat st;
+    unsigned int i;
+
+    if (fstat(fd, &st) < 0) {
+        perror("diagnostic fstat");
+        return;
+    }
+    for (i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        char path[256], line[512];
+        FILE *f;
+
+        snprintf(path, sizeof(path), "/sys/dev/char/%u:%u/device/%s",
+                 major(st.st_rdev), minor(st.st_rdev), names[i]);
+        f = fopen(path, "r");
+        printf("[DIAG] %s:\n", names[i]);
+        if (!f) {
+            printf("  unavailable: %s\n", strerror(errno));
+            continue;
+        }
+        while (fgets(line, sizeof(line), f))
+            fputs(line, stdout);
+        fclose(f);
+    }
 }
 
 int main(int argc, char **argv)
@@ -148,7 +182,7 @@ int main(int argc, char **argv)
     unsigned int width = DEFAULT_WIDTH, height = DEFAULT_HEIGHT;
     int pattern = 9, fps = 60, probe_only = 0;
     int benchmark_mode = 0, frames_set = 0, streamoff_ok = 0;
-    int source = -1, timings_only = 0, geometry_set = 0;
+    int source = -1, timings_only = 0, geometry_set = 0, diag_mode = 0;
     int fd = -1, opt, rc = EXIT_FAILURE;
     struct v4l2_capability cap;
     struct v4l2_fmtdesc desc;
@@ -181,6 +215,7 @@ int main(int argc, char **argv)
         {"out", required_argument, NULL, 'o'},
         {"buffers", required_argument, NULL, 'n'},
         {"benchmark", no_argument, NULL, 'b'},
+        {"diag", no_argument, NULL, 'D'},
         {"source", required_argument, NULL, 'S'},
         {"timings", no_argument, NULL, 'T'},
         {"probe", no_argument, NULL, 'P'},
@@ -200,6 +235,7 @@ int main(int argc, char **argv)
         case 'o': output_name = optarg; break;
         case 'n': num_buffers = strtoul(optarg, NULL, 0); break;
         case 'b': benchmark_mode = 1; break;
+        case 'D': diag_mode = 1; break;
         case 'S': source = strtol(optarg, NULL, 0); break;
         case 'T': timings_only = 1; break;
         case 'P': probe_only = 1; break;
@@ -548,6 +584,8 @@ int main(int argc, char **argv)
     }
     printf("[PASS] STREAMON; capturing...\n");
     start_ms = monotonic_ms();
+    if (diag_mode)
+        dump_bar0_diag(fd);
 
     while (captured < frame_target) {
         fd_set readfds;
@@ -564,6 +602,10 @@ int main(int argc, char **argv)
         if (ready <= 0) {
             if (ready == 0) fprintf(stderr, "[FAIL] frame timeout\n");
             else perror("select");
+            if (diag_mode) {
+                printf("[DIAG] final state:\n");
+                dump_bar0_diag(fd);
+            }
             break;
         }
 

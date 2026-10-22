@@ -48,7 +48,7 @@ puts "   (GIT AUTO-INJECT) Commit Hash: 0x$git_raw, Build Date: $date_raw"
 add_files [glob ./rtl/*.v]
 set_property top zu4ev_pcie_card_top [current_fileset]
 # Full HDMI bring-up is a new hardware revision; debug04 remains unchanged.
-if {!$debug_profile} {set_property generic {C_VERSION=32'h26101906} [current_fileset]}
+if {!$debug_profile} {set_property generic {C_VERSION=32'h26102201} [current_fileset]}
 
 set verilog_defs [list GIT_COMMIT_HASH_DEF=$git_commit_hex BUILD_TIMESTAMP_DEF=$build_date_hex]
 if {$debug_profile} {lappend verilog_defs SC7F0_DEBUG_ONLY=1}

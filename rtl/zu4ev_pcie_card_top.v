@@ -17,7 +17,7 @@
 `timescale 1ns / 1ps
 
 module zu4ev_pcie_card_top #(
-    parameter [31:0] C_VERSION = 32'h2610_1906,
+    parameter [31:0] C_VERSION = 32'h2610_2201,
     parameter PCIE_DATA_WIDTH  = 256,
     parameter PCIE_KEEP_WIDTH  = PCIE_DATA_WIDTH / 32, // 8 DW keep for 256-bit
     parameter NUM_VIDEO_CH     = 4,
@@ -148,7 +148,7 @@ module zu4ev_pcie_card_top #(
         .m_axi_rvalid(hdmi_ctl_rvalid), .m_axi_rready(hdmi_ctl_rready)
     );
 
-    // 300MHz Multimedia Clock Domain (Reserved for future)
+    // Si5341 OUT8: 300 MHz. Divide locally for a 150 MHz capture domain.
     wire pl_clk_300m_ibufg;
     wire pl_clk_300m;
     wire sys_300m_rst_n;
@@ -207,6 +207,22 @@ module zu4ev_pcie_card_top #(
     wire video_pipeline_rst_n = pcie_user_rst_n && !video_pipeline_reset_sync[1];
     wire video_tpg_rst_n      = video_pipeline_rst_n && !video_tpg_reset_sync[1];
     wire video_engine_rst_n   = video_pipeline_rst_n && !video_engine_reset_sync[1];
+
+    wire capture_clk, capture_rst_n;
+    wire video_capture_active;
+`ifdef SC7F0_DEBUG_ONLY
+    assign capture_clk = pcie_user_clk;
+    assign capture_rst_n = video_engine_rst_n;
+`else
+    BUFGCE_DIV #(.BUFGCE_DIVIDE(2)) u_capture_clock (
+        .I(pl_clk_300m_ibufg), .CE(1'b1), .CLR(!sys_300m_rst_n),
+        .O(capture_clk));
+    wire capture_reset;
+    xpm_cdc_async_rst #(.DEST_SYNC_FF(4), .RST_ACTIVE_HIGH(1)) u_capture_reset (
+        .src_arst(!video_engine_rst_n || !sys_300m_rst_n),
+        .dest_clk(capture_clk), .dest_arst(capture_reset));
+    assign capture_rst_n = !capture_reset;
+`endif
 
     // =========================================================================
     // BAR1 AXI4-Lite Master Interconnect Wires
@@ -904,77 +920,33 @@ module zu4ev_pcie_card_top #(
         .VIDEO_OUT_tvalid      (rx_ss_video_tvalid)
     );
 
-    // Ch 0: Native HDMI RX Video Stream CDC FIFO (phy_rx_video_clk -> pcie_user_clk)
+    // Ch 0: HDMI 148.5 MHz -> capture 150 MHz, NOT PCIe 125 MHz.
     wire [127:0] hdmi_rx_v_tdata;
     wire         hdmi_rx_v_tvalid;
     wire         hdmi_rx_v_tready;
     wire         hdmi_rx_v_tlast;
     wire         hdmi_rx_v_tuser;
 
-    // Pack 4 PPC native video: 96-bit {P3, P2, P1, P0} -> 128-bit little-endian
-    wire [127:0] rx_video_packed_tdata = {
-        8'hFF, rx_ss_video_tdata[95:88], rx_ss_video_tdata[87:80], rx_ss_video_tdata[79:72], // P3
-        8'hFF, rx_ss_video_tdata[71:64], rx_ss_video_tdata[63:56], rx_ss_video_tdata[55:48], // P2
-        8'hFF, rx_ss_video_tdata[47:40], rx_ss_video_tdata[39:32], rx_ss_video_tdata[31:24], // P1
-        8'hFF, rx_ss_video_tdata[23:16], rx_ss_video_tdata[15:8],  rx_ss_video_tdata[7:0]    // P0
-    };
+    // The host rejects incompatible input/descriptor color formats. Transfer
+    // this quasi-static RGB selector into the RX pixel clock domain.
+    wire rx_pack_rgb;
+    xpm_cdc_single #(.DEST_SYNC_FF(4), .SRC_INPUT_REG(1)) u_rx_pack_mode (
+        .src_clk(pcie_user_clk), .src_in(vch0_ctrl_w[7:4] == 4'd1),
+        .dest_clk(phy_rx_video_clk), .dest_out(rx_pack_rgb));
+    wire [127:0] rx_video_packed_tdata;
+    hdmi_rx_pixel_pack u_rx_pixel_pack (
+        .native_data(rx_ss_video_tdata), .rgb_mode(rx_pack_rgb),
+        .dma_data(rx_video_packed_tdata));
 
-    wire rx_fifo_full, rx_fifo_empty, rx_fifo_wr_busy, rx_fifo_rd_busy;
-    assign rx_ss_video_tready = !rx_fifo_full && !rx_fifo_wr_busy && !rx_video_rst;
-    wire rx_fifo_wr_en = rx_ss_video_tvalid && rx_ss_video_tready;
-    wire rx_fifo_rd_en = hdmi_rx_v_tready && hdmi_rx_v_tvalid;
-
-    wire [129:0] rx_fifo_din = {rx_ss_video_tuser, rx_ss_video_tlast, rx_video_packed_tdata};
-    wire [129:0] rx_fifo_dout;
-
-    assign hdmi_rx_v_tvalid = !rx_fifo_empty && !rx_fifo_rd_busy && video_engine_rst_n;
-    assign hdmi_rx_v_tuser  = rx_fifo_dout[129];
-    assign hdmi_rx_v_tlast  = rx_fifo_dout[128];
-    assign hdmi_rx_v_tdata  = rx_fifo_dout[127:0];
-
-    xpm_fifo_async #(
-        .CDC_SYNC_STAGES     (4),
-        .DOUT_RESET_VALUE    ("0"),
-        .ECC_MODE            ("no_ecc"),
-        .FIFO_MEMORY_TYPE    ("block"),
-        .FIFO_READ_LATENCY   (0),
-        .FIFO_WRITE_DEPTH    (1024),
-        .READ_DATA_WIDTH     (130),
-        .READ_MODE           ("fwft"),
-        .RELATED_CLOCKS      (0),
-        .SIM_ASSERT_CHK      (0),
-        .USE_ADV_FEATURES    ("0707"),
-        .WAKEUP_TIME         (0),
-        .WRITE_DATA_WIDTH    (130),
-        .WR_DATA_COUNT_WIDTH (11),
-        .RD_DATA_COUNT_WIDTH (11)
-    ) u_hdmi_rx_video_cdc_fifo (
-        .injectsbiterr  (1'b0),
-        .injectdbiterr  (1'b0),
-        .sleep         (1'b0),
-        .rst           (rx_video_rst),
-        .wr_clk        (phy_rx_video_clk),
-        .wr_en         (rx_fifo_wr_en),
-        .din           (rx_fifo_din),
-        .full          (rx_fifo_full),
-        .prog_full     (),
-        .wr_data_count (),
-        .overflow      (),
-        .wr_rst_busy   (rx_fifo_wr_busy),
-        .almost_full   (),
-        .wr_ack        (),
-        .rd_clk        (pcie_user_clk),
-        .rd_en         (rx_fifo_rd_en),
-        .dout          (rx_fifo_dout),
-        .empty         (rx_fifo_empty),
-        .prog_empty    (),
-        .rd_data_count (),
-        .underflow     (),
-        .rd_rst_busy   (rx_fifo_rd_busy),
-        .almost_empty  (),
-        .data_valid    (),
-        .dbiterr       (),
-        .sbiterr       ()
+    video_axis_async_fifo #(.DEPTH(1024)) u_hdmi_rx_video_cdc_fifo (
+        .s_clk(phy_rx_video_clk), .s_rst_n(!rx_video_rst),
+        .s_data(rx_video_packed_tdata), .s_valid(rx_ss_video_tvalid),
+        .s_sof(rx_ss_video_tuser), .s_eol(rx_ss_video_tlast),
+        .s_ready(rx_ss_video_tready),
+        .m_clk(capture_clk), .m_rst_n(capture_rst_n),
+        .m_data(hdmi_rx_v_tdata), .m_valid(hdmi_rx_v_tvalid),
+        .m_sof(hdmi_rx_v_tuser), .m_eol(hdmi_rx_v_tlast),
+        .m_ready(hdmi_rx_v_tready)
     );
 
     // Synchronize 5V Cable Detect & HPD status to pcie_user_clk
@@ -1279,14 +1251,34 @@ module zu4ev_pcie_card_top #(
                        (!sync_5v_det_q[1] && (vch0_ctrl_w[21:20] != 2'b10));
 `endif
 
-    wire [127:0] video_ch0_mux_tdata  = ch0_use_tpg ? tpg_capture_tdata  : hdmi_rx_v_tdata;
-    wire         video_ch0_mux_tvalid = ch0_use_tpg ? tpg_capture_tvalid : hdmi_rx_v_tvalid;
-    wire         video_ch0_mux_tlast  = ch0_use_tpg ? tpg_capture_tlast  : hdmi_rx_v_tlast;
-    wire         video_ch0_mux_tuser  = ch0_use_tpg ? tpg_capture_tuser  : hdmi_rx_v_tuser;
+    // Source changes are allowed only while stopped. Audio retains the
+    // PCIe-domain selector; video gets its own synchronized selector.
+    wire capture_use_tpg;
+    xpm_cdc_single #(.DEST_SYNC_FF(4), .SRC_INPUT_REG(1)) u_capture_source (
+        .src_clk(pcie_user_clk), .src_in(ch0_use_tpg),
+        .dest_clk(capture_clk), .dest_out(capture_use_tpg));
+    wire [127:0] tpg_cdc_data;
+    wire tpg_cdc_valid, tpg_cdc_sof, tpg_cdc_eol, tpg_cdc_ready;
+    video_axis_async_fifo #(.DEPTH(32), .MEMORY_TYPE("distributed")) u_tpg_video_cdc (
+        .s_clk(pcie_user_clk), .s_rst_n(video_engine_rst_n),
+        .s_data(tpg_capture_tdata), .s_valid(tpg_capture_tvalid),
+        .s_sof(tpg_capture_tuser), .s_eol(tpg_capture_tlast),
+        .s_ready(tpg_capture_tready),
+        .m_clk(capture_clk), .m_rst_n(capture_rst_n),
+        .m_data(tpg_cdc_data), .m_valid(tpg_cdc_valid),
+        .m_sof(tpg_cdc_sof), .m_eol(tpg_cdc_eol), .m_ready(tpg_cdc_ready)
+    );
+    wire [127:0] video_ch0_mux_tdata  = capture_use_tpg ? tpg_cdc_data  : hdmi_rx_v_tdata;
+    wire         video_ch0_mux_tvalid = capture_use_tpg ? tpg_cdc_valid : hdmi_rx_v_tvalid;
+    wire         video_ch0_mux_tlast  = capture_use_tpg ? tpg_cdc_eol   : hdmi_rx_v_tlast;
+    wire         video_ch0_mux_tuser  = capture_use_tpg ? tpg_cdc_sof   : hdmi_rx_v_tuser;
     wire         video_ch0_mux_tready;
 
-    assign tpg_capture_tready = ch0_use_tpg ? video_ch0_mux_tready : 1'b0;
-    assign hdmi_rx_v_tready   = ch0_use_tpg ? 1'b1                  : video_ch0_mux_tready;
+    assign tpg_cdc_ready = capture_use_tpg ? video_ch0_mux_tready : 1'b1;
+    // Live TMDS cannot be backpressured. Drain unowned frames continuously;
+    // the engine consumes/discards a partial raster until the next SOF.
+    assign hdmi_rx_v_tready = (capture_use_tpg || !video_capture_active) ?
+                             1'b1 : video_ch0_mux_tready;
 
     // =========================================================================
     // 4-Channel Dedicated Datapath Wiring:
@@ -1924,8 +1916,9 @@ module zu4ev_pcie_card_top #(
         .s_axis_video_tuser(s_video_tuser),
         .s_axis_video_tready(s_video_tready),
 
-        .video_clk(pcie_user_clk),
-        .video_rst_n(video_engine_rst_n),
+        .video_clk(capture_clk),
+        .video_rst_n(capture_rst_n),
+        .video_capture_active(video_capture_active),
         .video_ch0_tdata(video_ch0_mux_tdata),
         .video_ch0_tvalid(video_ch0_mux_tvalid),
         .video_ch0_tlast(video_ch0_mux_tlast),

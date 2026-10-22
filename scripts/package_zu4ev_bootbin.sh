@@ -15,11 +15,14 @@ else
     PROJ_BUILD_DIR="$ROOT_DIR/build/qpcie_zu4ev_proj"
 fi
 
-SINGLE_BIT="$PROJ_BUILD_DIR/qpcie_zu4ev_card.runs/impl_1/zu4ev_pcie_card_top.bit"
-TANDEM1_BIT="$PROJ_BUILD_DIR/qpcie_zu4ev_card.runs/impl_1/zu4ev_pcie_card_top_tandem1.bit"
-TANDEM2_BIT="$PROJ_BUILD_DIR/qpcie_zu4ev_card.runs/impl_1/zu4ev_pcie_card_top_tandem2.bit"
+IMPL_DIR="${SC7F0_IMPL_DIR:-$PROJ_BUILD_DIR/qpcie_zu4ev_card.runs/impl_1}"
+SINGLE_BIT="$IMPL_DIR/zu4ev_pcie_card_top.bit"
+TANDEM1_BIT="$IMPL_DIR/zu4ev_pcie_card_top_tandem1.bit"
+TANDEM2_BIT="$IMPL_DIR/zu4ev_pcie_card_top_tandem2.bit"
 
-IMG_DIR="$ROOT_DIR/petalinux/qpcie-zu4ev/images/linux"
+# An isolated input/output directory preserves the validated HDMI07 artifacts.
+IMG_DIR="${SC7F0_IMG_DIR:-$ROOT_DIR/petalinux/qpcie-zu4ev/images/linux}"
+IMG_DIR="$(realpath "$IMG_DIR")"
 BIF_FILE="$IMG_DIR/bootgen.bif"
 OUT_BOOTBIN="$IMG_DIR/BOOT.BIN"
 
@@ -52,29 +55,29 @@ if [ -f "$SINGLE_BIT" ]; then
 // Monolithic Bitstream BIF
 the_ROM_image:
 {
-	[bootloader, destination_cpu=a53-0] images/linux/zynqmp_fsbl.elf
-	[pmufw_image] images/linux/pmufw.elf
-	[destination_device=pl] images/linux/zu4ev_pcie_card_top.bit
-	[destination_cpu=a53-0, exception_level=el-3, trustzone] images/linux/bl31.elf
-	[destination_cpu=a53-0, load=0x00100000] images/linux/system.dtb
-	[destination_cpu=a53-0, exception_level=el-2] images/linux/u-boot.elf
+	[bootloader, destination_cpu=a53-0] $IMG_DIR/zynqmp_fsbl.elf
+	[pmufw_image] $IMG_DIR/pmufw.elf
+	[destination_device=pl] $IMG_DIR/zu4ev_pcie_card_top.bit
+	[destination_cpu=a53-0, exception_level=el-3, trustzone] $IMG_DIR/bl31.elf
+	[destination_cpu=a53-0, load=0x00100000] $IMG_DIR/system.dtb
+	[destination_cpu=a53-0, exception_level=el-2] $IMG_DIR/u-boot.elf
 }
 EOF
 elif [ -f "$TANDEM1_BIT" ] && [ -f "$TANDEM2_BIT" ]; then
     echo "[1/3] Using Two-Stage Tandem Bitstreams..."
     cp -v "$TANDEM1_BIT" "$IMG_DIR/zu4ev_pcie_card_top_tandem1.bit"
     cp -v "$TANDEM2_BIT" "$IMG_DIR/zu4ev_pcie_card_top_tandem2.bit"
-    cat << 'EOF' > "$BIF_FILE"
+    cat << EOF > "$BIF_FILE"
 // Two-Stage Tandem PCIe BIF
 the_ROM_image:
 {
-	[bootloader, destination_cpu=a53-0] images/linux/zynqmp_fsbl.elf
-	[pmufw_image] images/linux/pmufw.elf
-	[destination_device=pl] images/linux/zu4ev_pcie_card_top_tandem1.bit
-	[destination_device=pl] images/linux/zu4ev_pcie_card_top_tandem2.bit
-	[destination_cpu=a53-0, exception_level=el-3, trustzone] images/linux/bl31.elf
-	[destination_cpu=a53-0, load=0x00100000] images/linux/system.dtb
-	[destination_cpu=a53-0, exception_level=el-2] images/linux/u-boot.elf
+	[bootloader, destination_cpu=a53-0] $IMG_DIR/zynqmp_fsbl.elf
+	[pmufw_image] $IMG_DIR/pmufw.elf
+	[destination_device=pl] $IMG_DIR/zu4ev_pcie_card_top_tandem1.bit
+	[destination_device=pl] $IMG_DIR/zu4ev_pcie_card_top_tandem2.bit
+	[destination_cpu=a53-0, exception_level=el-3, trustzone] $IMG_DIR/bl31.elf
+	[destination_cpu=a53-0, load=0x00100000] $IMG_DIR/system.dtb
+	[destination_cpu=a53-0, exception_level=el-2] $IMG_DIR/u-boot.elf
 }
 EOF
 else

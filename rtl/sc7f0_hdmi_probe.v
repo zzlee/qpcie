@@ -51,12 +51,14 @@ module sc7f0_freq_meter #(
         else if (sample_req_pulse) req_toggle <= ~req_toggle;
     end
 
-    // Synchronize req_toggle into test_clk domain
-    (* ASYNC_REG = "TRUE" *) reg [2:0] req_sync = 3'b000;
-    always @(posedge test_clk) begin
-        req_sync <= {req_sync[1:0], req_toggle};
-    end
-    wire req_event = (req_sync[2] ^ req_sync[1]);
+    // The snapshot bus is held until the next one-second request.
+    wire req_sync;
+    reg req_seen = 1'b0;
+    xpm_cdc_single #(.DEST_SYNC_FF(3), .SRC_INPUT_REG(1), .INIT_SYNC_FF(1)) u_req_cdc (
+        .src_clk(ref_clk), .src_in(req_toggle),
+        .dest_clk(test_clk), .dest_out(req_sync));
+    always @(posedge test_clk) req_seen <= req_sync;
+    wire req_event = req_sync ^ req_seen;
 
     reg [31:0] snapshot_test = 32'd0;
     reg ack_toggle = 1'b0;
@@ -67,13 +69,16 @@ module sc7f0_freq_meter #(
         end
     end
 
-    // Synchronize ack_toggle back into ref_clk domain
-    (* ASYNC_REG = "TRUE" *) reg [2:0] ack_sync = 3'b000;
+    wire ack_sync;
+    reg ack_seen = 1'b0;
+    xpm_cdc_single #(.DEST_SYNC_FF(3), .SRC_INPUT_REG(1), .INIT_SYNC_FF(1)) u_ack_cdc (
+        .src_clk(test_clk), .src_in(ack_toggle),
+        .dest_clk(ref_clk), .dest_out(ack_sync));
     always @(posedge ref_clk or negedge ref_rst_n) begin
-        if (!ref_rst_n) ack_sync <= 3'b000;
-        else ack_sync <= {ack_sync[1:0], ack_toggle};
+        if (!ref_rst_n) ack_seen <= 1'b0;
+        else ack_seen <= ack_sync;
     end
-    wire ack_event = (ack_sync[2] ^ ack_sync[1]);
+    wire ack_event = ack_sync ^ ack_seen;
 
     reg [31:0] prev_snapshot = 32'd0;
     reg [31:0] watchdog = 32'd0;
@@ -177,8 +182,8 @@ module sc7f0_hdmi_probe (
     output reg  [31:0] reg_probe_raw_refclk100
 );
 
-    // Version Tag: YYMMDDpp = 26102001 (Magic / Probing Feature ABI v1.0)
-    assign reg_probe_version = 32'h2610_2001;
+    // Transfer-gated counters and synchronized diagnostic readout.
+    assign reg_probe_version = 32'h2610_2201;
 
     // -------------------------------------------------------------------------
     // 1-Second Gate Generator (based on 99,990,005 Hz pl_clk0)
@@ -356,7 +361,8 @@ module sc7f0_hdmi_probe (
     end
 
     // Pin Level Register mapping
-    assign reg_probe_pins = {
+    // Independent diagnostic levels, not an atomic multi-signal snapshot.
+    wire [31:0] raw_probe_pins = {
         rx_ss_video_tlast,          // [31]
         rx_ss_video_tuser,          // [30]
         rx_ss_video_tready,         // [29]
@@ -383,6 +389,11 @@ module sc7f0_hdmi_probe (
         hpd_sync[1],                // [1]
         det5v_sync[1]               // [0]
     };
+
+    xpm_cdc_array_single #(.WIDTH(32), .DEST_SYNC_FF(3), .SRC_INPUT_REG(0),
+                           .INIT_SYNC_FF(1)) u_pin_levels_cdc (
+        .src_clk(clk), .src_in(raw_probe_pins),
+        .dest_clk(clk), .dest_out(reg_probe_pins));
 
     assign reg_probe_pulse_cnt1 = {hpd_edge_cnt, det5v_edge_cnt};
     assign reg_probe_ddc_cnt    = {sda_edge_cnt, scl_fall_cnt};
@@ -414,7 +425,21 @@ module sc7f0_hdmi_probe (
         if (rx_ss_video_tvalid && rx_ss_video_tready) vid_pix_cnt <= vid_pix_cnt + 1'b1;
     end
 
-    // Snapshot into clk (pl_clk0) domain on each 1-second gate
+    // Each counter crosses independently; the six values are not atomic.
+    wire [31:0] beats0_sync, beats1_sync, beats2_sync;
+    wire [31:0] sof_sync, eol_sync, pixels_sync;
+    xpm_cdc_gray #(.WIDTH(32), .DEST_SYNC_FF(4), .INIT_SYNC_FF(1)) u_beats0_cdc (
+        .src_clk(clk_rxout), .src_in_bin(beat_ch0_cnt), .dest_clk(clk), .dest_out_bin(beats0_sync));
+    xpm_cdc_gray #(.WIDTH(32), .DEST_SYNC_FF(4), .INIT_SYNC_FF(1)) u_beats1_cdc (
+        .src_clk(clk_rxout), .src_in_bin(beat_ch1_cnt), .dest_clk(clk), .dest_out_bin(beats1_sync));
+    xpm_cdc_gray #(.WIDTH(32), .DEST_SYNC_FF(4), .INIT_SYNC_FF(1)) u_beats2_cdc (
+        .src_clk(clk_rxout), .src_in_bin(beat_ch2_cnt), .dest_clk(clk), .dest_out_bin(beats2_sync));
+    xpm_cdc_gray #(.WIDTH(32), .DEST_SYNC_FF(4), .INIT_SYNC_FF(1)) u_sof_cdc (
+        .src_clk(clk_rx_video), .src_in_bin(vid_sof_cnt), .dest_clk(clk), .dest_out_bin(sof_sync));
+    xpm_cdc_gray #(.WIDTH(32), .DEST_SYNC_FF(4), .INIT_SYNC_FF(1)) u_eol_cdc (
+        .src_clk(clk_rx_video), .src_in_bin(vid_eol_cnt), .dest_clk(clk), .dest_out_bin(eol_sync));
+    xpm_cdc_gray #(.WIDTH(32), .DEST_SYNC_FF(4), .INIT_SYNC_FF(1)) u_pixels_cdc (
+        .src_clk(clk_rx_video), .src_in_bin(vid_pix_cnt), .dest_clk(clk), .dest_out_bin(pixels_sync));
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             reg_probe_ch0_beats    <= 32'd0;
@@ -424,12 +449,12 @@ module sc7f0_hdmi_probe (
             reg_probe_rx_video_eol <= 32'd0;
             reg_probe_rx_video_pix <= 32'd0;
         end else if (sample_req_1s) begin
-            reg_probe_ch0_beats    <= beat_ch0_cnt;
-            reg_probe_ch1_beats    <= beat_ch1_cnt;
-            reg_probe_ch2_beats    <= beat_ch2_cnt;
-            reg_probe_rx_video_sof <= vid_sof_cnt;
-            reg_probe_rx_video_eol <= vid_eol_cnt;
-            reg_probe_rx_video_pix <= vid_pix_cnt;
+            reg_probe_ch0_beats    <= beats0_sync;
+            reg_probe_ch1_beats    <= beats1_sync;
+            reg_probe_ch2_beats    <= beats2_sync;
+            reg_probe_rx_video_sof <= sof_sync;
+            reg_probe_rx_video_eol <= eol_sync;
+            reg_probe_rx_video_pix <= pixels_sync;
         end
     end
 

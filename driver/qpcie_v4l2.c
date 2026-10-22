@@ -364,7 +364,10 @@ static int qpcie_vidioc_s_fmt_vid_cap_mplane(struct file *file, void *priv,
 
     pattern_ctrl = v4l2_ctrl_find(&vch->ctrl_handler,
                                   V4L2_CID_TEST_PATTERN);
-    if (pattern_ctrl) {
+    if (pattern_ctrl && vch->channel_id == 0 &&
+        (vch->video_source == 1 ||
+         (vch->video_source == 0 &&
+          !(ioread32(vch->qdev->bar0_mmio + REG_HDMI_RX_STATUS) & HDMI_RX_STATUS_5V_DET)))) {
         pattern_id = qpcie_tpg_pattern_id(pattern_ctrl->val);
         ret = qpcie_program_tpg(vch, pattern_id, true);
         if (ret) {
@@ -573,6 +576,20 @@ static bool qpcie_hdmi_source_ready(struct qpcie_v4l2_channel *vch, int *err)
     }
     if (!qpcie_hdmi_telemetry_fresh(qdev, t.heartbeat)) {
         *err = -EAGAIN;
+        return false;
+    }
+    /* The frontend repacks RGB or subsamples YUV444; it has no color-space
+     * converter, 422/420 expander, deep-color or interlaced support.
+     */
+    if (!(t.flags & HDMI_TLM_F_COLOR_VALID) ||
+        (t.flags & HDMI_TLM_F_INTERLACED) ||
+        ((t.color_fmt >> 20) & 0xf) != 8 ||
+        ((t.color_fmt >> 24) & 0xf) !=
+            (vch->pixelformat == V4L2_PIX_FMT_RGB24 ? 0 : 1)) {
+        dev_err(&qdev->pdev->dev,
+                "HDMI format unsupported: color=0x%08x mbus=0x%x requested=0x%x; use RGB24 for RGB8 or NV12M for YUV444/8, progressive only\n",
+                t.color_fmt, t.mbus_code, vch->pixelformat);
+        *err = -EOPNOTSUPP;
         return false;
     }
     return true;
@@ -1034,6 +1051,32 @@ static void qpcie_return_all_buffers(struct qpcie_v4l2_channel *vch,
     }
 }
 
+/* Initial QBUF publishes descriptors before start_streaming validates HDMI.
+ * On a pre-enable rejection, cancel those doorbells BEFORE returning buffers;
+ * otherwise the next STREAMON can fetch addresses from already-freed buffers.
+ * This helper is only called before this start attempt enables the channel.
+ */
+static void qpcie_cancel_unstarted_rings(struct qpcie_v4l2_channel *vch)
+{
+    struct qpcie_dev *qdev = vch->qdev;
+    u32 head;
+
+    if (!vch->thin_ring_virt)
+        return;
+    head = ioread32(qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING0_HEAD) & 0xffff;
+    vch->thin_ring_head = vch->thin_ring_tail = head;
+    iowrite32((head << 16) | RING_BUFFER_SIZE,
+              qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING0_CFG);
+    ioread32(qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING0_CFG);
+    if (vch->thin_ring1_virt) {
+        head = ioread32(qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING1_HEAD) & 0xffff;
+        vch->thin_ring1_head = vch->thin_ring1_tail = head;
+        iowrite32((head << 16) | RING_BUFFER_SIZE,
+                  qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING1_CFG);
+        ioread32(qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING1_CFG);
+    }
+}
+
 static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
 {
     struct qpcie_v4l2_channel *vch = vb2_get_drv_priv(vq);
@@ -1043,6 +1086,7 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
     int ret;
 
     if (count < 2) {
+        qpcie_cancel_unstarted_rings(vch);
         qpcie_return_all_buffers(vch, VB2_BUF_STATE_QUEUED);
         return -ENOBUFS;
     }
@@ -1067,6 +1111,7 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
                     dev_err(&qdev->pdev->dev,
                             "STREAMON refused: HDMI RX source not ready (5V=0x%08x, err=%d)\n",
                             st, src_err);
+                qpcie_cancel_unstarted_rings(vch);
                 qpcie_return_all_buffers(vch, VB2_BUF_STATE_QUEUED);
                 return src_err;
             }
@@ -1254,8 +1299,9 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
         iowrite32(0x00, tpg + 0x00);
     }
 
-    /* 2. Stop fetching descriptors for this channel immediately. */
-    iowrite32(0, qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_CTRL);
+    /* 2. Stop descriptor fetch without switching the mux in mid-frame. */
+    iowrite32(ioread32(qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_CTRL) & ~BIT(0),
+              qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_CTRL);
     ioread32(qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_CTRL);
 
     /* 3. Wait for in-flight C2H writes to retire. */
@@ -1421,6 +1467,10 @@ static int qpcie_s_ctrl(struct v4l2_ctrl *ctrl)
         }
         break;
     case V4L2_CID_QPCIE_VIDEO_SOURCE:
+        /* The mux selector crosses as a quasi-static level. Switching source
+         * inside a frame would splice two rasters into one host buffer. */
+        if (vb2_is_streaming(&vch->queue) && vch->video_source != ctrl->val)
+            return -EBUSY;
         vch->video_source = ctrl->val;
         if (qdev && qdev->bar0_mmio && vch->ch_reg_base) {
             u32 cur_ctrl = ioread32(qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_CTRL);

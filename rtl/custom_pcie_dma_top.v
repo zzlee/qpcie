@@ -103,6 +103,7 @@ module custom_pcie_dma_top #(
     input  wire                                             video_ch0_tlast,
     input  wire                                             video_ch0_tuser,
     output wire                                             video_ch0_tready,
+    output wire                                             video_capture_active, // video_clk domain
 
     output wire [(NUM_VIDEO_CH*VIDEO_DATA_WIDTH)-1:0]       m_axis_video_tdata,
     output wire [NUM_VIDEO_CH-1:0]                          m_axis_video_tvalid,
@@ -456,6 +457,12 @@ module custom_pcie_dma_top #(
     wire        global_reset_pulse_w; // From axil_reg_space BAR0[0x14] — flushes DMA-domain FIFOs
     wire        dma_rst_n = rst_n && !reg_dma_ctrl[1] && !global_reset_pulse_w;
 
+    // XPM async FIFOs require reset release synchronous to their write clock.
+    wire video_cdc_reset_pcie;
+    xpm_cdc_async_rst #(.DEST_SYNC_FF(4), .RST_ACTIVE_HIGH(1)) u_video_fifo_reset (
+        .src_arst(!dma_rst_n || !video_rst_n),
+        .dest_clk(clk), .dest_arst(video_cdc_reset_pcie));
+
     wire [31:0] reg_irq_status_w1c;
     wire [31:0] reg_slice_height;
     wire [31:0] reg_video_ctrl;
@@ -484,21 +491,6 @@ module custom_pcie_dma_top #(
     wire       sof_pulse  = video_transfer && video_ch0_tuser;
     wire       eol_pulse  = video_transfer && video_ch0_tlast;
 
-    function [31:0] gray_to_bin;
-        input [31:0] g;
-        integer i;
-        reg [31:0] b;
-        begin
-            b[31] = g[31];
-            for (i = 30; i >= 0; i = i - 1)
-                b[i] = b[i+1] ^ g[i];
-            gray_to_bin = b;
-        end
-    endfunction
-
-    reg [31:0] sof_gray_v  = 32'd0;
-    reg [31:0] eol_gray_v  = 32'd0;
-    reg [31:0] beat_gray_v = 32'd0;
     reg [31:0] sof_bin_v   = 32'd0;
     reg [31:0] eol_bin_v   = 32'd0;
     reg [31:0] beat_bin_v  = 32'd0;
@@ -509,42 +501,33 @@ module custom_pcie_dma_top #(
 
     always @(posedge video_clk or negedge video_rst_n) begin
         if (!video_rst_n) begin
-            sof_gray_v  <= 32'd0;
-            eol_gray_v  <= 32'd0;
-            beat_gray_v <= 32'd0;
             sof_bin_v   <= 32'd0;
             eol_bin_v   <= 32'd0;
             beat_bin_v  <= 32'd0;
         end else begin
             if (sof_pulse) begin
                 sof_bin_v   <= sof_bin_next;
-                sof_gray_v  <= (sof_bin_next >> 1) ^ sof_bin_next;
             end
             if (eol_pulse) begin
                 eol_bin_v   <= eol_bin_next;
-                eol_gray_v  <= (eol_bin_next >> 1) ^ eol_bin_next;
             end
             if (video_transfer) begin
                 beat_bin_v  <= beat_bin_next;
-                beat_gray_v <= (beat_bin_next >> 1) ^ beat_bin_next;
             end
         end
     end
 
-    (* ASYNC_REG = "TRUE" *) reg [31:0] sof_gray_sync1 = 32'd0;
-    (* ASYNC_REG = "TRUE" *) reg [31:0] sof_gray_sync2 = 32'd0;
-    (* ASYNC_REG = "TRUE" *) reg [31:0] eol_gray_sync1 = 32'd0;
-    (* ASYNC_REG = "TRUE" *) reg [31:0] eol_gray_sync2 = 32'd0;
-    (* ASYNC_REG = "TRUE" *) reg [31:0] beat_gray_sync1 = 32'd0;
-    (* ASYNC_REG = "TRUE" *) reg [31:0] beat_gray_sync2 = 32'd0;
-    always @(posedge clk) begin
-        sof_gray_sync1  <= sof_gray_v;
-        sof_gray_sync2  <= sof_gray_sync1;
-        eol_gray_sync1  <= eol_gray_v;
-        eol_gray_sync2  <= eol_gray_sync1;
-        beat_gray_sync1 <= beat_gray_v;
-        beat_gray_sync2 <= beat_gray_sync1;
-    end
+    // XPM supplies the per-bit CDC timing/skew constraints. These clocks
+    // are genuinely asynchronous in HDMI08, rather than both PCIe user_clk.
+    xpm_cdc_gray #(.WIDTH(32), .DEST_SYNC_FF(4), .INIT_SYNC_FF(1)) u_sof_count_cdc (
+        .src_clk(video_clk), .src_in_bin(sof_bin_v),
+        .dest_clk(clk), .dest_out_bin(reg_sof_count));
+    xpm_cdc_gray #(.WIDTH(32), .DEST_SYNC_FF(4), .INIT_SYNC_FF(1)) u_eol_count_cdc (
+        .src_clk(video_clk), .src_in_bin(eol_bin_v),
+        .dest_clk(clk), .dest_out_bin(reg_eol_count));
+    xpm_cdc_gray #(.WIDTH(32), .DEST_SYNC_FF(4), .INIT_SYNC_FF(1)) u_beat_count_cdc (
+        .src_clk(video_clk), .src_in_bin(beat_bin_v),
+        .dest_clk(clk), .dest_out_bin(reg_beat_count));
     wire [63:0] reg_h2c_ring_addr, reg_c2h_ring_addr;
     wire [15:0] reg_h2c_ring_size, reg_h2c_tail_ptr, reg_h2c_head_ptr;
     wire [15:0] reg_c2h_ring_size, reg_c2h_tail_ptr, reg_c2h_head_ptr;
@@ -863,7 +846,10 @@ module custom_pcie_dma_top #(
         end
     endgenerate
 
-    wire video_tx_idle = video_cdc_fifo_empty && !v_c2h_req_valid[0] &&
+    // An empty packet FIFO alone is not idle: the frontend may still be
+    // producing writes to the current host buffer. Retire the owner first.
+    wire video_tx_idle = !ch0_owner_busy && !v_busy[0] &&
+                         video_cdc_fifo_empty && !v_c2h_req_valid[0] &&
                          (c2h_owner != 8'd2);
     assign reg_dma_status = {20'd0, sg_c2h_busy, sg_h2c_busy,
                              desc_fetch_idle, video_tx_idle, 4'd0,
@@ -1133,9 +1119,9 @@ module custom_pcie_dma_top #(
         .reg_slice_height(reg_slice_height),
         .reg_video_ctrl(reg_video_ctrl),
         .reg_video_sub_reset(reg_video_sub_reset),
-        .reg_sof_count(gray_to_bin(sof_gray_sync2)),
-        .reg_eol_count(gray_to_bin(eol_gray_sync2)),
-        .reg_beat_count(gray_to_bin(beat_gray_sync2)),
+        .reg_sof_count(reg_sof_count),
+        .reg_eol_count(reg_eol_count),
+        .reg_beat_count(reg_beat_count),
 
         // Hardware Performance Monitor Ports
         .perf_enable(perf_enable),
@@ -1814,13 +1800,14 @@ module custom_pcie_dma_top #(
     (* ASYNC_REG = "TRUE" *) reg [1:0] pacer_sync = 2'b01;
 
     wire        eng_frame_done, eng_busy;
+    assign video_capture_active = eng_busy;
     wire [31:0] eng_err_count;
     wire [63:0] eng_frame_pts;
     wire        eng_req_valid, eng_req_ready, eng_req_ack;
     wire [63:0] eng_req_addr;
     wire [127:0] eng_req_data;
 
-    (* ASYNC_REG = "TRUE" *) reg [1:0] v_busy_sync = 2'b00;
+    wire eng_busy_pcie;
 
     wire        tel_dest_req;
     wire [95:0]  tel_dest_out;
@@ -1952,14 +1939,9 @@ module custom_pcie_dma_top #(
     always @(posedge video_clk) pacer_sync <= {pacer_sync[0], reg_pacer_ctrl[0]};
 
     // Busy crosses back as a level; completion is ordered through the request FIFO.
-    always @(posedge clk or negedge dma_rst_n) begin
-        if (!dma_rst_n) begin
-            v_busy_sync <= 2'b00;
-        end else begin
-            v_busy_sync[0] <= eng_busy;
-            v_busy_sync[1] <= v_busy_sync[0];
-        end
-    end
+    xpm_cdc_single #(.DEST_SYNC_FF(4), .SRC_INPUT_REG(1)) u_capture_busy_cdc (
+        .src_clk(video_clk), .src_in(eng_busy),
+        .dest_clk(clk), .dest_out(eng_busy_pcie));
 
     // Telemetry handshake: {protocol_error_count, frame_pts} per frame done.
     xpm_cdc_handshake #(
@@ -1990,7 +1972,7 @@ module custom_pcie_dma_top #(
 
     // Channel-0 status/telemetry now come from the synchronized copies.
     assign v_done[0]     = pcie_frame_done;
-    assign v_busy[0]     = v_busy_sync[1] || !video_cdc_fifo_empty || v_c2h_req_valid[0];
+    assign v_busy[0]     = eng_busy_pcie || !video_cdc_fifo_empty || v_c2h_req_valid[0];
     assign v_pts[0]      = v_pts_sync_q;
     assign v_drop_cnt[0] = v_err_sync_q;
     assign s_axis_video_tready = {NUM_VIDEO_CH{1'b0}};
@@ -2058,7 +2040,7 @@ module custom_pcie_dma_top #(
         .PROG_FULL_THRESH(480),
         .USE_ADV_FEATURES("0002")
     ) u_sgl_y_cdc (
-        .rst(!rst_n || !video_rst_n),
+        .rst(video_cdc_reset_pcie),
         .wr_clk(clk),
         .wr_en((thin_active ? thin_sgl_y_wr_en : sgl_ch0_y_wr_en) && !v_sgl_y_full),
         .din(thin_active ? {thin_sgl_y_wr_flags, thin_sgl_y_wr_len, thin_sgl_y_wr_addr} : {sgl_y_wr_flags, sgl_y_wr_len, sgl_y_wr_addr}),
@@ -2092,7 +2074,7 @@ module custom_pcie_dma_top #(
         .PROG_FULL_THRESH(480),
         .USE_ADV_FEATURES("0002")
     ) u_sgl_uv_cdc (
-        .rst(!rst_n || !video_rst_n),
+        .rst(video_cdc_reset_pcie),
         .wr_clk(clk),
         .wr_en((thin_active ? thin_sgl_uv_wr_en : sgl_ch0_uv_wr_en) && !v_sgl_uv_full),
         .din(thin_active ? {thin_sgl_uv_wr_flags, thin_sgl_uv_wr_len, thin_sgl_uv_wr_addr} : {sgl_uv_wr_flags, sgl_uv_wr_len, sgl_uv_wr_addr}),
@@ -2175,14 +2157,14 @@ module custom_pcie_dma_top #(
     wire        ch1_sgl_y_pop_ready, ch1_sgl_uv_pop_ready;
     wire        ch1_sgl_y_rd_en, ch1_sgl_uv_rd_en;
     xpm_fifo_async #(.FIFO_MEMORY_TYPE("distributed"), .FIFO_WRITE_DEPTH(64), .WRITE_DATA_WIDTH(128), .READ_DATA_WIDTH(128), .READ_MODE("fwft"), .FIFO_READ_LATENCY(0), .PROG_FULL_THRESH(48), .USE_ADV_FEATURES("0002"))
-    u_ch1_sgl_y_cdc (.rst(!rst_n || !video_rst_n), .wr_clk(clk), .wr_en(sgl_ch1_y_wr_en), .din({sgl_y_wr_flags, sgl_y_wr_len, sgl_y_wr_addr}), .prog_full(ch1_sgl_y_almost_full), .full(), .rd_clk(video_clk), .rd_en(ch1_sgl_y_rd_en), .dout(ch1_sgl_y_dout), .empty(ch1_sgl_y_empty), .sleep(1'b0), .injectsbiterr(1'b0), .injectdbiterr(1'b0), .sbiterr(), .dbiterr(), .wr_rst_busy(), .rd_rst_busy());
+    u_ch1_sgl_y_cdc (.rst(video_cdc_reset_pcie), .wr_clk(clk), .wr_en(sgl_ch1_y_wr_en), .din({sgl_y_wr_flags, sgl_y_wr_len, sgl_y_wr_addr}), .prog_full(ch1_sgl_y_almost_full), .full(), .rd_clk(video_clk), .rd_en(ch1_sgl_y_rd_en), .dout(ch1_sgl_y_dout), .empty(ch1_sgl_y_empty), .sleep(1'b0), .injectsbiterr(1'b0), .injectdbiterr(1'b0), .sbiterr(), .dbiterr(), .wr_rst_busy(), .rd_rst_busy());
     xpm_fifo_async #(.FIFO_MEMORY_TYPE("distributed"), .FIFO_WRITE_DEPTH(64), .WRITE_DATA_WIDTH(128), .READ_DATA_WIDTH(128), .READ_MODE("fwft"), .FIFO_READ_LATENCY(0), .PROG_FULL_THRESH(48), .USE_ADV_FEATURES("0002"))
-    u_ch1_sgl_uv_cdc (.rst(!rst_n || !video_rst_n), .wr_clk(clk), .wr_en(sgl_ch1_uv_wr_en), .din({sgl_uv_wr_flags, sgl_uv_wr_len, sgl_uv_wr_addr}), .prog_full(ch1_sgl_uv_almost_full), .full(), .rd_clk(video_clk), .rd_en(ch1_sgl_uv_rd_en), .dout(ch1_sgl_uv_dout), .empty(ch1_sgl_uv_empty), .sleep(1'b0), .injectsbiterr(1'b0), .injectdbiterr(1'b0), .sbiterr(), .dbiterr(), .wr_rst_busy(), .rd_rst_busy());
+    u_ch1_sgl_uv_cdc (.rst(video_cdc_reset_pcie), .wr_clk(clk), .wr_en(sgl_ch1_uv_wr_en), .din({sgl_uv_wr_flags, sgl_uv_wr_len, sgl_uv_wr_addr}), .prog_full(ch1_sgl_uv_almost_full), .full(), .rd_clk(video_clk), .rd_en(ch1_sgl_uv_rd_en), .dout(ch1_sgl_uv_dout), .empty(ch1_sgl_uv_empty), .sleep(1'b0), .injectsbiterr(1'b0), .injectdbiterr(1'b0), .sbiterr(), .dbiterr(), .wr_rst_busy(), .rd_rst_busy());
 
     wire [129:0] ch1_fifo_dout;
     wire        ch1_fifo_empty, ch1_tready;
     xpm_fifo_async #(.FIFO_MEMORY_TYPE("block"), .FIFO_WRITE_DEPTH(512), .WRITE_DATA_WIDTH(130), .READ_DATA_WIDTH(130), .READ_MODE("fwft"), .FIFO_READ_LATENCY(0), .USE_ADV_FEATURES("0000"))
-    u_ch1_loopback_cdc (.rst(!rst_n || !video_rst_n), .wr_clk(clk), .wr_en(lb_tvalid && lb_tready && sg_loopback_enable && (sg_loopback_channel == 2'd1 || sg_loopback_channel == 2'd0)), .din({lb_tuser, lb_tlast, lb_tdata}), .full(ch1_loopback_full), .rd_clk(video_clk), .rd_en(!ch1_fifo_empty && ch1_tready), .dout(ch1_fifo_dout), .empty(ch1_fifo_empty), .sleep(1'b0), .injectsbiterr(1'b0), .injectdbiterr(1'b0), .sbiterr(), .dbiterr(), .wr_rst_busy(), .rd_rst_busy());
+    u_ch1_loopback_cdc (.rst(video_cdc_reset_pcie), .wr_clk(clk), .wr_en(lb_tvalid && lb_tready && sg_loopback_enable && (sg_loopback_channel == 2'd1 || sg_loopback_channel == 2'd0)), .din({lb_tuser, lb_tlast, lb_tdata}), .full(ch1_loopback_full), .rd_clk(video_clk), .rd_en(!ch1_fifo_empty && ch1_tready), .dout(ch1_fifo_dout), .empty(ch1_fifo_empty), .sleep(1'b0), .injectsbiterr(1'b0), .injectdbiterr(1'b0), .sbiterr(), .dbiterr(), .wr_rst_busy(), .rd_rst_busy());
     wire [127:0] ch1_tdata = ch1_fifo_dout[127:0]; wire ch1_tlast = ch1_fifo_dout[128]; wire ch1_tuser = ch1_fifo_dout[129]; wire ch1_tvalid = !ch1_fifo_empty;
 
     reg hs1_send_q; reg [240:0] hs1_bus_q; wire hs1_src_rcv, hs1_dest_req; wire [240:0] hs1_dest_bus; reg hs1_dest_ack; reg eng1_desc_valid, eng1_desc_sg_mode; reg [63:0] eng1_y_addr, eng1_uv_addr, eng1_ts; reg [15:0] eng1_width, eng1_height, eng1_stride; wire nv12_ch1_desc_ready_v;
@@ -2236,14 +2218,14 @@ module custom_pcie_dma_top #(
             wire        ch2_sgl_y_empty, ch2_sgl_uv_empty;
             wire        ch2_sgl_y_pop_ready, ch2_sgl_uv_pop_ready;
             xpm_fifo_async #(.FIFO_MEMORY_TYPE("distributed"), .FIFO_WRITE_DEPTH(64), .WRITE_DATA_WIDTH(128), .READ_DATA_WIDTH(128), .READ_MODE("fwft"), .FIFO_READ_LATENCY(0), .PROG_FULL_THRESH(48), .USE_ADV_FEATURES("0002"))
-            u_ch2_sgl_y_cdc (.rst(!rst_n || !video_rst_n), .wr_clk(clk), .wr_en(sgl_ch2_y_wr_en), .din({sgl_y_wr_flags, sgl_y_wr_len, sgl_y_wr_addr}), .prog_full(ch2_sgl_y_almost_full), .full(), .rd_clk(video_clk), .rd_en(!ch2_sgl_y_empty && ch2_sgl_y_pop_ready), .dout(ch2_sgl_y_dout), .empty(ch2_sgl_y_empty), .sleep(1'b0), .injectsbiterr(1'b0), .injectdbiterr(1'b0), .sbiterr(), .dbiterr(), .wr_rst_busy(), .rd_rst_busy());
+            u_ch2_sgl_y_cdc (.rst(video_cdc_reset_pcie), .wr_clk(clk), .wr_en(sgl_ch2_y_wr_en), .din({sgl_y_wr_flags, sgl_y_wr_len, sgl_y_wr_addr}), .prog_full(ch2_sgl_y_almost_full), .full(), .rd_clk(video_clk), .rd_en(!ch2_sgl_y_empty && ch2_sgl_y_pop_ready), .dout(ch2_sgl_y_dout), .empty(ch2_sgl_y_empty), .sleep(1'b0), .injectsbiterr(1'b0), .injectdbiterr(1'b0), .sbiterr(), .dbiterr(), .wr_rst_busy(), .rd_rst_busy());
             xpm_fifo_async #(.FIFO_MEMORY_TYPE("distributed"), .FIFO_WRITE_DEPTH(64), .WRITE_DATA_WIDTH(128), .READ_DATA_WIDTH(128), .READ_MODE("fwft"), .FIFO_READ_LATENCY(0), .PROG_FULL_THRESH(48), .USE_ADV_FEATURES("0002"))
-            u_ch2_sgl_uv_cdc (.rst(!rst_n || !video_rst_n), .wr_clk(clk), .wr_en(sgl_ch2_uv_wr_en), .din({sgl_uv_wr_flags, sgl_uv_wr_len, sgl_uv_wr_addr}), .prog_full(ch2_sgl_uv_almost_full), .full(), .rd_clk(video_clk), .rd_en(!ch2_sgl_uv_empty && ch2_sgl_uv_pop_ready), .dout(ch2_sgl_uv_dout), .empty(ch2_sgl_uv_empty), .sleep(1'b0), .injectsbiterr(1'b0), .injectdbiterr(1'b0), .sbiterr(), .dbiterr(), .wr_rst_busy(), .rd_rst_busy());
+            u_ch2_sgl_uv_cdc (.rst(video_cdc_reset_pcie), .wr_clk(clk), .wr_en(sgl_ch2_uv_wr_en), .din({sgl_uv_wr_flags, sgl_uv_wr_len, sgl_uv_wr_addr}), .prog_full(ch2_sgl_uv_almost_full), .full(), .rd_clk(video_clk), .rd_en(!ch2_sgl_uv_empty && ch2_sgl_uv_pop_ready), .dout(ch2_sgl_uv_dout), .empty(ch2_sgl_uv_empty), .sleep(1'b0), .injectsbiterr(1'b0), .injectdbiterr(1'b0), .sbiterr(), .dbiterr(), .wr_rst_busy(), .rd_rst_busy());
 
             wire [129:0] ch2_fifo_dout;
             wire        ch2_fifo_empty, ch2_tready;
             xpm_fifo_async #(.FIFO_MEMORY_TYPE("block"), .FIFO_WRITE_DEPTH(512), .WRITE_DATA_WIDTH(130), .READ_DATA_WIDTH(130), .READ_MODE("fwft"), .FIFO_READ_LATENCY(0), .USE_ADV_FEATURES("0000"))
-            u_ch2_loopback_cdc (.rst(!rst_n || !video_rst_n), .wr_clk(clk), .wr_en(lb_tvalid && lb_tready && sg_loopback_enable && (sg_loopback_channel == 2'd2)), .din({lb_tuser, lb_tlast, lb_tdata}), .full(ch2_loopback_full), .rd_clk(video_clk), .rd_en(!ch2_fifo_empty && ch2_tready), .dout(ch2_fifo_dout), .empty(ch2_fifo_empty), .sleep(1'b0), .injectsbiterr(1'b0), .injectdbiterr(1'b0), .sbiterr(), .dbiterr(), .wr_rst_busy(), .rd_rst_busy());
+            u_ch2_loopback_cdc (.rst(video_cdc_reset_pcie), .wr_clk(clk), .wr_en(lb_tvalid && lb_tready && sg_loopback_enable && (sg_loopback_channel == 2'd2)), .din({lb_tuser, lb_tlast, lb_tdata}), .full(ch2_loopback_full), .rd_clk(video_clk), .rd_en(!ch2_fifo_empty && ch2_tready), .dout(ch2_fifo_dout), .empty(ch2_fifo_empty), .sleep(1'b0), .injectsbiterr(1'b0), .injectdbiterr(1'b0), .sbiterr(), .dbiterr(), .wr_rst_busy(), .rd_rst_busy());
             wire [127:0] ch2_tdata = ch2_fifo_dout[127:0]; wire ch2_tlast = ch2_fifo_dout[128]; wire ch2_tuser = ch2_fifo_dout[129]; wire ch2_tvalid = !ch2_fifo_empty;
 
             reg hs2_send_q; reg [240:0] hs2_bus_q; wire hs2_src_rcv, hs2_dest_req; wire [240:0] hs2_dest_bus; reg hs2_dest_ack; reg eng2_desc_valid, eng2_desc_sg_mode; reg [63:0] eng2_y_addr, eng2_uv_addr, eng2_ts; reg [15:0] eng2_width, eng2_height, eng2_stride; wire nv12_ch2_desc_ready_v;
@@ -2302,14 +2284,14 @@ module custom_pcie_dma_top #(
             wire        ch3_sgl_y_empty, ch3_sgl_uv_empty;
             wire        ch3_sgl_y_pop_ready, ch3_sgl_uv_pop_ready;
             xpm_fifo_async #(.FIFO_MEMORY_TYPE("distributed"), .FIFO_WRITE_DEPTH(64), .WRITE_DATA_WIDTH(128), .READ_DATA_WIDTH(128), .READ_MODE("fwft"), .FIFO_READ_LATENCY(0), .PROG_FULL_THRESH(48), .USE_ADV_FEATURES("0002"))
-            u_ch3_sgl_y_cdc (.rst(!rst_n || !video_rst_n), .wr_clk(clk), .wr_en(sgl_ch3_y_wr_en), .din({sgl_y_wr_flags, sgl_y_wr_len, sgl_y_wr_addr}), .prog_full(ch3_sgl_y_almost_full), .full(), .rd_clk(video_clk), .rd_en(!ch3_sgl_y_empty && ch3_sgl_y_pop_ready), .dout(ch3_sgl_y_dout), .empty(ch3_sgl_y_empty), .sleep(1'b0), .injectsbiterr(1'b0), .injectdbiterr(1'b0), .sbiterr(), .dbiterr(), .wr_rst_busy(), .rd_rst_busy());
+            u_ch3_sgl_y_cdc (.rst(video_cdc_reset_pcie), .wr_clk(clk), .wr_en(sgl_ch3_y_wr_en), .din({sgl_y_wr_flags, sgl_y_wr_len, sgl_y_wr_addr}), .prog_full(ch3_sgl_y_almost_full), .full(), .rd_clk(video_clk), .rd_en(!ch3_sgl_y_empty && ch3_sgl_y_pop_ready), .dout(ch3_sgl_y_dout), .empty(ch3_sgl_y_empty), .sleep(1'b0), .injectsbiterr(1'b0), .injectdbiterr(1'b0), .sbiterr(), .dbiterr(), .wr_rst_busy(), .rd_rst_busy());
             xpm_fifo_async #(.FIFO_MEMORY_TYPE("distributed"), .FIFO_WRITE_DEPTH(64), .WRITE_DATA_WIDTH(128), .READ_DATA_WIDTH(128), .READ_MODE("fwft"), .FIFO_READ_LATENCY(0), .PROG_FULL_THRESH(48), .USE_ADV_FEATURES("0002"))
-            u_ch3_sgl_uv_cdc (.rst(!rst_n || !video_rst_n), .wr_clk(clk), .wr_en(sgl_ch3_uv_wr_en), .din({sgl_uv_wr_flags, sgl_uv_wr_len, sgl_uv_wr_addr}), .prog_full(ch3_sgl_uv_almost_full), .full(), .rd_clk(video_clk), .rd_en(!ch3_sgl_uv_empty && ch3_sgl_uv_pop_ready), .dout(ch3_sgl_uv_dout), .empty(ch3_sgl_uv_empty), .sleep(1'b0), .injectsbiterr(1'b0), .injectdbiterr(1'b0), .sbiterr(), .dbiterr(), .wr_rst_busy(), .rd_rst_busy());
+            u_ch3_sgl_uv_cdc (.rst(video_cdc_reset_pcie), .wr_clk(clk), .wr_en(sgl_ch3_uv_wr_en), .din({sgl_uv_wr_flags, sgl_uv_wr_len, sgl_uv_wr_addr}), .prog_full(ch3_sgl_uv_almost_full), .full(), .rd_clk(video_clk), .rd_en(!ch3_sgl_uv_empty && ch3_sgl_uv_pop_ready), .dout(ch3_sgl_uv_dout), .empty(ch3_sgl_uv_empty), .sleep(1'b0), .injectsbiterr(1'b0), .injectdbiterr(1'b0), .sbiterr(), .dbiterr(), .wr_rst_busy(), .rd_rst_busy());
 
             wire [129:0] ch3_fifo_dout;
             wire        ch3_fifo_empty, ch3_tready;
             xpm_fifo_async #(.FIFO_MEMORY_TYPE("block"), .FIFO_WRITE_DEPTH(512), .WRITE_DATA_WIDTH(130), .READ_DATA_WIDTH(130), .READ_MODE("fwft"), .FIFO_READ_LATENCY(0), .USE_ADV_FEATURES("0000"))
-            u_ch3_loopback_cdc (.rst(!rst_n || !video_rst_n), .wr_clk(clk), .wr_en(lb_tvalid && lb_tready && sg_loopback_enable && (sg_loopback_channel == 2'd3)), .din({lb_tuser, lb_tlast, lb_tdata}), .full(ch3_loopback_full), .rd_clk(video_clk), .rd_en(!ch3_fifo_empty && ch3_tready), .dout(ch3_fifo_dout), .empty(ch3_fifo_empty), .sleep(1'b0), .injectsbiterr(1'b0), .injectdbiterr(1'b0), .sbiterr(), .dbiterr(), .wr_rst_busy(), .rd_rst_busy());
+            u_ch3_loopback_cdc (.rst(video_cdc_reset_pcie), .wr_clk(clk), .wr_en(lb_tvalid && lb_tready && sg_loopback_enable && (sg_loopback_channel == 2'd3)), .din({lb_tuser, lb_tlast, lb_tdata}), .full(ch3_loopback_full), .rd_clk(video_clk), .rd_en(!ch3_fifo_empty && ch3_tready), .dout(ch3_fifo_dout), .empty(ch3_fifo_empty), .sleep(1'b0), .injectsbiterr(1'b0), .injectdbiterr(1'b0), .sbiterr(), .dbiterr(), .wr_rst_busy(), .rd_rst_busy());
             wire [127:0] ch3_tdata = ch3_fifo_dout[127:0]; wire ch3_tlast = ch3_fifo_dout[128]; wire ch3_tuser = ch3_fifo_dout[129]; wire ch3_tvalid = !ch3_fifo_empty;
 
             reg hs3_send_q; reg [240:0] hs3_bus_q; wire hs3_src_rcv, hs3_dest_req; wire [240:0] hs3_dest_bus; reg hs3_dest_ack; reg eng3_desc_valid, eng3_desc_sg_mode; reg [63:0] eng3_y_addr, eng3_uv_addr, eng3_ts; reg [15:0] eng3_width, eng3_height, eng3_stride; wire nv12_ch3_desc_ready_v;
