@@ -1,6 +1,6 @@
 // ============================================================================
 // Module: nv12_capture_engine
-// Description: Pipelined single-channel YUV444 4-PPC to NV12M capture engine.
+// Description: Pipelined 4-PPC RGB24 / YUV444 to NV12M or NV16M capture.
 //              - Input byte order per 32-bit pixel: Y, Cb, Cr, X
 //              - Rounded 2x2 Cb/Cr box filter, one input beat per clock
 //              - Independent Y and UV burst FIFOs decouple video from PCIe
@@ -76,6 +76,7 @@ module nv12_capture_engine #(
 
     reg [3:0]  format_q;
     wire       is_rgb_mode = (format_q == 4'd1);
+    wire       is_nv16_mode = (format_q == 4'd3);
 
     function [15:0] calc_line_bytes;
         input [3:0]  fmt;
@@ -252,25 +253,37 @@ module nv12_capture_engine #(
         end
     endfunction
 
-    function [31:0] pack_nv12_uv4;
+    function [31:0] pack_nv_uv4;
         input [127:0] odd_d;
         input [35:0] even_sums;
+        input [3:0]   fmt;
         reg [10:0] u01_total, v01_total, u23_total, v23_total;
         reg [7:0] u01, v01, u23, v23;
         begin
-            u01_total = {2'b0, even_sums[8:0]} +
-                        {3'b0, odd_d[15:8]} + {3'b0, odd_d[47:40]} + 11'd2;
-            v01_total = {2'b0, even_sums[17:9]} +
-                        {3'b0, odd_d[23:16]} + {3'b0, odd_d[55:48]} + 11'd2;
-            u23_total = {2'b0, even_sums[26:18]} +
-                        {3'b0, odd_d[79:72]} + {3'b0, odd_d[111:104]} + 11'd2;
-            v23_total = {2'b0, even_sums[35:27]} +
-                        {3'b0, odd_d[87:80]} + {3'b0, odd_d[119:112]} + 11'd2;
-            u01 = u01_total[9:2];
-            v01 = v01_total[9:2];
-            u23 = u23_total[9:2];
-            v23 = v23_total[9:2];
-            pack_nv12_uv4 = {v23, u23, v01, u01};
+            if (fmt == 4'd2) begin // NV12: 2x2 box filter
+                u01_total = {2'b0, even_sums[8:0]} +
+                            {3'b0, odd_d[15:8]} + {3'b0, odd_d[47:40]} + 11'd2;
+                v01_total = {2'b0, even_sums[17:9]} +
+                            {3'b0, odd_d[23:16]} + {3'b0, odd_d[55:48]} + 11'd2;
+                u23_total = {2'b0, even_sums[26:18]} +
+                            {3'b0, odd_d[79:72]} + {3'b0, odd_d[111:104]} + 11'd2;
+                v23_total = {2'b0, even_sums[35:27]} +
+                            {3'b0, odd_d[87:80]} + {3'b0, odd_d[119:112]} + 11'd2;
+                u01 = u01_total[9:2];
+                v01 = v01_total[9:2];
+                u23 = u23_total[9:2];
+                v23 = v23_total[9:2];
+            end else begin // NV16: rounded horizontal 2:1, every row (4:2:2)
+                u01_total = {3'b0, odd_d[15:8]} + {3'b0, odd_d[47:40]} + 11'd1;
+                v01_total = {3'b0, odd_d[23:16]} + {3'b0, odd_d[55:48]} + 11'd1;
+                u23_total = {3'b0, odd_d[79:72]} + {3'b0, odd_d[111:104]} + 11'd1;
+                v23_total = {3'b0, odd_d[87:80]} + {3'b0, odd_d[119:112]} + 11'd1;
+                u01 = u01_total[8:1];
+                v01 = v01_total[8:1];
+                u23 = u23_total[8:1];
+                v23 = v23_total[8:1];
+            end
+            pack_nv_uv4 = {v23, u23, v01, u01};
         end
     endfunction
 
@@ -291,7 +304,7 @@ module nv12_capture_engine #(
         is_rgb_mode ? 1'b0 :
         (odd_valid && (odd_col[1:0] == 2'b11));
     wire [127:0] uv_fifo_push_data = RAW_INPUT ? s_axis_tdata :
-        {pack_nv12_uv4(odd_data, chroma_even_q), uv_pack[95:0]};
+        {pack_nv_uv4(odd_data, chroma_even_q, format_q), uv_pack[95:0]};
 
     wire y_fifo_pop = c2h_req_data_ready && c2h_req_valid && !request_is_uv;
     wire uv_fifo_pop = c2h_req_data_ready && c2h_req_valid && request_is_uv;
@@ -389,7 +402,7 @@ module nv12_capture_engine #(
                 raw_byte_count <= 0;
                 raw_y_bytes <= {16'd0, frame_width} * frame_height;
                 raw_total_bytes <= ({16'd0, frame_width} * frame_height) +
-                                   ({16'd0, frame_width} * (frame_height >> 1));
+                                   ({16'd0, frame_width} * ((desc_format == 4'd3) ? frame_height : (frame_height >> 1)));
                 rgb_hold_0 <= 0;
                 rgb_hold_1 <= 0;
                 rgb_hold_2 <= 0;
@@ -412,8 +425,8 @@ module nv12_capture_engine #(
                     end
                 end
             end else begin
-                odd_valid <= pixel_accept && line_idx[0];
-                if (pixel_accept && line_idx[0]) begin
+                odd_valid <= pixel_accept && !is_rgb_mode && (is_nv16_mode || line_idx[0]);
+                if (pixel_accept && !is_rgb_mode && (is_nv16_mode || line_idx[0])) begin
                     odd_data <= s_axis_tdata;
                     odd_col <= beat_col;
                     odd_frame_end <= s_axis_tlast &&
@@ -425,7 +438,7 @@ module nv12_capture_engine #(
                         uv_pack <= 0;
                     else
                         uv_pack[(odd_col[1:0]*32) +: 32] <=
-                            pack_nv12_uv4(odd_data, chroma_even_q);
+                            pack_nv_uv4(odd_data, chroma_even_q, format_q);
                     if (odd_frame_end) begin
                         frontend_done <= 1;
                         capture_enable <= 0;
@@ -471,7 +484,7 @@ module nv12_capture_engine #(
                         line_idx <= line_idx + 1'b1;
                         if (line_idx + 1'b1 >= height_q) begin
                             capture_enable <= 0;
-                            if (is_rgb_mode || !line_idx[0])
+                            if (is_rgb_mode || (!is_nv16_mode && !line_idx[0]))
                                 frontend_done <= 1;
                         end
                     end else begin

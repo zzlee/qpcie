@@ -430,6 +430,16 @@ int main(int argc, char **argv) {
         }
     }
 
+    /* The board verifier requires a complete three-file boot transaction.
+     * Reject partial discrete bundles before probing or touching the card.
+     */
+    if (bootbin_path || kernel_path || bootscr_path) {
+        if (package_path || !bootbin_path || !kernel_path || !bootscr_path) {
+            fprintf(stderr, "ERROR: discrete packaging requires all of -b BOOT.BIN -k image.ub -c boot.scr, without --package\n");
+            return EXIT_FAILURE;
+        }
+    }
+
     if (!package_path && !bootbin_path && !kernel_path && !do_commit && !do_reboot && !show_status) {
         if (optind < argc) {
             package_path = argv[optind];

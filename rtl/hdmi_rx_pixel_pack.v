@@ -9,7 +9,8 @@ module hdmi_rx_pixel_pack (
     genvar p;
     generate for (p=0; p<4; p=p+1) begin : pixel
         wire [23:0] c = native_data[p*24 +: 24];
+        // Little-endian byte order: RGB = R,G,B,X; YUV = Y,U,V,X.
         assign dma_data[p*32 +: 32] = rgb_mode ?
-            {8'hff, c[15:8], c[7:0], c[23:16]} : {8'hff, c};
+            {8'hff, c[15:8], c[7:0], c[23:16]} : {8'h00, c};
     end endgenerate
 endmodule

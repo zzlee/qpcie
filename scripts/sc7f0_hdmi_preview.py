@@ -5,7 +5,9 @@ Examples (run in the test machine's desktop terminal):
   python3 scripts/sc7f0_hdmi_preview.py
   python3 scripts/sc7f0_hdmi_preview.py --sink fake --frames 120 --timeout 15
   python3 scripts/sc7f0_hdmi_preview.py --sink wayland --timeout 30
-Requires gst-launch-1.0, v4l2src, videoconvert, videoscale and fpsdisplaysink.
+  python3 scripts/sc7f0_hdmi_preview.py --format NV12 --sink wayland --native-size --fullscreen
+Native-size mode sends the captured format directly to the sink, with no
+videoconvert or videoscale. The legacy windowed mode scales to at most 1080p.
 No TPG fallback; a negotiated pipeline without buffers is NOT a successful test.
 """
 import argparse
@@ -40,15 +42,27 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", default="/dev/video0")
     parser.add_argument("--sink", choices=("auto", "wayland", "x11", "fake"), default="auto")
+    parser.add_argument("--format", choices=("auto", "RGB", "NV12", "NV16"), default="auto",
+                        help="capture format; RGB input to NV12/NV16 requires FPGA rev04+")
+    parser.add_argument("--native-size", action="store_true",
+                        help="keep capture resolution/format; no CPU conversion or scaling")
+    parser.add_argument("--fullscreen", action="store_true",
+                        help="request fullscreen on the current Wayland desktop")
     parser.add_argument("--frames", type=int, default=0, help="0: continuous preview")
     parser.add_argument("--timeout", type=float, default=0, help="seconds; 0: no deadline")
     args = parser.parse_args()
     if args.frames < 0 or not math.isfinite(args.timeout) or args.timeout < 0:
         parser.error("frames and timeout must be non-negative")
+    if args.fullscreen and args.sink != "wayland":
+        parser.error("--fullscreen requires --sink wayland")
     try:
         node = Path(args.device).resolve().name
         status = (Path("/sys/class/video4linux") / node / "device/hdmi_status").read_text()
         width, height, fmt = locked_mode(status)
+        if args.format != "auto":
+            if args.format == "RGB" and fmt != "RGB":
+                raise ValueError("YUV input to RGB conversion is not implemented")
+            fmt = args.format
     except (OSError, ValueError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
@@ -63,10 +77,11 @@ def main():
                 "!", f"video/x-raw,format={fmt},width={width},height={height},framerate=60/1",
                 "!", "queue", "max-size-buffers=2", "max-size-bytes=0", "max-size-time=0",
                 "leaky=downstream"]
-    if args.sink != "fake":
+    if args.sink != "fake" and not args.native_size:
         pipeline += ["!", "videoconvert", "!", "videoscale", "!",
                      f"video/x-raw,width={min(width,1920)},height={min(height,1080)}"]
-    pipeline += ["!", "fpsdisplaysink", f"video-sink={sinks[args.sink]}",
+    sink = sinks[args.sink] + (" fullscreen=true" if args.fullscreen else "")
+    pipeline += ["!", "fpsdisplaysink", f"video-sink={sink}",
                  "text-overlay=false", "sync=false"]
     print(f"Locked HDMI: {width}x{height} {fmt}; force HDMI, pacer off", flush=True)
     print(shlex.join(pipeline), flush=True)

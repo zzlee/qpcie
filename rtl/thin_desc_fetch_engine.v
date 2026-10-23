@@ -118,7 +118,8 @@ module thin_desc_fetch_engine #(
     wire [15:0] launch_stride     = (frame_stride0 > 16'd0) ? frame_stride0 : effective_width;
 
     wire [31:0] target_y  = effective_stride0 * frame_height;
-    wire [31:0] target_uv = (format == 4'd1) ? 32'd0 : (effective_stride1 * (frame_height >> 1));
+    wire [31:0] target_uv = (format == 4'd1) ? 32'd0 :
+                           (effective_stride1 * ((format == 4'd3) ? frame_height : (frame_height >> 1)));
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin

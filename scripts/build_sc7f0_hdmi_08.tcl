@@ -3,10 +3,13 @@ set root [file normalize [file join [file dirname [info script]] ..]]
 cd $root
 open_project ./build/qpcie_zu4ev_hdmi_proj/qpcie_zu4ev_card.xpr
 save_project_as qpcie_zu4ev_live ./build/qpcie_zu4ev_live_proj -force
-foreach f {video_axis_async_fifo.v hdmi_rx_pixel_pack.v} {
+foreach f {video_axis_async_fifo.v hdmi_rx_pixel_pack.v video_rgb_to_yuv709.v} {
     if {[get_files -quiet */$f] eq ""} { add_files -norecurse ./rtl/$f }
 }
-set_property generic {C_VERSION=32'h26102201} [current_fileset]
+set version 26102204
+if {[info exists ::env(SC7F0_VERSION)]} { set version $::env(SC7F0_VERSION) }
+if {![regexp {^[0-9A-Fa-f]{8}$} $version]} { error "SC7F0_VERSION must be eight hex digits" }
+set_property generic "C_VERSION=32'h$version" [current_fileset]
 set git_hex [string toupper [exec git rev-parse --short=8 HEAD]]
 set date_hex [clock format [clock seconds] -format "%Y%m%d"]
 set_property verilog_define [list GIT_COMMIT_HASH_DEF=32'h$git_hex BUILD_TIMESTAMP_DEF=32'h$date_hex] [current_fileset]
@@ -30,6 +33,7 @@ if {[string first "write_bitstream Complete" [get_property STATUS [get_runs impl
 open_run impl_1
 report_timing_summary -delay_type min_max -report_unconstrained -file ./build/qpcie_zu4ev_live_proj/timing_summary.rpt
 report_cdc -details -file ./build/qpcie_zu4ev_live_proj/cdc.rpt
+report_bus_skew -warn_on_violation -file ./build/qpcie_zu4ev_live_proj/bus_skew.rpt
 report_drc -file ./build/qpcie_zu4ev_live_proj/drc.rpt
 if {[get_property SLACK [get_timing_paths -delay_type max -max_paths 1]] < 0 ||
     [get_property SLACK [get_timing_paths -delay_type min -max_paths 1]] < 0} {

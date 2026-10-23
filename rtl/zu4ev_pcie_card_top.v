@@ -927,22 +927,36 @@ module zu4ev_pcie_card_top #(
     wire         hdmi_rx_v_tlast;
     wire         hdmi_rx_v_tuser;
 
-    // The host rejects incompatible input/descriptor color formats. Transfer
-    // this quasi-static RGB selector into the RX pixel clock domain.
-    wire rx_pack_rgb;
+    // CH0_CTRL[9]: RGB8 input -> BT.709 YUV444 before NV12/NV16 sampling.
+    // Driver sets it only for a validated RGB input and semiplanar output.
+    // Configuration is changed only while capture is stopped; SOF realigns it.
+    wire rx_pack_rgb, rx_csc_enable;
     xpm_cdc_single #(.DEST_SYNC_FF(4), .SRC_INPUT_REG(1)) u_rx_pack_mode (
-        .src_clk(pcie_user_clk), .src_in(vch0_ctrl_w[7:4] == 4'd1),
+        .src_clk(pcie_user_clk), .src_in(vch0_ctrl_w[7:4] == 4'd1 || vch0_ctrl_w[9]),
         .dest_clk(phy_rx_video_clk), .dest_out(rx_pack_rgb));
+    xpm_cdc_single #(.DEST_SYNC_FF(4), .SRC_INPUT_REG(1)) u_rx_csc_mode (
+        .src_clk(pcie_user_clk), .src_in(vch0_ctrl_w[9]),
+        .dest_clk(phy_rx_video_clk), .dest_out(rx_csc_enable));
     wire [127:0] rx_video_packed_tdata;
     hdmi_rx_pixel_pack u_rx_pixel_pack (
         .native_data(rx_ss_video_tdata), .rgb_mode(rx_pack_rgb),
         .dma_data(rx_video_packed_tdata));
 
-    video_axis_async_fifo #(.DEPTH(1024)) u_hdmi_rx_video_cdc_fifo (
-        .s_clk(phy_rx_video_clk), .s_rst_n(!rx_video_rst),
+    wire [127:0] rx_csc_data;
+    wire rx_csc_valid, rx_csc_sof, rx_csc_eol, rx_csc_ready;
+    video_rgb_to_yuv709 u_rx_csc (
+        .clk(phy_rx_video_clk), .rst_n(!rx_video_rst), .enable(rx_csc_enable),
         .s_data(rx_video_packed_tdata), .s_valid(rx_ss_video_tvalid),
         .s_sof(rx_ss_video_tuser), .s_eol(rx_ss_video_tlast),
         .s_ready(rx_ss_video_tready),
+        .m_data(rx_csc_data), .m_valid(rx_csc_valid),
+        .m_sof(rx_csc_sof), .m_eol(rx_csc_eol), .m_ready(rx_csc_ready));
+
+    video_axis_async_fifo #(.DEPTH(1024)) u_hdmi_rx_video_cdc_fifo (
+        .s_clk(phy_rx_video_clk), .s_rst_n(!rx_video_rst),
+        .s_data(rx_csc_data), .s_valid(rx_csc_valid),
+        .s_sof(rx_csc_sof), .s_eol(rx_csc_eol),
+        .s_ready(rx_csc_ready),
         .m_clk(capture_clk), .m_rst_n(capture_rst_n),
         .m_data(hdmi_rx_v_tdata), .m_valid(hdmi_rx_v_tvalid),
         .m_sof(hdmi_rx_v_tuser), .m_eol(hdmi_rx_v_tlast),

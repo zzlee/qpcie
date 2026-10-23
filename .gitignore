@@ -91,6 +91,7 @@ test_app/qpcie_hdmi_ctl
 test_app/qpcie_hdmi_daemon
 test_app/v4l2_test_app
 test_app/v4l2_rgb24_test_app
+test_app/v4l2_capture_verify
 test_app/alsa_test_app
 test_app/alsa_loopback_test_app
 test_app/dmabuf_p2p_test_app
@@ -103,6 +104,8 @@ raw/*.pdf
 # ------------------------------------------------------------------------------
 # 5. OS, IDE, Editor & Temporary Files
 # ------------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
 .vscode/
 .idea/
 compile_commands.json

@@ -43,6 +43,25 @@ class PreviewTests(unittest.TestCase):
 
     @patch.object(preview.Path, "read_text", return_value=RGB)
     @patch.object(preview.subprocess, "Popen")
+    def test_native_nv12_fullscreen_no_software_transform(self, popen, read_text):
+        popen.return_value.wait.return_value = 0
+        with patch("sys.argv", ["preview", "--sink", "wayland", "--format", "NV12",
+                                "--native-size", "--fullscreen", "--frames", "300"]):
+            self.assertEqual(preview.main(), 0)
+        command = popen.call_args.args[0]
+        self.assertIn("video/x-raw,format=NV12,width=3840,height=2160,framerate=60/1", command)
+        self.assertIn("video-sink=waylandsink fullscreen=true", command)
+        self.assertNotIn("videoconvert", command)
+        self.assertNotIn("videoscale", command)
+
+    def test_fullscreen_requires_wayland(self):
+        with patch("sys.argv", ["preview", "--sink", "fake", "--fullscreen"]):
+            with self.assertRaises(SystemExit) as error:
+                preview.main()
+        self.assertEqual(error.exception.code, 2)
+
+    @patch.object(preview.Path, "read_text", return_value=RGB)
+    @patch.object(preview.subprocess, "Popen")
     @patch.object(preview.os, "killpg")
     def test_timeout_not_success(self, killpg, popen, read_text):
         proc = popen.return_value

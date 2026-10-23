@@ -624,7 +624,7 @@ module custom_pcie_dma_top #(
 `else
     wire        sg_c2h_desc_select = (c2h_format == 4'd0);
 `endif
-    wire        nv12_desc_select   = ((c2h_format == 4'd2 && c2h_plane_count == 4'd2) ||
+    wire        nv12_desc_select   = (((c2h_format == 4'd2 || c2h_format == 4'd3) && c2h_plane_count == 4'd2) ||
                                       (c2h_format == 4'd1 && c2h_plane_count == 4'd1)) && (c2h_desc_ctrl[7:6] == 2'd0);
 `ifndef QPCIe_single_rgb24_path
     wire        nv12_ch1_desc_sel  = (c2h_format == 4'd2) && (c2h_plane_count == 4'd2) && (c2h_desc_ctrl[7:6] == 2'd1);

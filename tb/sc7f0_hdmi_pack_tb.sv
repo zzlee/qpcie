@@ -12,7 +12,8 @@ module sc7f0_hdmi_pack_tb;
             $fatal(1,"RGB component or PPC order wrong: %h",packed_data);
         rgb=0;
         native_data={24'habcdef,24'h789abc,24'h456789,24'h123456}; #1;
-        if (packed_data !== {32'hffabcdef,32'hff789abc,32'hff456789,32'hff123456})
+        // The high byte is unused padding, canonicalized to zero in YUV mode.
+        if (packed_data !== {32'h00abcdef,32'h00789abc,32'h00456789,32'h00123456})
             $fatal(1,"YUV444 component or PPC order wrong: %h",packed_data);
         $display("TB_PASS: HDMI RBG to host RGB; VUY to converter YUV; all four pixels");
         $finish;

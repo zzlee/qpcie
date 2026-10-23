@@ -48,9 +48,16 @@ module sc7f0_live_video_tb;
             else y<=y+1;
         end else x<=x+1;
     end
+    wire [127:0] csc_data;
+    wire csc_valid, csc_sof, csc_eol, csc_ready;
+    video_rgb_to_yuv709 csc (
+        .clk(rx_clk), .rst_n(rst_n), .enable(format != 1),
+        .s_data(pixels), .s_valid(active), .s_sof(sof), .s_eol(eol), .s_ready(ready),
+        .m_data(csc_data), .m_valid(csc_valid), .m_sof(csc_sof),
+        .m_eol(csc_eol), .m_ready(csc_ready));
     video_axis_async_fifo #(.DEPTH(1024)) ingress (
-        .s_clk(rx_clk), .s_rst_n(rst_n), .s_data(pixels), .s_valid(active),
-        .s_sof(sof), .s_eol(eol), .s_ready(ready),
+        .s_clk(rx_clk), .s_rst_n(rst_n), .s_data(csc_data), .s_valid(csc_valid),
+        .s_sof(csc_sof), .s_eol(csc_eol), .s_ready(csc_ready),
         .m_clk(capture_clk), .m_rst_n(rst_n), .m_data(data),
         .m_valid(valid), .m_sof(user), .m_eol(last),
         .m_ready(!busy || consume));
@@ -118,6 +125,7 @@ module sc7f0_live_video_tb;
     end
     initial begin
         if ($test$plusargs("NV12")) format=2;
+        if ($test$plusargs("NV16")) format=3;
         #100; rst_n=1;
         repeat(100) @(posedge capture_clk);
         @(negedge capture_clk); desc_valid=1;
@@ -126,7 +134,7 @@ module sc7f0_live_video_tb;
         @(negedge rx_clk); run_source=1;
         wait(completed==1);
         if(errors || overflow) $fatal(1,"Live raster lost data: errors=%0d overflow=%0d",errors,overflow);
-        if(payload_bytes != (format==1 ? 24883200 : 12441600))
+        if(payload_bytes != (format==1 ? 24883200 : format==3 ? 16588800 : 12441600))
             $fatal(1,"Bad payload size %0d",payload_bytes);
         if(accepted!=2073600) $fatal(1,"Bad accepted beat count %0d",accepted);
         if(tpg_received!=32) $fatal(1,"TPG CDC did not complete");
@@ -138,7 +146,7 @@ module sc7f0_live_video_tb;
         @(negedge capture_clk); desc_valid=0;
         wait(completed==2);
         if(errors || overflow) $fatal(1,"Second capture failed: errors=%0d overflow=%0d",errors,overflow);
-        if(payload_bytes != (format==1 ? 49766400 : 24883200)) $fatal(1,"Bad second payload size");
+        if(payload_bytes != (format==1 ? 49766400 : format==3 ? 33177600 : 24883200)) $fatal(1,"Bad second payload size");
         $display("TB_PASS: live 4K60 format=%0d frames=%0d bytes=%0d; old 125MHz lost=%0d beats",format,completed,payload_bytes,old_overflow);
         $finish;
     end

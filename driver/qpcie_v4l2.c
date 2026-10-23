@@ -54,6 +54,15 @@ static int qpcie_vidioc_enum_fmt_vid_cap_mplane(struct file *file, void *priv, s
         f->pixelformat = V4L2_PIX_FMT_RGB24;
         return 0;
     }
+    if (f->index == 2) {
+        struct qpcie_v4l2_channel *vch = video_drvdata(file);
+
+        if (vch->channel_id != 0 || vch->buf_type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE ||
+            ioread32(vch->qdev->bar0_mmio + REG_NEW_GLOBAL_VERSION) < 0x26102204)
+            return -EINVAL;
+        f->pixelformat = V4L2_PIX_FMT_NV16M;
+        return 0;
+    }
     return -EINVAL;
 }
 
@@ -111,6 +120,15 @@ static void qpcie_fill_pix_format(struct v4l2_pix_format_mplane *pix,
         pix->num_planes = 1;
         pix->plane_fmt[0].bytesperline = stride;
         pix->plane_fmt[0].sizeimage = stride * mode->height;
+    } else if (pixelformat == V4L2_PIX_FMT_NV16M) {
+        stride = req_stride >= mode->width ? req_stride : ALIGN(mode->width, 128);
+        pix->pixelformat = V4L2_PIX_FMT_NV16M;
+        pix->colorspace = V4L2_COLORSPACE_REC709;
+        pix->num_planes = 2;
+        pix->plane_fmt[0].bytesperline = stride;
+        pix->plane_fmt[0].sizeimage = stride * mode->height;
+        pix->plane_fmt[1].bytesperline = stride;
+        pix->plane_fmt[1].sizeimage = stride * mode->height;
     } else {
         stride = req_stride ? req_stride : ALIGN(mode->width, 128);
         if (stride < mode->width)
@@ -315,8 +333,16 @@ static int qpcie_vidioc_try_fmt_vid_cap_mplane(struct file *file, void *priv,
     u32 pixelformat = f->fmt.pix_mp.pixelformat;
     u32 req_stride = f->fmt.pix_mp.plane_fmt[0].bytesperline;
 
-    if (pixelformat != V4L2_PIX_FMT_RGB24)
+    if (pixelformat == V4L2_PIX_FMT_NV16M) {
+        struct qpcie_v4l2_channel *channel = video_drvdata(file);
+
+        if (channel->channel_id != 0 ||
+            channel->buf_type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE ||
+            ioread32(channel->qdev->bar0_mmio + REG_NEW_GLOBAL_VERSION) < 0x26102204)
+            return -EINVAL;
+    } else if (pixelformat != V4L2_PIX_FMT_RGB24) {
         pixelformat = V4L2_PIX_FMT_NV12M;
+    }
 
     mode = qpcie_find_video_mode(f->fmt.pix_mp.width,
                                  f->fmt.pix_mp.height);
@@ -331,7 +357,7 @@ static int qpcie_vidioc_s_fmt_vid_cap_mplane(struct file *file, void *priv,
     const struct qpcie_video_mode *mode;
     struct v4l2_ctrl *pattern_ctrl;
     u32 pattern_id;
-    u32 old_width, old_height, old_stride, old_pixelformat;
+    u32 old_width, old_height, old_stride, old_pixelformat, old_stride1;
     u32 pixelformat = f->fmt.pix_mp.pixelformat;
     u32 req_stride = f->fmt.pix_mp.plane_fmt[0].bytesperline;
     int ret;
@@ -339,8 +365,21 @@ static int qpcie_vidioc_s_fmt_vid_cap_mplane(struct file *file, void *priv,
     if (vb2_is_busy(&vch->queue))
         return -EBUSY;
 
-    if (pixelformat != V4L2_PIX_FMT_RGB24)
+    if (pixelformat == V4L2_PIX_FMT_NV16M) {
+        struct qpcie_v4l2_channel *channel = video_drvdata(file);
+
+        if (channel->channel_id != 0 ||
+            channel->buf_type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE ||
+            ioread32(channel->qdev->bar0_mmio + REG_NEW_GLOBAL_VERSION) < 0x26102204)
+            return -EINVAL;
+    } else if (pixelformat != V4L2_PIX_FMT_RGB24) {
         pixelformat = V4L2_PIX_FMT_NV12M;
+    }
+
+    if (req_stride > 65408 || (req_stride & 127) ||
+        (f->fmt.pix_mp.plane_fmt[1].bytesperline &&
+         f->fmt.pix_mp.plane_fmt[1].bytesperline != req_stride))
+        return -EINVAL;
 
     mode = qpcie_find_video_mode(f->fmt.pix_mp.width,
                                  f->fmt.pix_mp.height);
@@ -348,6 +387,7 @@ static int qpcie_vidioc_s_fmt_vid_cap_mplane(struct file *file, void *priv,
     old_width = vch->width;
     old_height = vch->height;
     old_stride = vch->stride;
+    old_stride1 = vch->stride1;
     old_pixelformat = vch->pixelformat;
 
     vch->width = mode->width;
@@ -374,6 +414,7 @@ static int qpcie_vidioc_s_fmt_vid_cap_mplane(struct file *file, void *priv,
             vch->width = old_width;
             vch->height = old_height;
             vch->stride = old_stride;
+            vch->stride1 = old_stride1;
             vch->pixelformat = old_pixelformat;
             return ret;
         }
@@ -430,7 +471,7 @@ static int qpcie_vidioc_s_parm(struct file *file, void *priv, struct v4l2_stream
 
 static int qpcie_vidioc_enum_framesizes(struct file *file, void *priv, struct v4l2_frmsizeenum *fsize)
 {
-    if (fsize->pixel_format != V4L2_PIX_FMT_NV12M && fsize->pixel_format != V4L2_PIX_FMT_RGB24)
+    if (fsize->pixel_format != V4L2_PIX_FMT_NV12M && fsize->pixel_format != V4L2_PIX_FMT_NV16M && fsize->pixel_format != V4L2_PIX_FMT_RGB24)
         return -EINVAL;
 
     if (fsize->index >= ARRAY_SIZE(qpcie_video_modes))
@@ -448,7 +489,7 @@ static const struct v4l2_fract supported_frameintervals[] = {
 
 static int qpcie_vidioc_enum_frameintervals(struct file *file, void *priv, struct v4l2_frmivalenum *fival)
 {
-    if (fival->pixel_format != V4L2_PIX_FMT_NV12M && fival->pixel_format != V4L2_PIX_FMT_RGB24)
+    if (fival->pixel_format != V4L2_PIX_FMT_NV12M && fival->pixel_format != V4L2_PIX_FMT_NV16M && fival->pixel_format != V4L2_PIX_FMT_RGB24)
         return -EINVAL;
 
     if (fival->index >= ARRAY_SIZE(supported_frameintervals))
@@ -578,16 +619,19 @@ static bool qpcie_hdmi_source_ready(struct qpcie_v4l2_channel *vch, int *err)
         *err = -EAGAIN;
         return false;
     }
-    /* The frontend repacks RGB or subsamples YUV444; it has no color-space
-     * converter, 422/420 expander, deep-color or interlaced support.
+    /* RGB8 -> NV12/NV16 uses the BT.709 converter in HDMI08 rev04+.
+     * Native YUV444/8 remains supported; no 422/420 expansion or deep color.
      */
     if (!(t.flags & HDMI_TLM_F_COLOR_VALID) ||
         (t.flags & HDMI_TLM_F_INTERLACED) ||
         ((t.color_fmt >> 20) & 0xf) != 8 ||
-        ((t.color_fmt >> 24) & 0xf) !=
-            (vch->pixelformat == V4L2_PIX_FMT_RGB24 ? 0 : 1)) {
+        (vch->pixelformat == V4L2_PIX_FMT_RGB24 ?
+            ((t.color_fmt >> 24) & 0xf) != 0 :
+            (((t.color_fmt >> 24) & 0xf) != 1 &&
+             !(((t.color_fmt >> 24) & 0xf) == 0 &&
+               ioread32(qdev->bar0_mmio + REG_NEW_GLOBAL_VERSION) >= 0x26102204)))) {
         dev_err(&qdev->pdev->dev,
-                "HDMI format unsupported: color=0x%08x mbus=0x%x requested=0x%x; use RGB24 for RGB8 or NV12M for YUV444/8, progressive only\n",
+                "HDMI format unsupported: color=0x%08x mbus=0x%x requested=0x%x; requires RGB8 or YUV444/8 progressive, and matching FPGA format support\n",
                 t.color_fmt, t.mbus_code, vch->pixelformat);
         *err = -EOPNOTSUPP;
         return false;
@@ -789,7 +833,9 @@ static int qpcie_queue_setup(struct vb2_queue *vq,
     struct qpcie_v4l2_channel *vch = vb2_get_drv_priv(vq);
     unsigned int exp_planes = (vch->pixelformat == V4L2_PIX_FMT_RGB24) ? 1 : 2;
     unsigned int y_size = vch->stride * vch->height;
-    unsigned int uv_size = (vch->pixelformat == V4L2_PIX_FMT_RGB24) ? 0 : (vch->stride * (vch->height / 2));
+    unsigned int uv_size = (vch->pixelformat == V4L2_PIX_FMT_RGB24) ? 0 :
+                            vch->stride * (vch->pixelformat == V4L2_PIX_FMT_NV16M ?
+                                           vch->height : vch->height / 2);
 
     if (*nplanes) {
         if (*nplanes != exp_planes)
@@ -817,8 +863,8 @@ static int qpcie_buf_prepare(struct vb2_buffer *vb)
     /* Validate plane size for MMAP, USERPTR, and DMABUF memory modes */
     for (i = 0; i < vb->num_planes; i++) {
         unsigned long size = (i == 0) ? (vch->stride * vch->height) :
-                             (vch->pixelformat == V4L2_PIX_FMT_YUV420M) ? ((vch->stride / 2) * (vch->height / 2)) :
-                             (vch->stride * (vch->height / 2));
+                             vch->stride * (vch->pixelformat == V4L2_PIX_FMT_NV16M ?
+                                            vch->height : vch->height / 2);
 
         if (vb2_plane_size(vb, i) < size) {
             v4l2_err(&vch->qdev->v4l2_dev,
@@ -1083,6 +1129,7 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
     struct qpcie_dev *qdev = vch->qdev;
     u32 pacer_ctrl;
     bool is_tpg_source = false;
+    bool convert_rgb = false;
     int ret;
 
     if (count < 2) {
@@ -1115,8 +1162,19 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
                 qpcie_return_all_buffers(vch, VB2_BUF_STATE_QUEUED);
                 return src_err;
             }
+            if (vch->pixelformat != V4L2_PIX_FMT_RGB24) {
+                struct qpcie_hdmi_tlm t;
+
+                ret = qpcie_hdmi_read_telemetry(qdev, &t);
+                if (ret) {
+                    qpcie_cancel_unstarted_rings(vch);
+                    qpcie_return_all_buffers(vch, VB2_BUF_STATE_QUEUED);
+                    return ret;
+                }
+                convert_rgb = ((t.color_fmt >> 24) & 0xf) == 0;
+            }
             dev_info(&qdev->pdev->dev,
-                     "STREAMON: HDMI RX source locked\n");
+                     "STREAMON: HDMI RX source locked, RGB-to-YUV=%u\n", convert_rgb);
         }
     }
 
@@ -1207,7 +1265,9 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
                                (vch->stride ? vch->stride : vch->width);
         u32 stride1 = is_rgb ? 0 :
                                (vch->stride1 ? vch->stride1 : (vch->stride ? vch->stride : vch->width));
-        u32 ch_ctrl = BIT(0) | ((is_rgb ? 1 : 2) << 4) | BIT(8) |
+        u32 ch_fmt = is_rgb ? 1 : (vch->pixelformat == V4L2_PIX_FMT_NV16M ? 3 : 2);
+        u32 ch_ctrl = BIT(0) | (ch_fmt << 4) | BIT(8) |
+                      (convert_rgb ? BIT(9) : 0) |
                       ((vch->video_source & 0x3) << 20); /* enable=1, format, irq_en=1, video_source */
 
         /* Program CH Geometry */
@@ -1238,6 +1298,15 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
                       qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_RING1_CFG);
         }
 
+        /* Set RX packing/CSC mode with descriptor fetching still disabled.
+         * Let the mode CDC and idle-drained FIFO settle before the engine can
+         * accept SOF; otherwise a format switch could capture a stale marker.
+         */
+        if (vch->channel_id == 0) {
+            iowrite32(ch_ctrl & ~BIT(0), qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_CTRL);
+            ioread32(qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_CTRL);
+            usleep_range(1000, 2000);
+        }
         /* Enable CH */
         iowrite32(ch_ctrl, qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_CTRL);
         ioread32(qdev->bar0_mmio + vch->ch_reg_base + REG_VCH_OFFSET_CTRL);

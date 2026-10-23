@@ -39,6 +39,13 @@ def check(args, output):
         "-o", str(dtb), str(preprocessed),
     ], check=True)
     fdtget = args.dtc.with_name("fdtget")
+    if not fdtget.is_file():
+        # Vivado prepends Vitis/bin/dtc, but that directory has no fdtget.
+        # Resolve the independent tool instead of assuming they ship together.
+        fdtget = Path(shutil.which("fdtget") or str(PLNX /
+                     "build/tmp/sysroots-components/x86_64/dtc-native/usr/bin/fdtget"))
+    if not fdtget.is_file():
+        raise FileNotFoundError("fdtget is required (install device-tree-compiler or build dtc-native)")
 
     def cells(node, prop):
         return [int(x, 16) for x in run([fdtget, "-t", "x", dtb, node, prop]).split()]
