@@ -1,0 +1,23 @@
+[Unit]
+Description=SC7F0 progress-gated FPD hardware watchdog (sole owner)
+After=local-fs.target systemd-udevd.service
+Wants=qpcie-debugd.service qpcie-hdmi-daemon.service qpcie-upgrade-daemon.service
+RefuseManualStop=yes
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/sc7f0_ps_watchdog --run
+# Guardian failure must expire the hardware WDT, not endlessly re-arm it.
+Restart=no
+OOMScoreAdjust=-1000
+Nice=-5
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/run
+ProtectHome=yes
+PrivateTmp=yes
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

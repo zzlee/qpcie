@@ -81,7 +81,8 @@ module audio_stream_engine #(
     reg  [127:0] fifo_din;
     reg          fifo_rd_en;
 
-    assign s_axis_audio_tready = audio_start && !fifo_full;
+    wire fifo_wr_busy, fifo_rd_busy;
+    assign s_axis_audio_tready = audio_start && !fifo_full && !fifo_wr_busy && !fifo_wr_en;
 
     reg         prev_fifo_full;
 
@@ -108,7 +109,7 @@ module audio_stream_engine #(
         end else begin
             fifo_wr_en     <= 1'b0; // Default pulse
             prev_fifo_full <= fifo_full;
-            audio_xrun     <= (s_axis_audio_tvalid && fifo_full && !prev_fifo_full);
+            audio_xrun     <= 1'b0; // AXIS backpressure is not itself lost data.
 
             if (sample_fire) begin
                 // Latch PTS on AES3 Block Start (Preamble 4'hB)
@@ -175,7 +176,7 @@ module audio_stream_engine #(
         .prog_full     (),
         .wr_data_count (),
         .overflow      (),
-        .wr_rst_busy   (),
+        .wr_rst_busy   (fifo_wr_busy),
         .almost_full   (),
         .wr_ack        (),
 
@@ -185,7 +186,7 @@ module audio_stream_engine #(
         .prog_empty    (),
         .rd_data_count (),
         .underflow     (),
-        .rd_rst_busy   (),
+        .rd_rst_busy   (fifo_rd_busy),
         .almost_empty  (),
         .data_valid    (),
 
@@ -213,8 +214,7 @@ module audio_stream_engine #(
             audio_busy       <= 1'b0;
             audio_block_done <= 1'b0;
             fifo_rd_en       <= 1'b0;
-        end else if (!audio_start) begin
-            state            <= IDLE;
+        end else if (!audio_start && state == IDLE) begin
             reg_write_ptr    <= 32'd0;
             reg_period_accum <= 32'd0;
             c2h_req_valid    <= 1'b0;
@@ -222,11 +222,13 @@ module audio_stream_engine #(
             audio_block_done <= 1'b0;
             fifo_rd_en       <= 1'b0;
         end else begin
+            // STOP must retire a submitted MWr before dropping valid/freeing memory.
+            audio_block_done <= 1'b0;
             case (state)
                 IDLE: begin
                     audio_block_done <= 1'b0;
 
-                    if (!fifo_empty) begin
+                    if (!fifo_empty && !fifo_rd_busy && audio_start) begin
                         c2h_req_data   <= fifo_dout;
                         fifo_rd_en     <= 1'b1; // Pop 128-bit beat
                         c2h_req_addr   <= host_buffer_addr + {32'd0, reg_write_ptr};
@@ -245,6 +247,7 @@ module audio_stream_engine #(
 
                     if (c2h_req_ack) begin
                         c2h_req_valid <= 1'b0;
+                        audio_busy <= 1'b0;
 
                         // Wrap circular ALSA buffer write pointer
                         if (reg_write_ptr + 32'd16 >= actual_buf_size)
@@ -253,7 +256,7 @@ module audio_stream_engine #(
                             reg_write_ptr <= reg_write_ptr + 32'd16;
 
                         // Check period elapsed boundary
-                        if (reg_period_accum + 32'd16 >= actual_period_size) begin
+                        if (audio_start && reg_period_accum + 32'd16 >= actual_period_size) begin
                             reg_period_accum <= 32'd0;
                             audio_block_done <= 1'b1; // Pulse period IRQ
                         end else begin

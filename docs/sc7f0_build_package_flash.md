@@ -59,7 +59,7 @@ eMMC boot mount 為 `/run/media/BOOT-mmcblk0p1`。其他部署配置應先確認
 4. PCIe push／PS VERIFY；不接受 E1，不會忽略錯誤強行 COMMIT。
 5. 備份 PS eMMC 三個 boot files 與 host module；載入及安裝 matched driver。
 6. COMMIT；經 PS mailbox 獨立讀回三個檔案的 SHA。
-7. 只對卡端 POR／PCIe rescan，等待 PS 回復，確認 active version 與三個 daemon。
+7. 請求卡端 warm system reset／PCIe rescan（依賴活著的 PS upgrade daemon，**不是外部 POR**），等待 PS 回復，確認 active version 與三個 daemon；新流程還需比對 PS kernel boot_id。
 8. 比對 x86 boot ID 未變。保留 remote logs／backups 的目錄路徑。
 
 只有 VERIFY、不寫 eMMC、不換驅動、不重啟：
@@ -87,7 +87,9 @@ python3 /home/rd/sc7f0-nv-formats/sc7f0_hdmi_preview.py --format NV12 --sink way
 檢查 bytesused／sequence／error flags，可再加 dump 檔名保存完整一幀。
 目前只將 3840×2160 作為這個小工具的驗收尺寸。
 
-**已知獨立限制**：PS-only warm reboot 後 IT6663 下游可能未恢復。
+**reset 術語修正**：工具過去顯示「POR」不精確；目前 Linux/PSCI/PMU 路徑是 card warm **system** reset（不是 PMU 的 PS_ONLY subtype），不保證拉低板上 MCU／IT6663 reset 線。詳見 [PS watchdog 與 reset 範圍](sc7f0_ps_watchdog_20261024.md)。
+
+**已知獨立限制**：上述 warm reboot 後 IT6663 下游可能未恢復。
 若 `hdmi_status` 仍未鎖定，先停 capture，在 x86 測試機執行一次：
 
 ```sh

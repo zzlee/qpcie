@@ -4,6 +4,7 @@
 #include <signal.h>
 #include <sys/wait.h>
 #include <sys/prctl.h>
+#include "sc7f0_health.h"
 
 static volatile sig_atomic_t stopping;
 static void stop_handler(int sig) { (void)sig; stopping = 1; }
@@ -76,6 +77,7 @@ int main(int argc, char **argv)
     signal(SIGTERM, stop_handler); signal(SIGINT, stop_handler);
     signal(SIGCHLD, SIG_DFL); // preserve child PID until explicit wait/reap
     signal(SIGPIPE, SIG_IGN);
+    sc7f0_health_init("debug");
     struct db_io io;
     if (db_open(&io,path,true,sim)) { db_close(&io); return 125; }
     if (!db_valid(&io)) {
@@ -96,7 +98,9 @@ int main(int argc, char **argv)
     db_wr(&io,DB_CARD_BEAT,(uint32_t)db_now());
     db_wr(&io,DB_READY,1);
     fprintf(stderr,"Debug mailbox ready (exec %s, shell %s)\n",allow_exec?"enabled":"disabled",shell);
+    sc7f0_health_ready();
     while (!stopping && !io.failed) {
+        sc7f0_health_progress();
         uint64_t now=db_now();
         db_wr(&io,DB_CARD_BEAT,(uint32_t)now);
         if (!db_valid(&io) || db_rd(&io,DB_CARD_EPOCH)!=epoch) break;

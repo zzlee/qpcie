@@ -16,7 +16,7 @@ all: $(TARGETS)
 sc7f0ctl: sc7f0ctl.c qpcie_debug_io.h ../include/qpcie_debug.h
 	$(CC) $(CFLAGS) -I../include -o $@ sc7f0ctl.c
 
-qpcie_debugd: qpcie_debugd.c qpcie_debug_io.h ../include/qpcie_debug.h
+qpcie_debugd: qpcie_debugd.c qpcie_debug_io.h sc7f0_health.h ../include/qpcie_debug.h
 	$(AARCH64_CC) -O2 -Wall -Wextra -I../include -static -o $@ qpcie_debugd.c
 
 qpcie_upgrade: qpcie_upgrade.c
@@ -31,7 +31,10 @@ qpcie_ddr_verify: qpcie_ddr_verify.c
 qpcie_stage_push: qpcie_stage_push.c
 	$(CC) $(CFLAGS) -o $@ qpcie_stage_push.c
 
-qpcie_upgrade_daemon: qpcie_upgrade_daemon.c
+sc7f0_ps_watchdog: sc7f0_ps_watchdog.c sc7f0_health.h
+	$(AARCH64_CC) -O2 -Wall -Wextra -static -o $@ sc7f0_ps_watchdog.c
+
+qpcie_upgrade_daemon: qpcie_upgrade_daemon.c sc7f0_health.h qpcie_file_transaction.h qpcie_commit_helpers.h qpcie_archive_verify.h
 	$(AARCH64_CC) -O2 -Wall -static -o $@ qpcie_upgrade_daemon.c
 
 qpcie_a50t_tool: qpcie_a50t_tool.c
@@ -40,7 +43,7 @@ qpcie_a50t_tool: qpcie_a50t_tool.c
 qpcie_fw_daemon: qpcie_fw_daemon.c
 	$(AARCH64_CC) -O2 -Wall -static -o $@ qpcie_fw_daemon.c
 
-qpcie_hdmi_daemon: qpcie_hdmi_daemon.c qpcie_control.h
+qpcie_hdmi_daemon: qpcie_hdmi_daemon.c qpcie_control.h qpcie_hdmi_audio.h sc7f0_health.h
 	$(AARCH64_CC) -O2 -Wall -static -o $@ qpcie_hdmi_daemon.c
 
 qpcie_flash: qpcie_flash.c

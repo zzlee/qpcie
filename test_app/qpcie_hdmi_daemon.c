@@ -39,6 +39,8 @@
 #include <dirent.h>
 
 #include "qpcie_control.h"
+#include "qpcie_hdmi_audio.h"
+#include "sc7f0_health.h"
 
 #define DAEMON_NAME "qpcie_hdmi_daemon"
 #define DEFAULT_PL_BASE_ADDR   0xA0000000UL /* BD-mapped HPM0 window (was wrong 0xB000) */
@@ -51,6 +53,7 @@ struct rx_state {
     bool color_valid;
     bool interlaced;
     bool query_error;
+    uint32_t audio_fmt;
     struct v4l2_dv_timings timings;
     struct v4l2_mbus_framefmt fmt;
 };
@@ -220,6 +223,8 @@ static void publish_snapshot(volatile uint32_t *r, const struct rx_state *s,
         r[BAR0_REG_HDMI_TLM_MBUS_CODE / 4] = s->fmt.code;
     }
 
+    r[BAR0_REG_HDMI_RX_AUDIO_FMT / 4] = s->audio_fmt;
+
     r[BAR0_REG_HDMI_TLM_FLAGS / 4] =
         (s->timing_valid ? HDMI_TLM_F_TIMING_VALID : 0) |
         (s->color_valid ? HDMI_TLM_F_COLOR_VALID : 0) |
@@ -288,6 +293,21 @@ static int read_rx_state(int subdev_fd, struct rx_state *s)
         s->fmt = fmt.format;
         s->color_valid = true;
     }
+    /* The official PS RX driver owns these measurements. No fabricated audio
+     * codec/formatter is registered on PS: samples go directly PL -> host. */
+    uint32_t encoding, depth;
+    classify_mbus(s->fmt.code, &encoding, &depth);
+    if (s->color_valid && depth == 8 &&
+        (encoding == HDMI_COLOR_ENC_RGB || encoding == HDMI_COLOR_ENC_YUV444)) {
+        FILE *f = fopen("/sys/bus/platform/devices/b0010000.hdmi-rx/hdmi_info","r");
+        if (f) {
+            char info[8192];
+            size_t n = fread(info,1,sizeof(info)-1,f);
+            info[n] = 0;
+            fclose(f);
+            s->audio_fmt = qpcie_parse_hdmi_audio(info,s->timings.bt.pixelclock);
+        }
+    }
     return 0;
 }
 
@@ -299,6 +319,7 @@ int main(int argc, char *argv[]) {
 
     printf("[%s] Starting Card-Side HDMI RX Telemetry Daemon...\n", DAEMON_NAME);
 
+    sc7f0_health_init("hdmi");
     /* 1. Map PL Registers via /dev/mem */
     int mem_fd = open("/dev/mem", O_RDWR | O_SYNC);
     if (mem_fd < 0) {
@@ -361,7 +382,9 @@ int main(int argc, char *argv[]) {
     was_valid = state.timing_valid;
 
     /* 4. Event & Polling Loop */
+    sc7f0_health_ready();
     while (keep_running) {
+        sc7f0_health_progress();
         if (subdev_fd < 0) {
             sleep(1);
             /* Nodes may appear after the bridge/media probe, and the numbering

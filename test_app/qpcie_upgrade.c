@@ -8,7 +8,7 @@
  *   High-speed firmware upgrade tool pushing complete image bundles (BOOT.BIN,
  *   image.ub, boot.scr packaged as upgrade.tar.gz) directly to board memory.
  *   Coordinated with on-board qpcie_upgrade_daemon for atomic eMMC flashing,
- *   integrity verification, and PCIe link hot-reload (POR reset + rescan)
+ *   integrity verification, and PCIe hot-reload (PS warm reset + rescan)
  *   without rebooting the Host PC.
  *
  * Note: A50T SPI Flash programming is handled by qpcie_a50t_tool.
@@ -413,7 +413,7 @@ int main(int argc, char **argv) {
                 printf("Two-stage protocol (eMMC is written ONLY by --commit):\n");
                 printf("  1. sudo %s --package <tar.gz>  push + BAR0-verify + board VERIFY\n", argv[0]);
                 printf("  2. sudo %s --commit             flash eMMC from VERIFIED bundle\n", argv[0]);
-                printf("  3. sudo %s --reboot             POR reset + PCIe rescan\n", argv[0]);
+                printf("  3. sudo %s --reboot             PS warm reset + PCIe rescan\n", argv[0]);
                 printf("Usage:\n");
                 printf("  sudo %s [options]\n\n", argv[0]);
                 printf("Options:\n");
@@ -423,7 +423,7 @@ int main(int argc, char **argv) {
                 printf("  -c, --script <boot.scr> Specify boot.scr script to package\n");
                 printf("  -m, --commit           Flash eMMC from VERIFIED bundle (requires prior --package)\n");
                 printf("  -s, --status           Query card version, caps, and upgrade state\n");
-                printf("  -r, --reboot           Trigger card POR reset & PCIe link rescan (Zero-Host-Reboot)\n");
+                printf("  -r, --reboot           Request PS warm reset & PCIe link rescan (Zero-Host-Reboot)\n");
                 printf("  -L, --allow-legacy     Allow upgrade of legacy daemons without HELLO handshake\n");
                 printf("  -h, --help             Show this help message\n");
                 return EXIT_SUCCESS;
@@ -564,9 +564,9 @@ int main(int argc, char **argv) {
         return EXIT_SUCCESS;
     }
 
-    /* Standalone --reboot: POR + rescan without any package work. */
+    /* Standalone --reboot: PS-dependent warm-reset request + host rescan. */
     if (do_reboot && !package_path && !bootbin_path && !kernel_path) {
-        printf(" Executing standalone POR + rescan...\n");
+        printf(" Requesting PS warm reset + PCIe rescan (not board POR)...\n");
         bar0[REG_DMA_UPG_CTRL / 4] = DMA_UPG_CMD_REBOOT;
         (void)bar0[REG_DMA_UPG_CTRL / 4];
         char rm_cmd[256];
@@ -580,7 +580,7 @@ int main(int argc, char **argv) {
         sleep(1);
         char new_bdf[64] = {0};
         if (find_pcie_device(new_bdf, sizeof(new_bdf)))
-            printf(" SUCCESS: PCIe Device re-established at %s!\n", new_bdf);
+            printf(" PCIe device present at %s; PS reboot is NOT verified.\n", new_bdf);
         else
             printf(" Notice: Card did not respond immediately. Check link status.\n");
         return EXIT_SUCCESS;
@@ -781,9 +781,9 @@ int main(int argc, char **argv) {
 
     // 6. Zero-Host-Reboot PCIe Hot-Reload Protocol (standalone or after --package)
     if (do_reboot) {
-        printf(" ⚡ Executing Zero-Host-Reboot Card POR & Rescan Sequence...\n");
+        printf(" ⚡ Requesting card PS warm reset & PCIe rescan...\n");
 
-        printf("    [1/4] Triggering ZU4EV PMU Chip-Level Power-On Reset (POR)...\n");
+        printf("    [1/4] Requesting Linux/PSCI warm system reset (requires live PS daemon)...\n");
         bar0[REG_DMA_UPG_CTRL / 4] = DMA_UPG_CMD_REBOOT;
         (void)bar0[REG_DMA_UPG_CTRL / 4]; // Flush PCIe MMIO write
 
@@ -806,12 +806,13 @@ int main(int argc, char **argv) {
         char new_bdf[64] = {0};
         if (find_pcie_device(new_bdf, sizeof(new_bdf))) {
             printf(" ✅ SUCCESS: PCIe Device re-established at %s!\n", new_bdf);
-            printf(" 🎉 New FPGA Bitstream & Firmware is now 100%% active!\n");
+            printf(" PCIe enumeration only: PS reboot/new firmware NOT verified.\n");
+            printf(" Check changed PS kernel boot_id, release ID and advancing heartbeats.\n");
         } else {
             printf(" ⚠️ Notice: Card did not respond immediately. Check link status.\n");
         }
     } else {
-        printf(" NOTE: Pass '--reboot' to automatically POR reset the card and\n");
+        printf(" NOTE: Pass '--reboot' to request a PS warm system reset and\n");
         printf("       rescan the PCIe link without rebooting the host PC.\n");
         munmap((void *)bar0, 65536);
         close(fd_bar0);

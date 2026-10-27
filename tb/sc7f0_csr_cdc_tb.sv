@@ -23,10 +23,14 @@ module sc7f0_csr_cdc_tb;
     wire [31:0] w1c_event;
     reg [15:0] status_counter = 0;
     reg xrun = 0;
+    reg [31:0] audio_frames = 32'h12345678;
+    reg [31:0] expected_audio_ctrl = 32'h111;
+    wire [31:0] audio_ctrl, audio_period, audio_buffer;
+    wire [63:0] audio_ring;
     always @(posedge pcie_clk or negedge pcie_rst_n)
         if (!pcie_rst_n) status_counter <= 0;
         else status_counter <= status_counter + 1'b1;
-    qpcie_csr_reg_space dut (
+    qpcie_csr_reg_space #(.C_VERSION(32'h26102206)) dut (
         .clk(clk), .rst_n(rst_n), .pcie_clk(pcie_clk), .pcie_rst_n(pcie_rst_n),
         .s_axil_awaddr(awaddr), .s_axil_awvalid(awvalid), .s_axil_awready(awready),
         .s_axil_wdata(wdata), .s_axil_wstrb(4'hf), .s_axil_wvalid(wvalid), .s_axil_wready(wready),
@@ -35,6 +39,11 @@ module sc7f0_csr_cdc_tb;
         .s_axil_rdata(rdata), .s_axil_rresp(rresp), .s_axil_rvalid(rvalid), .s_axil_rready(rready),
         .reg_dma_status({status_counter, ~status_counter}),
         .in_requester_id(16'h0300), .in_adev0_xrun(xrun), .in_adev0_running(1'b0),
+        .in_audio_rx_frames(audio_frames), .in_audio_rx_errors(32'd7),
+        .in_audio_rx_channels(32'd3), .in_audio_rx_cs(32'h02000000),
+        .in_hdmi_rx_audio(32'd48000),
+        .out_adev0_ctrl(audio_ctrl), .out_adev0_ring0_base(audio_ring),
+        .out_adev0_period_bytes(audio_period), .out_adev0_buffer_bytes(audio_buffer),
         .in_dma_upg_write_done(1'b0), .in_dma_upg_bytes_written(32'd17),
         .in_dma_upg_diag_pcie(32'd0), .in_dma_upg_diag_writer(32'd0),
         .in_dma_upg_diag_clear_ack(1'b0), .in_ddr_read_status(32'd0),
@@ -49,6 +58,10 @@ module sc7f0_csr_cdc_tb;
     always @(posedge pcie_clk) begin
         if (reset_event) resets = resets + 1;
         if (w1c_event == 32'hcafebabe) clears = clears + 1;
+        if (pcie_rst_n && audio_ctrl[0] &&
+            (audio_ctrl !== expected_audio_ctrl || audio_ring !== 64'h1122334455667788 ||
+             audio_period !== 4096 || audio_buffer !== 65536))
+            $fatal(1, "Incoherent audio configuration at START");
         if (upg_ctrl[0] && (upg_size !== 12345 || upg_host !== 64'hfedcba9876543210))
             $fatal(1, "Incoherent upgrade START");
         if (pcie_rst_n && ctrl[0] &&
@@ -97,7 +110,7 @@ module sc7f0_csr_cdc_tb;
         read_reg(0, value);
         if (value !== 32'h12abe380) $fatal(1, "standalone magic %h", value);
         read_reg('h4, value);
-        if (value !== 32'h26101504) $fatal(1, "candidate hardware version %h", value);
+        if (value !== 32'h26102206) $fatal(1, "candidate hardware version %h", value);
 `ifdef SC7F0_DEBUG_ONLY
         read_reg('h8, value);
         if (value !== 32'h80000010) $fatal(1, "debug profile advertises AV hardware: %h", value);
@@ -119,6 +132,38 @@ module sc7f0_csr_cdc_tb;
         #1000;
         if (!ctrl[0]) $fatal(1, "START missing");
         write_reg('h100, 0);
+        #1000;
+        // Full audio ABI must traverse the actual generated wrapper, not
+        // only axil_reg_space: catch stale ports and torn configuration.
+        read_reg('h538, value);
+        if (value !== 32'h41554431) $fatal(1, "PCM ABI %h", value);
+        read_reg('h53c, value);
+        if (value !== 32'h52584131) $fatal(1, "RXA1 trace ABI %h", value);
+        read_reg('h518, value);
+        if (value !== audio_frames) $fatal(1, "audio frames %h", value);
+        read_reg('h51c, value);
+        if (value !== 48000) $fatal(1, "audio measured rate %h", value);
+        read_reg('h52c, value);
+        if (value !== 7) $fatal(1, "audio errors %h", value);
+        read_reg('h530, value);
+        if (value !== 3) $fatal(1, "audio channel mask %h", value);
+        read_reg('h534, value);
+        if (value !== 32'h02000000) $fatal(1, "audio channel status %h", value);
+        @(negedge pcie_clk); audio_frames = 32'haaaaaaaa;
+        #3000; read_reg('h518, value);
+        if (value !== audio_frames) $fatal(1, "audio snapshot update %h", value);
+        write_reg('h520, 32'h55667788); write_reg('h524, 32'h11223344);
+        write_reg('h50c, 4096); write_reg('h510, 65536);
+        write_reg('h500, 32'h111);
+        #3000;
+        if (audio_ctrl !== 32'h111) $fatal(1, "HDMI PCM START missing");
+        write_reg('h500, 32'h120); #3000;
+        if (audio_ctrl !== 32'h120) $fatal(1, "trace idle config missing");
+        expected_audio_ctrl = 32'h121;
+        write_reg('h500, 32'h121); #3000;
+        if (audio_ctrl !== 32'h121) $fatal(1, "trace ordered START missing");
+        write_reg('h500, 0); #3000;
+        write_reg('h500, 0);
         #1000;
         // Slow, unrelated clock: force FIFO full and write backpressure.
         pcie_half = 75;

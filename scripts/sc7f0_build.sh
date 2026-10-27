@@ -28,19 +28,24 @@ flock -n 9 || { echo 'Another build/package is active' >&2; exit 1; }
 mkdir -p "$OUT"/{logs,fpga,images}
 exec > >(tee "$OUT/logs/build.log") 2>&1
 trap 's=$?; echo "$s" > "$OUT/build.exit"; exit "$s"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 printf '%s\n' "$VERSION" > "$OUT/VERSION"
 # Include untracked new RTL too, but never generated kernel .mod.c files.
-find rtl constraints tb driver include test_app scripts -type f \
-    \( -name '*.v' -o -name '*.sv' -o -name '*.xdc' -o -name '*.c' -o -name '*.h' -o -name '*.tcl' -o -name '*.sh' -o -name '*.py' -o -name Makefile \) \
+find rtl constraints tb driver include test_app scripts petalinux/qpcie-zu4ev/project-spec/meta-user -type f \
+    \( -name '*.v' -o -name '*.sv' -o -name '*.xdc' -o -name '*.c' -o -name '*.h' -o -name '*.tcl' -o -name '*.sh' -o -name '*.py' -o -name '*.bb' -o -name '*.bbappend' -o -name '*.cfg' -o -name '*.patch' -o -name '*.dtsi' -o -name '*.service' -o -name Makefile \) \
     ! -name '*.mod.c' -print0 | sort -z | xargs -0 sha256sum > "$OUT/SOURCE.sha256"
 set +u
 source "${VIVADO_SETTINGS:-/opt/Xilinx/Vivado/2023.2/settings64.sh}"
 set -u
-bash scripts/test_sc7f0_nv_formats.sh | tee "$OUT/logs/unit.log"
+python3 scripts/generate_sc7f0_csr_cdc.py --check
+SC7F0_NV_TEST_OUT="$OUT/unit/nv-formats" bash scripts/test_sc7f0_nv_formats.sh | tee "$OUT/logs/unit.log"
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests
 mkdir -p /tmp/opencode
 python3 tb/qpcie_archive_verify_tb.py
-for test in sim_zu4ev_ps_axi_protocol test_sc7f0_cdc; do
+cc -O2 -Wall -Wextra -Itest_app tb/qpcie_hdmi_audio_tb.c -o "$OUT/hdmi-audio-parser-test"
+"$OUT/hdmi-audio-parser-test"
+for test in sim_zu4ev_ps_axi_protocol sim_sc7f0_csr_cdc test_sc7f0_cdc test_sc7f0_audio; do
     vivado -mode batch -log "$OUT/logs/$test.vivado.log" -journal "$OUT/logs/$test.jou" \
         -source "scripts/$test.tcl" > "$OUT/logs/$test.log" 2>&1
 done
@@ -75,6 +80,7 @@ make -B -C test_app qpcie_upgrade_daemon qpcie_debugd qpcie_hdmi_daemon
 # Build the deployable PS FIT with all three services enabled; never publish
 # into release/zu4ev_sd_installer or overwrite a validated release directory.
 REL_TARGET_DIR="$OUT/.no-release-copy" INCLUDE_DEBUG_DAEMON=1 ENABLE_DEBUG_EXEC=1 ENABLE_HDMI_DAEMON=1 \
+    ENABLE_SC7F0_WATCHDOG=1 SC7F0_PL_BASE_VERSION="0x$VERSION" \
     bash scripts/inject_upgrade_daemon_to_image_ub.sh
 for f in image.ub boot.scr zynqmp_fsbl.elf pmufw.elf bl31.elf u-boot.elf system.dtb; do
     cp -L "petalinux/qpcie-zu4ev/images/linux/$f" "$OUT/images/$f"

@@ -5,7 +5,7 @@ LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/GPL-2.0-only;md5=801f80980d171d
 # Keep one copy of the protocol and daemon sources in the repository.
 QPCIE_ROOT := "${THISDIR}/../../../../../.."
 FILESEXTRAPATHS:prepend := "${THISDIR}/files:${QPCIE_ROOT}/test_app:${QPCIE_ROOT}/include:"
-SRC_URI = "file://qpcie_debugd.c file://qpcie_debug_io.h file://qpcie_debug.h file://qpcie-debugd.service"
+SRC_URI = "file://qpcie_debugd.c file://qpcie_debug_io.h file://sc7f0_health.h file://qpcie_debug.h file://qpcie-debugd.service"
 S = "${WORKDIR}"
 inherit systemd
 SYSTEMD_SERVICE:${PN} = "qpcie-debugd.service"

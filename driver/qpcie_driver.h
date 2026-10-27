@@ -311,6 +311,17 @@
 #define REG_ADEV0_PERIOD_BYTES      0x50C  /* Period size in bytes */
 #define REG_ADEV0_BUFFER_BYTES      0x510  /* Circular buffer size in bytes */
 #define REG_ADEV0_POSITION          0x514  /* RO: current HW write pointer (bytes) */
+#define REG_ADEV0_RX_FRAMES         0x518
+#define REG_ADEV0_RX_RATE           0x51C
+#define REG_ADEV0_RX_ERRORS         0x52C
+#define REG_ADEV0_RX_CHANNELS       0x530
+#define REG_ADEV0_RX_CS             0x534
+#define REG_ADEV0_PCM_ABI           0x538
+#define ADEV0_PCM_ABI               0x41554431U
+#define ADEV0_CTRL_HDMI_PCM         BIT(4)
+#define ADEV0_CTRL_HDMI_TRACE       BIT(5)
+#define REG_ADEV0_TRACE_ABI         0x53C
+#define ADEV0_TRACE_ABI             0x52584131U /* RXA1 */
 #define REG_ADEV0_RING0_BASE_L      0x520  /* Host circular buffer DMA phys addr [31:0] */
 #define REG_ADEV0_RING0_BASE_H      0x524  /* Host circular buffer DMA phys addr [63:32] */
 #define REG_ADEV0_RING0_CFG         0x528  /* Ring config (reserved) */
@@ -484,6 +495,7 @@ struct qpcie_alsa_channel {
     spinlock_t slock;
     u32 play_buffer_pos;
     u32 cap_buffer_pos;
+    u32 audio_error_start;
     struct hrtimer play_timer;
     bool play_timer_active;
     snd_pcm_uframes_t play_hw_ptr;

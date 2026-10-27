@@ -126,3 +126,4 @@ raw/NUC1262BSP/
 test_mcu_nuc1262/*.elf
 test_mcu_nuc1262/*.bin
 test_mcu_nuc1262/*.tcl
+/test_app/sc7f0_ps_watchdog

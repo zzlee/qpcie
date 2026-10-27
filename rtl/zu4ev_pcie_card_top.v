@@ -608,6 +608,8 @@ module zu4ev_pcie_card_top #(
     wire [31:0] hdmi_rx_res_w;
     wire [31:0] hdmi_rx_timing_w;
     wire [31:0] hdmi_rx_audio_w;
+    wire [31:0] audio_capture_control;
+    wire [31:0] audio_rx_frames, audio_rx_errors, audio_rx_channels, audio_rx_cs;
     wire [31:0] hdmi_tx_status_w;
     wire [31:0] hdmi_tx_ctrl_w;
     wire [31:0] hdmi_tx_res_w;
@@ -851,6 +853,7 @@ module zu4ev_pcie_card_top #(
     wire        rx_ss_video_tuser;
 
     wire [31:0] rx_ss_audio_tdata;
+    wire [7:0] rx_ss_audio_tid;
     wire        rx_ss_audio_tvalid;
     wire        rx_ss_audio_tready;
     wire        hdmi_rx_hpd_from_ss;
@@ -904,7 +907,7 @@ module zu4ev_pcie_card_top #(
         .S_AXI_CPU_IN_wstrb    (hdmi_ctl_wstrb[7:4]),
         .S_AXI_CPU_IN_wvalid   (hdmi_ctl_wvalid[1]),
         .AUDIO_OUT_tdata       (rx_ss_audio_tdata),
-        .AUDIO_OUT_tid         (),
+        .AUDIO_OUT_tid         (rx_ss_audio_tid),
         .AUDIO_OUT_tready      (rx_ss_audio_tready),
         .AUDIO_OUT_tvalid      (rx_ss_audio_tvalid),
         .DDC_OUT_scl_i         (rx_ddc_scl_i),
@@ -987,22 +990,20 @@ module zu4ev_pcie_card_top #(
     wire        hdmi_rx_a_tready;
     wire        hdmi_rx_a_tlast;
 
-    hdmi_rx_audio_bridge #(
-        .FIFO_DEPTH(512)
-    ) u_hdmi_rx_audio_bridge (
-        .rx_audio_clk(pcie_user_clk),
-        .rx_audio_rst_n(pcie_user_rst_n),
-        .s_axis_audio_tdata(rx_ss_audio_tdata),
-        .s_axis_audio_tvalid(rx_ss_audio_tvalid),
-        .s_axis_audio_tready(rx_ss_audio_tready),
-        .pcie_user_clk(pcie_user_clk),
-        .pcie_user_rst_n(pcie_user_rst_n),
-        .m_axis_audio_tdata(hdmi_rx_a_tdata),
-        .m_axis_audio_tvalid(hdmi_rx_a_tvalid),
-        .m_axis_audio_tready(hdmi_rx_a_tready),
-        .m_axis_audio_tlast(hdmi_rx_a_tlast),
-        .rx_audio_reg(hdmi_rx_audio_w)
+    // RX audio AXIS already runs on PCIe125; no second clock or raw fan-out.
+    hdmi_rx_pcm_converter u_hdmi_rx_pcm_converter (
+        .clk(pcie_user_clk), .rst_n(pcie_user_rst_n),
+        .capture_enable(audio_capture_control[0] && (audio_capture_control[4] || audio_capture_control[5])),
+        .diagnostic_raw(audio_capture_control[5]),
+        .s_axis_audio_tdata(rx_ss_audio_tdata), .s_axis_audio_tid(rx_ss_audio_tid),
+        .s_axis_audio_tvalid(rx_ss_audio_tvalid), .s_axis_audio_tready(rx_ss_audio_tready),
+        .m_axis_pcm_tdata(hdmi_rx_a_tdata), .m_axis_pcm_tvalid(hdmi_rx_a_tvalid),
+        .m_axis_pcm_tready(hdmi_rx_a_tready), .overflow(),
+        .frame_count(audio_rx_frames), .measured_rate(hdmi_rx_audio_w),
+        .error_count(audio_rx_errors), .channel_mask(audio_rx_channels),
+        .channel_status(audio_rx_cs)
     );
+    assign hdmi_rx_a_tlast = 1'b0;
 
     // =========================================================================
     // HDMI TX Subsystem (v_hdmi_tx_ss_0)
@@ -1204,6 +1205,10 @@ module zu4ev_pcie_card_top #(
     assign hdmi_rx_res_w = 32'd0;
     assign hdmi_rx_timing_w = 32'd0;
     assign hdmi_rx_audio_w = 32'd0;
+    assign audio_rx_frames = 0;
+    assign audio_rx_errors = 0;
+    assign audio_rx_channels = 0;
+    assign audio_rx_cs = 0;
     assign hdmi_tx_status_w = 32'd0;
     assign m_video_tready[1] = 1'b1;
     assign m_audio_tready[1] = 1'b1;
@@ -1304,10 +1309,11 @@ module zu4ev_pcie_card_top #(
     assign s_video_tuser[0]     = video_ch0_mux_tuser;
     assign m_video_tready[0]    = 1'b1;
 
-    assign s_audio_tdata[31:0]  = ch0_use_tpg ? aud_pat_axis_tdata  : hdmi_rx_a_tdata;
-    assign s_audio_tvalid[0]    = ch0_use_tpg ? aud_pat_axis_tvalid : hdmi_rx_a_tvalid;
-    assign s_audio_tlast[0]     = ch0_use_tpg ? aud_pat_axis_tlast  : hdmi_rx_a_tlast;
-    assign hdmi_rx_a_tready     = ch0_use_tpg ? 1'b1                 : s_audio_tready[0];
+    // ADEV0 CTRL[4] is independent of video: 0=legacy TPG raw, 1=HDMI PCM.
+    assign s_audio_tdata[31:0] = (audio_capture_control[4] || audio_capture_control[5]) ? hdmi_rx_a_tdata : aud_pat_axis_tdata;
+    assign s_audio_tvalid[0] = (audio_capture_control[4] || audio_capture_control[5]) ? hdmi_rx_a_tvalid : aud_pat_axis_tvalid;
+    assign s_audio_tlast[0] = audio_capture_control[4] ? hdmi_rx_a_tlast : aud_pat_axis_tlast;
+    assign hdmi_rx_a_tready = (audio_capture_control[4] || audio_capture_control[5]) ? s_audio_tready[0] : 1'b1;
     assign m_audio_tready[0]    = 1'b1;
 
     // Channel 1 (HDMI TX):
@@ -1342,7 +1348,7 @@ module zu4ev_pcie_card_top #(
     assign s_audio_tdata[127:96]  = aud_pat_axis_tdata;
     assign s_audio_tvalid[3]      = aud_pat_axis_tvalid;
     assign s_audio_tlast[3]       = aud_pat_axis_tlast;
-    assign aud_pat_axis_tready    = (ch0_use_tpg ? s_audio_tready[0] : 1'b0) | s_audio_tready[3];
+    assign aud_pat_axis_tready = ((!audio_capture_control[4] && !audio_capture_control[5] && audio_capture_control[0]) ? s_audio_tready[0] : 1'b1);
     assign m_audio_tready[3]      = 1'b1;
 
     // =========================================================================
@@ -1974,6 +1980,9 @@ module zu4ev_pcie_card_top #(
         .in_hdmi_rx_res(hdmi_rx_res_w),
         .in_hdmi_rx_timing(hdmi_rx_timing_w),
         .in_hdmi_rx_audio(hdmi_rx_audio_w),
+        .out_audio_capture_control(audio_capture_control),
+        .in_audio_rx_frames(audio_rx_frames), .in_audio_rx_errors(audio_rx_errors),
+        .in_audio_rx_channels(audio_rx_channels), .in_audio_rx_cs(audio_rx_cs),
         .in_hdmi_tx_status(hdmi_tx_status_w),
         .out_hdmi_tx_ctrl(hdmi_tx_ctrl_w),
         .out_hdmi_tx_res(hdmi_tx_res_w),

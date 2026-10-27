@@ -9,7 +9,7 @@
  *   Host PC's qpcie_upgrade tool via PL CSR registers. Receives the upgrade
  *   bundle (upgrade.tar.gz) directly in DDR4 memory, validates CRC32/SHA256,
  *   performs atomic replacement on eMMC (/dev/mmcblk0p1 and mmcblk0boot0),
- *   and triggers PMU chip-level POR reset for zero-host-reboot reloading.
+ *   and requests PS/PL warm system reset for zero-host-reboot reloading.
  */
 
 #define _GNU_SOURCE
@@ -29,6 +29,7 @@
 #include <setjmp.h>
 #include <syslog.h>
 
+#include "sc7f0_health.h"
 #include "qpcie_commit_helpers.h"
 #include "qpcie_archive_verify.h"
 #include "qpcie_file_transaction.h"
@@ -210,7 +211,8 @@ static inline void run_best_effort(const char *cmd) {
 }
 
 /* Trigger ZU4EV System Reset */
-static void trigger_pmu_por(void) {
+/* Warm system reset through Linux/PSCI/PMU; NOT external board POR. */
+static void trigger_ps_warm_reboot(void) {
     syslog(LOG_NOTICE, "Triggering ZU4EV system reset...");
     sync();
 
@@ -450,6 +452,7 @@ int main(int argc, char **argv) {
     signal(SIGINT, sig_handler);
     signal(SIGTERM, sig_handler);
 
+    sc7f0_health_init("upgrade");
     int fd_mem = open("/dev/mem", O_RDWR | O_SYNC);
     if (fd_mem < 0) {
         syslog(LOG_ERR, "Failed to open /dev/mem: %s", strerror(errno));
@@ -512,14 +515,16 @@ int main(int argc, char **argv) {
     uint32_t verified_size = 0, verified_crc = 0;
     bool verified_valid = false;
 
+    sc7f0_health_ready();
     while (g_running) {
+        sc7f0_health_progress();
         uint32_t ctrl     = pl_regs[REG_DMA_UPG_CTRL / 4];
         uint32_t doorbell = pl_regs[REG_DMA_UPG_DOORBELL / 4];
 
         // Check for Warm Reboot request
         if (ctrl & DMA_UPG_CMD_REBOOT) {
             pl_regs[REG_DMA_UPG_CTRL / 4] = DMA_UPG_CMD_NONE;
-            trigger_pmu_por();
+            trigger_ps_warm_reboot();
             break;
         }
 
@@ -541,7 +546,9 @@ int main(int argc, char **argv) {
                           &verified_size, &verified_crc, &verified_valid);
             } else {
                 syslog(LOG_NOTICE, "COMMIT request: size=%u crc=0x%08X", req_size, req_crc);
+                sc7f0_health_critical(1);
                 do_commit(pl_regs, &verified_size, &verified_crc, &verified_valid);
+                sc7f0_health_critical(0);
             }
         } else if (doorbell != 0) {
             pl_regs[REG_DMA_UPG_DOORBELL / 4] = 0x00;

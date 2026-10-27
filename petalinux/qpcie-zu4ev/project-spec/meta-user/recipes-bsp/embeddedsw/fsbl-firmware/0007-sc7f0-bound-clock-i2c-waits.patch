@@ -1,0 +1,164 @@
+From: SC7F0 recovery preparation
+Subject: [PATCH] 0007-sc7f0-bound-clock-i2c-waits.patch
+
+Offline candidate; requires cold-boot and watchdog fault-injection acceptance.
+Upstream-Status: Inappropriate [SC7F0 board policy]
+
+--- a/lib/sw_apps/zynqmp_fsbl/src/xfsbl_hooks.c
++++ b/lib/sw_apps/zynqmp_fsbl/src/xfsbl_hooks.c
+@@ -32,6 +32,7 @@
+ #include "xfsbl_hooks.h"
+ #include "psu_init.h"
+ #include "xiicps.h"
++#include "xtime_l.h"
+ #include "Si5341-RevB-SC7F0-V1_1-20261008-Registers.h"
+ 
+ #define IIC_SCLK_RATE_SI5341  100000
+@@ -56,48 +57,41 @@
+ 	return *((u32*)(reg + off));
+ }
+ 
+-static s32 si5341_write(XIicPs *IicInstance, u16 register_address, u8 data)
+-{
+-	static u8 current_page = 0xff;
+-
+-	u8 slave = IIC_ADDR_SI5341;
+-	u8 send_buf[2];
+-	s32 Status;
+-
+-	send_buf[0] = 0x01;
+-	send_buf[1] = (register_address >> 8);
+-
+-	if(send_buf[1] != current_page)
+-	{
+-		XFsbl_Printf(DEBUG_PRINT_ALWAYS, "+");
+-		Status = XIicPs_MasterSendPolled(IicInstance, send_buf, 2, slave);
+-		if (Status != XST_SUCCESS) {
+-			XFsbl_Printf(DEBUG_GENERAL, "XFSBL_ERROR_I2C_WRITE\r\n");
++static u8 si5341_current_page = 0xff;
++
++static s32 si5341_wait_idle(XIicPs *Instance)
++{
++	XTime start, now;
++	XTime_GetTime(&start);
++	while (XIicPs_BusIsBusy(Instance)) {
++		XTime_GetTime(&now);
++		if (now - start >= COUNTS_PER_SECOND / 10U) {
++			XIicPs_Abort(Instance);
+ 			return XST_FAILURE;
+ 		}
+-
+-		while(XIicPs_BusIsBusy(IicInstance)) {
+-			/* NOP */
+-		}
+-
+-		current_page = send_buf[1];
+-	}
+-
+-	send_buf[0] = (register_address & 0xFF);
+-	send_buf[1] = data;
+-
+-	XFsbl_Printf(DEBUG_PRINT_ALWAYS, ".");
+-	Status = XIicPs_MasterSendPolled(IicInstance, send_buf, 2, slave);
+-	if (Status != XST_SUCCESS) {
+-		XFsbl_Printf(DEBUG_GENERAL, "XFSBL_ERROR_I2C_WRITE\r\n");
++	}
++	return XST_SUCCESS;
++}
++
++static s32 si5341_send(XIicPs *Instance, u8 *Data)
++{
++	if (si5341_wait_idle(Instance) != XST_SUCCESS ||
++	    XIicPs_MasterSendPolled(Instance, Data, 2, IIC_ADDR_SI5341) != XST_SUCCESS)
+ 		return XST_FAILURE;
+-	}
+-
+-	while(XIicPs_BusIsBusy(IicInstance)) {
+-		/* NOP */
+-	}
+-
+-	return Status;
++	return si5341_wait_idle(Instance);
++}
++
++static s32 si5341_write(XIicPs *Instance, u16 Address, u8 Data)
++{
++	u8 buf[2] = {0x01, Address >> 8};
++	if (buf[1] != si5341_current_page) {
++		if (si5341_send(Instance, buf) != XST_SUCCESS)
++			return XST_FAILURE;
++		si5341_current_page = buf[1];
++	}
++	buf[0] = Address & 0xff;
++	buf[1] = Data;
++	return si5341_send(Instance, buf);
+ }
+ 
+ #ifndef XPAR_ZZLAB_ENV_CTRL_0_BASEADDR
+@@ -143,6 +137,7 @@
+ 	s32 Status;
+ 	u32 UStatus;
+ 	int i;
++	XTime start, now;
+ 
+ 	ShowZzLabEnvVer();
+ 	XFsbl_Printf(DEBUG_PRINT_ALWAYS, "SC7F0 2026/10/08\n\r");
+@@ -170,17 +165,28 @@
+ 	}
+ 
+ 	XFsbl_Printf(DEBUG_PRINT_ALWAYS, "Program SI5341.");
+-	for(i = 0;i < SI5341_REVB_REG_CONFIG_NUM_REGS;i++)
+-	{
+-		if(i == 6) {
+-			usleep(300000U);
++	/* Retry complete programming, not an ambiguous partial write.
++	 * 45s also permits the independent MCU WDT to release the shared bus.
++	 * No arbitrary MMIO, reset-pin driving, or unbounded BUSY loops.
++	 */
++	XTime_GetTime(&start);
++	do {
++		si5341_current_page = 0xff;
++		for (i = 0; i < SI5341_REVB_REG_CONFIG_NUM_REGS; ++i) {
++			if (i == 6) usleep(300000U);
++			Status = si5341_write(&I2c1Instance,
++				si5341_revb_registers[i].address,
++				si5341_revb_registers[i].value);
++			if (Status != XST_SUCCESS) break;
+ 		}
+-
+-		Status = si5341_write(&I2c1Instance, si5341_revb_registers[i].address, si5341_revb_registers[i].value);
+-		if (Status != XST_SUCCESS) {
++		if (Status == XST_SUCCESS) break;
++		XIicPs_Reset(&I2c1Instance);
++		if (XIicPs_SetSClk(&I2c1Instance, IIC_SCLK_RATE_SI5341) != XST_SUCCESS)
+ 			return XST_FAILURE;
+-		}
+-	}
++		usleep(10000U);
++		XTime_GetTime(&now);
++	} while (now - start < (XTime)45U * COUNTS_PER_SECOND);
++	if (Status != XST_SUCCESS) return XST_FAILURE;
+ 	XFsbl_Printf(DEBUG_PRINT_ALWAYS, "Done\n\r");
+ 
+ 	UStatus = XFSBL_SUCCESS;
+--- a/XilinxProcessorIPLib/drivers/iicps/src/xiicps_master.c
++++ b/XilinxProcessorIPLib/drivers/iicps/src/xiicps_master.c
+@@ -342,6 +342,10 @@
+ 	Value = ((InstancePtr->SendByteCount > (s32)0) &&
+ 		((IntrStatusReg & Intrs) == (u32)0U));
+ 	while (Value != FALSE) {
++		if (++timeout >= TX_MAX_LOOPCNT) {
++			XIicPs_Abort(InstancePtr);
++			return (s32)XST_FAILURE;
++		}
+ 		StatusReg = XIicPs_ReadReg(BaseAddr, XIICPS_SR_OFFSET);
+ 
+ 		/*
+@@ -366,6 +370,7 @@
+ 	/*
+ 	 * Check for completion of transfer.
+ 	 */
++	timeout = 0;
+ 	while ((IntrStatusReg & XIICPS_IXR_COMP_MASK) != XIICPS_IXR_COMP_MASK){
+ 
+ 		IntrStatusReg = XIicPs_ReadReg(BaseAddr, XIICPS_ISR_OFFSET);

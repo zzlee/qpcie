@@ -87,6 +87,10 @@ if [ "${INCLUDE_DEBUG_DAEMON:-0}" = "1" ]; then
     bash "$ROOT_DIR/scripts/install_debug_rootfs.sh" "$WORK_DIR/rootfs"
 fi
 
+if [ "${ENABLE_SC7F0_WATCHDOG:-0}" = 1 ]; then
+    bash "$ROOT_DIR/scripts/install_sc7f0_watchdog_rootfs.sh" "$WORK_DIR/rootfs"
+fi
+
 echo "[3/4] Repacking rootfs.cpio.gz..."
 NEW_ROOTFS="$WORK_DIR/rootfs_with_daemon.cpio.gz"
 cd "$WORK_DIR/rootfs"

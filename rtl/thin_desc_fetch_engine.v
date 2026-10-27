@@ -203,15 +203,19 @@ module thin_desc_fetch_engine #(
                             frame_launch_req <= 1'b1;
                             frame_active     <= 1'b1;
                             state            <= S_LAUNCH_WAIT;
-                        end else if (ring0_has_work && !sgl_y_almost_full && ring0_needed) begin
-                            // Fetch next entry for RING0
+                        end else if (frame_active && ring0_has_work && !sgl_y_almost_full && ring0_needed) begin
+                            // Only the launched frame owns descriptor fetches.
+                            // Host Y/UV doorbells are separate MMIO writes: an
+                            // early prefetch can consume one ring before its
+                            // partner arrives, then lose its byte accounting
+                            // at launch (or prevent launch entirely).
                             sel_ring1      <= 1'b0;
                             mrd_req_addr   <= ring0_base_addr + (ring0_head * 16);
                             mrd_req_dw_len <= 11'd4; // 16 bytes
                             mrd_req_tag    <= THIN_MRD_TAG;
                             mrd_req_valid  <= 1'b1;
                             state          <= S_REQ_MRD;
-                        end else if (ring1_has_work && !sgl_uv_almost_full && ring1_needed) begin
+                        end else if (frame_active && ring1_has_work && !sgl_uv_almost_full && ring1_needed) begin
                             // Fetch next entry for RING1
                             sel_ring1      <= 1'b1;
                             mrd_req_addr   <= ring1_base_addr + (ring1_head * 16);

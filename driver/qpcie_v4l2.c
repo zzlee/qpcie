@@ -21,6 +21,14 @@ module_param(force_sgl_fetch, bool, 0644);
 MODULE_PARM_DESC(force_sgl_fetch,
                  "Force 4KiB host SGL fetch tables for V4L2 DMA validation");
 
+/* Lab-only buffer-pressure comparison on frozen PL. This does not repair
+ * the dual-ring doorbell race; default preserves the validated allocation.
+ * Load-time only, and bounded by the existing eight-buffer maximum. */
+static unsigned int sc7f0_nv_min_buffers = 2;
+module_param(sc7f0_nv_min_buffers, uint, 0400);
+MODULE_PARM_DESC(sc7f0_nv_min_buffers,
+                 "Diagnostic minimum NV12/NV16 capture buffers (2..8, default2)");
+
 static const struct v4l2_file_operations qpcie_v4l2_fops = {
     .owner          = THIS_MODULE,
     .open           = v4l2_fh_open,
@@ -851,7 +859,9 @@ static int qpcie_queue_setup(struct vb2_queue *vq,
     sizes[0] = y_size;
     if (exp_planes == 2)
         sizes[1] = uv_size;
-    *nbuffers = clamp_t(unsigned int, *nbuffers, 2, 8);
+    *nbuffers = clamp_t(unsigned int, *nbuffers,
+                       (vch->channel_id == 0 && exp_planes == 2) ?
+                       clamp_t(unsigned int, sc7f0_nv_min_buffers, 2, 8) : 2, 8);
     return 0;
 }
 

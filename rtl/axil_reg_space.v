@@ -195,6 +195,8 @@ module axil_reg_space #(
     input  wire [31:0] in_hdmi_rx_res,
     input  wire [31:0] in_hdmi_rx_timing,
     input  wire [31:0] in_hdmi_rx_audio,
+    input  wire [31:0] in_audio_rx_frames, in_audio_rx_errors,
+    input  wire [31:0] in_audio_rx_channels, in_audio_rx_cs,
     input  wire [31:0] in_hdmi_tx_status,
     output wire [31:0] out_hdmi_tx_ctrl,
     output wire [31:0] out_hdmi_tx_res,
@@ -889,6 +891,13 @@ module axil_reg_space #(
                             8'h0C: s_axil_rdata <= adev0_period_bytes;
                             8'h10: s_axil_rdata <= adev0_buffer_bytes;
                             8'h14: s_axil_rdata <= in_adev0_position;
+                            8'h18: s_axil_rdata <= in_audio_rx_frames;
+                            8'h1C: s_axil_rdata <= in_hdmi_rx_audio;
+                            8'h2C: s_axil_rdata <= in_audio_rx_errors;
+                            8'h30: s_axil_rdata <= in_audio_rx_channels;
+                            8'h34: s_axil_rdata <= in_audio_rx_cs;
+                            8'h38: s_axil_rdata <= 32'h41554431; // "AUD1" PCM ABI
+                            8'h3C: s_axil_rdata <= 32'h52584131; // RXA1: IEC/TID/cycle diagnostic
                             8'h20: s_axil_rdata <= adev0_ring0_base[31:0];
                             8'h24: s_axil_rdata <= adev0_ring0_base[63:32];
                             8'h28: s_axil_rdata <= adev0_ring0_cfg;

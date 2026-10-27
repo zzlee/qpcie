@@ -2,7 +2,7 @@
 # Fast, byte-exact RTL regressions. No hardware access.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-OUT=build/validation/sc7f0-nv-formats
+OUT=${SC7F0_NV_TEST_OUT:-build/validation/sc7f0-nv-formats}
 mkdir -p "$OUT"
 for sg in 0 1; do
 for format in 2 3; do
@@ -23,5 +23,11 @@ vvp "$OUT/csc_tb"
 iverilog -g2012 -s thin_nv_formats_tb -o "$OUT/thin_tb" rtl/thin_desc_fetch_engine.v tb/thin_nv_formats_tb.sv
 vvp "$OUT/thin_tb"
 vvp "$OUT/thin_tb" +NV16
+iverilog -g2012 -s thin_doorbell_order_tb -o "$OUT/doorbell_tb" rtl/thin_desc_fetch_engine.v tb/thin_doorbell_order_tb.sv
+for args in '' '+UV_FIRST' '+NV16' '+NV16 +UV_FIRST'; do
+    for geometry in '' '+UHD'; do
+        vvp "$OUT/doorbell_tb" $args $geometry
+    done
+done
 iverilog -g2012 -s sc7f0_hdmi_pack_tb -o "$OUT/pack_tb" rtl/hdmi_rx_pixel_pack.v tb/sc7f0_hdmi_pack_tb.sv
 vvp "$OUT/pack_tb"

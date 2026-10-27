@@ -1,0 +1,17 @@
+From: SC7F0 recovery preparation
+Subject: [PATCH] 0002-sc7f0-enable-watchdog-srst.patch
+
+Offline candidate; requires cold-boot and watchdog fault-injection acceptance.
+Upstream-Status: Inappropriate [SC7F0 board policy]
+
+--- a/lib/sw_apps/zynqmp_pmufw/src/xpfw_config.h
++++ b/lib/sw_apps/zynqmp_pmufw/src/xpfw_config.h
+@@ -126,7 +126,7 @@
+ #endif
+ 
+ #ifndef ENABLE_EM_VAL
+-#define	ENABLE_EM_VAL						(0U)
++#define	ENABLE_EM_VAL						(1U) /* SC7F0: FPD SWDT -> hardware SRST */
+ #endif
+ 
+ #ifndef ENABLE_SCHEDULER_VAL

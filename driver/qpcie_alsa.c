@@ -9,6 +9,56 @@
 #include "qpcie_driver.h"
 #include <linux/ktime.h>
 #include <linux/hrtimer.h>
+#include <linux/iopoll.h>
+
+/* Lab-only unqualified converter output. Never advertise this as valid audio.
+ * Opt-in at module load; DEV1 production guards remain mandatory. */
+static bool enable_hdmi_diagnostics;
+module_param(enable_hdmi_diagnostics, bool, 0400);
+MODULE_PARM_DESC(enable_hdmi_diagnostics,
+                "Expose DEV2 unqualified HDMI converter data (NOT validated PCM)");
+
+static int qpcie_hdmi_audio_ready(struct qpcie_dev *qdev)
+{
+    u32 seq, fmt, flags, heartbeat, rate, source_channels;
+    seq = ioread32(qdev->bar0_mmio + REG_HDMI_TLM_SEQ);
+    fmt = ioread32(qdev->bar0_mmio + REG_HDMI_RX_AUDIO_FMT);
+    flags = ioread32(qdev->bar0_mmio + REG_HDMI_TLM_FLAGS);
+    heartbeat = ioread32(qdev->bar0_mmio + REG_HDMI_TLM_HEARTBEAT);
+    if ((seq & 1) || seq != ioread32(qdev->bar0_mmio + REG_HDMI_TLM_SEQ))
+        return -EAGAIN;
+    if (!(flags & HDMI_TLM_F_TIMING_VALID) ||
+        !qpcie_hdmi_telemetry_fresh(qdev, heartbeat))
+        return -ENOLINK;
+    /* PS publishes ACR-derived rate/channels only for real L-PCM. */
+    source_channels = (fmt >> 16) & 0xff;
+    /* The hardware extracts TID0/1 Front L/R; it is NOT an 8ch downmix.
+     * Keep the actual source layout separate from the stereo ALSA output. */
+    if ((fmt & 0xffff) != 48000 ||
+        (source_channels != 2 && source_channels != 4 &&
+         source_channels != 6 && source_channels != 8))
+        return -EINVAL;
+    /* IEC 60958 non-audio may carry compressed bursts even in sample
+     * packets advertised as L-PCM. Never play those as signed samples. */
+    if (ioread32(qdev->bar0_mmio + REG_ADEV0_RX_CS) & BIT(1))
+        return -EINVAL;
+    rate = ioread32(qdev->bar0_mmio + REG_ADEV0_RX_RATE);
+    if (rate < 47900 || rate > 48100)
+        return -ENODATA;
+    return 0;
+}
+
+static int qpcie_alsa_cap_sync_stop(struct snd_pcm_substream *substream)
+{
+    struct qpcie_alsa_channel *ach = snd_pcm_substream_chip(substream);
+    u32 status;
+    if (ach->channel_id != 0)
+        return 0;
+    /* Allow ordered CTRL transport, then retire any owned MWr. */
+    usleep_range(20, 40);
+    return readl_poll_timeout(ach->qdev->bar0_mmio + REG_ADEV0_STATUS,
+                             status, !(status & BIT(0)), 10, 100000);
+}
 
 static const struct snd_pcm_hardware qpcie_alsa_hardware = {
     .info = (SNDRV_PCM_INFO_MMAP |
@@ -37,15 +87,39 @@ static int qpcie_alsa_cap_open(struct snd_pcm_substream *substream)
     struct qpcie_alsa_channel *ach = snd_pcm_substream_chip(substream);
     struct snd_pcm_runtime *runtime = substream->runtime;
 
+    unsigned long flags;
+    spin_lock_irqsave(&ach->slock, flags);
+    if (ach->cap_substream) {
+        spin_unlock_irqrestore(&ach->slock, flags);
+        return -EBUSY; // raw and PCM nodes share the canonical ADEV0 engine
+    }
     ach->cap_substream = substream;
+    spin_unlock_irqrestore(&ach->slock, flags);
     runtime->hw = qpcie_alsa_hardware;
+    if (ach->channel_id == 0 && substream->pcm->device == 1) {
+        runtime->hw.formats = SNDRV_PCM_FMTBIT_S32_LE;
+        runtime->hw.rates = SNDRV_PCM_RATE_48000;
+        runtime->hw.rate_min = runtime->hw.rate_max = 48000;
+        runtime->hw.channels_min = runtime->hw.channels_max = 2;
+    }
+    if (ach->channel_id == 0 && substream->pcm->device == 2) {
+        runtime->hw.formats = SNDRV_PCM_FMTBIT_S32_LE;
+        runtime->hw.rates = SNDRV_PCM_RATE_KNOT;
+        runtime->hw.rate_min = runtime->hw.rate_max =
+            ioread32(ach->qdev->bar0_mmio + REG_ADEV0_TRACE_ABI) == ADEV0_TRACE_ABI ?
+            768000 : 384000;
+        runtime->hw.channels_min = runtime->hw.channels_max = 2;
+    }
+    snd_pcm_hw_constraint_step(runtime, 0, SNDRV_PCM_HW_PARAM_PERIOD_BYTES, 16);
+    snd_pcm_hw_constraint_step(runtime, 0, SNDRV_PCM_HW_PARAM_BUFFER_BYTES, 16);
     return 0;
 }
 
 static int qpcie_alsa_cap_close(struct snd_pcm_substream *substream)
 {
     struct qpcie_alsa_channel *ach = snd_pcm_substream_chip(substream);
-    ach->cap_substream = NULL;
+    WRITE_ONCE(ach->cap_substream, NULL);
+    synchronize_irq(pci_irq_vector(ach->qdev->pdev, 0));
     return 0;
 }
 
@@ -67,7 +141,20 @@ static int qpcie_alsa_cap_prepare(struct snd_pcm_substream *substream)
     size_t buffer_bytes = snd_pcm_lib_buffer_bytes(substream);
     size_t period_bytes = snd_pcm_lib_period_bytes(substream);
     u32 rate = substream->runtime->rate;
-
+    int ret;
+    if (ach->channel_id == 0 && substream->pcm->device == 1) {
+        ret = qpcie_hdmi_audio_ready(qdev);
+        if (ret) return ret;
+    }
+    if (ach->channel_id == 0) {
+        iowrite32(0, qdev->bar0_mmio + REG_ADEV0_CTRL);
+        ioread32(qdev->bar0_mmio + REG_ADEV0_CTRL);
+        ret = qpcie_alsa_cap_sync_stop(substream);
+        if (ret) return ret;
+        iowrite32(3, qdev->bar0_mmio + REG_ADEV0_IRQ_STATUS);
+        iowrite32(BIT(1), qdev->bar0_mmio + REG_ADEV0_STATUS);
+        ach->audio_error_start = ioread32(qdev->bar0_mmio + REG_ADEV0_RX_ERRORS);
+    }
     ach->cap_buffer_pos = 0;
 
     if (ach->channel_id == 0) {
@@ -105,7 +192,12 @@ static int qpcie_alsa_cap_trigger(struct snd_pcm_substream *substream, int cmd)
         switch (cmd) {
         case SNDRV_PCM_TRIGGER_START:
             /* BIT(0)=enable, BIT(8)=irq_en */
-            iowrite32(BIT(0) | BIT(8), qdev->bar0_mmio + REG_ADEV0_CTRL);
+            ctrl = substream->pcm->device == 1 ? ADEV0_CTRL_HDMI_PCM : 0;
+            if (substream->pcm->device == 2)
+                ctrl = ioread32(qdev->bar0_mmio + REG_ADEV0_TRACE_ABI) == ADEV0_TRACE_ABI ?
+                       ADEV0_CTRL_HDMI_TRACE : ADEV0_CTRL_HDMI_PCM;
+            iowrite32(BIT(0) | BIT(8) | ctrl,
+                      qdev->bar0_mmio + REG_ADEV0_CTRL);
             dev_info(&qdev->pdev->dev, "[ALSA Ch0 Canonical] Started (ADEV0_CTRL=0x%08X)\n",
                      (u32)(BIT(0) | BIT(8)));
             break;
@@ -162,6 +254,7 @@ static const struct snd_pcm_ops qpcie_alsa_capture_ops = {
     .hw_free     = qpcie_alsa_hw_free,
     .prepare     = qpcie_alsa_cap_prepare,
     .trigger     = qpcie_alsa_cap_trigger,
+    .sync_stop   = qpcie_alsa_cap_sync_stop,
     .pointer     = qpcie_alsa_cap_pointer,
 };
 
@@ -546,6 +639,34 @@ int qpcie_alsa_init(struct qpcie_dev *qdev)
             snd_pcm_set_ops(ach->pcm_cap, SNDRV_PCM_STREAM_CAPTURE, &qpcie_alsa_capture_ops);
             snd_pcm_set_managed_buffer_all(ach->pcm_cap, SNDRV_DMA_TYPE_DEV, &qdev->pdev->dev, 64 * 1024, 128 * 1024);
 
+            // Device 1 is real HDMI PCM, distinct from device 0 raw AES3 diagnostics.
+            if (ioread32(qdev->bar0_mmio + REG_ADEV0_PCM_ABI) == ADEV0_PCM_ABI) {
+                struct snd_pcm *hdmi_pcm;
+                ret = snd_pcm_new(card, "SC7F0 HDMI PCM", 1, 0, 1, &hdmi_pcm);
+                if (ret) goto free_card;
+                hdmi_pcm->private_data = ach;
+                strscpy(hdmi_pcm->name, "HDMI LPCM Front L/R", sizeof(hdmi_pcm->name));
+                snd_pcm_set_ops(hdmi_pcm, SNDRV_PCM_STREAM_CAPTURE, &qpcie_alsa_capture_ops);
+                snd_pcm_set_managed_buffer_all(hdmi_pcm, SNDRV_DMA_TYPE_DEV,
+                                              &qdev->pdev->dev, 64*1024, 128*1024);
+                strscpy(card->shortname, "SC7F0 HDMI Audio", sizeof(card->shortname));
+                strscpy(card->longname, "SC7F0 HDMI PCM + raw TPG diagnostics", sizeof(card->longname));
+            }
+
+            if (enable_hdmi_diagnostics &&
+                ioread32(qdev->bar0_mmio + REG_ADEV0_PCM_ABI) == ADEV0_PCM_ABI) {
+                struct snd_pcm *diag;
+                ret = snd_pcm_new(card, "UNQUALIFIED HDMI DIAGNOSTIC", 2, 0, 1, &diag);
+                if (ret) goto free_card;
+                diag->private_data = ach;
+                strscpy(diag->name, "NOT AUDIO: converter diagnostic", sizeof(diag->name));
+                snd_pcm_set_ops(diag, SNDRV_PCM_STREAM_CAPTURE, &qpcie_alsa_capture_ops);
+                snd_pcm_set_managed_buffer_all(diag, SNDRV_DMA_TYPE_DEV,
+                                              &qdev->pdev->dev, 64*1024, 128*1024);
+                dev_warn(&qdev->pdev->dev,
+                         "DEV2 lab diagnostic enabled: unqualified data, never play as PCM\n");
+            }
+
             // Register Mixer Controls for Ch0 Pattern Generator
             for (k = 0; k < ARRAY_SIZE(qpcie_alsa_controls); k++) {
                 ret = snd_ctl_add(card, snd_ctl_new1(&qpcie_alsa_controls[k], ach));
@@ -637,8 +758,12 @@ void qpcie_alsa_irq_handler(struct qpcie_dev *qdev, u32 status)
     int i;
     for (i = 0; i < qdev->alsa_channel_count; i++) {
         struct qpcie_alsa_channel *ach = &qdev->alsa_ch[i];
+        /* close clears publication, then synchronize_irq keeps this snapshot
+         * alive until this handler returns. Never reload a possibly NULL ptr. */
+        struct snd_pcm_substream *cap = READ_ONCE(ach->cap_substream);
 
         if (i == 0) {
+            int audio_ready;
             /* Canonical v3.0: Handle via REG_ADEV0_IRQ_STATUS */
             u32 adev_irq = ioread32(qdev->bar0_mmio + REG_ADEV0_IRQ_STATUS);
             if (!adev_irq)
@@ -651,15 +776,26 @@ void qpcie_alsa_irq_handler(struct qpcie_dev *qdev, u32 status)
                 iowrite32(BIT(1), qdev->bar0_mmio + REG_ADEV0_STATUS);
             }
 
+            audio_ready = qpcie_hdmi_audio_ready(qdev);
+            if (cap && snd_pcm_running(cap) &&
+                cap->pcm->device == 1 &&
+                ((adev_irq & BIT(1)) ||
+                 ioread32(qdev->bar0_mmio + REG_ADEV0_RX_ERRORS) != ach->audio_error_start ||
+                 (audio_ready < 0 && audio_ready != -EAGAIN))) {
+                iowrite32(adev_irq, qdev->bar0_mmio + REG_ADEV0_IRQ_STATUS);
+                snd_pcm_stop_xrun(cap);
+                continue;
+            }
+
             if (adev_irq & BIT(0)) {
                 /* Period done: update pointer and notify ALSA */
-                if (ach->cap_substream && snd_pcm_running(ach->cap_substream)) {
+                if (cap && snd_pcm_running(cap)) {
                     u32 hw_pos = ioread32(qdev->bar0_mmio + REG_ADEV0_POSITION);
-                    size_t buf_bytes = snd_pcm_lib_buffer_bytes(ach->cap_substream);
+                    size_t buf_bytes = snd_pcm_lib_buffer_bytes(cap);
                     if (hw_pos >= buf_bytes)
                         hw_pos = 0;
                     ach->cap_buffer_pos = hw_pos;
-                    snd_pcm_period_elapsed(ach->cap_substream);
+                    snd_pcm_period_elapsed(cap);
                 }
             }
 
@@ -670,13 +806,13 @@ void qpcie_alsa_irq_handler(struct qpcie_dev *qdev, u32 status)
 
         if (status & IRQ_STATUS_AUDIO_CH(i)) {
             /* Legacy: Capture period done */
-            if (ach->cap_substream && snd_pcm_running(ach->cap_substream)) {
+            if (cap && snd_pcm_running(cap)) {
                 u32 hw_pos = ioread32(qdev->bar0_mmio + REG_AUDIO_DMA_PTR_CH(i));
-                size_t buf_bytes = snd_pcm_lib_buffer_bytes(ach->cap_substream);
+                size_t buf_bytes = snd_pcm_lib_buffer_bytes(cap);
                 if (hw_pos >= buf_bytes)
                     hw_pos = 0;
                 ach->cap_buffer_pos = hw_pos;
-                snd_pcm_period_elapsed(ach->cap_substream);
+                snd_pcm_period_elapsed(cap);
             }
         }
     }

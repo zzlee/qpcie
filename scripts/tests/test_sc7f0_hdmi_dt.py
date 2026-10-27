@@ -14,7 +14,7 @@ XCI = ROOT / "build/qpcie_zu4ev_hdmi_proj/qpcie_zu4ev_card.srcs/sources_1/ip"
 
 class HDMIConsistencyTest(unittest.TestCase):
     def check_parameters(self, mutation=None, disabled=False):
-        with tempfile.TemporaryDirectory(prefix="sc7f0-dt-test-", dir="/tmp/opencode") as temp:
+        with tempfile.TemporaryDirectory(prefix="sc7f0-dt-test-") as temp:
             xci = Path(temp) / "ip"
             for module in ("vid_phy_controller_0", "v_hdmi_rx_ss_0"):
                 (xci / module).mkdir(parents=True)

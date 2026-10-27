@@ -3,7 +3,7 @@ set root [file normalize [file join [file dirname [info script]] ..]]
 cd $root
 open_project ./build/qpcie_zu4ev_hdmi_proj/qpcie_zu4ev_card.xpr
 save_project_as qpcie_zu4ev_live ./build/qpcie_zu4ev_live_proj -force
-foreach f {video_axis_async_fifo.v hdmi_rx_pixel_pack.v video_rgb_to_yuv709.v} {
+foreach f {video_axis_async_fifo.v hdmi_rx_pixel_pack.v video_rgb_to_yuv709.v hdmi_rx_pcm_converter.v} {
     if {[get_files -quiet */$f] eq ""} { add_files -norecurse ./rtl/$f }
 }
 set version 26102204

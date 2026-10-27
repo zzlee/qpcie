@@ -7,6 +7,7 @@ EMBEDDEDSW_SRCURI += "file://0001-Fixed-vproc-ip-issues.patch \
             file://0004-feat-fsbl-support-two-stage-tandem-bitstream-loading.patch \
             file://0005-fix-fsbl-zzlab-env-baseaddr-macro.patch \
             file://0006-silence-fsbl-prints.patch \
+            file://0007-sc7f0-bound-clock-i2c-waits.patch \
             "
 # NOTE 2026-10-08: 0003 retired — io_read fix folded into 0002.
 

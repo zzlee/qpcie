@@ -140,6 +140,9 @@ module custom_pcie_dma_top #(
     input  wire [31:0]                                      in_hdmi_rx_res,
     input  wire [31:0]                                      in_hdmi_rx_timing,
     input  wire [31:0]                                      in_hdmi_rx_audio,
+    output wire [31:0] out_audio_capture_control,
+    input wire [31:0] in_audio_rx_frames, in_audio_rx_errors,
+    input wire [31:0] in_audio_rx_channels, in_audio_rx_cs,
     input  wire [31:0]                                      in_hdmi_tx_status,
     output wire [31:0]                                      out_hdmi_tx_ctrl,
     output wire [31:0]                                      out_hdmi_tx_res,
@@ -800,17 +803,7 @@ module custom_pcie_dma_top #(
             c2h_req_last_mux = sg_c2h_req_last; c2h_arb_found = 1'b1;
             c2h_selected = 8'd1;
         end
-        for (i_arb = 0; i_arb < NUM_VIDEO_CH; i_arb = i_arb + 1) begin
-            if (((c2h_owner == (8'd2+i_arb)) ||
-                 ((c2h_owner == 0) && !c2h_arb_found && v_c2h_req_valid[i_arb]))) begin
-                c2h_req_valid_mux = v_c2h_req_valid[i_arb];
-                c2h_req_addr_mux = v_c2h_req_addr[(i_arb*64)+:64];
-                c2h_req_dw_len_mux = v_c2h_req_dw_len[(i_arb*11)+:11];
-                c2h_req_data_mux = v_c2h_req_data[(i_arb*PCIE_DATA_WIDTH)+:PCIE_DATA_WIDTH];
-                c2h_req_last_mux = v_c2h_req_last[i_arb]; c2h_arb_found = 1'b1;
-                c2h_selected = 8'd2+i_arb;
-            end
-        end
+        // Low-bandwidth audio gets the next packet boundary; never preempt an owner.
         for (i_arb = 0; i_arb < NUM_AUDIO_CH; i_arb = i_arb + 1) begin
             if (((c2h_owner == (8'd2+NUM_VIDEO_CH+i_arb)) ||
                  ((c2h_owner == 0) && !c2h_arb_found && a_c2h_req_valid[i_arb]))) begin
@@ -820,6 +813,17 @@ module custom_pcie_dma_top #(
                 c2h_req_data_mux = {{PCIE_DATA_WIDTH-128{1'b0}}, a_c2h_req_data[(i_arb*128)+:128]};
                 c2h_req_last_mux = a_c2h_req_last[i_arb]; c2h_arb_found = 1'b1;
                 c2h_selected = 8'd2+NUM_VIDEO_CH+i_arb;
+            end
+        end
+        for (i_arb = 0; i_arb < NUM_VIDEO_CH; i_arb = i_arb + 1) begin
+            if (((c2h_owner == (8'd2+i_arb)) ||
+                 ((c2h_owner == 0) && !c2h_arb_found && v_c2h_req_valid[i_arb]))) begin
+                c2h_req_valid_mux = v_c2h_req_valid[i_arb];
+                c2h_req_addr_mux = v_c2h_req_addr[(i_arb*64)+:64];
+                c2h_req_dw_len_mux = v_c2h_req_dw_len[(i_arb*11)+:11];
+                c2h_req_data_mux = v_c2h_req_data[(i_arb*PCIE_DATA_WIDTH)+:PCIE_DATA_WIDTH];
+                c2h_req_last_mux = v_c2h_req_last[i_arb]; c2h_arb_found = 1'b1;
+                c2h_selected = 8'd2+i_arb;
             end
         end
     end
@@ -1225,6 +1229,8 @@ module custom_pcie_dma_top #(
         .in_hdmi_rx_res(in_hdmi_rx_res),
         .in_hdmi_rx_timing(in_hdmi_rx_timing),
         .in_hdmi_rx_audio(in_hdmi_rx_audio),
+        .in_audio_rx_frames(in_audio_rx_frames), .in_audio_rx_errors(in_audio_rx_errors),
+        .in_audio_rx_channels(in_audio_rx_channels), .in_audio_rx_cs(in_audio_rx_cs),
         .in_hdmi_tx_status(in_hdmi_tx_status),
         .out_hdmi_tx_ctrl(out_hdmi_tx_ctrl),
         .out_hdmi_tx_res(out_hdmi_tx_res),
@@ -2481,10 +2487,15 @@ module custom_pcie_dma_top #(
     endgenerate
 
     // 9. Multi-Channel AES3 Audio Stream Engines
-    wire        audio0_start        = map_mode_new_w ? adev0_ctrl_w[0] : reg_dma_ctrl[2];
-    wire [63:0] audio0_buffer_addr  = map_mode_new_w ? adev0_ring0_base_w : reg_audio_dma_addr;
-    wire [31:0] audio0_buffer_size  = map_mode_new_w ? adev0_buffer_bytes_w : {16'd0, reg_audio_dma_cfg[15:0]};
-    wire [31:0] audio0_period_size  = map_mode_new_w ? adev0_period_bytes_w : {16'd0, reg_audio_dma_cfg[31:16]};
+    // qpcie_csr_reg_space already transports ordered configuration snapshots
+    // to clk and coherent telemetry back to pl_clk0. Do not cross these
+    // outputs again using the PS clock: they are already in the PCIe domain.
+    wire [31:0] audio0_ctrl = adev0_ctrl_w;
+    wire [63:0] audio0_buffer_addr = adev0_ring0_base_w;
+    wire [31:0] audio0_buffer_size = adev0_buffer_bytes_w;
+    wire [31:0] audio0_period_size = adev0_period_bytes_w;
+    assign out_audio_capture_control = audio0_ctrl;
+    wire audio0_start = audio0_ctrl[0];
 
     audio_stream_engine #(
         .AUDIO_DATA_WIDTH(AUDIO_DATA_WIDTH),
@@ -2493,7 +2504,7 @@ module custom_pcie_dma_top #(
         .clk(clk),
         .rst_n(dma_rst_n),
         .audio_start(audio0_start),
-        .aes3_sync_disable(reg_audio_loopback_ctrl[4]),
+        .aes3_sync_disable(audio0_ctrl[4] || audio0_ctrl[5]),
         .host_buffer_addr(audio0_buffer_addr),
         .buffer_size_bytes(audio0_buffer_size),
         .period_size_bytes(audio0_period_size),
