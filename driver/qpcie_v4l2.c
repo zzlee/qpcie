@@ -54,6 +54,19 @@ static int qpcie_vidioc_querycap(struct file *file, void *priv, struct v4l2_capa
 
 static int qpcie_vidioc_enum_fmt_vid_cap_mplane(struct file *file, void *priv, struct v4l2_fmtdesc *f)
 {
+    struct qpcie_v4l2_channel *vch = video_drvdata(file);
+
+    if (vch && vch->channel_id == 1) {
+        if (f->index == 0) {
+            f->pixelformat = V4L2_PIX_FMT_H264;
+            return 0;
+        }
+        if (f->index == 1) {
+            f->pixelformat = V4L2_PIX_FMT_HEVC;
+            return 0;
+        }
+        return -EINVAL;
+    }
     if (f->index == 0) {
         f->pixelformat = V4L2_PIX_FMT_NV12M;
         return 0;
@@ -316,6 +329,17 @@ static int qpcie_vidioc_g_fmt_vid_cap(struct file *file, void *priv, struct v4l2
     struct qpcie_v4l2_channel *vch = video_drvdata(file);
     const struct qpcie_video_mode *mode;
 
+    if (vch->channel_id == 1) {
+        f->fmt.pix.width = vch->width ? vch->width : 3840;
+        f->fmt.pix.height = vch->height ? vch->height : 2160;
+        f->fmt.pix.field = V4L2_FIELD_NONE;
+        f->fmt.pix.pixelformat = vch->pixelformat ? vch->pixelformat : V4L2_PIX_FMT_H264;
+        f->fmt.pix.bytesperline = 0;
+        f->fmt.pix.sizeimage = 4 * 1024 * 1024;
+        f->fmt.pix.colorspace = V4L2_COLORSPACE_REC709;
+        return 0;
+    }
+
     mode = qpcie_find_video_mode(vch->width, vch->height);
     f->fmt.pix.width = mode->width;
     f->fmt.pix.height = mode->height;
@@ -332,6 +356,57 @@ static int qpcie_vidioc_g_fmt_vid_cap(struct file *file, void *priv, struct v4l2
         f->fmt.pix.colorspace = V4L2_COLORSPACE_REC709;
     }
     return 0;
+}
+
+static int qpcie_vidioc_try_fmt_vid_cap(struct file *file, void *priv, struct v4l2_format *f)
+{
+    struct qpcie_v4l2_channel *vch = video_drvdata(file);
+
+    if (vch->channel_id == 1) {
+        if (f->fmt.pix.pixelformat != V4L2_PIX_FMT_HEVC)
+            f->fmt.pix.pixelformat = V4L2_PIX_FMT_H264;
+        f->fmt.pix.field = V4L2_FIELD_NONE;
+        f->fmt.pix.bytesperline = 0;
+        f->fmt.pix.sizeimage = 4 * 1024 * 1024;
+        f->fmt.pix.colorspace = V4L2_COLORSPACE_REC709;
+        return 0;
+    }
+    if (f->fmt.pix.pixelformat != V4L2_PIX_FMT_RGB24)
+        f->fmt.pix.pixelformat = V4L2_PIX_FMT_NV12;
+    f->fmt.pix.field = V4L2_FIELD_NONE;
+    f->fmt.pix.colorspace = (f->fmt.pix.pixelformat == V4L2_PIX_FMT_RGB24) ?
+        V4L2_COLORSPACE_SRGB : V4L2_COLORSPACE_REC709;
+    return 0;
+}
+
+static int qpcie_vidioc_s_fmt_vid_cap(struct file *file, void *priv, struct v4l2_format *f)
+{
+    struct qpcie_v4l2_channel *vch = video_drvdata(file);
+
+    if (vb2_is_busy(&vch->queue)) {
+        if (vch->channel_id == 1 &&
+            f->fmt.pix.pixelformat == vch->pixelformat &&
+            (!f->fmt.pix.width || f->fmt.pix.width == vch->width) &&
+            (!f->fmt.pix.height || f->fmt.pix.height == vch->height)) {
+            return qpcie_vidioc_g_fmt_vid_cap(file, priv, f);
+        }
+        return -EBUSY;
+    }
+
+    if (vch->channel_id == 1) {
+        if (f->fmt.pix.pixelformat == V4L2_PIX_FMT_HEVC)
+            vch->pixelformat = V4L2_PIX_FMT_HEVC;
+        else
+            vch->pixelformat = V4L2_PIX_FMT_H264;
+        if (f->fmt.pix.width && f->fmt.pix.height) {
+            vch->width = f->fmt.pix.width;
+            vch->height = f->fmt.pix.height;
+        }
+        vch->vcu_cfg.codec_type = (vch->pixelformat == V4L2_PIX_FMT_HEVC) ? 1 : 0;
+        qpcie_vcu_sync_config(vch);
+        return qpcie_vidioc_g_fmt_vid_cap(file, priv, f);
+    }
+    return -EINVAL;
 }
 
 static int qpcie_vidioc_try_fmt_vid_cap_mplane(struct file *file, void *priv,
@@ -657,7 +732,7 @@ static int qpcie_vidioc_query_dv_timings(struct file *file, void *_fh,
     int ret;
 
     if (vch->channel_id != 0)
-        return -ENODATA;
+        return -ENOTTY;
 
     if (!qdev || !qdev->bar0_mmio)
         return -ENODEV;
@@ -706,7 +781,7 @@ static int qpcie_vidioc_g_dv_timings(struct file *file, void *_fh,
 {
     struct qpcie_v4l2_channel *vch = video_drvdata(file);
     if (vch->channel_id != 0)
-        return -ENODATA;
+        return -ENOTTY;
     return qpcie_vidioc_query_dv_timings(file, _fh, timings);
 }
 
@@ -715,7 +790,7 @@ static int qpcie_vidioc_s_dv_timings(struct file *file, void *_fh,
 {
     struct qpcie_v4l2_channel *vch = video_drvdata(file);
     if (vch->channel_id != 0)
-        return -ENODATA;
+        return -ENOTTY;
     if (vb2_is_busy(&vch->queue))
         return -EBUSY;
     if (timings->type != V4L2_DV_BT_656_1120)
@@ -732,7 +807,7 @@ static int qpcie_vidioc_dv_timings_cap(struct file *file, void *_fh,
 {
     struct qpcie_v4l2_channel *vch = video_drvdata(file);
     if (vch->channel_id != 0)
-        return -ENODATA;
+        return -ENOTTY;
 
     memset(cap, 0, sizeof(*cap));
     cap->type = V4L2_DV_BT_656_1120;
@@ -764,12 +839,19 @@ static int qpcie_vidioc_subscribe_event(struct v4l2_fh *fh,
 
 static int qpcie_vidioc_enum_input(struct file *file, void *priv, struct v4l2_input *inp)
 {
+    struct qpcie_v4l2_channel *vch = video_drvdata(file);
+
     if (inp->index > 0)
         return -EINVAL;
     inp->type = V4L2_INPUT_TYPE_CAMERA;
     inp->std = 0;
-    inp->capabilities = V4L2_IN_CAP_DV_TIMINGS;
-    strscpy(inp->name, "HDMI / TPG Input", sizeof(inp->name));
+    if (vch && vch->channel_id != 0) {
+        inp->capabilities = 0;
+        strscpy(inp->name, "VCU Hardware Stream", sizeof(inp->name));
+    } else {
+        inp->capabilities = V4L2_IN_CAP_DV_TIMINGS;
+        strscpy(inp->name, "HDMI / TPG Input", sizeof(inp->name));
+    }
     return 0;
 }
 
@@ -793,6 +875,8 @@ static const struct v4l2_ioctl_ops qpcie_v4l2_ioctl_ops = {
     .vidioc_s_input                 = qpcie_vidioc_s_input,
     .vidioc_enum_fmt_vid_cap        = qpcie_vidioc_enum_fmt_vid_cap_mplane,
     .vidioc_g_fmt_vid_cap           = qpcie_vidioc_g_fmt_vid_cap,
+    .vidioc_try_fmt_vid_cap         = qpcie_vidioc_try_fmt_vid_cap,
+    .vidioc_s_fmt_vid_cap           = qpcie_vidioc_s_fmt_vid_cap,
     .vidioc_g_fmt_vid_cap_mplane    = qpcie_vidioc_g_fmt_vid_cap_mplane,
     .vidioc_try_fmt_vid_cap_mplane  = qpcie_vidioc_try_fmt_vid_cap_mplane,
     .vidioc_s_fmt_vid_cap_mplane    = qpcie_vidioc_s_fmt_vid_cap_mplane,
@@ -839,9 +923,25 @@ static int qpcie_queue_setup(struct vb2_queue *vq,
                             unsigned int sizes[], struct device *alloc_devs[])
 {
     struct qpcie_v4l2_channel *vch = vb2_get_drv_priv(vq);
-    unsigned int exp_planes = (vch->pixelformat == V4L2_PIX_FMT_RGB24) ? 1 : 2;
-    unsigned int y_size = vch->stride * vch->height;
-    unsigned int uv_size = (vch->pixelformat == V4L2_PIX_FMT_RGB24) ? 0 :
+    unsigned int exp_planes;
+    unsigned int y_size, uv_size;
+
+    if (vch->channel_id == 1) {
+        unsigned int comp_size = 4 * 1024 * 1024;
+        if (*nplanes) {
+            if (*nplanes != 1 || sizes[0] < 65536)
+                return -EINVAL;
+            return 0;
+        }
+        *nplanes = 1;
+        sizes[0] = comp_size;
+        *nbuffers = clamp_t(unsigned int, *nbuffers, 4, 32);
+        return 0;
+    }
+
+    exp_planes = (vch->pixelformat == V4L2_PIX_FMT_RGB24) ? 1 : 2;
+    y_size = vch->stride * vch->height;
+    uv_size = (vch->pixelformat == V4L2_PIX_FMT_RGB24) ? 0 :
                             vch->stride * (vch->pixelformat == V4L2_PIX_FMT_NV16M ?
                                            vch->height : vch->height / 2);
 
@@ -869,6 +969,17 @@ static int qpcie_buf_prepare(struct vb2_buffer *vb)
 {
     struct qpcie_v4l2_channel *vch = vb2_get_drv_priv(vb->vb2_queue);
     int i;
+
+    if (vch->channel_id == 1) {
+        if (vb2_plane_size(vb, 0) < 65536) {
+            v4l2_err(&vch->qdev->v4l2_dev,
+                     "Plane 0 size %lu < min required 65536\n",
+                     vb2_plane_size(vb, 0));
+            return -EINVAL;
+        }
+        vb2_set_plane_payload(vb, 0, vb2_plane_size(vb, 0));
+        return 0;
+    }
 
     /* Validate plane size for MMAP, USERPTR, and DMABUF memory modes */
     for (i = 0; i < vb->num_planes; i++) {
@@ -925,13 +1036,74 @@ static int qpcie_publish_buffer(struct qpcie_v4l2_channel *vch,
     u32 entries_added = 0;
     bool is_rgb;
 
+    if (vch->channel_id == 1 && qdev->c2h_only) {
+        void __iomem *ring_mmio = qdev->bar0_mmio + QPCIE_BAR0_VCU_RING_OFFSET;
+        u32 host_head = ioread32(ring_mmio + offsetof(struct qpcie_vcu_host_ring, host_head));
+        u32 ps_tail = ioread32(ring_mmio + offsetof(struct qpcie_vcu_host_ring, ps_tail));
+        u32 slot_idx = host_head % QPCIE_VCU_RING_SIZE;
+        u32 next_head = host_head + 1;
+        void __iomem *slot_mmio;
+        dma_addr_t dma_addr;
+        u32 dma_len;
+
+        if (next_head - ps_tail > QPCIE_VCU_RING_SIZE) {
+            dev_warn_ratelimited(&qdev->pdev->dev,
+                                 "VCU Host Ring full (head=%u, tail=%u)\n", host_head, ps_tail);
+            return -ENOSPC;
+        }
+
+        sgt0 = vb2_dma_sg_plane_desc(vb, 0);
+        if (WARN_ON(!sgt0 || sgt0->nents == 0))
+            return -EINVAL;
+        sg = sgt0->sgl;
+        dma_addr = sg_dma_address(sg);
+        dma_len = sg_dma_len(sg);
+
+        slot_mmio = ring_mmio + offsetof(struct qpcie_vcu_host_ring, slots) +
+                    slot_idx * sizeof(struct qpcie_vcu_buffer_slot);
+
+        iowrite32(lower_32_bits(dma_addr), slot_mmio + offsetof(struct qpcie_vcu_buffer_slot, host_phys_addr));
+        iowrite32(upper_32_bits(dma_addr), slot_mmio + offsetof(struct qpcie_vcu_buffer_slot, host_phys_addr) + 4);
+
+        if (vch->comp_ring_dma) {
+            dma_addr_t comp_addr = vch->comp_ring_dma + slot_idx * 64;
+            iowrite32(lower_32_bits(comp_addr), slot_mmio + offsetof(struct qpcie_vcu_buffer_slot, host_comp_addr));
+            iowrite32(upper_32_bits(comp_addr), slot_mmio + offsetof(struct qpcie_vcu_buffer_slot, host_comp_addr) + 4);
+        } else {
+            iowrite32(0, slot_mmio + offsetof(struct qpcie_vcu_buffer_slot, host_comp_addr));
+            iowrite32(0, slot_mmio + offsetof(struct qpcie_vcu_buffer_slot, host_comp_addr) + 4);
+        }
+
+        iowrite32(dma_len, slot_mmio + offsetof(struct qpcie_vcu_buffer_slot, host_buf_len));
+        iowrite32(vb->index, slot_mmio + offsetof(struct qpcie_vcu_buffer_slot, host_buf_id));
+        iowrite32(0, slot_mmio + offsetof(struct qpcie_vcu_buffer_slot, flags));
+
+        wmb();
+        iowrite32(next_head, ring_mmio + offsetof(struct qpcie_vcu_host_ring, host_head));
+        ioread32(ring_mmio + offsetof(struct qpcie_vcu_host_ring, host_head));
+
+        spin_lock(&vch->slock);
+        list_add_tail(&buf->list, &vch->active_buffers);
+        spin_unlock(&vch->slock);
+
+        if (!buf->sgl_logged) {
+            dev_info(&qdev->pdev->dev,
+                     "VCU Ring buf%u queued (slot %u, phys=0x%llx len=%u, head: %u -> %u)\n",
+                     vb->index, slot_idx, (unsigned long long)dma_addr, dma_len, host_head, next_head);
+            buf->sgl_logged = true;
+        }
+        return 0;
+    }
+
     if (!vch->thin_ring_virt) {
         dev_err(&qdev->pdev->dev, "V4L2 ch%d: thin ring not configured\n", vch->channel_id);
         return -EINVAL;
     }
 
     thin_tail = vch->thin_ring_tail;
-    is_rgb = (vch->pixelformat == V4L2_PIX_FMT_RGB24);
+    is_rgb = (vch->pixelformat == V4L2_PIX_FMT_RGB24 ||
+              vch->pixelformat == V4L2_PIX_FMT_H264 ||
+              vch->pixelformat == V4L2_PIX_FMT_HEVC);
 
     sgt0 = vb2_dma_sg_plane_desc(vb, 0);
     if (WARN_ON(!sgt0))
@@ -1012,7 +1184,7 @@ static void qpcie_buf_queue(struct vb2_buffer *vb)
     unsigned long flags;
     int ret;
 
-    if (vch->channel_id == 0) {
+    if (vch->channel_id == 0 || (qdev->c2h_only && vch->channel_id == 1)) {
         spin_lock_irqsave(&qdev->ring_lock, flags);
         ret = qpcie_publish_buffer(vch, buf);
         spin_unlock_irqrestore(&qdev->ring_lock, flags);
@@ -1142,6 +1314,14 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
     bool convert_rgb = false;
     int ret;
 
+    if (vch->channel_id == 1 && qdev->c2h_only) {
+        atomic_inc(&qdev->streaming_count);
+        dev_info(&qdev->pdev->dev,
+                 "VCU STREAMON (Node 1): %u buffers queued, ring size=%u\n",
+                 count, QPCIE_VCU_RING_SIZE);
+        return 0;
+    }
+
     if (count < 2) {
         qpcie_cancel_unstarted_rings(vch);
         qpcie_return_all_buffers(vch, VB2_BUF_STATE_QUEUED);
@@ -1270,7 +1450,9 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
     }
 
     if (vch->thin_ring_virt) {
-        bool is_rgb = (vch->pixelformat == V4L2_PIX_FMT_RGB24);
+        bool is_rgb = (vch->pixelformat == V4L2_PIX_FMT_RGB24 ||
+                       vch->pixelformat == V4L2_PIX_FMT_H264 ||
+                       vch->pixelformat == V4L2_PIX_FMT_HEVC);
         u32 stride0 = is_rgb ? (vch->stride ? vch->stride : (vch->width * 3)) :
                                (vch->stride ? vch->stride : vch->width);
         u32 stride1 = is_rgb ? 0 :
@@ -1363,6 +1545,13 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
     u32 head = 0;
     u32 stat_reg = vch->ch_reg_base + REG_VCH_OFFSET_STATUS;
 
+    if (vch->channel_id == 1 && qdev->c2h_only) {
+        qpcie_return_all_buffers(vch, VB2_BUF_STATE_ERROR);
+        atomic_dec(&qdev->streaming_count);
+        dev_info(&qdev->pdev->dev, "VCU STREAMOFF (Node 1)\n");
+        return;
+    }
+
     /*
      * Ordering is the whole point of this function: the card must be provably
      * done writing into these buffers BEFORE they are handed back to userspace.
@@ -1371,7 +1560,7 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
      */
 
     /* 1. Stop the frame source so no new frame enters the pipeline. */
-    if (vch->channel_id == 0 && qdev->bar1_mmio) {
+    if (vch->channel_id == 0 && qdev->bar1_mmio && !qdev->c2h_only) {
         void __iomem *tpg = qdev->bar1_mmio + qdev->bar1_offset_tpg;
 
         qpcie_tpg_pace_stop(qdev);
@@ -1514,12 +1703,197 @@ static const char * const qpcie_tpg_pattern_strings[] = {
     NULL
 };
 
+void qpcie_vcu_sync_config(struct qpcie_v4l2_channel *vch)
+{
+    struct qpcie_dev *qdev;
+    void __iomem *target;
+    const u32 *words;
+    int i, count;
+
+    if (!vch || vch->channel_id != 1)
+        return;
+    qdev = vch->qdev;
+    if (!qdev || !qdev->bar0_mmio || !qdev->c2h_only)
+        return;
+
+    vch->vcu_cfg.magic = QPCIE_VCU_CFG_MAGIC;
+    vch->vcu_cfg.version = 1;
+    vch->vcu_cfg.config_seq++;
+
+    target = qdev->bar0_mmio + QPCIE_BAR0_VCU_CFG_OFFSET;
+    words = (const u32 *)&vch->vcu_cfg;
+    count = sizeof(struct qpcie_vcu_encoder_config) / sizeof(u32);
+
+    for (i = 0; i < count; i++)
+        iowrite32(words[i], target + (i * 4));
+
+    /* Memory barrier and PCIe write flush */
+    wmb();
+    ioread32(target);
+}
+
 static int qpcie_s_ctrl(struct v4l2_ctrl *ctrl)
 {
     struct qpcie_v4l2_channel *vch = container_of(ctrl->handler, struct qpcie_v4l2_channel, ctrl_handler);
     struct qpcie_dev *qdev = vch->qdev;
 
     switch (ctrl->id) {
+    case V4L2_CID_MPEG_VIDEO_BITRATE_MODE:
+        vch->vcu_cfg.bitrate_mode = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_BITRATE:
+        vch->vcu_cfg.bitrate = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_BITRATE_PEAK:
+        vch->vcu_cfg.bitrate_peak = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_FRAME_RC_ENABLE:
+        vch->vcu_cfg.frame_rc_enable = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_MB_RC_ENABLE:
+        vch->vcu_cfg.mb_rc_enable = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_CONSTANT_QUALITY:
+        vch->vcu_cfg.const_quality = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_GOP_SIZE:
+        vch->vcu_cfg.gop_size = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_B_FRAMES:
+        vch->vcu_cfg.b_frames = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME:
+        vch->vcu_cfg.force_idr = 1;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_REPEAT_SEQ_HEADER:
+        vch->vcu_cfg.repeat_seq_header = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_HEADER_MODE:
+        vch->vcu_cfg.header_mode = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_H264_PROFILE:
+        vch->vcu_cfg.h264_profile = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_H264_LEVEL:
+        vch->vcu_cfg.h264_level = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_H264_ENTROPY_MODE:
+        vch->vcu_cfg.h264_entropy_mode = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_H264_MIN_QP:
+        vch->vcu_cfg.h264_min_qp = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_H264_MAX_QP:
+        vch->vcu_cfg.h264_max_qp = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_H264_I_FRAME_QP:
+        vch->vcu_cfg.h264_i_qp = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_H264_P_FRAME_QP:
+        vch->vcu_cfg.h264_p_qp = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_H264_B_FRAME_QP:
+        vch->vcu_cfg.h264_b_qp = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_H264_CPB_SIZE:
+        vch->vcu_cfg.h264_cpb_size = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_H264_LOOP_FILTER_MODE:
+        vch->vcu_cfg.h264_loop_filter_mode = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_H264_8X8_TRANSFORM:
+        vch->vcu_cfg.h264_8x8_transform = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_HEVC_PROFILE:
+        vch->vcu_cfg.hevc_profile = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_HEVC_LEVEL:
+        vch->vcu_cfg.hevc_level = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_HEVC_TIER:
+        vch->vcu_cfg.hevc_tier = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_HEVC_MIN_QP:
+        vch->vcu_cfg.hevc_min_qp = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_HEVC_MAX_QP:
+        vch->vcu_cfg.hevc_max_qp = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_HEVC_I_FRAME_QP:
+        vch->vcu_cfg.hevc_i_qp = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_HEVC_P_FRAME_QP:
+        vch->vcu_cfg.hevc_p_qp = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_HEVC_B_FRAME_QP:
+        vch->vcu_cfg.hevc_b_qp = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_HEVC_LOOP_FILTER_MODE:
+        vch->vcu_cfg.hevc_loop_filter_mode = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_HEVC_REFRESH_TYPE:
+        vch->vcu_cfg.hevc_refresh_type = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_HEVC_STRONG_SMOOTHING:
+        vch->vcu_cfg.hevc_strong_smoothing = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_HEVC_CONST_INTRA_PRED:
+        vch->vcu_cfg.hevc_const_intra_pred = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_HEVC_WAVEFRONT:
+        vch->vcu_cfg.hevc_wavefront = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MODE:
+        vch->vcu_cfg.slice_mode = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MAX_BYTES:
+        vch->vcu_cfg.slice_max_bytes = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MAX_MB:
+        vch->vcu_cfg.slice_max_mb = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_CYCLIC_INTRA_REFRESH_MB:
+        vch->vcu_cfg.intra_refresh_mb = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
     case V4L2_CID_QPCIE_PACER_ENABLE:
         vch->pacer_enable = !!ctrl->val;
         if (qdev && qdev->bar0_mmio && vb2_is_streaming(&vch->queue)) {
@@ -1546,6 +1920,8 @@ static int qpcie_s_ctrl(struct v4l2_ctrl *ctrl)
         }
         break;
     case V4L2_CID_QPCIE_VIDEO_SOURCE:
+        if (qdev->c2h_only && ctrl->val != 2)
+            return -EOPNOTSUPP;
         /* The mux selector crosses as a quasi-static level. Switching source
          * inside a frame would splice two rasters into one host buffer. */
         if (vb2_is_streaming(&vch->queue) && vch->video_source != ctrl->val)
@@ -1752,8 +2128,12 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
                 hw_caps);
         return -EOPNOTSUPP;
     }
-    node_count = 1 + (2 * min(hw_video_ch - 1,
-                              (unsigned int)(NUM_VIDEO_CHANNELS - 1)));
+    if (qdev->c2h_only) {
+        node_count = 2; /* Node 0: Raw HDMI capture; Node 1: VCU Stream (Packet DMA) capture */
+    } else {
+        node_count = 1 + (2 * min(hw_video_ch - 1,
+                                  (unsigned int)(NUM_VIDEO_CHANNELS - 1)));
+    }
     dev_info(&qdev->pdev->dev,
              "[V4L2] FPGA capability check passed: %u video channels, registering %u node(s) (caps=0x%08x)\n",
              hw_video_ch, node_count, hw_caps);
@@ -1784,13 +2164,23 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
         vch->stride     = 1920;
         vch->pixelformat= V4L2_PIX_FMT_NV12M;
         vch->pacer_enable = true;
+        if (qdev->c2h_only)
+            vch->video_source = 2; /* No automatic TPG fallback. */
 
         if (i == 0) {
             vch->channel_id = 0;
             vch->buf_type   = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
         } else if (i == 1) {
             vch->channel_id = 1;
-            vch->buf_type   = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+            vch->buf_type   = qdev->c2h_only ?
+                V4L2_BUF_TYPE_VIDEO_CAPTURE :
+                V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+            if (qdev->c2h_only) {
+                vch->pixelformat = V4L2_PIX_FMT_H264;
+                vch->width = 3840;
+                vch->height = 2160;
+                vch->stride = 0;
+            }
         } else if (i == 2) {
             vch->channel_id = 1;
             vch->buf_type   = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
@@ -1817,22 +2207,236 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
 
         /* Initialize V4L2 Control Handler */
         dev_info(&qdev->pdev->dev, "[DEBUG STEP 2.3] Node %d: Initializing Control Handler...\n", i);
-        v4l2_ctrl_handler_init(&vch->ctrl_handler, i == 0 ? 6 : 1);
-        if (i == 0) {
-            v4l2_ctrl_new_std_menu_items(&vch->ctrl_handler, &qpcie_ctrl_ops,
-                                         V4L2_CID_TEST_PATTERN,
-                                         6, BIT(0), 3, qpcie_tpg_pattern_strings);
+        if (i == 1 && qdev->c2h_only) {
+            v4l2_ctrl_handler_init(&vch->ctrl_handler, 45);
+            /* Standard V4L2 Rate Control */
+            v4l2_ctrl_new_std_menu(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                                   V4L2_CID_MPEG_VIDEO_BITRATE_MODE,
+                                   V4L2_MPEG_VIDEO_BITRATE_MODE_CQ, 0,
+                                   V4L2_MPEG_VIDEO_BITRATE_MODE_CBR);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_BITRATE,
+                              25000, 100000000, 1000, 10000000);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_BITRATE_PEAK,
+                              25000, 120000000, 1000, 15000000);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_FRAME_RC_ENABLE,
+                              0, 1, 1, 1);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_MB_RC_ENABLE,
+                              0, 1, 1, 1);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_CONSTANT_QUALITY,
+                              0, 51, 1, 28);
+
+            /* Standard V4L2 GOP & Framing */
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_GOP_SIZE,
+                              1, 300, 1, 60);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_B_FRAMES,
+                              0, 4, 1, 0);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME,
+                              0, 0, 0, 0);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_REPEAT_SEQ_HEADER,
+                              0, 1, 1, 1);
+            v4l2_ctrl_new_std_menu(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                                   V4L2_CID_MPEG_VIDEO_HEADER_MODE,
+                                   V4L2_MPEG_VIDEO_HEADER_MODE_JOINED_WITH_1ST_FRAME, 0,
+                                   V4L2_MPEG_VIDEO_HEADER_MODE_JOINED_WITH_1ST_FRAME);
+
+            /* Standard V4L2 H.264 Controls */
+            v4l2_ctrl_new_std_menu(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                                   V4L2_CID_MPEG_VIDEO_H264_PROFILE,
+                                   V4L2_MPEG_VIDEO_H264_PROFILE_HIGH,
+                                   ~((1 << V4L2_MPEG_VIDEO_H264_PROFILE_BASELINE) |
+                                     (1 << V4L2_MPEG_VIDEO_H264_PROFILE_CONSTRAINED_BASELINE) |
+                                     (1 << V4L2_MPEG_VIDEO_H264_PROFILE_MAIN) |
+                                     (1 << V4L2_MPEG_VIDEO_H264_PROFILE_HIGH)),
+                                   V4L2_MPEG_VIDEO_H264_PROFILE_HIGH);
+            v4l2_ctrl_new_std_menu(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                                   V4L2_CID_MPEG_VIDEO_H264_LEVEL,
+                                   V4L2_MPEG_VIDEO_H264_LEVEL_5_2, 0,
+                                   V4L2_MPEG_VIDEO_H264_LEVEL_5_1);
+            v4l2_ctrl_new_std_menu(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                                   V4L2_CID_MPEG_VIDEO_H264_ENTROPY_MODE,
+                                   V4L2_MPEG_VIDEO_H264_ENTROPY_MODE_CABAC, 0,
+                                   V4L2_MPEG_VIDEO_H264_ENTROPY_MODE_CABAC);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_H264_MIN_QP,
+                              0, 51, 1, 10);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_H264_MAX_QP,
+                              0, 51, 1, 51);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_H264_I_FRAME_QP,
+                              0, 51, 1, 26);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_H264_P_FRAME_QP,
+                              0, 51, 1, 28);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_H264_B_FRAME_QP,
+                              0, 51, 1, 30);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_H264_CPB_SIZE,
+                              64, 100000, 64, 10000);
+            v4l2_ctrl_new_std_menu(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                                   V4L2_CID_MPEG_VIDEO_H264_LOOP_FILTER_MODE,
+                                   V4L2_MPEG_VIDEO_H264_LOOP_FILTER_MODE_DISABLED_AT_SLICE_BOUNDARY, 0,
+                                   V4L2_MPEG_VIDEO_H264_LOOP_FILTER_MODE_ENABLED);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_H264_8X8_TRANSFORM,
+                              0, 1, 1, 1);
+
+            /* Standard V4L2 HEVC / H.265 Controls */
+            v4l2_ctrl_new_std_menu(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                                   V4L2_CID_MPEG_VIDEO_HEVC_PROFILE,
+                                   V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_10, 0,
+                                   V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN);
+            v4l2_ctrl_new_std_menu(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                                   V4L2_CID_MPEG_VIDEO_HEVC_LEVEL,
+                                   V4L2_MPEG_VIDEO_HEVC_LEVEL_6_2, 0,
+                                   V4L2_MPEG_VIDEO_HEVC_LEVEL_5_1);
+            v4l2_ctrl_new_std_menu(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                                   V4L2_CID_MPEG_VIDEO_HEVC_TIER,
+                                   V4L2_MPEG_VIDEO_HEVC_TIER_HIGH, 0,
+                                   V4L2_MPEG_VIDEO_HEVC_TIER_MAIN);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_HEVC_MIN_QP,
+                              0, 51, 1, 10);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_HEVC_MAX_QP,
+                              0, 51, 1, 51);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_HEVC_I_FRAME_QP,
+                              0, 51, 1, 26);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_HEVC_P_FRAME_QP,
+                              0, 51, 1, 28);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_HEVC_B_FRAME_QP,
+                              0, 51, 1, 30);
+            v4l2_ctrl_new_std_menu(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                                   V4L2_CID_MPEG_VIDEO_HEVC_LOOP_FILTER_MODE,
+                                   V4L2_MPEG_VIDEO_HEVC_LOOP_FILTER_MODE_DISABLED_AT_SLICE_BOUNDARY, 0,
+                                   V4L2_MPEG_VIDEO_HEVC_LOOP_FILTER_MODE_ENABLED);
+            v4l2_ctrl_new_std_menu(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                                   V4L2_CID_MPEG_VIDEO_HEVC_REFRESH_TYPE,
+                                   V4L2_MPEG_VIDEO_HEVC_REFRESH_IDR, 0,
+                                   V4L2_MPEG_VIDEO_HEVC_REFRESH_IDR);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_HEVC_STRONG_SMOOTHING,
+                              0, 1, 1, 1);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_HEVC_CONST_INTRA_PRED,
+                              0, 1, 1, 0);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_HEVC_WAVEFRONT,
+                              0, 1, 1, 1);
+
+            /* Slicing & Resilience */
+            v4l2_ctrl_new_std_menu(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                                   V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MODE,
+                                   V4L2_MPEG_VIDEO_MULTI_SLICE_MODE_MAX_BYTES, 0,
+                                   V4L2_MPEG_VIDEO_MULTI_SLICE_MODE_SINGLE);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MAX_BYTES,
+                              0, 65535, 1, 0);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MAX_MB,
+                              0, 65535, 1, 0);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_CYCLIC_INTRA_REFRESH_MB,
+                              0, 8192, 1, 0);
+
+            /* Populate default struct values */
+            vch->vcu_cfg.magic = QPCIE_VCU_CFG_MAGIC;
+            vch->vcu_cfg.version = 1;
+            vch->vcu_cfg.codec_type = (vch->pixelformat == V4L2_PIX_FMT_HEVC) ? 1 : 0;
+            vch->vcu_cfg.bitrate_mode = V4L2_MPEG_VIDEO_BITRATE_MODE_CBR;
+            vch->vcu_cfg.bitrate = 10000000;
+            vch->vcu_cfg.bitrate_peak = 15000000;
+            vch->vcu_cfg.frame_rc_enable = 1;
+            vch->vcu_cfg.mb_rc_enable = 1;
+            vch->vcu_cfg.const_quality = 28;
+            vch->vcu_cfg.gop_size = 60;
+            vch->vcu_cfg.b_frames = 0;
+            vch->vcu_cfg.force_idr = 0;
+            vch->vcu_cfg.repeat_seq_header = 1;
+            vch->vcu_cfg.header_mode = V4L2_MPEG_VIDEO_HEADER_MODE_JOINED_WITH_1ST_FRAME;
+            vch->vcu_cfg.h264_profile = V4L2_MPEG_VIDEO_H264_PROFILE_HIGH;
+            vch->vcu_cfg.h264_level = V4L2_MPEG_VIDEO_H264_LEVEL_5_1;
+            vch->vcu_cfg.h264_entropy_mode = V4L2_MPEG_VIDEO_H264_ENTROPY_MODE_CABAC;
+            vch->vcu_cfg.h264_min_qp = 10;
+            vch->vcu_cfg.h264_max_qp = 51;
+            vch->vcu_cfg.h264_i_qp = 26;
+            vch->vcu_cfg.h264_p_qp = 28;
+            vch->vcu_cfg.h264_b_qp = 30;
+            vch->vcu_cfg.h264_cpb_size = 10000;
+            vch->vcu_cfg.h264_loop_filter_mode = V4L2_MPEG_VIDEO_H264_LOOP_FILTER_MODE_ENABLED;
+            vch->vcu_cfg.h264_8x8_transform = 1;
+            vch->vcu_cfg.hevc_profile = V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN;
+            vch->vcu_cfg.hevc_level = V4L2_MPEG_VIDEO_HEVC_LEVEL_5_1;
+            vch->vcu_cfg.hevc_tier = V4L2_MPEG_VIDEO_HEVC_TIER_MAIN;
+            vch->vcu_cfg.hevc_min_qp = 10;
+            vch->vcu_cfg.hevc_max_qp = 51;
+            vch->vcu_cfg.hevc_i_qp = 26;
+            vch->vcu_cfg.hevc_p_qp = 28;
+            vch->vcu_cfg.hevc_b_qp = 30;
+            vch->vcu_cfg.hevc_loop_filter_mode = V4L2_MPEG_VIDEO_HEVC_LOOP_FILTER_MODE_ENABLED;
+            vch->vcu_cfg.hevc_refresh_type = V4L2_MPEG_VIDEO_HEVC_REFRESH_IDR;
+            vch->vcu_cfg.hevc_strong_smoothing = 1;
+            vch->vcu_cfg.hevc_const_intra_pred = 0;
+            vch->vcu_cfg.hevc_wavefront = 1;
+            vch->vcu_cfg.slice_mode = V4L2_MPEG_VIDEO_MULTI_SLICE_MODE_SINGLE;
+            vch->vcu_cfg.slice_max_bytes = 0;
+            vch->vcu_cfg.slice_max_mb = 0;
+            vch->vcu_cfg.intra_refresh_mb = 0;
+            qpcie_vcu_sync_config(vch);
+
+            /* Allocate DPC1 completion record ring for Channel 1 */
+            vch->comp_ring_virt = dma_alloc_coherent(&qdev->pdev->dev,
+                                                     QPCIE_VCU_RING_SIZE * 64,
+                                                     &vch->comp_ring_dma, GFP_KERNEL);
+            if (vch->comp_ring_virt)
+                memset(vch->comp_ring_virt, 0, QPCIE_VCU_RING_SIZE * 64);
+            if (qdev->bar0_mmio) {
+                void __iomem *ring_mmio = qdev->bar0_mmio + QPCIE_BAR0_VCU_RING_OFFSET;
+                iowrite32(QPCIE_VCU_RING_MAGIC, ring_mmio + offsetof(struct qpcie_vcu_host_ring, magic));
+                iowrite32(1, ring_mmio + offsetof(struct qpcie_vcu_host_ring, version));
+                iowrite32(QPCIE_VCU_RING_SIZE, ring_mmio + offsetof(struct qpcie_vcu_host_ring, ring_size));
+                iowrite32(0, ring_mmio + offsetof(struct qpcie_vcu_host_ring, host_head));
+                iowrite32(0, ring_mmio + offsetof(struct qpcie_vcu_host_ring, ps_tail));
+                iowrite32(0, ring_mmio + offsetof(struct qpcie_vcu_host_ring, dropped_count));
+            }
+        } else {
+            v4l2_ctrl_handler_init(&vch->ctrl_handler, i == 0 ? 6 : 1);
+            if (i == 0 && !qdev->c2h_only) {
+                v4l2_ctrl_new_std_menu_items(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                                             V4L2_CID_TEST_PATTERN,
+                                             6, BIT(0), 3, qpcie_tpg_pattern_strings);
+                v4l2_ctrl_new_custom(&vch->ctrl_handler,
+                                     &qpcie_tpg_motion_ctrl_config, NULL);
+                v4l2_ctrl_new_custom(&vch->ctrl_handler,
+                                     &qpcie_frame_drop_ctrl_config, NULL);
+                v4l2_ctrl_new_custom(&vch->ctrl_handler,
+                                     &qpcie_tpg_overlay_ctrl_config, NULL);
+                v4l2_ctrl_new_custom(&vch->ctrl_handler,
+                                     &qpcie_video_source_ctrl_config, NULL);
+            }
+            if (i == 0 && qdev->c2h_only) {
+                struct v4l2_ctrl_config source = qpcie_video_source_ctrl_config;
+
+                source.def = 2;
+                source.menu_skip_mask = BIT(0) | BIT(1);
+                v4l2_ctrl_new_custom(&vch->ctrl_handler, &source, NULL);
+            }
             v4l2_ctrl_new_custom(&vch->ctrl_handler,
-                                 &qpcie_tpg_motion_ctrl_config, NULL);
-            v4l2_ctrl_new_custom(&vch->ctrl_handler,
-                                 &qpcie_frame_drop_ctrl_config, NULL);
-            v4l2_ctrl_new_custom(&vch->ctrl_handler,
-                                 &qpcie_tpg_overlay_ctrl_config, NULL);
-            v4l2_ctrl_new_custom(&vch->ctrl_handler,
-                                 &qpcie_video_source_ctrl_config, NULL);
+                                 &qpcie_pacer_ctrl_config, NULL);
         }
-        v4l2_ctrl_new_custom(&vch->ctrl_handler,
-                             &qpcie_pacer_ctrl_config, NULL);
         if (vch->ctrl_handler.error) {
             ret = vch->ctrl_handler.error;
             dev_err(&qdev->pdev->dev, "[DEBUG ERROR] Node %d: Control handler error: %d\n", i, ret);
@@ -1866,13 +2470,20 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
 
         dev_info(&qdev->pdev->dev, "[DEBUG STEP 2.5] Node %d: Registering Video Device /dev/videoX...\n", i);
         if (i == 0) {
-            snprintf(vdev->name, sizeof(vdev->name), "qpcie-capture-tpg0");
+            snprintf(vdev->name, sizeof(vdev->name), "%s",
+                     qdev->c2h_only ? "sc7f0-hdmi-raw" : "qpcie-capture-tpg0");
             vdev->device_caps = V4L2_CAP_VIDEO_CAPTURE_MPLANE | V4L2_CAP_STREAMING;
             vdev->vfl_dir     = VFL_DIR_RX;
         } else if (i == 1) {
-            snprintf(vdev->name, sizeof(vdev->name), "qpcie-loopback-out1");
-            vdev->device_caps = V4L2_CAP_VIDEO_OUTPUT_MPLANE | V4L2_CAP_STREAMING;
-            vdev->vfl_dir     = VFL_DIR_TX;
+            if (qdev->c2h_only) {
+                snprintf(vdev->name, sizeof(vdev->name), "sc7f0-vcu-stream");
+                vdev->device_caps = V4L2_CAP_VIDEO_CAPTURE | V4L2_CAP_STREAMING;
+                vdev->vfl_dir     = VFL_DIR_RX;
+            } else {
+                snprintf(vdev->name, sizeof(vdev->name), "qpcie-loopback-out1");
+                vdev->device_caps = V4L2_CAP_VIDEO_OUTPUT_MPLANE | V4L2_CAP_STREAMING;
+                vdev->vfl_dir     = VFL_DIR_TX;
+            }
         } else if (i == 2) {
             snprintf(vdev->name, sizeof(vdev->name), "qpcie-loopback-cap1");
             vdev->device_caps = V4L2_CAP_VIDEO_CAPTURE_MPLANE | V4L2_CAP_STREAMING;
@@ -1993,6 +2604,13 @@ void qpcie_v4l2_remove(struct qpcie_dev *qdev)
     qdev->v4l2_registered = false;
     for (i = 0; i < qdev->v4l2_node_count; i++) {
         struct qpcie_v4l2_channel *vch = &qdev->v4l2_ch[i];
+        if (vch->comp_ring_virt) {
+            dma_free_coherent(&qdev->pdev->dev,
+                              QPCIE_VCU_RING_SIZE * 64,
+                              vch->comp_ring_virt,
+                              vch->comp_ring_dma);
+            vch->comp_ring_virt = NULL;
+        }
         if (video_is_registered(&vch->vdev))
             video_unregister_device(&vch->vdev);
         v4l2_ctrl_handler_free(&vch->ctrl_handler);
@@ -2014,7 +2632,21 @@ void qpcie_v4l2_node_done(struct qpcie_dev *qdev, int node_idx)
         buf = list_first_entry(&vch->active_buffers, struct qpcie_v4l2_buffer, list);
         list_del(&buf->list);
         qdev->ring_completed++;
-        buf->vb.vb2_buf.timestamp = ktime_get_ns();
+
+        if (vch->channel_id == 1 && qdev->bar0_mmio) {
+            u32 last_len = ioread32(qdev->bar0_mmio + REG_VCH_BASE(1) + REG_VCH_OFFSET_PKT_LAST_LEN);
+            u32 pts_lo   = ioread32(qdev->bar0_mmio + REG_VCH_BASE(1) + REG_VCH_OFFSET_PKT_LAST_PTS_LO);
+            u32 pts_hi   = ioread32(qdev->bar0_mmio + REG_VCH_BASE(1) + REG_VCH_OFFSET_PKT_LAST_PTS_HI);
+            if (last_len > 0)
+                vb2_set_plane_payload(&buf->vb.vb2_buf, 0, last_len);
+            if (pts_lo || pts_hi)
+                buf->vb.vb2_buf.timestamp = (((u64)pts_hi << 32) | pts_lo) * 1000 / 150;
+            else
+                buf->vb.vb2_buf.timestamp = ktime_get_ns();
+        } else {
+            buf->vb.vb2_buf.timestamp = ktime_get_ns();
+        }
+
         buf->vb.sequence = vch->sequence++;
         vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
     }

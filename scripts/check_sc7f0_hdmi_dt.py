@@ -26,7 +26,12 @@ def check(args, output):
     user = PLNX / "project-spec/meta-user/recipes-bsp/device-tree/files"
     preprocessed = output / "system-top.dts.pp"
     dtb = output / "sc7f0-hdmi-rx-test.dtb"
+    capture = getattr(args, "capture", False)
+    if capture and args.disabled:
+        raise ValueError("Capture cannot be enabled on the disabled/debug profile")
     profile_flags = [] if args.disabled else ["-DSC7F0_HDMI_RX_ENABLE=1"]
+    if capture:
+        profile_flags.append("-DSC7F0_PS_CAPTURE_ENABLE=1")
     with preprocessed.open("w") as stream:
         subprocess.run([
             "gcc", "-E", "-nostdinc", "-undef", "-D__DTS__",
@@ -115,7 +120,7 @@ def check(args, output):
     for feature in ("C_INCLUDE_HDCP_1_4", "C_INCLUDE_HDCP_2_2"):
         require(rx_params[feature], "false", "HDCP disabled")
     require(cells("/qpcie_v4l2_bridge", "hdmirx"), cells(rx, "phandle"), "bridge phandle")
-    require(strings("/qpcie_v4l2_bridge", "status"), ["okay"], "bridge enabled")
+    require(strings("/qpcie_v4l2_bridge", "status"), ["disabled" if capture else "okay"], "bridge ownership")
     require(run([fdtget, "-l", dtb, phy]).split(), ["lane0", "lane1", "lane2"], "PHY order")
     expected_phys = []
     for i in range(3):
@@ -128,6 +133,51 @@ def check(args, output):
     children = run([fdtget, "-l", dtb, "/amba_pl@0"]).split()
     if "zzlab_env@b0000000" in children:
         raise ValueError("Legacy environment node still aliases VPHY")
+    if capture:
+        fb = "/amba_pl@0/framebuffer@b0050000"
+        csc = "/amba_pl@0/vpss-csc@b0060000"
+        tap = "/amba_pl@0/frame-tap@b0070000"
+        cap = "/video-capture"
+        for node, address, size in [(fb, 0xb0050000, 0x1000), (csc, 0xb0060000, 0x10000), (tap, 0xb0070000, 0x1000)]:
+            require(cells(node, "reg"), [0, address, 0, size], node + " aperture")
+            require(strings(node, "status"), ["okay"], node + " enabled")
+        require(cells(fb, "interrupts"), [0, 93, 4], "framebuffer IRQ0[4]")
+        require(cells(fb, "reset-gpios"), cells(tap, "phandle") + [0, 1], "writer reset_n")
+        require(cells(csc, "reset-gpios"), cells(tap, "phandle") + [1, 1], "CSC reset_n")
+        require(cells(cap, "dmas"), cells(fb, "phandle") + [0], "capture DMA")
+        require(cells(cap, "yuan,frame-tap"), cells(tap, "phandle"), "SOF provider")
+        require(cells("/capture-clock", "clock-frequency"), [150000000], "capture clock")
+        require(strings(fb, "compatible"), ["xlnx,axi-frmbuf-wr-v2.2"], "framebuffer driver match")
+        require(strings(fb, "xlnx,vid-formats"), ["nv12"], "capture formats")
+        fp = xci("sc7f0_frmbuf_wr")
+        cp = xci("sc7f0_vpss_csc")
+        for prop, param in {"dma-addr-width": "AXIMM_ADDR_WIDTH", "pixels-per-clock": "SAMPLES_PER_CLOCK", "max-width": "MAX_COLS", "max-height": "MAX_ROWS"}.items():
+            require(cells(fb, "xlnx," + prop), [int(fp[param])], "framebuffer " + param)
+        require(int(fp["AXIMM_DATA_WIDTH"]), 256, "4PPC framebuffer native width")
+        wp = xci("sc7f0_capture_width")
+        for param, value in {"SI_DATA_WIDTH": 256, "MI_DATA_WIDTH": 128,
+                             "ADDR_WIDTH": 64, "SI_ID_WIDTH": 1}.items():
+            require(int(wp[param]), value, "capture width converter " + param)
+        require(wp["PROTOCOL"], "AXI4", "capture width converter protocol")
+        require(int(fp["HAS_Y_UV8_420"]), 1, "NV12 enabled")
+        require(int(fp["HAS_RGB8"]), 0, "NV12-only IP")
+        require(int(cp["C_TOPOLOGY"]), 3, "CSC-only topology")
+        require(int(cp["C_COLORSPACE_SUPPORT"]), 0, "420 chroma support")
+        require(int(cp["C_SAMPLES_PER_CLK"]), 4, "CSC PPC")
+        require(cells(csc, "xlnx,max-width"), [int(cp["C_MAX_COLS"])], "CSC max width")
+        require(cells(csc, "xlnx,max-height"), [int(cp["C_MAX_ROWS"])], "CSC max height")
+        cross = xci("axi_crossbar_hdmi")
+        require(int(cross["NUM_MI"]), 7, "control destinations")
+        for index, base, width in [(4, 0xb0050000, 12), (5, 0xb0060000, 16), (6, 0xb0070000, 12)]:
+            require(int(cross[f"M{index:02}_A00_BASE_ADDR"], 16), base, "control base")
+            require(int(cross[f"M{index:02}_A00_ADDR_WIDTH"]), width, "control window")
+        links = [(rx + "/ports/port@0/endpoint", tap + "/ports/port@0/endpoint"),
+                 (tap + "/ports/port@1/endpoint", csc + "/ports/port@0/endpoint"),
+                 (csc + "/ports/port@1/endpoint", cap + "/ports/port@0/endpoint")]
+        for a, b in links:
+            require(cells(a, "remote-endpoint"), cells(b, "phandle"), "graph forward")
+            require(cells(b, "remote-endpoint"), cells(a, "phandle"), "graph reverse")
+        print("SC7F0_CAPTURE_DT_PASS: board graph/control/IRQ/reset/format match XCI; runtime/XSA import not proven")
     print("HDMI_DT_PASS: complete board DTS compiled; RX/PHY parameters match XCI")
 
 
@@ -141,6 +191,7 @@ def main():
           "build/tmp/sysroots-components/x86_64/dtc-native/usr/bin/dtc")
     parser.add_argument("--dtc", type=Path, default=Path(dtc))
     parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--capture", action="store_true", help="Check the official framebuffer capture graph (26102801+ only)")
     parser.add_argument("--disabled", action="store_true",
                         help="Check the safe, non-opt-in/default DTS instead of HDMI06")
     args = parser.parse_args()

@@ -80,15 +80,78 @@ else
            "$WORK_DIR/rootfs/etc/systemd/system/multi-user.target.wants/qpcie-upgrade-daemon.service"
 fi
 
+# Pure No-Network: SC7F0 has no RJ45 ethernet port.
+# Purge and mask all network, nfs, and resolver services to prevent boot failure / delay
+echo "[2c/4] Purging and masking network and nfs services..."
+rm -f "$WORK_DIR/rootfs/etc/systemd/system/multi-user.target.wants/systemd-networkd.service" \
+      "$WORK_DIR/rootfs/etc/systemd/system/network-online.target.wants/systemd-networkd-wait-online.service" \
+      "$WORK_DIR/rootfs/etc/systemd/system/sysinit.target.wants/systemd-network-generator.service" \
+      "$WORK_DIR/rootfs/etc/systemd/system/sysinit.target.wants/systemd-resolved.service" \
+      "$WORK_DIR/rootfs/etc/systemd/system/sysinit.target.wants/systemd-timesyncd.service" \
+      "$WORK_DIR/rootfs/etc/systemd/system/multi-user.target.wants/nfs-"*.service \
+      "$WORK_DIR/rootfs/etc/systemd/system/multi-user.target.wants/remote-fs.target" \
+      "$WORK_DIR/rootfs/etc/systemd/system/multi-user.target.wants/rpcbind.service" \
+      "$WORK_DIR/rootfs/etc/systemd/system/sockets.target.wants/systemd-networkd.socket" \
+      "$WORK_DIR/rootfs/etc/systemd/system/sockets.target.wants/rpcbind.socket" \
+      "$WORK_DIR/rootfs/etc/systemd/system/sockets.target.wants/sshd.socket" \
+      "$WORK_DIR/rootfs/etc/systemd/system/dbus-org.freedesktop.network1.service" \
+      "$WORK_DIR/rootfs/etc/systemd/system/dbus-org.freedesktop.resolve1.service" \
+      "$WORK_DIR/rootfs/etc/systemd/system/dbus-org.freedesktop.timesync1.service" \
+      "$WORK_DIR/rootfs/etc/systemd/system/networking.service" \
+      "$WORK_DIR/rootfs/etc/systemd/system/nfscommon.service" \
+      "$WORK_DIR/rootfs/etc/init.d/networking" \
+      "$WORK_DIR/rootfs/etc/init.d/nfs"* \
+      "$WORK_DIR/rootfs/etc/init.d/nfsserver" \
+      "$WORK_DIR/rootfs/etc/init.d/sshd" \
+      "$WORK_DIR/rootfs/etc/init.d/inetd.busybox" \
+      "$WORK_DIR/rootfs/etc/rc"*.d/*networking* \
+      "$WORK_DIR/rootfs/etc/rc"*.d/*nfs* \
+      "$WORK_DIR/rootfs/etc/rc"*.d/*sshd* \
+      "$WORK_DIR/rootfs/etc/rc"*.d/*inetd*
+
+# Mask them so systemd never attempts to activate or wait on them
+mkdir -p "$WORK_DIR/rootfs/etc/systemd/system"
+ln -sfn /dev/null "$WORK_DIR/rootfs/etc/systemd/system/networking.service"
+ln -sfn /dev/null "$WORK_DIR/rootfs/etc/systemd/system/systemd-networkd.service"
+ln -sfn /dev/null "$WORK_DIR/rootfs/etc/systemd/system/systemd-networkd-wait-online.service"
+ln -sfn /dev/null "$WORK_DIR/rootfs/etc/systemd/system/systemd-network-generator.service"
+ln -sfn /dev/null "$WORK_DIR/rootfs/etc/systemd/system/systemd-resolved.service"
+ln -sfn /dev/null "$WORK_DIR/rootfs/etc/systemd/system/systemd-timesyncd.service"
+ln -sfn /dev/null "$WORK_DIR/rootfs/etc/systemd/system/nfs-server.service"
+ln -sfn /dev/null "$WORK_DIR/rootfs/etc/systemd/system/nfs-statd.service"
+ln -sfn /dev/null "$WORK_DIR/rootfs/etc/systemd/system/nfs-mountd.service"
+ln -sfn /dev/null "$WORK_DIR/rootfs/etc/systemd/system/rpcbind.service"
+
+# Configure autologin on serial console ttyPS0 for quick debug access
+mkdir -p "$WORK_DIR/rootfs/etc/systemd/system/serial-getty@ttyPS0.service.d"
+cat << 'GETTY_EOF' > "$WORK_DIR/rootfs/etc/systemd/system/serial-getty@ttyPS0.service.d/autologin.conf"
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty --autologin root --noclear %I $TERM
+GETTY_EOF
+
 # Debug support is opt-in and only added to the production rootfs, never
 # the standalone SD installer. ENABLE_DEBUG_EXEC=1 is a separate explicit
 # authorization for root command execution in this lab image.
 if [ "${INCLUDE_DEBUG_DAEMON:-0}" = "1" ]; then
     bash "$ROOT_DIR/scripts/install_debug_rootfs.sh" "$WORK_DIR/rootfs"
+else
+    echo "  Disabling and masking qpcie-debugd and qpcie-hdmi-daemon..."
+    rm -f "$WORK_DIR/rootfs/etc/systemd/system/multi-user.target.wants/qpcie-debugd.service" \
+          "$WORK_DIR/rootfs/etc/systemd/system/multi-user.target.wants/qpcie-hdmi-daemon.service"
+    ln -sfn /dev/null "$WORK_DIR/rootfs/etc/systemd/system/qpcie-debugd.service"
+    ln -sfn /dev/null "$WORK_DIR/rootfs/etc/systemd/system/qpcie-hdmi-daemon.service"
 fi
 
 if [ "${ENABLE_SC7F0_WATCHDOG:-0}" = 1 ]; then
     bash "$ROOT_DIR/scripts/install_sc7f0_watchdog_rootfs.sh" "$WORK_DIR/rootfs"
+else
+    echo "  Disabling and masking sc7f0-ps-watchdog..."
+    rm -f "$WORK_DIR/rootfs/etc/systemd/system/multi-user.target.wants/sc7f0-ps-watchdog.service" \
+          "$WORK_DIR/rootfs/lib/systemd/system/sc7f0-ps-watchdog.service" \
+          "$WORK_DIR/rootfs/etc/systemd/system.conf.d/90-sc7f0-watchdog.conf"
+    rm -rf "$WORK_DIR/rootfs/etc/systemd/system"/*.service.d/10-watchdog.conf
+    ln -sfn /dev/null "$WORK_DIR/rootfs/etc/systemd/system/sc7f0-ps-watchdog.service"
 fi
 
 echo "[3/4] Repacking rootfs.cpio.gz..."

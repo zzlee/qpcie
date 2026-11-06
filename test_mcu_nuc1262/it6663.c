@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 #include "it6663.h"
 #include "it6663_rx_state.h"
+#include "it6663_tx_recover.h"
 #include "it6663_edid.h"
 #include "board.h"
 #include "i2c.h"
@@ -344,7 +345,17 @@ void it6663_poll_status(it6663_info_t *info)
         /* Keep the existing TX setup sequence. Only checked RX mode bits with
          * 25 consecutive valid observations can enter it. No polling EQ writes
          * or CDR kicks: boot EQ remains unchanged during invalid observations. */
-        if (!s_tx1_configured || observed.ratio40 != s_tx1_is_hdmi20) {
+        /* FPGA/PS reboot can drop P1 HPD without changing upstream RX.
+         * Invalidate cached setup, then replay TX/SCDC only after HPD rises. */
+        uint8_t p1_reg = 0x03, p1_status = 0;
+        bool p1_ok = i2c1_transfer(IT6663_ADDR_TXP1, &p1_reg, 1,
+                                 &p1_status, 1) == 0;
+        it_tx_action_t p1_action = it_tx_recover(s_tx1_configured,
+            s_tx1_is_hdmi20, observed.ratio40, p1_ok, p1_status);
+        if (p1_action == IT_TX_DISABLE) {
+            it6663_tx_power_down(IT6663_ADDR_TXP1);
+            s_tx1_configured = false;
+        } else if (p1_action == IT_TX_CONFIGURE) {
             it6663_tx_setup(IT6663_ADDR_TXP1, true, observed.ratio40);
             s_tx1_configured = true;
             s_tx1_is_hdmi20 = observed.ratio40;

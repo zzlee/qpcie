@@ -4,9 +4,9 @@
 # ==============================================================================
 set -e
 
-if [ "$#" -ne 1 ]; then
-    echo "Usage: sudo $0 <sd_device>"
-    echo "Example: sudo $0 /dev/sdb"
+if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
+    echo "Usage: sudo $0 <sd_device> [images_dir]"
+    echo "Example: sudo $0 /dev/sdb build/sc7f0-capture-26110301-r1/images"
     exit 1
 fi
 
@@ -26,16 +26,18 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." 2>/dev/null && pwd || echo "$SCRIPT_DIR")"
 
 # Search for release artifacts
-SRC_DIR=""
-for cand in "$SCRIPT_DIR" "$REPO_ROOT/release/zu4ev_sd_boot" "$SCRIPT_DIR/release/zu4ev_sd_boot"; do
-    if [ -f "$cand/BOOT.BIN" ] && [ -f "$cand/image.ub" ]; then
-        SRC_DIR="$cand"
-        break
-    fi
-done
-
+SRC_DIR="${SC7F0_IMAGES_DIR:-${2:-}}"
 if [ -z "$SRC_DIR" ]; then
-    echo "ERROR: Could not locate BOOT.BIN and image.ub in $SCRIPT_DIR or $REPO_ROOT/release/zu4ev_sd_boot"
+    for cand in "$REPO_ROOT/release/zu4ev_sd_installer" "$REPO_ROOT/build/sc7f0-capture-26110301-r1/images" "$SCRIPT_DIR" "$REPO_ROOT/release/zu4ev_sd_boot" "$SCRIPT_DIR/release/zu4ev_sd_boot"; do
+        if [ -f "$cand/BOOT.BIN" ] && [ -f "$cand/image.ub" ]; then
+            SRC_DIR="$cand"
+            break
+        fi
+    done
+fi
+
+if [ -z "$SRC_DIR" ] || [ ! -d "$SRC_DIR" ]; then
+    echo "ERROR: Could not locate BOOT.BIN and image.ub in $SRC_DIR, $REPO_ROOT/build/sc7f0-capture-26110301-r1/images, or $SCRIPT_DIR"
     exit 1
 fi
 
@@ -43,6 +45,7 @@ BOOTBIN="$SRC_DIR/BOOT.BIN"
 BOOTSCR="$SRC_DIR/boot.scr"
 IMAGEUB="$SRC_DIR/image.ub"
 FLASHEMMC="$SRC_DIR/flash_emmc.sh"
+[ -f "$FLASHEMMC" ] || FLASHEMMC="$SCRIPT_DIR/flash_emmc.sh"
 
 echo "================================================================="
 echo "  SC7F0 N1 HDMI2 V11: SD Card Image Flashing Tool"
@@ -96,6 +99,11 @@ sudo cp -v "$IMAGEUB" "$MOUNT_DIR/image.ub"
 if [ -f "$FLASHEMMC" ]; then
     sudo cp -v "$FLASHEMMC" "$MOUNT_DIR/flash_emmc.sh"
     sudo chmod +x "$MOUNT_DIR/flash_emmc.sh"
+fi
+
+if [ -d "$SRC_DIR/target_emmc" ]; then
+    echo "  Copying target_emmc/ production firmware directory..."
+    sudo cp -rv "$SRC_DIR/target_emmc" "$MOUNT_DIR/"
 fi
 
 if [ -f "$SRC_DIR/qpcie_hdmi_daemon" ]; then

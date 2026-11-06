@@ -17,8 +17,26 @@ module custom_pcie_dma_top #(
     parameter NUM_VIDEO_CH     = 2,
     parameter NUM_AUDIO_CH     = 2,
     parameter VIDEO_DATA_WIDTH = 32,
-    parameter AUDIO_DATA_WIDTH = 32
+    parameter AUDIO_DATA_WIDTH = 32,
+    parameter ENABLE_PACKET_C2H = 0
 )(
+    input wire packet_req_valid,
+    input wire [63:0] packet_req_addr,
+    input wire [10:0] packet_req_dw_len,
+    input wire [PCIE_DATA_WIDTH-1:0] packet_req_data,
+    input wire [3:0] packet_req_first_be, packet_req_last_be,
+    output wire packet_req_data_ready, packet_req_ack,
+    input wire packet_done_irq,
+    input wire [31:0] in_pkt_submit_cnt,
+    input wire [31:0] in_pkt_done_cnt,
+    input wire [31:0] in_pkt_err_cnt,
+    input wire [31:0] in_pkt_msi_cnt,
+    input wire [31:0] in_pkt_bytes_lo,
+    input wire [31:0] in_pkt_bytes_hi,
+    input wire [31:0] in_pkt_fsm_state,
+    input wire [31:0] in_pkt_last_len,
+    input wire [31:0] in_pkt_last_pts_lo,
+    input wire [31:0] in_pkt_last_pts_hi,
     input  wire                                             clk,
     input  wire                                             pl_clk0,
     input  wire                                             pl_resetn0,
@@ -280,48 +298,8 @@ module custom_pcie_dma_top #(
     wire        cvt_bar0_axil_bvalid, cvt_bar0_axil_bready, cvt_bar0_axil_arvalid, cvt_bar0_axil_arready;
     wire        cvt_bar0_axil_rvalid, cvt_bar0_axil_rready;
 
-    // Standalone PS -> PL read-path capture (100 MHz PS clock, independent of
-    // PCIe link). Arm from JTAG BEFORE issuing a single devmem read on UART.
-    // Status bit map and capture procedure: docs/zu4ev_ps_axi_ila.md.
-    wire [31:0] ps_axi_ila_status;
-    assign ps_axi_ila_status = {
-        9'd0,
-        pl_resetn0,                  // [22] PS-provided reset deasserted
-        env_axil_rresp,             // [21:20]
-        arb_axil_rresp,             // [19:18]
-        s_axil_ps_rresp,            // [17:16]
-        env_axil_rready,            // [15]
-        env_axil_rvalid,            // [14]
-        env_axil_arready,           // [13]
-        env_axil_arvalid,           // [12]
-        arb_axil_rready,            // [11]
-        arb_axil_rvalid,            // [10]
-        arb_axil_arready,           // [9]
-        arb_axil_arvalid,           // [8]
-        s_axil_ps_rready,           // [7]
-        s_axil_ps_rvalid,           // [6]
-        s_axil_ps_arready,          // [5]
-        s_axil_ps_arvalid,          // [4]
-        cvt_bar0_axil_arvalid,      // [3] PCIe requester (should be 0)
-        env_axil_awvalid,           // [2] unexpected concurrent writes
-        arb_axil_awvalid,           // [1]
-        sys_100m_rst_n              // [0] 100 MHz domain out of reset
-    };
-
-    ila_ps_axi_0 u_ila_ps_axi (
-        .clk(pl_clk0),
-        .probe0(ps_axi_ila_status),
-        .probe1(s_axil_ps_araddr),
-        .probe2(arb_axil_araddr),
-        .probe3(s_axil_ps_rdata),
-        .probe4(ps_hpm0_arvalid_raw), // trigger BEFORE AXI4-to-Lite conversion
-        .probe5(ps_hpm0_arid),
-        .probe6(ps_hpm0_arlen),
-        .probe7(ps_hpm0_arsize),
-        .probe8(ps_hpm0_rid_raw),
-        .probe9(ps_hpm0_rvalid_raw),
-        .probe10(ps_hpm0_arready_raw)
-    );
+    // Production dual-path design: PS AXI ILA removed. The independent
+    // debug mailbox and normal PS/PCIe AXI control path remain intact.
 
     axi_clock_converter_0 u_axi_clock_converter_0 (
         .s_axi_aclk(clk),
@@ -782,6 +760,9 @@ module custom_pcie_dma_top #(
     reg                        c2h_req_last_mux;
     wire                       c2h_req_data_ready_mux;
     wire                       c2h_req_ack_mux;
+    reg [3:0] c2h_first_be_mux,c2h_last_be_mux;
+    localparam [7:0] PACKET_OWNER=2+NUM_VIDEO_CH+NUM_AUDIO_CH;
+    reg prefer_packet;
     reg [7:0]                  c2h_owner;
     reg [7:0]                  c2h_selected;
     wire [NUM_VIDEO_CH-1:0]    v_c2h_req_ack;
@@ -795,6 +776,7 @@ module custom_pcie_dma_top #(
         c2h_req_data_mux = {PCIE_DATA_WIDTH{1'b0}};
         c2h_req_last_mux = 1'b0; c2h_arb_found = 1'b0;
         c2h_selected = c2h_owner;
+        c2h_first_be_mux=4'hf;c2h_last_be_mux=4'hf;
 
         if ((c2h_owner == 8'd1) || ((c2h_owner == 0) && sg_c2h_req_valid)) begin
             c2h_req_valid_mux = sg_c2h_req_valid; c2h_req_addr_mux = sg_c2h_req_addr;
@@ -815,6 +797,13 @@ module custom_pcie_dma_top #(
                 c2h_selected = 8'd2+NUM_VIDEO_CH+i_arb;
             end
         end
+        if(ENABLE_PACKET_C2H && ((c2h_owner==PACKET_OWNER) ||
+            (c2h_owner==0&&!c2h_arb_found&&prefer_packet&&packet_req_valid)))begin
+            c2h_req_valid_mux=packet_req_valid;c2h_req_addr_mux=packet_req_addr;
+            c2h_req_dw_len_mux=packet_req_dw_len;c2h_req_data_mux=packet_req_data;
+            c2h_req_last_mux=1;c2h_first_be_mux=packet_req_first_be;
+            c2h_last_be_mux=packet_req_last_be;c2h_arb_found=1;c2h_selected=PACKET_OWNER;
+        end
         for (i_arb = 0; i_arb < NUM_VIDEO_CH; i_arb = i_arb + 1) begin
             if (((c2h_owner == (8'd2+i_arb)) ||
                  ((c2h_owner == 0) && !c2h_arb_found && v_c2h_req_valid[i_arb]))) begin
@@ -826,6 +815,12 @@ module custom_pcie_dma_top #(
                 c2h_selected = 8'd2+i_arb;
             end
         end
+        if(ENABLE_PACKET_C2H&&c2h_owner==0&&!c2h_arb_found&&packet_req_valid)begin
+            c2h_req_valid_mux=1;c2h_req_addr_mux=packet_req_addr;
+            c2h_req_dw_len_mux=packet_req_dw_len;c2h_req_data_mux=packet_req_data;
+            c2h_req_last_mux=1;c2h_first_be_mux=packet_req_first_be;
+            c2h_last_be_mux=packet_req_last_be;c2h_selected=PACKET_OWNER;
+        end
     end
 
     always @(posedge clk or negedge dma_rst_n) begin
@@ -833,6 +828,14 @@ module custom_pcie_dma_top #(
         else if (c2h_owner == 0 && c2h_req_valid_mux) c2h_owner <= c2h_selected;
         else if (c2h_owner != 0 && c2h_req_ack_mux) c2h_owner <= 8'd0;
     end
+
+    always @(posedge clk or negedge dma_rst_n)begin
+        if(!dma_rst_n)prefer_packet<=1;
+        else if(c2h_req_ack_mux)prefer_packet<=c2h_owner!=PACKET_OWNER;
+    end
+    assign packet_req_data_ready=ENABLE_PACKET_C2H &&
+        (c2h_owner==PACKET_OWNER||(c2h_owner==0&&c2h_selected==PACKET_OWNER))&&c2h_req_data_ready_mux;
+    assign packet_req_ack=ENABLE_PACKET_C2H&&c2h_owner==PACKET_OWNER&&c2h_req_ack_mux;
 
     assign sg_c2h_req_data_ready =
         ((c2h_owner == 8'd1) || (c2h_owner == 8'd0 && c2h_selected == 8'd1)) && c2h_req_data_ready_mux;
@@ -1209,6 +1212,16 @@ module custom_pcie_dma_top #(
         .in_vch1_irq_status(vch1_irq_status_w),
         .out_vch1_irq_status_w1c(vch1_irq_status_w1c_w),
         .out_vch1_irq_en(vch1_irq_en_w),
+        .in_pkt_submit_cnt(in_pkt_submit_cnt),
+        .in_pkt_done_cnt(in_pkt_done_cnt),
+        .in_pkt_err_cnt(in_pkt_err_cnt),
+        .in_pkt_msi_cnt(in_pkt_msi_cnt),
+        .in_pkt_bytes_lo(in_pkt_bytes_lo),
+        .in_pkt_bytes_hi(in_pkt_bytes_hi),
+        .in_pkt_fsm_state(in_pkt_fsm_state),
+        .in_pkt_last_len(in_pkt_last_len),
+        .in_pkt_last_pts_lo(in_pkt_last_pts_lo),
+        .in_pkt_last_pts_hi(in_pkt_last_pts_hi),
         // Phase 4 P4-2: Audio DEV0 Ports
         .out_adev0_ctrl(adev0_ctrl_w),
         .out_adev0_rate(adev0_rate_w),
@@ -1465,6 +1478,7 @@ module custom_pcie_dma_top #(
     wire [PCIE_DATA_WIDTH-1:0] rq_c2h_req_data = c2h_req_data_mux;
 
     rq_tx_encoder #(
+        .ENABLE_C2H_BYTE_ENABLE(1),
         .DATA_WIDTH(PCIE_DATA_WIDTH),
         .KEEP_WIDTH(PCIE_KEEP_WIDTH)
     ) u_rq_tx_encoder (
@@ -1501,6 +1515,7 @@ module custom_pcie_dma_top #(
         .c2h_req_dw_len(c2h_req_dw_len_mux),
         .c2h_req_data(rq_c2h_req_data),
         .c2h_req_last(c2h_req_last_mux),
+        .c2h_req_first_be(c2h_first_be_mux),.c2h_req_last_be(c2h_last_be_mux),
         .c2h_req_data_ready(c2h_req_data_ready_mux),
         .c2h_req_ack(c2h_req_ack_mux)
     );
@@ -2156,6 +2171,7 @@ module custom_pcie_dma_top #(
     // NOTE: The full multi-channel block below is disabled when the
     // `QPCIe_single_rgb24_path` define is set, leaving only the Ch0 TPG->RGB24
     // SGL capture path (used for single-path bandwidth validation builds).
+`ifndef SC7F0_C2H_ONLY
 `ifndef QPCIe_single_rgb24_path
     // ---------------------- CHANNEL 1 ----------------------------------------
     wire [127:0] ch1_sgl_y_dout, ch1_sgl_uv_dout;
@@ -2350,12 +2366,31 @@ module custom_pcie_dma_top #(
     endgenerate
 
 `endif // QPCIe_single_rgb24_path
+`else
+    // Register ABI keeps four slots, but only raw video channel zero exists.
+    assign v_c2h_req_valid[1]=0; assign v_c2h_req_addr[64+:64]=0;
+    assign v_c2h_req_dw_len[11+:11]=0; assign v_c2h_req_data[1*PCIE_DATA_WIDTH+:PCIE_DATA_WIDTH]=0;
+    assign v_c2h_req_last[1]=0; assign v_busy[1]=0; assign v_done[1]=0;
+    assign v_pts[1]=0; assign v_drop_cnt[1]=0; assign nv12_ch1_desc_ready=0;
+    assign ch1_sgl_y_almost_full=0; assign ch1_sgl_uv_almost_full=0; assign ch1_loopback_full=0;
+    assign v_c2h_req_valid[2]=0; assign v_c2h_req_addr[128+:64]=0;
+    assign v_c2h_req_dw_len[22+:11]=0; assign v_c2h_req_data[2*PCIE_DATA_WIDTH+:PCIE_DATA_WIDTH]=0;
+    assign v_c2h_req_last[2]=0; assign v_busy[2]=0; assign v_done[2]=0;
+    assign v_pts[2]=0; assign v_drop_cnt[2]=0; assign nv12_ch2_desc_ready=0;
+    assign ch2_sgl_y_almost_full=0; assign ch2_sgl_uv_almost_full=0; assign ch2_loopback_full=0;
+    assign v_c2h_req_valid[3]=0; assign v_c2h_req_addr[192+:64]=0;
+    assign v_c2h_req_dw_len[33+:11]=0; assign v_c2h_req_data[3*PCIE_DATA_WIDTH+:PCIE_DATA_WIDTH]=0;
+    assign v_c2h_req_last[3]=0; assign v_busy[3]=0; assign v_done[3]=0;
+    assign v_pts[3]=0; assign v_drop_cnt[3]=0; assign nv12_ch3_desc_ready=0;
+    assign ch3_sgl_y_almost_full=0; assign ch3_sgl_uv_almost_full=0; assign ch3_loopback_full=0;
+`endif // SC7F0_C2H_ONLY
 
     assign m_axis_video_tdata  = {(NUM_VIDEO_CH*VIDEO_DATA_WIDTH){1'b0}};
     assign m_axis_video_tvalid = {NUM_VIDEO_CH{1'b0}};
     assign m_axis_video_tlast  = {NUM_VIDEO_CH{1'b0}};
     assign m_axis_video_tuser  = {NUM_VIDEO_CH{1'b0}};
 
+`ifndef SC7F0_C2H_ONLY
     // 8.1 Audio Playback H2C Block RAM FIFOs (Channels 1, 2, 3)
     audio_h2c_fifo #(.DEPTH(512)) u_audio_h2c_fifo_ch1 (
         .clk(clk),
@@ -2486,6 +2521,16 @@ module custom_pcie_dma_top #(
         end
     endgenerate
 
+`else
+    assign h2c_fifo_full_ch1=0; assign h2c_fifo_empty_ch1=1;
+    assign h2c_fifo_count_ch1=0; assign h2c_fifo_rdata_ch1=0; assign h2c_fifo_rd_en_ch1=0;
+    assign h2c_fifo_full_ch2=0; assign h2c_fifo_empty_ch2=1;
+    assign h2c_fifo_count_ch2=0; assign h2c_fifo_rdata_ch2=0; assign h2c_fifo_rd_en_ch2=0;
+    assign h2c_fifo_full_ch3=0; assign h2c_fifo_empty_ch3=1;
+    assign h2c_fifo_count_ch3=0; assign h2c_fifo_rdata_ch3=0; assign h2c_fifo_rd_en_ch3=0;
+    assign m_axis_audio_tvalid=0; assign m_axis_audio_tlast=0; assign m_axis_audio_tdata=0;
+`endif
+
     // 9. Multi-Channel AES3 Audio Stream Engines
     // qpcie_csr_reg_space already transports ordered configuration snapshots
     // to clk and coherent telemetry back to pl_clk0. Do not cross these
@@ -2526,6 +2571,7 @@ module custom_pcie_dma_top #(
         .audio_pts(a_pts[0])
     );
 
+`ifndef SC7F0_C2H_ONLY
     audio_stream_engine #(
         .AUDIO_DATA_WIDTH(AUDIO_DATA_WIDTH),
         .PCIE_DATA_WIDTH(128)
@@ -2623,10 +2669,28 @@ module custom_pcie_dma_top #(
         end
     endgenerate
 
+`else
+    assign a_c2h_req_valid[1]=0; assign a_c2h_req_addr[64+:64]=0;
+    assign a_c2h_req_dw_len[11+:11]=0; assign a_c2h_req_data[128+:128]=0;
+    assign a_c2h_req_last[1]=0; assign a_busy[1]=0; assign a_done[1]=0;
+    assign a_xrun[1]=0; assign a_pts[1]=0; assign reg_audio_dma_ptr_ch1=0;
+    assign s_axis_audio_tready[1]=1;
+    assign a_c2h_req_valid[2]=0; assign a_c2h_req_addr[128+:64]=0;
+    assign a_c2h_req_dw_len[22+:11]=0; assign a_c2h_req_data[256+:128]=0;
+    assign a_c2h_req_last[2]=0; assign a_busy[2]=0; assign a_done[2]=0;
+    assign a_xrun[2]=0; assign a_pts[2]=0; assign reg_audio_dma_ptr_ch2=0;
+    assign s_axis_audio_tready[2]=1;
+    assign a_c2h_req_valid[3]=0; assign a_c2h_req_addr[192+:64]=0;
+    assign a_c2h_req_dw_len[33+:11]=0; assign a_c2h_req_data[384+:128]=0;
+    assign a_c2h_req_last[3]=0; assign a_busy[3]=0; assign a_done[3]=0;
+    assign a_xrun[3]=0; assign a_pts[3]=0; assign reg_audio_dma_ptr_ch3=0;
+    assign s_axis_audio_tready[3]=1;
+`endif
+
     wire [3:0] v_done_ch = {
         (NUM_VIDEO_CH >= 4 ? v_done[3] : 1'b0),
         (NUM_VIDEO_CH >= 3 ? v_done[2] : 1'b0),
-        (NUM_VIDEO_CH >= 2 ? v_done[1] : 1'b0),
+        (NUM_VIDEO_CH >= 2 ? (v_done[1] | packet_done_irq) : 1'b0),
         (v_done[0] | sg_c2h_done_irq)
     };
     wire [3:1] h2c_done_ch = {

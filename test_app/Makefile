@@ -19,6 +19,9 @@ sc7f0ctl: sc7f0ctl.c qpcie_debug_io.h ../include/qpcie_debug.h
 qpcie_debugd: qpcie_debugd.c qpcie_debug_io.h sc7f0_health.h ../include/qpcie_debug.h
 	$(AARCH64_CC) -O2 -Wall -Wextra -I../include -static -o $@ qpcie_debugd.c
 
+sc7f0_vcud: sc7f0_vcud.c
+	$(AARCH64_CC) -O2 -Wall -Wextra -static -o $@ sc7f0_vcud.c -pthread
+
 qpcie_upgrade: qpcie_upgrade.c
 	$(CC) $(CFLAGS) -o $@ qpcie_upgrade.c $(LDFLAGS)
 
@@ -65,6 +68,10 @@ v4l2_rgb24_test_app: v4l2_rgb24_test_app.c qpcie_control.h
 v4l2_capture_verify: v4l2_capture_verify.c
 	$(CC) $(CFLAGS) -std=c11 -Wextra -o $@ $<
 
+# PetaLinux capture app; standard V4L2/VB2, no host-private source controls.
+sc7f0_ps_capture: sc7f0_ps_capture.c
+	$(AARCH64_CC) -O2 -std=c11 -Wall -Wextra -static -o $@ $<
+
 alsa_test_app: alsa_test_app.c qpcie_control.h
 	$(CC) $(CFLAGS) -o $@ alsa_test_app.c $(LDFLAGS)
 
@@ -78,6 +85,6 @@ loopback_test_app: loopback_test_app.c qpcie_control.h
 	$(CC) $(CFLAGS) -o $@ loopback_test_app.c $(LDFLAGS)
 
 clean:
-	rm -f $(TARGETS) qpcie_debugd qpcie_fw_daemon qpcie_hdmi_daemon *.o *.yuv *.pcm *.raw
+	rm -f $(TARGETS) sc7f0_ps_capture qpcie_debugd qpcie_fw_daemon qpcie_hdmi_daemon *.o *.yuv *.pcm *.raw
 
 .PHONY: all clean qpcie_fw_daemon qpcie_hdmi_daemon

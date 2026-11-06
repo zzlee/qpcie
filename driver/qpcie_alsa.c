@@ -629,31 +629,37 @@ int qpcie_alsa_init(struct qpcie_dev *qdev)
             snprintf(card->longname, sizeof(card->longname), "QPCIe Audio Ch0 (Pattern Gen Source)");
 
             // Card 0: Device 0 = Capture Only (Pattern Gen Source) -> /dev/snd/pcmC<X>D0c
-            ret = snd_pcm_new(card, "QPCIe AES3 Capture", 0, 0, 1, &ach->pcm_cap);
-            if (ret) {
-                dev_err(&qdev->pdev->dev, "Audio Ch %d: snd_pcm_new capture failed: %d\n", i, ret);
-                goto free_card;
+            if (!qdev->c2h_only) {
+                ret = snd_pcm_new(card, "QPCIe AES3 Capture", 0, 0, 1, &ach->pcm_cap);
+                if (ret) {
+                    dev_err(&qdev->pdev->dev, "Audio Ch %d: snd_pcm_new capture failed: %d\n", i, ret);
+                    goto free_card;
+                }
+                ach->pcm_cap->private_data = ach;
+                strscpy(ach->pcm_cap->name, "QPCIe AES3 Subframe PCM", sizeof(ach->pcm_cap->name));
+                snd_pcm_set_ops(ach->pcm_cap, SNDRV_PCM_STREAM_CAPTURE, &qpcie_alsa_capture_ops);
+                snd_pcm_set_managed_buffer_all(ach->pcm_cap, SNDRV_DMA_TYPE_DEV,
+                                              &qdev->pdev->dev, 64 * 1024, 128 * 1024);
             }
-            ach->pcm_cap->private_data = ach;
-            strscpy(ach->pcm_cap->name, "QPCIe AES3 Subframe PCM", sizeof(ach->pcm_cap->name));
-            snd_pcm_set_ops(ach->pcm_cap, SNDRV_PCM_STREAM_CAPTURE, &qpcie_alsa_capture_ops);
-            snd_pcm_set_managed_buffer_all(ach->pcm_cap, SNDRV_DMA_TYPE_DEV, &qdev->pdev->dev, 64 * 1024, 128 * 1024);
 
-            // Device 1 is real HDMI PCM, distinct from device 0 raw AES3 diagnostics.
+            // Device 1 remains HDMI PCM even when DEV0 diagnostics are absent.
             if (ioread32(qdev->bar0_mmio + REG_ADEV0_PCM_ABI) == ADEV0_PCM_ABI) {
                 struct snd_pcm *hdmi_pcm;
                 ret = snd_pcm_new(card, "SC7F0 HDMI PCM", 1, 0, 1, &hdmi_pcm);
                 if (ret) goto free_card;
+                if (qdev->c2h_only)
+                    ach->pcm_cap = hdmi_pcm;
                 hdmi_pcm->private_data = ach;
                 strscpy(hdmi_pcm->name, "HDMI LPCM Front L/R", sizeof(hdmi_pcm->name));
                 snd_pcm_set_ops(hdmi_pcm, SNDRV_PCM_STREAM_CAPTURE, &qpcie_alsa_capture_ops);
                 snd_pcm_set_managed_buffer_all(hdmi_pcm, SNDRV_DMA_TYPE_DEV,
                                               &qdev->pdev->dev, 64*1024, 128*1024);
                 strscpy(card->shortname, "SC7F0 HDMI Audio", sizeof(card->shortname));
-                strscpy(card->longname, "SC7F0 HDMI PCM + raw TPG diagnostics", sizeof(card->longname));
+                strscpy(card->longname, qdev->c2h_only ? "SC7F0 HDMI PCM capture" :
+                        "SC7F0 HDMI PCM + raw TPG diagnostics", sizeof(card->longname));
             }
 
-            if (enable_hdmi_diagnostics &&
+            if (!qdev->c2h_only && enable_hdmi_diagnostics &&
                 ioread32(qdev->bar0_mmio + REG_ADEV0_PCM_ABI) == ADEV0_PCM_ABI) {
                 struct snd_pcm *diag;
                 ret = snd_pcm_new(card, "UNQUALIFIED HDMI DIAGNOSTIC", 2, 0, 1, &diag);
@@ -668,7 +674,7 @@ int qpcie_alsa_init(struct qpcie_dev *qdev)
             }
 
             // Register Mixer Controls for Ch0 Pattern Generator
-            for (k = 0; k < ARRAY_SIZE(qpcie_alsa_controls); k++) {
+            for (k = 0; !qdev->c2h_only && k < ARRAY_SIZE(qpcie_alsa_controls); k++) {
                 ret = snd_ctl_add(card, snd_ctl_new1(&qpcie_alsa_controls[k], ach));
                 if (ret < 0) {
                     dev_err(&qdev->pdev->dev, "Audio Ch %d: snd_ctl_add failed: %d\n", i, ret);

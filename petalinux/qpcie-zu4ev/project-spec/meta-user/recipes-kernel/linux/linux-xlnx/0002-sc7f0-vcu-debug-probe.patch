@@ -1,0 +1,98 @@
+diff --git a/drivers/clk/xilinx/xlnx_vcu.c b/drivers/clk/xilinx/xlnx_vcu.c
+index b4fe0b2704fc..33033ab136a2 100644
+--- a/drivers/clk/xilinx/xlnx_vcu.c
++++ b/drivers/clk/xilinx/xlnx_vcu.c
+@@ -9,6 +9,7 @@
+ #include <linux/bitfield.h>
+ #include <linux/clk.h>
+ #include <linux/clk-provider.h>
++#include <linux/delay.h>
+ #include <linux/device.h>
+ #include <linux/errno.h>
+ #include <linux/gpio/consumer.h>
+@@ -288,13 +289,16 @@ static int xvcu_pll_wait_for_lock(struct vcu_pll *pll)
+ 	void __iomem *base = pll->reg_base;
+ 	unsigned long timeout;
+ 	u32 lock_status;
++	unsigned int loops = 0;
+ 
+ 	timeout = jiffies + msecs_to_jiffies(2000);
+ 	do {
+ 		lock_status = xvcu_read(base, VCU_PLL_STATUS);
+ 		if (lock_status & VCU_PLL_STATUS_LOCK_STATUS)
+ 			return 0;
+-	} while (!time_after(jiffies, timeout));
++		loops++;
++		udelay(1);
++	} while (!time_after(jiffies, timeout) && loops < 1000000);
+ 
+ 	return -ETIMEDOUT;
+ }
+@@ -307,15 +311,11 @@ static struct clk_hw *xvcu_register_pll_post(struct device *dev,
+ 	u32 div;
+ 	u32 vcu_pll_ctrl;
+ 
+-	/*
+-	 * The output divider of the PLL must be set to 1/2 to meet the
+-	 * timing in the design.
+-	 */
+ 	vcu_pll_ctrl = xvcu_read(reg_base, VCU_PLL_CTRL);
+ 	div = FIELD_GET(VCU_PLL_CTRL_CLKOUTDIV, vcu_pll_ctrl);
+-	if (div != 1)
++	if (div != 1) {
+ 		return ERR_PTR(-EINVAL);
+-
++	}
+ 	return clk_hw_register_fixed_factor(dev, "vcu_pll_post",
+ 					    clk_hw_get_name(parent_hw),
+ 					    CLK_SET_RATE_PARENT, 1, 2);
+@@ -722,6 +722,12 @@ static int xvcu_probe(struct platform_device *pdev)
+ 		return ret;
+ 	}
+ 
++	ret = clk_prepare_enable(xvcu->pll_ref);
++	if (ret) {
++		dev_err(&pdev->dev, "pll_ref clock enable failed: %d\n", ret);
++		goto error_aclk;
++	}
++
+ 	/*
+ 	 * Do the Gasket isolation and put the VCU out of reset
+ 	 * Bit 0 : Gasket isolation
+@@ -732,7 +738,7 @@ static int xvcu_probe(struct platform_device *pdev)
+ 	if (IS_ERR(xvcu->reset_gpio)) {
+ 		ret = PTR_ERR(xvcu->reset_gpio);
+ 		dev_err(&pdev->dev, "failed to get reset gpio for vcu.\n");
+-		goto error_get_gpio;
++		goto error_pll_ref;
+ 	}
+ 
+ 	if (xvcu->reset_gpio) {
+@@ -750,7 +756,7 @@ static int xvcu_probe(struct platform_device *pdev)
+ 	ret = xvcu_register_clock_provider(xvcu);
+ 	if (ret) {
+ 		dev_err(&pdev->dev, "failed to register clock provider\n");
+-		goto error_clk_provider;
++		goto error_pll_ref;
+ 	}
+ 
+ 	dev_set_drvdata(&pdev->dev, xvcu);
+@@ -765,7 +771,9 @@ static int xvcu_probe(struct platform_device *pdev)
+ 
+ error_clk_provider:
+ 	xvcu_unregister_clock_provider(xvcu);
+-error_get_gpio:
++error_pll_ref:
++	clk_disable_unprepare(xvcu->pll_ref);
++error_aclk:
+ 	clk_disable_unprepare(xvcu->aclk);
+ 	return ret;
+ }
+@@ -798,6 +806,7 @@ static int xvcu_remove(struct platform_device *pdev)
+ 	}
+ 	regmap_write(xvcu->logicore_reg_ba, VCU_GASKET_INIT, 0);
+ 
++	clk_disable_unprepare(xvcu->pll_ref);
+ 	clk_disable_unprepare(xvcu->aclk);
+ 
+ 	return 0;

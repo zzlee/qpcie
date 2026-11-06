@@ -9547,7 +9547,7 @@ config Init-manager-sysvinit
 endchoice
 endmenu
 
-source /home/zzlee/qpcie/petalinux/qpcie-zu4ev/project-spec/configs/rootfsconfigs/Kconfig.user
+source /home/zzlee/vibecoding/sc7f0-dual-video/petalinux/qpcie-zu4ev/project-spec/configs/rootfsconfigs/Kconfig.user
 
 menu "PetaLinux RootFS Settings"
 config ADD_EXTRA_USERS

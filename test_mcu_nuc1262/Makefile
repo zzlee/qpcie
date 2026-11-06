@@ -13,14 +13,17 @@ OBJCOPY  := $(PREFIX)objcopy
 OBJDUMP  := $(PREFIX)objdump
 SIZE     := $(PREFIX)size
 
-CFLAGS   := -mcpu=cortex-m23 -mthumb -Os -flto -ffunction-sections -fdata-sections \
+# GCC13 size optimization preserves the 8192-byte transport/staging ABI.
+# Do not raise the field staging limit or reduce runtime queues to make fit.
+CFLAGS   := -mcpu=cortex-m23 -mthumb -Oz -flto -ffunction-sections -fdata-sections \
             -fno-unwind-tables -fno-asynchronous-unwind-tables \
+            -fno-jump-tables -fno-inline-small-functions \
             -Wall -Wextra \
             -I$(DEVDIR)/Include -I$(CMSIS) -I$(STDDRV_I) -I.
 
 LDFLAGS  := -mcpu=cortex-m23 -mthumb -flto -Wl,--gc-sections,-Map=nuc1262.map -specs=nano.specs -specs=nosys.specs -Tnuc1262.ld
 
-SRCS     := main.c board.c it6663.c i2c1_bus.c i2c0_slave.c writer.c \
+SRCS     := main.c board.c it6663.c i2c1_bus.c i2c0_slave.c writer.c legacy_reset_compat.S \
             $(DEVDIR)/Source/system_NUC1262.c \
             $(STDDRV_S)/clk.c \
             $(STDDRV_S)/sys.c \
@@ -53,5 +56,9 @@ test:
 	../build/tests/it6663_rx_state_test
 	$(HOSTCC) -std=c11 -O2 -Wall -Wextra -Werror -I. tests/i2c1_plan_test.c -o ../build/tests/i2c1_plan_test
 	../build/tests/i2c1_plan_test
+	$(HOSTCC) -std=c11 -O2 -Wall -Wextra -Werror -I. tests/it6663_tx_recover_test.c -o ../build/tests/it6663_tx_recover_test
+	../build/tests/it6663_tx_recover_test
+	$(HOSTCC) -std=c11 -O2 -Wall -Wextra -Werror -fsanitize=undefined -Itests/fakes -I. tests/writer_test.c writer.c -o ../build/tests/mcu_safe_writer_test
+	../build/tests/mcu_safe_writer_test
 
 .PHONY: all clean test

@@ -21,7 +21,24 @@ if {[info exists ::env(SC7F0_PROJECT_DIR)]} {set project_dir $::env(SC7F0_PROJEC
 set build_stage "bitstream"
 if {[info exists ::env(SC7F0_BUILD_STAGE)]} {set build_stage $::env(SC7F0_BUILD_STAGE)}
 if {$build_stage ni {ip synth bitstream}} {error "SC7F0_BUILD_STAGE must be ip, synth or bitstream"}
+# Encoder-only VCU is opt-in per hardware revision. Unset or 0 keeps the shipped
+# BD call (and therefore every published bitstream) exactly as it was; 1 adds
+# the slimmed encoder subsystem to the full-profile PS block design.
+set vcu_enable 0
+if {[info exists ::env(SC7F0_ENABLE_VCU)]} {
+    set vcu_req [string tolower [string trim $::env(SC7F0_ENABLE_VCU)]]
+    if {$vcu_req ni {0 1 true false yes no}} {
+        error "SC7F0_ENABLE_VCU must be 0/1 (true/false), got '$vcu_req'"
+    }
+    if {$vcu_req in {1 true yes}} {set vcu_enable 1}
+}
+# The VCU memory clock (dp_mem_clk) and the PS HP2/HP3/LPD ports it needs only
+# exist in the full profile, so a debug-profile request is a configuration bug.
+if {$vcu_enable && $debug_profile} {
+    error "SC7F0_ENABLE_VCU requires SC7F0_PROFILE=full (debug profile has no dp_mem_clk)"
+}
 puts " SC7F0 profile: $profile"
+puts " SC7F0 VCU:     $vcu_enable"
 exec python3 ./scripts/generate_sc7f0_csr_cdc.py --check
 
 puts "================================================================="
@@ -48,10 +65,20 @@ puts "   (GIT AUTO-INJECT) Commit Hash: 0x$git_raw, Build Date: $date_raw"
 add_files [glob ./rtl/*.v]
 set_property top zu4ev_pcie_card_top [current_fileset]
 # Full HDMI bring-up is a new hardware revision; debug04 remains unchanged.
-if {!$debug_profile} {set_property generic {C_VERSION=32'h26102201} [current_fileset]}
+if {!$debug_profile} {
+    set hw_version 26102901
+    if {[info exists ::env(SC7F0_VERSION)]} {set hw_version $::env(SC7F0_VERSION)}
+    if {![regexp {^[0-9A-Fa-f]{8}$} $hw_version]} {error "Invalid SC7F0_VERSION"}
+    set_property generic "C_VERSION=32'h$hw_version" [current_fileset]
+}
 
 set verilog_defs [list GIT_COMMIT_HASH_DEF=$git_commit_hex BUILD_TIMESTAMP_DEF=$build_date_hex]
-if {$debug_profile} {lappend verilog_defs SC7F0_DEBUG_ONLY=1}
+if {$debug_profile} {
+    lappend verilog_defs SC7F0_DEBUG_ONLY=1
+} else {
+    # Production SC7F0 has only raw video, packet video and raw audio C2H.
+    lappend verilog_defs SC7F0_C2H_ONLY=1
+}
 set_property verilog_define $verilog_defs [current_fileset]
 set_property XPM_LIBRARIES {XPM_CDC XPM_FIFO XPM_MEMORY} [current_project]
 
@@ -60,12 +87,24 @@ if {$debug_profile} {
     add_files -fileset constrs_1 ./constraints/zu4ev_debug_pinout.xdc
 } else {
     add_files -fileset constrs_1 ./constraints/zu4ev_pcie_pinout.xdc
+    add_files -fileset constrs_1 ./constraints/sc7f0_capture_gray.xdc
+    set_property USED_IN_SYNTHESIS false [get_files sc7f0_capture_gray.xdc]
+    set_property PROCESSING_ORDER LATE [get_files sc7f0_capture_gray.xdc]
+    # Full Tcl belongs in a run hook, not XDC (where if/foreach are ignored).
+    set_property STEPS.OPT_DESIGN.TCL.PRE [file normalize scripts/check_sc7f0_capture_gray.tcl] [get_runs impl_1]
 }
 
 # 2.1 Generate ZU4EV Processing System Subsystem (zu4ev_ps_bd)
 puts "Generating ZU4EV Processing System Subsystem (zu4ev_ps_bd)..."
 source ./scripts/create_zu4ev_ps_bd.tcl
-create_zu4ev_ps_bd [expr {!$debug_profile}]
+if {$vcu_enable} {
+    # Slim memory interconnect (axi_crossbar + axi_dwidth_converter), the style
+    # measured for Todo 1.2b. Without this branch the call below stays the
+    # original two-argument form, so the VCU-off build is bit-for-bit identical.
+    create_zu4ev_ps_bd [expr {!$debug_profile}] 1 "xbar"
+} else {
+    create_zu4ev_ps_bd [expr {!$debug_profile}]
+}
 generate_target all [get_files zu4ev_ps_bd.bd]
 set bd_wrapper [make_wrapper -files [get_files zu4ev_ps_bd.bd] -top]
 add_files -norecurse $bd_wrapper
@@ -118,6 +157,8 @@ foreach {property expected} {
 
 generate_target all [get_ips pcie4_uscale_plus_0]
 
+# Debug-only TPG. No generated TPG IP in the production RX-only card.
+if {$debug_profile} {
 # 4. Generate Video Test Pattern Generator IP Core (v_tpg_0)
 puts "Generating Video TPG IP Core (v_tpg_0 - 4 PPC 4K60)..."
 create_ip -name v_tpg -vendor xilinx.com -library ip -version 8.2 -module_name v_tpg_0
@@ -130,6 +171,7 @@ set_property -dict [list \
 ] [get_ips v_tpg_0]
 
 generate_target all [get_ips v_tpg_0]
+}
 
 # 5. Generate AXI Crossbar IP Core (axi_crossbar_0 - 1x4)
 puts "Generating AXI Crossbar IP Core (axi_crossbar_0 - 1x4)..."
@@ -206,27 +248,8 @@ puts "Generating Processor System Reset IP Core (proc_sys_reset_0)..."
 create_ip -name proc_sys_reset -vendor xilinx.com -library ip -version 5.0 -module_name proc_sys_reset_0
 generate_target all [get_ips proc_sys_reset_0]
 
-# PS->PL AXI read-path ILA: 100 MHz PS-derived clock, so it remains usable
-# with PCIe disconnected. Status/addresses/data are documented separately.
-create_ip -name ila -vendor xilinx.com -library ip -version 6.2 -module_name ila_ps_axi_0
-set_property -dict [list \
-  CONFIG.C_NUM_OF_PROBES {11} \
-  CONFIG.C_PROBE0_WIDTH {32} \
-  CONFIG.C_PROBE1_WIDTH {32} \
-  CONFIG.C_PROBE2_WIDTH {32} \
-  CONFIG.C_PROBE3_WIDTH {32} \
-  CONFIG.C_PROBE4_WIDTH {1} \
-  CONFIG.C_PROBE5_WIDTH {16} \
-  CONFIG.C_PROBE6_WIDTH {8} \
-  CONFIG.C_PROBE7_WIDTH {3} \
-  CONFIG.C_PROBE8_WIDTH {16} \
-  CONFIG.C_PROBE9_WIDTH {1} \
-  CONFIG.C_PROBE10_WIDTH {1} \
-  CONFIG.C_DATA_DEPTH {4096} \
-  CONFIG.C_TRIGIN_EN {false} \
-  CONFIG.C_TRIGOUT_EN {false} \
-] [get_ips ila_ps_axi_0]
-generate_target all [get_ips ila_ps_axi_0]
+# No ILA in this design: reclaim the former 4096-sample capture memory.
+# Management/debug mailbox is retained; it is unrelated to on-chip ILA.
 
 if {!$debug_profile} {
 # PS HPM1 control aperture. All three IP register banks run on pl_clk0.
@@ -278,22 +301,14 @@ set_property -dict [list \
 
 generate_target all [get_ips v_hdmi_rx_ss_0]
 
-# 8. Generate HDMI TX Subsystem IP Core (v_hdmi_tx_ss_0 - 4 PPC)
-puts "Generating HDMI TX Subsystem IP Core (v_hdmi_tx_ss_0 - 4 PPC)..."
-create_ip -name v_hdmi_tx_ss -vendor xilinx.com -library ip -version 3.2 -module_name v_hdmi_tx_ss_0
+# No HDMI TX subsystem: shared PHY RX/TX clocking is intentionally retained.
+# Its former control aperture is a bounded DECERR responder.
 
-set_property -dict [list \
-  CONFIG.C_INPUT_PIXELS_PER_CLOCK {4} \
-  CONFIG.C_MAX_BITS_PER_COMPONENT {8} \
-  CONFIG.C_VID_INTERFACE {0} \
-  CONFIG.C_INCLUDE_LOW_RESO_VID {true} \
-  CONFIG.C_INCLUDE_YUV420_SUP {true} \
-  CONFIG.C_HDMI_FAST_SWITCH {true} \
-  CONFIG.C_EXDES_TX_PLL_SELECTION {6} \
-  CONFIG.C_EXDES_RX_PLL_SELECTION {0} \
-] [get_ips v_hdmi_tx_ss_0]
-
-generate_target all [get_ips v_hdmi_tx_ss_0]
+# Official PS V4L2 capture pipeline, independent of the raw PCIe branch.
+source scripts/create_sc7f0_frmbuf_ip.tcl
+create_sc7f0_frmbuf_ip
+source scripts/create_sc7f0_vpss_csc_ip.tcl
+create_sc7f0_vpss_csc_ip
 }
 
 # 9. Update Compile Order
@@ -335,8 +350,12 @@ if {[get_property PROGRESS [get_runs impl_1]] != "100%" ||
 open_run impl_1
 set impl_dir [get_property DIRECTORY [get_runs impl_1]]
 set probes_out "$impl_dir/zu4ev_pcie_card_top.ltx"
-write_debug_probes -force $probes_out
-puts " ILA debug probes: $probes_out"
+if {[llength [get_debug_cores -quiet]]} {
+    write_debug_probes -force $probes_out
+    puts " Debug probes: $probes_out"
+} else {
+    puts " No ILA/debug cores; no LTX export required."
+}
 puts "================================================================="
 puts " SUCCESS: ZU4EV Tandem PCIe Bitstreams Built (12AB:E380)!"
 puts " Output Bitstreams in $impl_dir:"
@@ -366,6 +385,9 @@ puts $gate_result
 set xsa_out "./hw_platform/sc7f0_base.xsa"
 if {!$debug_profile} {
     set xsa_out "./hw_platform/sc7f0_hdmi.xsa"
+}
+if {$vcu_enable} {
+    set xsa_out "./hw_platform/sc7f0_hdmi_vcu.xsa"
 }
 if {[info exists ::env(SC7F0_XSA_OUT)]} {set xsa_out $::env(SC7F0_XSA_OUT)}
 file mkdir [file dirname $xsa_out]

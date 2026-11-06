@@ -22,6 +22,9 @@ DTC="/opt/Xilinx/Vitis/2023.2/bin/dtc"
 MKIMAGE="/opt/Xilinx/petalinux/2023.2/components/yocto/buildtools/sysroots/x86_64-petalinux-linux/usr/bin/mkimage"
 [ -x "$MKIMAGE" ] || MKIMAGE=$(which mkimage 2>/dev/null || true)
 
+FDTPUT="/opt/Xilinx/petalinux/2023.2/components/yocto/buildtools/sysroots/x86_64-petalinux-linux/usr/bin/fdtput"
+[ -x "$FDTPUT" ] || FDTPUT=$(which fdtput 2>/dev/null || true)
+
 export PATH="$(dirname "$DTC"):$PATH"
 
 if [ ! -x "$BOOTGEN" ] || [ ! -x "$DTC" ] || [ ! -x "$MKIMAGE" ]; then
@@ -41,23 +44,67 @@ mkdir -p "$WORK_DIR"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
 # 2. Check Prerequisites
-if [ -f "$ROOT_DIR/build/zu4ev_fsbl/src/executable.elf" ]; then
+if [ -f "$ROOT_DIR/build/sc7f0-capture-26110301-r1/images/zynqmp_fsbl.elf" ]; then
+    FSBL="$ROOT_DIR/build/sc7f0-capture-26110301-r1/images/zynqmp_fsbl.elf"
+elif [ -f "$ROOT_DIR/build/zu4ev_fsbl/src/executable.elf" ]; then
     FSBL="$ROOT_DIR/build/zu4ev_fsbl/src/executable.elf"
+elif [ -f "$IMG_DIR/zynqmp_fsbl.elf" ]; then
+    FSBL="$IMG_DIR/zynqmp_fsbl.elf"
 else
     FSBL="$IMG_DIR/zynqmp_fsbl_sc7f0.elf"
 fi
-PMUFW="$IMG_DIR/pmufw.elf"
-if [ -f "$IMG_DIR/zu4ev_pcie_card_top.bit" ]; then
+
+if [ -f "$ROOT_DIR/build/sc7f0-capture-26110301-r1/images/pmufw.elf" ]; then
+    PMUFW="$ROOT_DIR/build/sc7f0-capture-26110301-r1/images/pmufw.elf"
+else
+    PMUFW="$IMG_DIR/pmufw.elf"
+fi
+
+if [ -f "$ROOT_DIR/build/sc7f0-capture-26110301-r1/images/zu4ev_pcie_card_top.bit" ]; then
+    BITSTREAM="$ROOT_DIR/build/sc7f0-capture-26110301-r1/images/zu4ev_pcie_card_top.bit"
+elif [ -f "$IMG_DIR/zu4ev_pcie_card_top.bit" ]; then
     BITSTREAM="$IMG_DIR/zu4ev_pcie_card_top.bit"
+elif [ -f "$IMG_DIR/system.bit" ]; then
+    BITSTREAM="$IMG_DIR/system.bit"
 else
     BITSTREAM="$IMG_DIR/system_sc7f0_base.bit"
 fi
-ATF="$IMG_DIR/bl31.elf"
-DTB="$IMG_DIR/system.dtb"
-UBOOT="$IMG_DIR/u-boot.elf"
-KERNEL_GZ="$IMG_DIR/Image.gz"
-ROOTFS_BASE="$IMG_DIR/rootfs.cpio.gz"
-BOOTSCR="$IMG_DIR/boot.scr"
+
+if [ -f "$ROOT_DIR/build/sc7f0-capture-26110301-r1/images/bl31.elf" ]; then
+    ATF="$ROOT_DIR/build/sc7f0-capture-26110301-r1/images/bl31.elf"
+else
+    ATF="$IMG_DIR/bl31.elf"
+fi
+
+if [ -f "$ROOT_DIR/build/sc7f0-capture-26110301-r1/images/system.dtb" ]; then
+    DTB="$ROOT_DIR/build/sc7f0-capture-26110301-r1/images/system.dtb"
+else
+    DTB="$IMG_DIR/system.dtb"
+fi
+
+if [ -f "$ROOT_DIR/build/sc7f0-capture-26110301-r1/images/u-boot.elf" ]; then
+    UBOOT="$ROOT_DIR/build/sc7f0-capture-26110301-r1/images/u-boot.elf"
+else
+    UBOOT="$IMG_DIR/u-boot.elf"
+fi
+
+if [ -f "$ROOT_DIR/build/sc7f0-capture-26110301-r1/images/Image.gz" ]; then
+    KERNEL_GZ="$ROOT_DIR/build/sc7f0-capture-26110301-r1/images/Image.gz"
+else
+    KERNEL_GZ="$IMG_DIR/Image.gz"
+fi
+
+if [ -f "$ROOT_DIR/build/sc7f0-capture-26110301-r1/images/rootfs.cpio.gz" ]; then
+    ROOTFS_BASE="$ROOT_DIR/build/sc7f0-capture-26110301-r1/images/rootfs.cpio.gz"
+else
+    ROOTFS_BASE="$IMG_DIR/rootfs.cpio.gz"
+fi
+
+if [ -f "$ROOT_DIR/build/sc7f0-capture-26110301-r1/images/boot.scr" ]; then
+    BOOTSCR="$ROOT_DIR/build/sc7f0-capture-26110301-r1/images/boot.scr"
+else
+    BOOTSCR="$IMG_DIR/boot.scr"
+fi
 
 for f in "$FSBL" "$PMUFW" "$BITSTREAM" "$ATF" "$DTB" "$UBOOT" "$KERNEL_GZ" "$ROOTFS_BASE" "$BOOTSCR"; do
     if [ ! -f "$f" ]; then
@@ -70,6 +117,28 @@ done
 # Step 1: Build Installer BOOT.BIN (Standard Monolithic Bitstream + 4GB DDR4)
 # ==============================================================================
 echo "[1/4] Generating Installer BOOT.BIN (Single Monolithic Bitstream)..."
+
+# Create Safe Installer DTB: disable PL video/MMIO IPs so SD installer never hangs during boot
+INSTALLER_DTB="$WORK_DIR/installer_system.dtb"
+cp "$DTB" "$INSTALLER_DTB"
+if [ -x "$FDTPUT" ]; then
+    echo "  Applying safe DTB overrides for installer (disabling PL video IPs)..."
+    for node in \
+        "/amba_pl@0/phy@b0000000" \
+        "/amba_pl@0/hdmi-rx@b0010000" \
+        "/amba_pl@0/frame-tap@b0070000" \
+        "/amba_pl@0/vpss-csc@b0060000" \
+        "/amba_pl@0/framebuffer@b0050000" \
+        "/amba_pl@0/vcu@80080000" \
+        "/amba_pl@0/vcu@80080000/al5e@80080000" \
+        "/amba_pl@0/vcu@b0100000" \
+        "/amba_pl@0/vcu@b0100000/al5e@b0100000" \
+        "/qpcie_v4l2_bridge" \
+        "/video-capture"; do
+        "$FDTPUT" -t s "$INSTALLER_DTB" "$node" status "disabled" 2>/dev/null || true
+    done
+fi
+
 cat << EOF > "$WORK_DIR/installer_boot.bif"
 the_ROM_image:
 {
@@ -77,7 +146,7 @@ the_ROM_image:
 	[pmufw_image] $PMUFW
 	[destination_device=pl] $BITSTREAM
 	[destination_cpu=a53-0, exception_level=el-3, trustzone] $ATF
-	[destination_cpu=a53-0, load=0x00100000] $DTB
+	[destination_cpu=a53-0, load=0x00100000] $INSTALLER_DTB
 	[destination_cpu=a53-0, exception_level=el-2] $UBOOT
 }
 EOF
@@ -100,11 +169,12 @@ cat << 'AUTOF_EOF' > "$ROOTFS_WORK/usr/bin/qpcie_autoflash.sh"
 # QPCIe Standalone eMMC Auto-Provisioning Script (Runs automatically on SD Boot)
 # ==============================================================================
 
-# Direct output to console & ttyPS0
+# Direct output to console & ttyPS0 & kmsg
 log_msg() {
     echo "$@"
     echo "$@" > /dev/console 2>/dev/null || true
     echo "$@" > /dev/ttyPS0 2>/dev/null || true
+    echo "<6>qpcie-autoflash: $@" > /dev/kmsg 2>/dev/null || true
 }
 
 log_msg ""
@@ -356,6 +426,51 @@ ln -sf /lib/systemd/system/qpcie-autoflash.service \
 # Production image.ub is separately copied to target_emmc below.
 bash "$ROOT_DIR/scripts/strip_sc7f0_mmio_services.sh" "$ROOTFS_WORK"
 
+# SC7F0 has no RJ45 ethernet port: remove and mask all network services to prevent boot failure / delay
+rm -f "$ROOTFS_WORK/etc/systemd/system/multi-user.target.wants/systemd-networkd.service" \
+      "$ROOTFS_WORK/etc/systemd/system/network-online.target.wants/systemd-networkd-wait-online.service" \
+      "$ROOTFS_WORK/etc/systemd/system/sysinit.target.wants/systemd-network-generator.service" \
+      "$ROOTFS_WORK/etc/systemd/system/sysinit.target.wants/systemd-resolved.service" \
+      "$ROOTFS_WORK/etc/systemd/system/sysinit.target.wants/systemd-timesyncd.service" \
+      "$ROOTFS_WORK/etc/systemd/system/multi-user.target.wants/nfs-"*.service \
+      "$ROOTFS_WORK/etc/systemd/system/multi-user.target.wants/remote-fs.target" \
+      "$ROOTFS_WORK/etc/systemd/system/multi-user.target.wants/rpcbind.service" \
+      "$ROOTFS_WORK/etc/systemd/system/sockets.target.wants/systemd-networkd.socket" \
+      "$ROOTFS_WORK/etc/systemd/system/sockets.target.wants/rpcbind.socket" \
+      "$ROOTFS_WORK/etc/systemd/system/sockets.target.wants/sshd.socket" \
+      "$ROOTFS_WORK/etc/systemd/system/dbus-org.freedesktop.network1.service" \
+      "$ROOTFS_WORK/etc/systemd/system/dbus-org.freedesktop.resolve1.service" \
+      "$ROOTFS_WORK/etc/systemd/system/dbus-org.freedesktop.timesync1.service" \
+      "$ROOTFS_WORK/etc/systemd/system/networking.service" \
+      "$ROOTFS_WORK/etc/systemd/system/nfscommon.service" \
+      "$ROOTFS_WORK/etc/init.d/nfs"* \
+      "$ROOTFS_WORK/etc/init.d/nfsserver" \
+      "$ROOTFS_WORK/etc/init.d/sshd" \
+      "$ROOTFS_WORK/etc/init.d/inetd.busybox" \
+      "$ROOTFS_WORK/etc/rc"*.d/*nfs* \
+      "$ROOTFS_WORK/etc/rc"*.d/*sshd* \
+      "$ROOTFS_WORK/etc/rc"*.d/*inetd* \
+      "$ROOTFS_WORK/lib/systemd/system/systemd-networkd.service"
+
+mkdir -p "$ROOTFS_WORK/etc/systemd/system"
+ln -sfn /dev/null "$ROOTFS_WORK/etc/systemd/system/systemd-networkd.service"
+ln -sfn /dev/null "$ROOTFS_WORK/etc/systemd/system/systemd-networkd-wait-online.service"
+ln -sfn /dev/null "$ROOTFS_WORK/etc/systemd/system/systemd-network-generator.service"
+ln -sfn /dev/null "$ROOTFS_WORK/etc/systemd/system/systemd-resolved.service"
+ln -sfn /dev/null "$ROOTFS_WORK/etc/systemd/system/systemd-timesyncd.service"
+ln -sfn /dev/null "$ROOTFS_WORK/etc/systemd/system/nfs-server.service"
+ln -sfn /dev/null "$ROOTFS_WORK/etc/systemd/system/nfs-statd.service"
+ln -sfn /dev/null "$ROOTFS_WORK/etc/systemd/system/nfs-mountd.service"
+ln -sfn /dev/null "$ROOTFS_WORK/etc/systemd/system/rpcbind.service"
+
+# Configure auto-login on serial console ttyPS0 for installer
+mkdir -p "$ROOTFS_WORK/etc/systemd/system/serial-getty@ttyPS0.service.d"
+cat << 'GETTY_EOF' > "$ROOTFS_WORK/etc/systemd/system/serial-getty@ttyPS0.service.d/autologin.conf"
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty --autologin root --noclear %I $TERM
+GETTY_EOF
+
 # Pack new installer_rootfs.cpio.gz
 INSTALLER_ROOTFS="$WORK_DIR/installer_rootfs.cpio.gz"
 fakeroot bash -c "cd '$ROOTFS_WORK' && find . | cpio -H newc -o --quiet | gzip -9 > '$INSTALLER_ROOTFS'"
@@ -388,7 +503,7 @@ cat << EOF > "$WORK_DIR/installer_fit.its"
         };
         fdt-1 {
             description = "SC7F0 Device Tree";
-            data = /incbin/("$DTB");
+            data = /incbin/("$INSTALLER_DTB");
             type = "flat_dt";
             arch = "arm64";
             compression = "none";
@@ -468,6 +583,10 @@ echo "[4/4] Populating target_emmc/ with Production 200ms Fast-Boot firmware..."
 # Production eMMC BOOT.BIN MUST come from PetaLinux (XSA-derived, tandem-capable),
 # NEVER from the SD installer monolithic image. See handoff 38fbf4ef §7.
 PROD_BOOTBIN="$IMG_DIR/BOOT.BIN"
+if [ -f "$ROOT_DIR/build/sc7f0-capture-26110301-r1/images/BOOT.BIN" ]; then
+    PROD_BOOTBIN="$ROOT_DIR/build/sc7f0-capture-26110301-r1/images/BOOT.BIN"
+fi
+
 if [ -f "$PROD_BOOTBIN" ]; then
     cp -v "$PROD_BOOTBIN" "$REL_DIR/target_emmc/BOOT.BIN"
 else
@@ -475,7 +594,12 @@ else
     exit 1
 fi
 cp -v "$BOOTSCR" "$REL_DIR/target_emmc/boot.scr"
-cp -v "$IMG_DIR/image.ub" "$REL_DIR/target_emmc/image.ub"
+
+PROD_IMAGEUB="$IMG_DIR/image.ub"
+if [ -f "$ROOT_DIR/build/sc7f0-capture-26110301-r1/images/image.ub" ]; then
+    PROD_IMAGEUB="$ROOT_DIR/build/sc7f0-capture-26110301-r1/images/image.ub"
+fi
+cp -v "$PROD_IMAGEUB" "$REL_DIR/target_emmc/image.ub"
 
 # Dual-boot invariant guard: SD installer files vs eMMC production files
 # must NEVER be silently identical (except boot.scr only if intended).
@@ -553,6 +677,11 @@ echo " 3. Power ON. The board will boot and automatically flash eMMC!"
 echo "================================================================="
 PREP_EOF
 chmod +x "$REL_DIR/prepare_sd.sh"
+
+# Automatically update SHA256SUMS
+echo "Updating SHA256SUMS..."
+(cd "$REL_DIR" && sha256sum BOOT.BIN boot.scr image.ub prepare_sd.sh target_emmc/BOOT.BIN target_emmc/boot.scr target_emmc/image.ub > SHA256SUMS)
+echo "  -> SHA256SUMS updated"
 
 echo "================================================================="
 echo " SUCCESS: SC7F0 SD Card Installer Package Ready!"
