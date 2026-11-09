@@ -142,8 +142,8 @@ def main(argv=None) -> int:
         clock = [body for name, body in found if name == 'capture-clock']
         freq = prop_ints(clock[0], 'clock-frequency') if clock else []
         report['capture_nodes']['capture-clock'] = ('%d Hz' % freq[0]) if freq else 'MISSING'
-        if freq and freq[0] != 150_000_000:
-            report['errors'].append('capture-clock is %d Hz, expected 150000000' % freq[0])
+        if freq and freq[0] != 300_000_000:
+            report['errors'].append('capture-clock is %d Hz, expected 300000000' % freq[0])
 
     if args.json:
         args.json.write_text(json.dumps(report, indent=2) + '\n')

@@ -146,7 +146,7 @@ def check(args, output):
         require(cells(csc, "reset-gpios"), cells(tap, "phandle") + [1, 1], "CSC reset_n")
         require(cells(cap, "dmas"), cells(fb, "phandle") + [0], "capture DMA")
         require(cells(cap, "yuan,frame-tap"), cells(tap, "phandle"), "SOF provider")
-        require(cells("/capture-clock", "clock-frequency"), [150000000], "capture clock")
+        require(cells("/capture-clock", "clock-frequency"), [300000000], "capture clock")
         require(strings(fb, "compatible"), ["xlnx,axi-frmbuf-wr-v2.2"], "framebuffer driver match")
         require(strings(fb, "xlnx,vid-formats"), ["nv12"], "capture formats")
         fp = xci("sc7f0_frmbuf_wr")

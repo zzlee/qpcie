@@ -115,7 +115,7 @@ module sc7f0_tap_regs(
                     'h008:s_rdata<={28'd0,state_csr[1],valid,ready,(state_csr[0]||started_csr!=retired_count)};
                     'h010:s_rdata<=staged_w;
                     'h014:s_rdata<=staged_h;
-                    'h018:s_rdata<=150000000;
+                    'h018:s_rdata<=300000000;
                     'h020:s_rdata<=drops_csr;
                     'h024:s_rdata<=started_csr;
                     'h02c:s_rdata<=retired_count;

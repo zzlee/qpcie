@@ -977,10 +977,31 @@ static int qpcie_queue_setup(struct vb2_queue *vq,
          * retire up to 16 buffers at once.  If userspace (GStreamer) allocated
          * fewer buffers than the ring holds, the completed buffers have nowhere
          * to go: the ring fills, publish is rejected and frames are dropped.
-         * Force the full ring depth so the host can always absorb a coalesced
-         * burst.  Never hand the host more buffers than the ring holds either,
-         * otherwise publish would overwrite in-flight ring slots. */
-            *nbuffers = QPCIE_VCU_RING_SIZE;
+         * Force at least the full ring depth so the host can always absorb a
+         * coalesced burst.
+         *
+         * The pool is now deliberately DEEPER than the 16-slot hardware ring.
+         * A QBUF that finds the ring momentarily full is no longer thrown back
+         * at userspace as VB2_BUF_STATE_ERROR (a 0-byte hole in the H.264
+         * stream: lost slices, "Frame num change", MB decode errors); it is
+         * parked on vch->pending_buffers and republished by the next
+         * completion.  Those parked buffers have to come out of the vb2 pool,
+         * so the pool must be bigger than the ring or GStreamer simply runs
+         * out of buffers while it waits.  24 frames ~= 400 ms of 60 fps slack
+         * on top of the 16 ring slots; 32 is the ceiling so a deep pool can
+         * never mask a genuinely stuck card for more than ~0.5 s. */
+            unsigned int requested = *nbuffers;
+            unsigned int depth = clamp_t(unsigned int, *nbuffers,
+                                         QPCIE_VCU_RING_SIZE,
+                                         QPCIE_VCU_RING_SIZE * 2);
+
+            if (depth < QPCIE_VCU_RING_SIZE + 8)
+                depth = QPCIE_VCU_RING_SIZE + 8;
+            *nbuffers = depth;
+            dev_info(&qdev->pdev->dev,
+                     "VCU ch1 buffer pool: requested %u -> %u (ring %u + %u parked-slack frames)\n",
+                     requested, depth, QPCIE_VCU_RING_SIZE,
+                     depth - QPCIE_VCU_RING_SIZE);
         } else {
             *nbuffers = clamp_t(unsigned int, *nbuffers, 4, QPCIE_VCU_RING_SIZE);
         }
@@ -1118,8 +1139,12 @@ static int qpcie_publish_buffer(struct qpcie_v4l2_channel *vch,
         }
 
         if (in_flight > QPCIE_VCU_RING_SIZE) {
+            /* Back-pressure, not a fault: all 16 slots are handed to the card.
+             * The caller parks the buffer on pending_buffers (QBUF) or leaves
+             * it queued for the next completion (drain) - a buffer is NEVER
+             * errored out on this path any more. */
             dev_warn_ratelimited(&qdev->pdev->dev,
-                                 "VCU Host Ring full (head=%u, tail=%u, in_flight=%d)\n",
+                                 "VCU Host Ring full (head=%u, tail=%u, in_flight=%d): parking publisher, no buffer dropped\n",
                                  host_head, ps_tail, in_flight);
             return -ENOSPC;
         }
@@ -1250,6 +1275,71 @@ static int qpcie_publish_buffer(struct qpcie_v4l2_channel *vch,
     return 0;
 }
 
+/* Lifetime telemetry for the parked-buffer path: how many QBUFs found the
+ * 16-slot VCU Host Ring full and were parked instead of being errored out. */
+static atomic_t qpcie_vcu_ring_parks = ATOMIC_INIT(0);
+static atomic_t qpcie_vcu_park_republished = ATOMIC_INIT(0);
+
+/*
+ * Republish buffers that a previous QBUF had to park because the VCU Host Ring
+ * was full.
+ *
+ * qpcie_buf_queue() parks a ch1 QBUF on vch->pending_buffers rather than
+ * calling vb2_buffer_done(VB2_BUF_STATE_ERROR): an ERROR completion hands
+ * GStreamer a 0-byte payload, and one hole in the H.264 byte stream costs the
+ * decoder a slice ("Frame num change from 8 to 9", "decode_slice_header
+ * error", "top block unavailable for requested intra mode") plus visible
+ * macroblock corruption until the next IDR.  Every slot this function
+ * publishes is a frame that reaches userspace intact.
+ *
+ * Locking: called with no locks held.  It takes qdev->ring_lock for the whole
+ * loop because qpcie_publish_buffer() writes the shared BRAM ring pointers and
+ * takes vch->slock internally, so the ordering stays ring_lock -> slock, the
+ * very same order qpcie_buf_queue() uses.  Callers must therefore never hold
+ * vch->slock here (qpcie_v4l2_node_done() drops it first), otherwise an IRQ on
+ * another CPU could invert the two locks.
+ *
+ * A rejected publish means the ring filled up again: the buffer is put back at
+ * the head of the list so QBUF order (and therefore ring slot order) is
+ * preserved, and the attempt is repeated on the next completion.
+ */
+static void qpcie_vcu_drain_pending(struct qpcie_v4l2_channel *vch)
+{
+    struct qpcie_dev *qdev = vch->qdev;
+    unsigned long flags;
+    int published = 0;
+
+    if (vch->channel_id != 1 || !qdev->c2h_only || !qdev->bar0_mmio)
+        return;
+
+    spin_lock_irqsave(&qdev->ring_lock, flags);
+    while (!list_empty(&vch->pending_buffers)) {
+        struct qpcie_v4l2_buffer *pbuf =
+            list_first_entry(&vch->pending_buffers,
+                             struct qpcie_v4l2_buffer, list);
+
+        /* Unlink BEFORE publishing: qpcie_publish_buffer() relinks this very
+         * list_head into vch->active_buffers on success, so a list_del() after
+         * the call would rip the freshly queued buffer straight back out of the
+         * active list and wedge its completion. */
+        list_del_init(&pbuf->list);
+        if (qpcie_publish_buffer(vch, pbuf)) {
+            list_add(&pbuf->list, &vch->pending_buffers);
+            break;
+        }
+        published++;
+    }
+    spin_unlock_irqrestore(&qdev->ring_lock, flags);
+
+    if (published) {
+        atomic_add(published, &qpcie_vcu_park_republished);
+        dev_dbg(&qdev->pdev->dev,
+                "VCU Host Ring: republished %u parked buffer(s) (lifetime parks=%d republished=%d)\n",
+                published, atomic_read(&qpcie_vcu_ring_parks),
+                atomic_read(&qpcie_vcu_park_republished));
+    }
+}
+
 static void qpcie_buf_queue(struct vb2_buffer *vb)
 {
     struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
@@ -1258,13 +1348,52 @@ static void qpcie_buf_queue(struct vb2_buffer *vb)
     struct qpcie_v4l2_channel *vch = vb2_get_drv_priv(vb->vb2_queue);
     struct qpcie_dev *qdev = vch->qdev;
     struct qpcie_v4l2_channel *out_vch, *cap_vch;
-    struct qpcie_v4l2_buffer *out_buf, *cap_buf;
+    struct qpcie_v4l2_buffer *out_buf, *cap_buf, *pbuf;
     unsigned long flags;
+    unsigned int depth;
     int ret;
 
     if (vch->channel_id == 0 || (qdev->c2h_only && vch->channel_id == 1)) {
         spin_lock_irqsave(&qdev->ring_lock, flags);
         ret = qpcie_publish_buffer(vch, buf);
+        if (ret == -ENOSPC && vch->channel_id == 1 && qdev->c2h_only) {
+            /* Ring temporarily full: PARK the buffer, never error it.
+             *
+             * -ENOSPC is not a buffer fault, it is back-pressure from a ring
+             * that is 16 slots deep and full for a microsecond.  The buffer is
+             * healthy, mapped, prepared and empty - exactly what the next free
+             * slot needs.  Erroing it here was the direct cause of the periodic
+             * stall + macroblock corruption: GStreamer received a 0-byte
+             * buffer, h264parse lost a slice and ffmpeg/vah264dec reported
+             * "Frame num change", "decode_slice_header error" and "top block
+             * unavailable" while the picture broke up.
+             *
+             * Parked buffers stay in QBUF order on vch->pending_buffers and are
+             * republished by qpcie_vcu_drain_pending() the moment a completion
+             * frees a slot.  Harvest + drain below, which also covers a lost or
+             * coalesced MSI for this very QBUF. */
+            list_add_tail(&buf->list, &vch->pending_buffers);
+
+            /* A park that clears on the next completion is normal back-pressure.
+             * A deep parked queue means the card stopped consuming the ring at
+             * all, which is a genuine stall - say so instead of hiding it. */
+            depth = 0;
+            list_for_each_entry(pbuf, &vch->pending_buffers, list)
+                depth++;
+            spin_unlock_irqrestore(&qdev->ring_lock, flags);
+
+            if (atomic_inc_return(&qpcie_vcu_ring_parks) <= 4)
+                dev_info(&qdev->pdev->dev,
+                         "VCU ch1 buf%u: ring busy, parked in QBUF order (park#%d)\n",
+                         vb->index, atomic_read(&qpcie_vcu_ring_parks));
+            if (depth >= 8)
+                dev_warn_ratelimited(&qdev->pdev->dev,
+                                     "VCU ch1: %u QBUFs parked, card is not consuming the Host Ring\n",
+                                     depth);
+
+            qpcie_v4l2_node_done(qdev, 1);
+            return;
+        }
         spin_unlock_irqrestore(&qdev->ring_lock, flags);
         if (ret) {
             dev_err(&qdev->pdev->dev,
@@ -1280,7 +1409,8 @@ static void qpcie_buf_queue(struct vb2_buffer *vb)
              * coalescing (and lost VCH1 interrupts) can leave already-completed
              * DPC1 slots sitting on active_buffers until the next interrupt
              * arrives; harvesting here bounds that latency.  Must run outside
-             * ring_lock: node_done takes vch->slock and retires buffers. */
+             * ring_lock: node_done takes vch->slock and retires buffers.  It
+             * also drains this channel's parked buffers. */
             qpcie_v4l2_node_done(qdev, 1);
         }
         return;
@@ -1406,8 +1536,11 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
     if (vch->channel_id == 1 && qdev->c2h_only) {
         atomic_inc(&qdev->streaming_count);
         dev_info(&qdev->pdev->dev,
-                 "VCU STREAMON (Node 1): %u buffers queued, ring size=%u\n",
+                 "VCU STREAMON (Node 1): %u buffers queued, ring size=%u (parked republish armed)\n",
                  count, QPCIE_VCU_RING_SIZE);
+        /* QBUFs that arrived before STREAMON (or that raced the session ring
+         * reset) may already be parked; give them their first slot now. */
+        qpcie_vcu_drain_pending(vch);
         return 0;
     }
 
@@ -1658,7 +1791,10 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
         }
 
         atomic_dec(&qdev->streaming_count);
-        dev_info(&qdev->pdev->dev, "VCU STREAMOFF (Node 1)\n");
+        dev_info(&qdev->pdev->dev,
+                 "VCU STREAMOFF (Node 1): ring parks=%d republished=%d\n",
+                 atomic_read(&qpcie_vcu_ring_parks),
+                 atomic_read(&qpcie_vcu_park_republished));
         return;
     }
 
@@ -2926,6 +3062,16 @@ void qpcie_v4l2_node_done(struct qpcie_dev *qdev, int node_idx)
             break;
     }
     spin_unlock_irqrestore(&vch->slock, flags);
+
+    /* Harvesting above retired buffers, and every retired buffer freed one
+     * VCU Host Ring slot.  QBUFs that found the ring full are parked on
+     * pending_buffers waiting for precisely that space, so drain them here:
+     * this is what keeps the 16-slot ring saturated instead of starving the
+     * card for a frame every time the ring tips over full.  Must run after
+     * slock is dropped (qpcie_publish_buffer() takes it) and it takes
+     * ring_lock itself in the same order qpcie_buf_queue() uses. */
+    if (vch->channel_id == 1 && qdev->c2h_only)
+        qpcie_vcu_drain_pending(vch);
 
     if (node_idx == 0)
         qpcie_v4l2_check_source_change(vch);

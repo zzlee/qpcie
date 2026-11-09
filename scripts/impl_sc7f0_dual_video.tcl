@@ -38,8 +38,10 @@ if {![llength $old_bd]} {
     set bd [lindex $old_bd 0]
     open_bd_design $bd
 }
-set_property -dict [list CONFIG.AWUSER_WIDTH {1} CONFIG.ARUSER_WIDTH {1}] [get_bd_intf_ports S_AXI_HP1_FPD]
+set_property -dict [list CONFIG.AWUSER_WIDTH {1} CONFIG.ARUSER_WIDTH {1} CONFIG.FREQ_HZ {300000000}] [get_bd_intf_ports S_AXI_HP1_FPD]
+set_property CONFIG.FREQ_HZ 300000000 [get_bd_ports dp_mem_clk]
 if {$vcu} {
+    set_property -dict [list CONFIG.AXI_ENC_CLK {300} CONFIG.AXI_MCU_CLK {300}] [get_bd_cells vcu_0]
     # The BD must be the encoder-only Todo 1.2b netlist, not the retired
     # SmartConnect variant and not a silently VCU-less BD.
     if {![llength [get_bd_cells -quiet vcu_0]]} {

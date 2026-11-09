@@ -72,7 +72,7 @@ def audit(build, project, ps_build, base_version=DEFAULT_BASE_VERSION):
         values=re.search(r'reset-gpios = <([^>]+)>;',text)[1].split()
         assert [int(v,0) for v in values]==[tap_phandle,bit,1],'wrong reset owner/polarity'
     clock=node(dts,'capture-clock')
-    assert int(re.search(r'clock-frequency = <(0x[0-9a-f]+)>;',clock)[1],16)==150000000
+    assert int(re.search(r'clock-frequency = <(0x[0-9a-f]+)>;',clock)[1],16)==300000000
     for pattern in ('interrupts = <0x00 0x5d 0x04>;', 'xlnx,dma-addr-width = <0x40>;',
                     'xlnx,pixels-per-clock = <0x04>;', 'xlnx,vid-formats = "nv12";'):
         assert pattern in writer,pattern

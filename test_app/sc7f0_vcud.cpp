@@ -106,6 +106,27 @@ extern "C" {
 #define QPCIE_VCU_RING_MAGIC    0x56435552 /* "VCUR" */
 #define QPCIE_VCU_RING_SIZE     16
 
+/* --------------------------------------------------------------------------
+ * Multi-slot DDR staging ring (fixes 4K frame corruption)
+ *
+ * submit_packet_dma() only stages the descriptor and rings the Packet DMA
+ * doorbell - it returns while the FPGA is still reading the DDR source over
+ * AXI. With a single fixed staging address the pacer memcpy for Frame N+1
+ * landed on top of the bytes the DMA had not fetched yet for Frame N, so the
+ * second half of a 4K picture (slices 2..3 of the 4-slice encode) was a mix of
+ * two frames: repeated/misaligned slices and heavy visible corruption, plus
+ * "missing picture in access unit" decode breaks. Any pacer tick that absorbs
+ * a late deadline (two AUs back to back) made this deterministic.
+ *
+ * Each of the 16 host ring slots now owns a private 1 MiB DDR staging slot, so
+ * 16 AUs can be in flight against 16 different buffers. Wrapping onto a slot
+ * the DMA is still reading would require 16 undelivered AUs (~266 ms at 60 Hz)
+ * while a 1 MiB PCIe read completes in ~1 ms, so the overwrite window is gone.
+ * ------------------------------------------------------------------------ */
+#define STAGING_SLOT_SIZE       (1024 * 1024ULL)      /* 1 MiB per slot        */
+#define STAGING_NUM_SLOTS       QPCIE_VCU_RING_SIZE   /* 16 slots, 1 per ring slot */
+#define STAGING_RING_SIZE       (STAGING_SLOT_SIZE * STAGING_NUM_SLOTS) /* 16 MiB */
+
 #define VCU_WIDTH               3840
 #define VCU_HEIGHT              2160
 #define NUM_IN_BUFFERS          8
@@ -212,7 +233,10 @@ struct __attribute__((packed)) qpcie_vcu_host_ring {
     uint32_t version;           /* 0x04: 1 */
     uint32_t ring_size;         /* 0x08: 16 */
     uint32_t host_head;         /* 0x0C: Host increments upon QBUF */
-    uint32_t ps_tail;           /* 0x10: PS increments after submitting Packet DMA */
+    uint32_t ps_tail;           /* 0x10: PS increments BEFORE ringing the Packet DMA
+                                 * doorbell for that slot, never after: the host can
+                                 * retire the frame and re-queue within ~1us, and a
+                                 * stale ps_tail makes it read a full ring (-ENOSPC). */
     uint32_t dropped_count;     /* 0x14 */
     uint32_t reserved[10];      /* 0x18..0x3C */
     struct qpcie_vcu_buffer_slot slots[QPCIE_VCU_RING_SIZE]; /* 512 bytes */
@@ -321,7 +345,13 @@ struct vcud_ctx {
     std::atomic<uint32_t> frames_sent{0};
     std::atomic<uint32_t> frames_dropped{0};
 
+    /* Newest parameter set pair seen from the encoder, reused to make a
+     * header-less IDR self contained (see pacer_submit_au). Written only by the
+     * OpenMAX FillBufferDone callback thread. */
     std::vector<uint8_t> cached_sps_pps;
+    /* Standalone SPS/PPS (OMX_BUFFERFLAG_CODECCONFIG) buffers the encoder hands
+     * out as their own pBuffer - counted here, never forwarded as an AU. */
+    uint32_t standalone_header_drops{0};
     bool need_idr_on_connect{true};
     bool was_host_connected{false};
     /* IDR synchronisation guard: becomes true once an AU that carries an IDR
@@ -487,12 +517,25 @@ struct h264_nal_info {
     bool has_sps;
     bool has_pps;
     bool is_idr;
+    /* Any VCL NAL (nal_unit_type 1..5), i.e. the buffer really carries a
+     * coded picture. A buffer with SPS/PPS but no VCL NAL is a header blob,
+     * not an access unit - shipping one to the host is what produced
+     * "missing picture in access unit with size 40". */
+    bool has_vcl;
+    bool has_aud;   /* nal_unit_type 9, already delimited by the encoder */
     size_t sps_pos;
     size_t idr_pos;
 };
 
+/* H.264 Access Unit Delimiter (nal_unit_type 9): start code, NAL header with
+ * nal_ref_idc = 0, primary_pic_type = 7 (this AU may hold I, P and B slices)
+ * and rbsp_trailing_bits. Prepending one to every AU gives h264parse / vah264dec
+ * an explicit first NAL per access unit, so the 4 slices of one 4K frame are
+ * never split across two AUs nor merged with the next frame. */
+static const uint8_t g_h264_aud[] = { 0x00, 0x00, 0x00, 0x01, 0x09, 0xF0 };
+
 static struct h264_nal_info scan_h264_nals(const uint8_t *data, size_t len) {
-    struct h264_nal_info info = {false, false, false, len, len};
+    struct h264_nal_info info = {false, false, false, false, false, len, len};
     for (size_t i = 0; i + 3 < len; i++) {
         if (data[i] == 0 && data[i+1] == 0) {
             size_t sc_len = 0;
@@ -503,7 +546,12 @@ static struct h264_nal_info scan_h264_nals(const uint8_t *data, size_t len) {
             }
             if (sc_len > 0) {
                 uint8_t nal_type = data[i + sc_len] & 0x1F;
-                if (nal_type == 7) {
+                /* nal_unit_type 1..5 are the coded slices of a picture */
+                if (nal_type >= 1 && nal_type <= 5)
+                    info.has_vcl = true;
+                if (nal_type == 9) {
+                    info.has_aud = true;
+                } else if (nal_type == 7) {
                     info.has_sps = true;
                     if (info.sps_pos == len) info.sps_pos = i;
                 } else if (nal_type == 8) {
@@ -734,9 +782,16 @@ static void host_ring_bump_dropped(struct vcud_ctx *ctx) {
     __sync_synchronize();
 }
 
-/* Producer side, runs on the OpenMAX FillBufferDone callback thread. */
+/* Producer side, runs on the OpenMAX FillBufferDone callback thread.
+ *
+ * nal_in is the NAL scan the caller already performed to decide whether this
+ * buffer is an access unit at all. Passing it in keeps the callback cost at one
+ * scan: this is the only thread standing between the VCU and its next output
+ * buffer, so re-walking the whole AU here would add pure latency. Optional so
+ * other callers can still pass nullptr. */
 static void pacer_submit_au(struct vcud_ctx *ctx, const uint8_t *payload, size_t len,
-                            uint64_t pts_us) {
+                            uint64_t pts_us,
+                            const struct h264_nal_info *nal_in = nullptr) {
     struct pacer_state *q = &ctx->pacer;
 
     pthread_mutex_lock(&q->mtx);
@@ -748,7 +803,7 @@ static void pacer_submit_au(struct vcud_ctx *ctx, const uint8_t *payload, size_t
         return;
     }
 
-    struct h264_nal_info nal = scan_h264_nals(payload, len);
+    struct h264_nal_info nal = nal_in ? *nal_in : scan_h264_nals(payload, len);
 
     /* Cache the parameter set pair that precedes an IDR so a header-less IDR AU
      * can still be made self contained before it hits the wire. */
@@ -760,6 +815,10 @@ static void pacer_submit_au(struct vcud_ctx *ctx, const uint8_t *payload, size_t
     if (nal.is_idr && !nal.has_sps && !ctx->cached_sps_pps.empty()) {
         prefix_len = ctx->cached_sps_pps.size();
     }
+
+    /* A standalone CODECCONFIG buffer is filtered out in omx_fill_buffer_done()
+     * and only reaches this queue as a re-stitched AU, so every AU leaving the
+     * card must be self contained: AUD + (SPS/PPS when needed) + slices. */
 
     if (pacer_depth_now(q) >= PACER_QUEUE_CAPACITY) {
         pthread_mutex_unlock(&q->mtx);
@@ -783,10 +842,26 @@ static void pacer_submit_au(struct vcud_ctx *ctx, const uint8_t *payload, size_t
 
     struct pacer_frame *fr = &q->frames[q->tail % PACER_QUEUE_CAPACITY];
     fr->payload.clear();   /* keeps capacity: steady state allocates nothing */
+
+    /* 1. Access Unit Delimiter first: it is the explicit start of the access
+     *    unit, so the 4 slices of one 4K frame are bracketed unambiguously and
+     *    the parser can never attach a leading slice to the previous frame.
+     *    Skipped only if the encoder already emitted one (native
+     *    OMX_ALG_IndexParamVideoAccessUnitDelimiter), to avoid a double AUD. */
+    if (!nal.has_aud)
+        fr->payload.insert(fr->payload.end(),
+                           g_h264_aud,
+                           g_h264_aud + sizeof(g_h264_aud));
+
+    /* 2. Sequence parameters in front of a header-less IDR (the cached pair is
+     *    kept warm by both a joined SPS/PPS AU and the CODECCONFIG buffer that
+     *    Allegro emits ahead of every periodic IDR). */
     if (prefix_len > 0)
         fr->payload.insert(fr->payload.end(),
                            ctx->cached_sps_pps.data(),
                            ctx->cached_sps_pps.data() + prefix_len);
+
+    /* 3. The encoded picture itself (all slices in one buffer). */
     fr->payload.insert(fr->payload.end(), payload, payload + len);
     fr->pts_us  = pts_us;
     fr->is_idr  = nal.is_idr;
@@ -820,6 +895,10 @@ static void pacer_deliver_au(struct vcud_ctx *ctx, const uint8_t *data, size_t t
     uint64_t host_comp = 0;
     uint32_t host_cap = 0;
     uint32_t tail = 0;
+    /* Private DDR staging slot that goes with the host ring slot picked below.
+     * Kept at function scope because the copy happens after state_mutex is
+     * released. */
+    uint32_t staging_slot = 0;
 
     if (ctx->host_ring && ctx->host_ring->magic == QPCIE_VCU_RING_MAGIC) {
         std::unique_lock<std::mutex> sl(ctx->state_mutex);
@@ -886,7 +965,18 @@ static void pacer_deliver_au(struct vcud_ctx *ctx, const uint8_t *data, size_t t
             host_comp = slot->host_comp_addr;
             host_cap  = slot->host_buf_len;
 
-            deliverable = stream_gate_open && host_dst && host_comp && host_cap >= total_len;
+            /* The DDR staging slot index tracks the host ring slot index 1:1, so
+             * the payload DMA'd into host buffer #k always came from staging slot
+             * #k and staging slot #k cannot be rewritten before the host has
+             * recycled buffer #k (i.e. before the DMA completed). */
+            staging_slot = tail % STAGING_NUM_SLOTS;
+
+            /* An AU larger than the staging slot is treated exactly like one that
+             * does not fit the host VB2 buffer: it is not deliverable, so the
+             * shared drop path requests a healing IDR instead of the DMA
+             * silently reading truncated bitstream. */
+            deliverable = stream_gate_open && host_dst && host_comp &&
+                          host_cap >= total_len && total_len <= STAGING_SLOT_SIZE;
         } else {
             /* When head == tail, host buffer queue is momentarily busy/empty.
              * A single tick of head == tail is normal 1-frame jitter and must NOT
@@ -912,16 +1002,27 @@ static void pacer_deliver_au(struct vcud_ctx *ctx, const uint8_t *data, size_t t
 
     bool sent = false;
     if (deliverable) {
-        /* Copy compressed NAL bitstream into DDR staging buffer */
-        uint8_t *staging = (uint8_t *)ctx->ddr_staging;
-        memcpy(staging, data, total_len);
+        /* Copy the compressed NAL bitstream into this AU's *own* DDR staging
+         * slot. Never the shared base address: the Packet DMA reads the source
+         * asynchronously after submit_packet_dma() has returned, and a shared
+         * slot let the next AU's memcpy corrupt the frame still in flight. */
+        uint8_t *slot_ptr = (uint8_t *)ctx->ddr_staging +
+                            (size_t)staging_slot * STAGING_SLOT_SIZE;
+        uint64_t slot_phys = DDR_STAGING_BUF_ADDR +
+                             (uint64_t)staging_slot * STAGING_SLOT_SIZE;
+        memcpy(slot_ptr, data, total_len);
 
         /* 16-byte align length as required by packet reader */
         uint32_t aligned_len = (uint32_t)((total_len + 15) & ~(size_t)15U);
         if (aligned_len > host_cap)
             aligned_len = host_cap & ~15U;
+        /* Hard bound of this slot: zero padding must never spill into the next
+         * slot's buffer (total_len <= STAGING_SLOT_SIZE is already required for
+         * deliverable, this only clamps the padded tail). */
+        if (aligned_len > (uint32_t)STAGING_SLOT_SIZE)
+            aligned_len = (uint32_t)(STAGING_SLOT_SIZE & ~(size_t)15U);
         if (aligned_len > total_len)
-            memset(staging + total_len, 0, aligned_len - total_len);
+            memset(slot_ptr + total_len, 0, aligned_len - total_len);
 
         /* pts_us is the untouched HDMI RX capture timestamp that travelled with
          * the AU from V4L2 DQBUF through OpenMAX into the pacer queue. The
@@ -931,8 +1032,37 @@ static void pacer_deliver_au(struct vcud_ctx *ctx, const uint8_t *data, size_t t
          * 1us == 150 ticks @ 150MHz hardware clock. */
         uint64_t pts_150mhz = meta->pts_us * 150;
 
+        /* Hand the slot credit back to the host BEFORE the DMA can possibly
+         * finish, not after submit_packet_dma() returns.
+         *
+         * ps_tail lives in PL BRAM and is the only signal the host driver has
+         * that slot "tail" is free again.  The old order (ring doorbell -> wait
+         * for the submit to return -> ps_tail++) lost a race that the two clock
+         * domains cannot win: the FPGA moves the DPC1 completion record into
+         * host RAM and raises the MSI within ~1 us, the 5 GHz host retires the
+         * buffer, GStreamer re-queues it instantly, and the driver's next QBUF
+         * still reads the stale ps_tail because this 1.2 GHz ARM core has not
+         * executed the store yet.  The host then computes
+         * (host_head + 1 - ps_tail) == 17 > 16, declares "VCU Host Ring full"
+         * and the publish is rejected with -ENOSPC - every 240th frame at 60 Hz.
+         *
+         * Publishing the credit first removes the window entirely: no one can
+         * observe the slot as in flight after the doorbell has been rung, so
+         * the host always reads an up-to-date ps_tail.  The fence plus the
+         * read-back make sure the posted AXI write has actually landed in BRAM
+         * before the doorbell write on a *different* AXI slave can start the
+         * transfer (a DMB alone does not order writes to two separate
+         * endpoints).  The credit is only taken inside the "deliverable"
+         * branch, so an AU for which the host never offered a slot (head ==
+         * tail) can never advance ps_tail. */
+        ctx->host_ring->ps_tail = tail + 1;
+        __sync_synchronize();
+        volatile uint32_t committed_tail = ctx->host_ring->ps_tail;
+        (void)committed_tail;   /* read-back: drain the posted write into BRAM */
+        __sync_synchronize();
+
         int ret = submit_packet_dma(ctx,
-                                    DDR_STAGING_BUF_ADDR,
+                                    slot_phys,
                                     host_dst,
                                     aligned_len,
                                     host_cap,
@@ -941,17 +1071,15 @@ static void pacer_deliver_au(struct vcud_ctx *ctx, const uint8_t *data, size_t t
                                     ctx->frame_seq,
                                     meta->flags);
         if (ret == 0) {
-            __sync_synchronize();
-            ctx->host_ring->ps_tail = tail + 1;
             ctx->frame_seq++;
             ctx->frames_sent++;
             ctx->total_bytes_sent += aligned_len;
             sent = true;
 
             if (ctx->dump_fp && (ctx->dump_max_frames == 0 || ctx->dump_frames_count < ctx->dump_max_frames)) {
-                fwrite(staging, 1, aligned_len, ctx->dump_fp);
+                fwrite(slot_ptr, 1, aligned_len, ctx->dump_fp);
                 fflush(ctx->dump_fp);
-                uint32_t crc = calc_crc32(staging, aligned_len);
+                uint32_t crc = calc_crc32(slot_ptr, aligned_len);
                 if (ctx->crc_fp) {
                     fprintf(ctx->crc_fp, "%u,%u,0x%08X\n", ctx->dump_frames_count, aligned_len, crc);
                     fflush(ctx->crc_fp);
@@ -969,15 +1097,21 @@ static void pacer_deliver_au(struct vcud_ctx *ctx, const uint8_t *data, size_t t
     }
 
     if (!sent) {
+        /* Note: when the AU was deliverable the slot credit was already handed
+         * to the host above (ps_tail = tail + 1 precedes the doorbell, which is
+         * what kills the host-side "Ring full" race).  A Packet DMA that
+         * refuses to accept the job therefore can no longer wedge the ring with
+         * a slot the host believes is still in flight: the host reclaims the
+         * buffer through its completion path instead.  This AU never reached
+         * the host, so the downstream decoder just lost its reference chain
+         * (grey/green artefacts until the next GOP IDR) - ask the VCU to insert
+         * an IDR on the very next frame so the decoder recovers immediately
+         * instead of waiting a full GOP. */
         while (csr_read32(ctx, REG_PKT_STATUS) & 0x08) {
             csr_write32(ctx, REG_PKT_DOORBELL_POP, 1);
         }
         ctx->frames_dropped++;
         host_ring_bump_dropped(ctx);
-        /* Self-heal: this AU never reached the host, so the downstream decoder
-         * just lost its reference chain (grey/green artefacts until the next GOP
-         * IDR). Ask the VCU to insert an IDR on the very next frame so the
-         * decoder recovers immediately instead of waiting a full GOP. */
         std::lock_guard<std::mutex> sl(ctx->state_mutex);
         request_idr_drop_heal_locked(ctx, now);
     }
@@ -1308,7 +1442,8 @@ static OMX_ERRORTYPE omx_empty_buffer_done(OMX_HANDLETYPE hComponent, OMX_PTR pA
  * This callback must be as short as humanly possible - it is the only thing
  * standing between the VCU Hard IP and its next output buffer. It therefore
  * performs nothing but:
- *   1. NAL scan of the Access Unit (and SPS/PPS caching / re-stitching),
+ *   1. NAL scan of the Access Unit (SPS/PPS caching / re-stitching) and
+ *      rejection of standalone CODECCONFIG (header-only) buffers,
  *   2. one memcpy of the compressed AU + its raw capture timestamp into the
  *      bounded pacer queue (pacer.mtx, held for the copy only),
  *   3. waking the pacer thread,
@@ -1323,6 +1458,9 @@ static OMX_ERRORTYPE omx_fill_buffer_done(OMX_HANDLETYPE hComponent, OMX_PTR pAp
     struct vcud_ctx *ctx = (struct vcud_ctx *)pAppData;
 
     if (pBuffer->nFilledLen > 0 && !g_stop) {
+        const uint8_t *au = pBuffer->pBuffer + pBuffer->nOffset;
+        size_t au_len = (size_t)pBuffer->nFilledLen;
+
         /* Prefer the OpenMAX output timestamp, which is propagated from the
          * V4L2 DQBUF capture timestamp (HDMI RX sampling time, microseconds)
          * attached to the input buffer in run_live_loop(). Using the local
@@ -1333,8 +1471,38 @@ static OMX_ERRORTYPE omx_fill_buffer_done(OMX_HANDLETYPE hComponent, OMX_PTR pAp
         uint64_t pts_us = (pBuffer->nTimeStamp > 0) ?
                           (uint64_t)pBuffer->nTimeStamp : (get_time_ns() / 1000);
 
-        pacer_submit_au(ctx, pBuffer->pBuffer + pBuffer->nOffset,
-                        (size_t)pBuffer->nFilledLen, pts_us);
+        /* --- Standalone parameter-set buffer filter -----------------------
+         * Every 30th frame Allegro signals a new IDR by first returning a
+         * separate ~47 byte pBuffer that holds SPS+PPS only (flagged
+         * OMX_BUFFERFLAG_CODECCONFIG). That buffer is not an access unit: it
+         * contains no VCL NAL. Forwarding it made the host decoder receive a
+         * ~40 byte "frame" with no picture, which h264parse/vah264dec report as
+         * "missing picture in access unit with size 40" and stall on. Keep the
+         * parameter sets for the IDR that follows and recycle the buffer - the
+         * AU itself still arrives (with or without its own headers) and
+         * pacer_submit_au() stitches the cached pair in front of it. */
+        struct h264_nal_info au_nal = scan_h264_nals(au, au_len);
+        bool header_only = ((pBuffer->nFlags & OMX_BUFFERFLAG_CODECCONFIG) != 0) ||
+                           (!au_nal.has_vcl && (au_nal.has_sps || au_nal.has_pps));
+
+        if (header_only) {
+            /* Cache only a buffer that starts with an SPS so the prefix we
+             * prepend to a header-less IDR is always a complete SPS/PPS pair. */
+            if (au_nal.has_sps && au_nal.sps_pos < au_len)
+                ctx->cached_sps_pps.assign(au + au_nal.sps_pos, au + au_len);
+
+            uint32_t n = ++ctx->standalone_header_drops;
+            if (n == 1 || (n % 30) == 0)
+                printf("[VCUD] Buffered standalone SPS/PPS buffer "
+                       "(%u bytes, flags=0x%08x, cached=%u B, not sent as AU, total %u)\n",
+                       (unsigned)au_len, (unsigned)pBuffer->nFlags,
+                       (unsigned)ctx->cached_sps_pps.size(), n);
+            /* Do NOT call pacer_submit_au(). Falling through recycles the
+             * buffer exactly as required (nFilledLen = 0 + OMX_FillThisBuffer +
+             * return OMX_ErrorNone) via the single shared recycle path below. */
+        } else {
+            pacer_submit_au(ctx, au, au_len, pts_us, &au_nal);
+        }
     }
 
     /* Recycle output buffer back to OpenMAX encoder immediately: no PCIe wait. */
@@ -1562,6 +1730,31 @@ static int run_live_loop(struct vcud_ctx *ctx) {
     } else {
         printf("[VCUD] Slices enabled: %d slices\n", (int)slices.nNumSlices);
     }
+
+    /* Progressive (frame-only) coding. Declaring the stream progressive keeps
+     * the SPS at frame_mbs_only_flag = 1 / pic_structure_always_field = 0, so a
+     * 4K60 frame is always one complete coded picture with all 4 slices inside
+     * a single access unit, and the host decoder never builds a field DPB or
+     * waits for a second field that cannot exist on a progressive HDMI RX
+     * stream. OMX_InterlaceFrameProgressive / OMX_ALG_IndexParamVideoInterlace
+     * FormatCurrent come from the bundled Allegro OMX headers; a rejected
+     * SetParameter is a warning only, the encoder default stays usable. */
+#if defined(OMX_InterlaceFrameProgressive)
+    OMX_INTERLACEFORMATTYPE interlaceParam;
+    initHeader(interlaceParam);
+    interlaceParam.nPortIndex = 1;
+    interlaceParam.nFormat = OMX_InterlaceFrameProgressive;
+    interlaceParam.nTimeStamp = 0;
+    err = OMX_SetParameter(ctx->hEncoder,
+                           (OMX_INDEXTYPE)OMX_ALG_IndexParamVideoInterlaceFormatCurrent,
+                           &interlaceParam);
+    if (err != OMX_ErrorNone) {
+        fprintf(stderr, "[VCUD WARNING] SetParameter progressive interlace format failed: 0x%08x\n",
+                (unsigned)err);
+    } else {
+        printf("[VCUD] Interlace format set to progressive (frame_mbs_only_flag=1)\n");
+    }
+#endif
 
     // Target Bitrate: 25000 kbps (25 Mbps CBR) - Allegro OpenMAX expects kbps!
     OMX_VIDEO_PARAM_BITRATETYPE bitrateParam;
@@ -1854,8 +2047,12 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    /* 3. Map DDR Staging Buffer @ 0x50000000 (8MB) */
-    ctx.ddr_staging = (volatile uint8_t *)mmap(NULL, 8 * 1024 * 1024, PROT_READ | PROT_WRITE,
+    /* 3. Map the DDR staging ring @ 0x50000000 (16 MiB = 16 slots x 1 MiB).
+     *    The cma,qdmabuf@50000000 reserved pool is 64 MiB, so a 16 MiB ring
+     *    fits with room to spare. One slot per host ring slot: see
+     *    STAGING_SLOT_SIZE / STAGING_NUM_SLOTS above. */
+    ctx.ddr_staging = (volatile uint8_t *)mmap(NULL, (size_t)STAGING_RING_SIZE,
+                                               PROT_READ | PROT_WRITE,
                                                MAP_SHARED, ctx.mem_fd, DDR_STAGING_BUF_ADDR);
     if (ctx.ddr_staging == MAP_FAILED) {
         perror("[VCUD ERROR] Cannot map DDR Staging buffer");
@@ -1904,7 +2101,7 @@ int main(int argc, char **argv) {
         ctx.vcu_cfg->ps_encoder_status = 0; /* Stopped */
 
     /* Cleanup */
-    munmap((void *)ctx.ddr_staging, 8 * 1024 * 1024);
+    munmap((void *)ctx.ddr_staging, (size_t)STAGING_RING_SIZE);
     munmap((void *)ctx.bram_base, PL_SHARED_BRAM_SIZE);
     munmap((void *)ctx.csr_base, PL_CSR_PACKET_SIZE);
     close(ctx.mem_fd);

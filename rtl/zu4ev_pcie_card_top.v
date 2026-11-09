@@ -238,7 +238,7 @@ module zu4ev_pcie_card_top #(
     assign capture_clk = pcie_user_clk;
     assign capture_rst_n = video_engine_rst_n;
 `else
-    BUFGCE_DIV #(.BUFGCE_DIVIDE(2)) u_capture_clock (
+    BUFGCE_DIV #(.BUFGCE_DIVIDE(1)) u_capture_clock (
         .I(pl_clk_300m_ibufg), .CE(1'b1), .CLR(!sys_300m_rst_n),
         .O(capture_clk));
     wire capture_reset;

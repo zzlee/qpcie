@@ -39,7 +39,7 @@ print(json.dumps(dict(
     margins=m.design_margins(text),
     clocks={k: clocks[k] for k in sorted(clocks) if clocks[k]["WNS"]},
     clock_periods={n: (p, f) for n, p, f in clock_lines if n in
-                   ("clk_pl_0", "clk_pl_1", "capture_clk_150m", "pl_clk_300m",
+                   ("clk_pl_0", "clk_pl_1", "capture_clk_150m", "capture_clk_300m", "pl_clk_300m",
                     "pcie_user_clk", "pipe_clk", "sys_clk")},
     bus_skew_rows=len(skew), bus_skew_min=min(float(r[2]) for r in skew),
     personality=(d / "c2h-personality.rpt").read_text(),

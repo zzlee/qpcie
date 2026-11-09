@@ -104,7 +104,7 @@ require {[cfg vcu_0 ENABLE_DECODER] eq "false"} "CONFIG.ENABLE_DECODER = false"
 require {[expr double([cfg vcu_0 PLL_CLK]) > 33.3 && double([cfg vcu_0 PLL_CLK]) < 33.4]} \
     "CONFIG.PLL_CLK = [cfg vcu_0 PLL_CLK] MHz"
 require {[cfg vcu_0 PLL_BYPASS] eq "0"} "CONFIG.PLL_BYPASS = 0 (internal VCU PLL in use)"
-require {[cfg vcu_0 AXI_ENC_CLK] == 150 && [cfg vcu_0 AXI_MCU_CLK] == 150} \
+require {[cfg vcu_0 AXI_ENC_CLK] == 300 && [cfg vcu_0 AXI_MCU_CLK] == 300} \
     "CONFIG.AXI_ENC_CLK/AXI_MCU_CLK = [cfg vcu_0 AXI_ENC_CLK]/[cfg vcu_0 AXI_MCU_CLK] MHz"
 require {![llength [get_bd_intf_pins vcu_0/M_AXI_DEC0]]} "no decoder AXI interface elaborated"
 puts "  info  ENC_FRAME_SIZE=[cfg vcu_0 ENC_FRAME_SIZE] ENC_FPS=[cfg vcu_0 ENC_FPS] ENC_COLOR_FORMAT=[cfg vcu_0 ENC_COLOR_FORMAT] ENC_COLOR_DEPTH=[cfg vcu_0 ENC_COLOR_DEPTH] ENC_BUFFER_EN=[cfg vcu_0 ENC_BUFFER_EN]"
@@ -119,11 +119,11 @@ require {[connected vcu_0/pll_ref_clk zynq_ultra_ps_e_0/pl_clk1]} "pll_ref_clk <
 set pll_ref_hz [freq vcu_0/pll_ref_clk]
 require {[expr $pll_ref_hz > 33200000 && $pll_ref_hz < 33400000]} \
     "pll_ref_clk FREQ_HZ = $pll_ref_hz (nominal 33333333; the PS RPLL is 999.90005MHz, so /30 gives 33.330002MHz)"
-require {[freq dp_mem_clk] == 150000000} "dp_mem_clk FREQ_HZ = [freq dp_mem_clk]"
+require {[freq dp_mem_clk] == 300000000} "dp_mem_clk FREQ_HZ = [freq dp_mem_clk]"
 foreach p [list vcu_0/m_axi_enc_aclk vcu_0/m_axi_mcu_aclk \
                zynq_ultra_ps_e_0/saxihp2_fpd_aclk zynq_ultra_ps_e_0/saxihp3_fpd_aclk \
                $enc_ic_clk $mcu_ic_clk vcu_rst_mem/slowest_sync_clk] {
-    require {[connected $p dp_mem_clk] && [freq $p] == 150000000} "$p on 150MHz dp_mem_clk ([freq $p])"
+    require {[connected $p dp_mem_clk] && [freq $p] == 300000000} "$p on 300MHz dp_mem_clk ([freq $p])"
 }
 foreach p {vcu_0/s_axi_lite_aclk ic_hpm1/*ACLK* vcu_rst_lite/slowest_sync_clk} {
     require {[same_net $p zynq_ultra_ps_e_0/pl_clk0]} "$p on PS pl_clk0"
@@ -287,7 +287,7 @@ puts "== Regression: HP0 / HP1 / HPM windows =="
 require {[get_property CONFIG.DATA_WIDTH [get_bd_intf_ports S_AXI_HP0_FPD]] == 128 &&
          [get_property CONFIG.FREQ_HZ [get_bd_intf_ports S_AXI_HP0_FPD]] == 99990005} "S_AXI_HP0_FPD port 128-bit @ [get_property CONFIG.FREQ_HZ [get_bd_intf_ports S_AXI_HP0_FPD]]Hz"
 require {[get_property CONFIG.DATA_WIDTH [get_bd_intf_ports S_AXI_HP1_FPD]] == 128 &&
-         [get_property CONFIG.FREQ_HZ [get_bd_intf_ports S_AXI_HP1_FPD]] == 150000000} "S_AXI_HP1_FPD port 128-bit @ [get_property CONFIG.FREQ_HZ [get_bd_intf_ports S_AXI_HP1_FPD]]Hz"
+         [get_property CONFIG.FREQ_HZ [get_bd_intf_ports S_AXI_HP1_FPD]] == 300000000} "S_AXI_HP1_FPD port 128-bit @ [get_property CONFIG.FREQ_HZ [get_bd_intf_ports S_AXI_HP1_FPD]]Hz"
 require {[connected zynq_ultra_ps_e_0/saxihp1_fpd_aclk dp_mem_clk]} "saxihp1_fpd_aclk still on dp_mem_clk"
 require {[get_property CONFIG.DATA_WIDTH [get_bd_intf_ports M_AXI_HPM1_FPD]] == 32 &&
          [get_property CONFIG.DATA_WIDTH [get_bd_intf_ports M_AXI_HPM0_FPD]] == 32} "M_AXI_HPM0/HPM1_FPD still 32-bit"

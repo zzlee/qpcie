@@ -5,11 +5,11 @@
 /* Stable DT enums from2023.2 xilinx-vip.h: RBG=2, YUV_420=3.
  * DTG's standalone include tree does not ship that kernel-only header. */
 / {
-	/* Physical Si5341 OUT8=300MHz / BUFGCE_DIV2, independent of PCIe. */
+	/* Physical Si5341 OUT8=300MHz / BUFGCE_DIV1, independent of PCIe. */
 	sc7f0_capture_clk: capture-clock {
 		compatible = "fixed-clock";
 		#clock-cells = <0>;
-		clock-frequency = <150000000>;
+		clock-frequency = <300000000>;
 	};
 	/* VIPP becomes the sole master binding the HDMI RX subdevice. */
 	qpcie_v4l2_bridge { status = "disabled"; };

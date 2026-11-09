@@ -1069,12 +1069,12 @@ Port;FD4A0000;FD4AFFFF;0|FPD;DPDMA;FD4C0000;FD4CFFFF;0|FPD;DDR_XMPU5_CFG;FD05000
 
   # Create external interface ports
   if {$hdmi_control} {
-    # HP1 is reserved for the independent dual-video memory path (150MHz).
+    # HP1 is reserved for the independent dual-video memory path (300MHz).
     set_property -dict [list CONFIG.PSU__USE__S_AXI_GP3 {1} CONFIG.PSU__SAXIGP3__DATA_WIDTH {128}] $zynq_ultra_ps_e_0
     set hp1 [create_bd_intf_port -mode Slave -vlnv xilinx.com:interface:aximm_rtl:1.0 S_AXI_HP1_FPD]
-    set_property -dict [list CONFIG.DATA_WIDTH {128} CONFIG.ADDR_WIDTH {49} CONFIG.AWUSER_WIDTH {1} CONFIG.ARUSER_WIDTH {1} CONFIG.FREQ_HZ {150000000}] $hp1
+    set_property -dict [list CONFIG.DATA_WIDTH {128} CONFIG.ADDR_WIDTH {49} CONFIG.AWUSER_WIDTH {1} CONFIG.ARUSER_WIDTH {1} CONFIG.FREQ_HZ {300000000}] $hp1
     connect_bd_intf_net $hp1 [get_bd_intf_pins zynq_ultra_ps_e_0/S_AXI_HP1_FPD]
-    create_bd_port -dir I -type clk -freq_hz 150000000 dp_mem_clk
+    create_bd_port -dir I -type clk -freq_hz 300000000 dp_mem_clk
     set_property CONFIG.ASSOCIATED_BUSIF S_AXI_HP1_FPD [get_bd_ports dp_mem_clk]
     connect_bd_net [get_bd_ports dp_mem_clk] [get_bd_pins zynq_ultra_ps_e_0/saxihp1_fpd_aclk]
     # Independent PS control path: HDMI remains configurable without PCIe.
@@ -1107,7 +1107,7 @@ Port;FD4A0000;FD4AFFFF;0|FPD;DPDMA;FD4C0000;FD4CFFFF;0|FPD;DDR_XMPU5_CFG;FD05000
   # ==========================================================================
   if {$vcu} {
     if {!$hdmi_control} {
-      error "VCU integration requires the full (hdmi_control) PS BD profile: it needs the 150MHz dp_mem_clk memory clock that only that profile creates"
+      error "VCU integration requires the full (hdmi_control) PS BD profile: it needs the 300MHz dp_mem_clk memory clock that only that profile creates"
     }
 
     switch -- $vcu_ic {sc -
@@ -1142,8 +1142,8 @@ Port;FD4A0000;FD4AFFFF;0|FPD;DPDMA;FD4C0000;FD4CFFFF;0|FPD;DDR_XMPU5_CFG;FD05000
       CONFIG.PLL_BYPASS {0} \
       CONFIG.PLL_CLK {33.333333} \
       CONFIG.CORE_CLK {667} \
-      CONFIG.AXI_ENC_CLK {150} \
-      CONFIG.AXI_MCU_CLK {150} \
+      CONFIG.AXI_ENC_CLK {300} \
+      CONFIG.AXI_MCU_CLK {300} \
       CONFIG.ENC_FRAME_SIZE {4} \
       CONFIG.ENC_FPS {3} \
       CONFIG.ENC_COLOR_FORMAT {0} \

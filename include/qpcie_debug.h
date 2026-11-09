@@ -35,9 +35,16 @@
 #define DB_C2H_CODE     0x44 /* EXIT: shell status, 124 timeout, 125 cancellation */
 #define DB_TIMEOUT_MS   0x48 /* host owns: EXEC budget, 1..300000 ms */
 #define DB_HOST_BEAT    0x4c /* host owns: detect disconnected clients */
-#define DB_H2C_DATA     0x400
+/* Payload windows must never alias other BAR0+0x2000 residents.
+ * The shared VCU host ring lives at BAR0+0x2200 (QPCIE_BAR0_VCU_RING_OFFSET),
+ * i.e. block-relative 0x200..0x43F (64-byte header + 16 * 32-byte slots).
+ * H2C used to start at 0x400 and therefore stomped ring slots 7..15 with
+ * command text on every exec/tail, corrupting the DMA ring.  Moving H2C to
+ * 0x800 keeps 0x3C0 (960) bytes of clearance below it, and DB_PAYLOAD 2048
+ * keeps the H2C window ending at 0xFFF, exactly below C2H at 0x1000. */
+#define DB_H2C_DATA     0x800
 #define DB_C2H_DATA     0x1000
-#define DB_PAYLOAD      3072U
+#define DB_PAYLOAD      2048U
 #define DB_EXEC         1U
 #define DB_ECHO         2U
 #define DB_CANCEL       3U

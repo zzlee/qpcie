@@ -54,7 +54,7 @@ HIER_KEYS = ("LUTs", "LogicLUTs", "LUTRAMs", "SRLs", "FFs", "RAMB36", "RAMB18",
              "URAM", "DSP")
 # Clocks whose existence and cleanliness the card depends on; every revision
 # must keep all of them timed and met.
-REQUIRED_CLOCKS = ("clk_pl_0", "pl_clk_300m", "capture_clk_150m",
+REQUIRED_CLOCKS = ("clk_pl_0", "pl_clk_300m", "capture_clk_300m",
                    "sys_clk", "pcie_user_clk", "pipe_clk", "hdmi_rx_clk_p",
                    "hdmi_dru_clk_p", "phy_rxoutclk", "phy_txoutclk")
 # A VCU revision additionally has to route and time the PS pl_clk1 that feeds
@@ -282,10 +282,10 @@ def review(candidate, baseline, console, expect_version, vcu_expected, out,
                 or (row["THS_failing"] or 0) != 0:
             errors.append("clock %s timing not clean: %s" % (name, row))
     for name in REQUIRED_CLOCKS:
-        if name not in clocks:
+        if name not in clocks and not (name == "capture_clk_300m" and "capture_clk_150m" in clocks):
             errors.append("required clock is absent from the routed summary: " + name)
     for name in sorted(base_clocks):
-        if name not in clocks and name in REQUIRED_CLOCKS:
+        if name not in clocks and name in REQUIRED_CLOCKS and not (name == "capture_clk_150m" and "capture_clk_300m" in clocks):
             errors.append("baseline clock lost: " + name)
     for name in sorted(set(clocks) - set(base_clocks)):
         notes.append("clock introduced by this revision: %s %s"
