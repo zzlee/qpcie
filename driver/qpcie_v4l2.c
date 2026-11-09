@@ -554,7 +554,11 @@ static int qpcie_vidioc_s_parm(struct file *file, void *priv, struct v4l2_stream
 
 static int qpcie_vidioc_enum_framesizes(struct file *file, void *priv, struct v4l2_frmsizeenum *fsize)
 {
-    if (fsize->pixel_format != V4L2_PIX_FMT_NV12M && fsize->pixel_format != V4L2_PIX_FMT_NV16M && fsize->pixel_format != V4L2_PIX_FMT_RGB24)
+    if (fsize->pixel_format != V4L2_PIX_FMT_NV12M &&
+        fsize->pixel_format != V4L2_PIX_FMT_NV16M &&
+        fsize->pixel_format != V4L2_PIX_FMT_RGB24 &&
+        fsize->pixel_format != V4L2_PIX_FMT_H264 &&
+        fsize->pixel_format != V4L2_PIX_FMT_HEVC)
         return -EINVAL;
 
     if (fsize->index >= ARRAY_SIZE(qpcie_video_modes))
@@ -572,7 +576,11 @@ static const struct v4l2_fract supported_frameintervals[] = {
 
 static int qpcie_vidioc_enum_frameintervals(struct file *file, void *priv, struct v4l2_frmivalenum *fival)
 {
-    if (fival->pixel_format != V4L2_PIX_FMT_NV12M && fival->pixel_format != V4L2_PIX_FMT_NV16M && fival->pixel_format != V4L2_PIX_FMT_RGB24)
+    if (fival->pixel_format != V4L2_PIX_FMT_NV12M &&
+        fival->pixel_format != V4L2_PIX_FMT_NV16M &&
+        fival->pixel_format != V4L2_PIX_FMT_RGB24 &&
+        fival->pixel_format != V4L2_PIX_FMT_H264 &&
+        fival->pixel_format != V4L2_PIX_FMT_HEVC)
         return -EINVAL;
 
     if (fival->index >= ARRAY_SIZE(supported_frameintervals))
@@ -923,11 +931,33 @@ static int qpcie_queue_setup(struct vb2_queue *vq,
                             unsigned int sizes[], struct device *alloc_devs[])
 {
     struct qpcie_v4l2_channel *vch = vb2_get_drv_priv(vq);
+    struct qpcie_dev *qdev = vch->qdev;
     unsigned int exp_planes;
     unsigned int y_size, uv_size;
 
     if (vch->channel_id == 1) {
         unsigned int comp_size = 4 * 1024 * 1024;
+
+        /* Reconfiguring buffers means a fresh capture session and happens
+         * before any QBUF, so this is the place to make the Host Ring pointers
+         * agree again.  host_head lives in BRAM and survives session teardown
+         * (and even driver reload, since the PS owns that BRAM): if the
+         * previous session left host_head ahead of ps_tail, every QBUF of the
+         * new session computes a huge in_flight and is rejected as Ring Full
+         * (-ENOSPC) forever.  Snap host_head onto ps_tail so the new session
+         * starts from a provably empty ring. */
+        if (qdev->c2h_only && qdev->bar0_mmio) {
+            void __iomem *ring_mmio = qdev->bar0_mmio + QPCIE_BAR0_VCU_RING_OFFSET;
+            u32 ps_tail = ioread32(ring_mmio + offsetof(struct qpcie_vcu_host_ring, ps_tail));
+
+            iowrite32(ps_tail, ring_mmio + offsetof(struct qpcie_vcu_host_ring, host_head));
+            ioread32(ring_mmio + offsetof(struct qpcie_vcu_host_ring, host_head));
+
+            dev_info(&qdev->pdev->dev,
+                     "VCU Host Ring session reset: host_head <- ps_tail=%u\n",
+                     ps_tail);
+        }
+
         if (*nplanes) {
             if (*nplanes != 1 || sizes[0] < 65536)
                 return -EINVAL;
@@ -935,7 +965,19 @@ static int qpcie_queue_setup(struct vb2_queue *vq,
         }
         *nplanes = 1;
         sizes[0] = comp_size;
-        *nbuffers = clamp_t(unsigned int, *nbuffers, 4, 32);
+        if (qdev->c2h_only) {
+            /* The PS VCU keeps a full QPCIE_VCU_RING_SIZE-deep ring in flight
+         * and its MSI is coalesced across several frames, so one interrupt can
+         * retire up to 16 buffers at once.  If userspace (GStreamer) allocated
+         * fewer buffers than the ring holds, the completed buffers have nowhere
+         * to go: the ring fills, publish is rejected and frames are dropped.
+         * Force the full ring depth so the host can always absorb a coalesced
+         * burst.  Never hand the host more buffers than the ring holds either,
+         * otherwise publish would overwrite in-flight ring slots. */
+            *nbuffers = QPCIE_VCU_RING_SIZE;
+        } else {
+            *nbuffers = clamp_t(unsigned int, *nbuffers, 4, QPCIE_VCU_RING_SIZE);
+        }
         return 0;
     }
 
@@ -977,7 +1019,12 @@ static int qpcie_buf_prepare(struct vb2_buffer *vb)
                      vb2_plane_size(vb, 0));
             return -EINVAL;
         }
-        vb2_set_plane_payload(vb, 0, vb2_plane_size(vb, 0));
+        /* No DMA has run yet: the payload is unknown, so stage 0 bytes.
+         * Staging the full plane size (4MiB) here would let a buffer that is
+         * never filled - or that retires with an error - export 4MiB of stale
+         * page content to userspace.  The real length is applied at completion
+         * from the DPC1 record (or the last-packet CSR fallback). */
+        vb2_set_plane_payload(vb, 0, 0);
         return 0;
     }
 
@@ -1004,6 +1051,8 @@ static int qpcie_buf_init(struct vb2_buffer *vb)
     struct qpcie_v4l2_buffer *buf = container_of(vbuf, struct qpcie_v4l2_buffer, vb);
 
     buf->sgl_logged = false;
+    buf->vcu_slot_idx = 0;
+    buf->vcu_seq = 0;
     return 0;
 }
 
@@ -1032,6 +1081,7 @@ static int qpcie_publish_buffer(struct qpcie_v4l2_channel *vch,
     struct scatterlist *sg;
     struct sg_table *sgt0, *sgt1;
     unsigned int i;
+    unsigned long flags;
     u32 thin_tail;
     u32 entries_added = 0;
     bool is_rgb;
@@ -1042,13 +1092,29 @@ static int qpcie_publish_buffer(struct qpcie_v4l2_channel *vch,
         u32 ps_tail = ioread32(ring_mmio + offsetof(struct qpcie_vcu_host_ring, ps_tail));
         u32 slot_idx = host_head % QPCIE_VCU_RING_SIZE;
         u32 next_head = host_head + 1;
+        s32 in_flight = (s32)(next_head - ps_tail);
         void __iomem *slot_mmio;
         dma_addr_t dma_addr;
         u32 dma_len;
 
-        if (next_head - ps_tail > QPCIE_VCU_RING_SIZE) {
+        if (in_flight <= 0) {
+            /* ps_tail ran ahead of host_head (driver reload or PS/driver
+             * pointer desync): the naive unsigned difference would underflow
+             * into a huge value and reject every QBUF with -ENOSPC forever.
+             * Snap host_head back onto ps_tail so the ring recovers health. */
+            dev_warn(&qdev->pdev->dev,
+                     "VCU Host Ring resync: host_head=%u behind ps_tail=%u; snapping to tail\n",
+                     host_head, ps_tail);
+            host_head = ps_tail;
+            next_head = host_head + 1;
+            slot_idx = host_head % QPCIE_VCU_RING_SIZE;
+            in_flight = 1;
+        }
+
+        if (in_flight > QPCIE_VCU_RING_SIZE) {
             dev_warn_ratelimited(&qdev->pdev->dev,
-                                 "VCU Host Ring full (head=%u, tail=%u)\n", host_head, ps_tail);
+                                 "VCU Host Ring full (head=%u, tail=%u, in_flight=%d)\n",
+                                 host_head, ps_tail, in_flight);
             return -ENOSPC;
         }
 
@@ -1082,9 +1148,15 @@ static int qpcie_publish_buffer(struct qpcie_v4l2_channel *vch,
         iowrite32(next_head, ring_mmio + offsetof(struct qpcie_vcu_host_ring, host_head));
         ioread32(ring_mmio + offsetof(struct qpcie_vcu_host_ring, host_head));
 
-        spin_lock(&vch->slock);
+        buf->vcu_slot_idx = slot_idx;
+        /* Remember which ring sequence this buffer owns so the completion
+         * path can ask the card PS whether the slot has already been
+         * consumed even when its DPC1 record never arrived. */
+        buf->vcu_seq = host_head;
+
+        spin_lock_irqsave(&vch->slock, flags);
         list_add_tail(&buf->list, &vch->active_buffers);
-        spin_unlock(&vch->slock);
+        spin_unlock_irqrestore(&vch->slock, flags);
 
         if (!buf->sgl_logged) {
             dev_info(&qdev->pdev->dev,
@@ -1136,9 +1208,9 @@ static int qpcie_publish_buffer(struct qpcie_v4l2_channel *vch,
         vch->thin_ring1_tail = (thin_tail1 + entries_added1) % RING_BUFFER_SIZE;
     }
 
-    spin_lock(&vch->slock);
+    spin_lock_irqsave(&vch->slock, flags);
     list_add_tail(&buf->list, &vch->active_buffers);
-    spin_unlock(&vch->slock);
+    spin_unlock_irqrestore(&vch->slock, flags);
 
     /* Descriptor data must be globally visible before ringing doorbell */
     dma_wmb();
@@ -1192,7 +1264,18 @@ static void qpcie_buf_queue(struct vb2_buffer *vb)
             dev_err(&qdev->pdev->dev,
                     "V4L2 ch%u buf%u: descriptor publish rejected (%d)\n",
                     vch->channel_id, buf->vb.vb2_buf.index, ret);
+            /* Nothing was ever written into this buffer: never hand the
+             * staged payload of the VCU stream channel to userspace. */
+            if (vch->channel_id == 1)
+                vb2_set_plane_payload(&buf->vb.vb2_buf, 0, 0);
             vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_ERROR);
+        } else if (vch->channel_id == 1 && qdev->c2h_only) {
+            /* Opportunistic completion harvest in process context.  MSI
+             * coalescing (and lost VCH1 interrupts) can leave already-completed
+             * DPC1 slots sitting on active_buffers until the next interrupt
+             * arrives; harvesting here bounds that latency.  Must run outside
+             * ring_lock: node_done takes vch->slock and retires buffers. */
+            qpcie_v4l2_node_done(qdev, 1);
         }
         return;
     }
@@ -1547,6 +1630,23 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
 
     if (vch->channel_id == 1 && qdev->c2h_only) {
         qpcie_return_all_buffers(vch, VB2_BUF_STATE_ERROR);
+
+        /* The buffers are back in userspace, so this session owns nothing any
+         * more - but host_head/ps_tail in BRAM still carry its unfinished
+         * in_flight difference.  Align host_head onto ps_tail here so a dead
+         * session cannot hand a full ring to the next STREAMON. */
+        if (qdev->bar0_mmio) {
+            void __iomem *ring_mmio = qdev->bar0_mmio + QPCIE_BAR0_VCU_RING_OFFSET;
+            u32 ps_tail = ioread32(ring_mmio + offsetof(struct qpcie_vcu_host_ring, ps_tail));
+
+            iowrite32(ps_tail, ring_mmio + offsetof(struct qpcie_vcu_host_ring, host_head));
+            ioread32(ring_mmio + offsetof(struct qpcie_vcu_host_ring, host_head));
+
+            dev_info(&qdev->pdev->dev,
+                     "VCU Host Ring STREAMOFF reset: host_head <- ps_tail=%u\n",
+                     ps_tail);
+        }
+
         atomic_dec(&qdev->streaming_count);
         dev_info(&qdev->pdev->dev, "VCU STREAMOFF (Node 1)\n");
         return;
@@ -2216,10 +2316,10 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
                                    V4L2_MPEG_VIDEO_BITRATE_MODE_CBR);
             v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
                               V4L2_CID_MPEG_VIDEO_BITRATE,
-                              25000, 100000000, 1000, 10000000);
+                              25000, 100000000, 1000, 25000000);
             v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
                               V4L2_CID_MPEG_VIDEO_BITRATE_PEAK,
-                              25000, 120000000, 1000, 15000000);
+                              25000, 120000000, 1000, 30000000);
             v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
                               V4L2_CID_MPEG_VIDEO_FRAME_RC_ENABLE,
                               0, 1, 1, 1);
@@ -2357,8 +2457,8 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
             vch->vcu_cfg.version = 1;
             vch->vcu_cfg.codec_type = (vch->pixelformat == V4L2_PIX_FMT_HEVC) ? 1 : 0;
             vch->vcu_cfg.bitrate_mode = V4L2_MPEG_VIDEO_BITRATE_MODE_CBR;
-            vch->vcu_cfg.bitrate = 10000000;
-            vch->vcu_cfg.bitrate_peak = 15000000;
+            vch->vcu_cfg.bitrate = 25000000;
+            vch->vcu_cfg.bitrate_peak = 30000000;
             vch->vcu_cfg.frame_rc_enable = 1;
             vch->vcu_cfg.mb_rc_enable = 1;
             vch->vcu_cfg.const_quality = 28;
@@ -2458,9 +2558,9 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
         vch->queue.lock            = &vch->lock;
         vch->queue.dev             = &qdev->pdev->dev;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0)
-        vch->queue.min_queued_buffers = 2;
+        vch->queue.min_queued_buffers = (vch->channel_id == 1) ? 8 : 2;
 #else
-        vch->queue.min_buffers_needed = 2;
+        vch->queue.min_buffers_needed = (vch->channel_id == 1) ? 8 : 2;
 #endif
         ret = vb2_queue_init(&vch->queue);
         if (ret) {
@@ -2618,39 +2718,134 @@ void qpcie_v4l2_remove(struct qpcie_dev *qdev)
     v4l2_device_unregister(&qdev->v4l2_dev);
 }
 
+/* "DPC1": magic the PS writes into a slot's 64-byte host completion record
+ * once the frame DMA for that VCU ring slot has fully landed in host memory. */
+#define QPCIE_VCU_DPC1_MAGIC        0x44504331
+
 void qpcie_v4l2_node_done(struct qpcie_dev *qdev, int node_idx)
 {
     struct qpcie_v4l2_channel *vch;
     struct qpcie_v4l2_buffer *buf;
+    unsigned long flags;
+    bool coalesced;
 
     if (!qdev || node_idx < 0 || node_idx >= qdev->v4l2_node_count)
         return;
 
     vch = &qdev->v4l2_ch[node_idx];
-    spin_lock(&vch->slock);
-    if (!list_empty(&vch->active_buffers)) {
+    /* Per-slot completion can only be proven where the PS writes a DPC1 record,
+     * i.e. the c2h-only VCU stream on channel 1.  Raw video (ch0) and the
+     * legacy/loopback paths keep the original one-buffer-per-interrupt path. */
+    coalesced = (vch->channel_id == 1 && qdev->c2h_only && vch->comp_ring_virt);
+
+    /* Runs from the MSI hardirq handler: must mask interrupts so a
+     * process-context publisher cannot be deadlocked by this IRQ. */
+    spin_lock_irqsave(&vch->slock, flags);
+    /* The VCU MSI is coalesced: a single interrupt can cover several finished
+     * frames.  Retiring only the head buffer per interrupt leaves completed
+     * slots queued on active_buffers, starves the vb2 pool (buffer exhaustion
+     * stall) and loses frames, so drain every slot whose DPC1 record landed. */
+    while (!list_empty(&vch->active_buffers)) {
+        u32 actual_len = 0;
+        u64 pts_ns = 0;
+
         buf = list_first_entry(&vch->active_buffers, struct qpcie_v4l2_buffer, list);
+
+        if (coalesced) {
+            volatile u32 *comp = (volatile u32 *)((u8 *)vch->comp_ring_virt +
+                                                  buf->vcu_slot_idx * 64);
+
+            /* active_buffers is FIFO in publish order, so the head is the
+             * oldest slot still in flight: if its completion has not landed,
+             * no later slot can have either - stop and wait for the next MSI. */
+            if (comp[0] != QPCIE_VCU_DPC1_MAGIC) {
+                void __iomem *ring_mmio = qdev->bar0_mmio ?
+                    qdev->bar0_mmio + QPCIE_BAR0_VCU_RING_OFFSET : NULL;
+                u32 ps_tail = ring_mmio ?
+                    ioread32(ring_mmio + offsetof(struct qpcie_vcu_host_ring,
+                                                  ps_tail)) : 0;
+
+                /* The card PS increments ps_tail *when it hands slot S to the
+                 * Packet DMA engine*, not when the payload has landed: pushing
+                 * buffer S advances ps_tail to S + 1, so a frame that is still
+                 * in flight on the PCIe C2H DMA shows exactly
+                 * (ps_tail - vcu_seq) == 1 while its DPC1 record has not been
+                 * written yet.  Treating any ps_tail advance as "slot skipped"
+                 * therefore retired healthy frames with VB2_BUF_STATE_ERROR on
+                 * the microsecond-long window between the PS push and the DPC1
+                 * write - dropped frames plus missing P-frame references (MB
+                 * decode errors).  Only a PS that has moved on to genuinely
+                 * later frames (>= 2 slots ahead, i.e. at least one further
+                 * job submitted after this one while this DPC1 still never
+                 * landed) proves the slot is lost for good; retire it with an
+                 * error so one dead slot cannot wedge the completion queue (and
+                 * starve the vb2 pool).  Anything <= 2 apart is still inside
+                 * the normal DMA pipeline: keep waiting for the next MSI or the
+                 * DPC1 write. */
+                if (ring_mmio && (s32)(ps_tail - buf->vcu_seq) > 2) {
+                    dev_warn_ratelimited(&qdev->pdev->dev,
+                                         "VCU slot %u (seq %u) skipped by PS (tail %u): completing with ERROR\n",
+                                         buf->vcu_slot_idx, buf->vcu_seq, ps_tail);
+
+                    list_del(&buf->list);
+                    qdev->ring_completed++;
+                    buf->vb.sequence = vch->sequence++;
+                    /* Frame DMA failed or its completion was lost: the buffer
+                     * content is undefined, so export 0 payload. */
+                    vb2_set_plane_payload(&buf->vb.vb2_buf, 0, 0);
+                    vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_ERROR);
+                    continue;
+                }
+                break;
+            }
+
+            actual_len = comp[10];           /* Transferred Payload Bytes */
+            if (comp[6] || comp[7])          /* PTS hi:lo */
+                pts_ns = (((u64)comp[7] << 32) | comp[6]) * 1000 / 150;
+
+            /* Re-arm the slot before the buffer can be republished into it. */
+            comp[0] = 0;                     /* Clear completion magic */
+        }
+
         list_del(&buf->list);
         qdev->ring_completed++;
 
-        if (vch->channel_id == 1 && qdev->bar0_mmio) {
-            u32 last_len = ioread32(qdev->bar0_mmio + REG_VCH_BASE(1) + REG_VCH_OFFSET_PKT_LAST_LEN);
-            u32 pts_lo   = ioread32(qdev->bar0_mmio + REG_VCH_BASE(1) + REG_VCH_OFFSET_PKT_LAST_PTS_LO);
-            u32 pts_hi   = ioread32(qdev->bar0_mmio + REG_VCH_BASE(1) + REG_VCH_OFFSET_PKT_LAST_PTS_HI);
-            if (last_len > 0)
-                vb2_set_plane_payload(&buf->vb.vb2_buf, 0, last_len);
+        if (!coalesced && vch->channel_id == 1 && qdev->bar0_mmio) {
+            /* No completion ring (VCU without DPC1 records): fall back to the
+             * last-packet CSRs, which describe the most recent frame only. */
+            u32 pts_lo = ioread32(qdev->bar0_mmio + REG_VCH_BASE(1) + REG_VCH_OFFSET_PKT_LAST_PTS_LO);
+            u32 pts_hi = ioread32(qdev->bar0_mmio + REG_VCH_BASE(1) + REG_VCH_OFFSET_PKT_LAST_PTS_HI);
+
+            actual_len = ioread32(qdev->bar0_mmio + REG_VCH_BASE(1) + REG_VCH_OFFSET_PKT_LAST_LEN);
             if (pts_lo || pts_hi)
-                buf->vb.vb2_buf.timestamp = (((u64)pts_hi << 32) | pts_lo) * 1000 / 150;
-            else
-                buf->vb.vb2_buf.timestamp = ktime_get_ns();
-        } else {
-            buf->vb.vb2_buf.timestamp = ktime_get_ns();
+                pts_ns = (((u64)pts_hi << 32) | pts_lo) * 1000 / 150;
         }
+
+        if (vch->channel_id == 1) {
+            /* ch1 (VCU compressed bitstream): bytesused comes from the
+             * completion only.  A zero-length completion must export 0, never
+             * the full plane size staged at buffer_prepare. */
+            if (actual_len > 0)
+                vb2_set_plane_payload(&buf->vb.vb2_buf, 0, actual_len);
+            else
+                vb2_set_plane_payload(&buf->vb.vb2_buf, 0, 0);
+        } else if (actual_len > 0) {
+            vb2_set_plane_payload(&buf->vb.vb2_buf, 0, actual_len);
+        }
+        if (pts_ns > 0)
+            buf->vb.vb2_buf.timestamp = pts_ns;
+        else
+            buf->vb.vb2_buf.timestamp = ktime_get_ns();
 
         buf->vb.sequence = vch->sequence++;
         vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
+
+        /* Channels without a per-slot completion record signal one frame per
+         * interrupt: keep the original single-shot behaviour and leave. */
+        if (!coalesced)
+            break;
     }
-    spin_unlock(&vch->slock);
+    spin_unlock_irqrestore(&vch->slock, flags);
 
     if (node_idx == 0)
         qpcie_v4l2_check_source_change(vch);
