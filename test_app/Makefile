@@ -8,6 +8,12 @@ LDFLAGS ?= -lm -pthread
 
 # Cross compiler for ZU4EV target daemon
 AARCH64_CC ?= $(shell which aarch64-linux-gnu-gcc 2>/dev/null || which /opt/Xilinx/Vitis/2023.2/gnu/aarch64/lin/aarch64-linux/bin/aarch64-linux-gnu-gcc 2>/dev/null || echo aarch64-linux-gnu-gcc)
+AARCH64_CXX ?= $(shell which aarch64-linux-gnu-g++ 2>/dev/null || which /opt/Xilinx/Vitis/2023.2/gnu/aarch64/lin/aarch64-linux/bin/aarch64-linux-gnu-g++ 2>/dev/null || echo aarch64-linux-gnu-g++)
+
+PETALINUX_SYSROOTS ?= ../petalinux/qpcie-zu4ev/build/tmp/sysroots-components
+VCU_INC ?= $(PETALINUX_SYSROOTS)/zynqmp_generic_xczu4ev/libomxil-xlnx/usr/include/vcu-omx-il
+VCU_LIB ?= $(PETALINUX_SYSROOTS)/zynqmp_generic_xczu4ev/libomxil-xlnx/usr/lib
+VCU_ALLEGRO_LIB ?= $(PETALINUX_SYSROOTS)/cortexa72-cortexa53/libvcu-xlnx/usr/lib
 
 TARGETS = sc7f0ctl qpcie_sanity_check qpcie_upgrade qpcie_dma_diag qpcie_ddr_verify qpcie_stage_push qpcie_flash qpcie_a50t_tool qpcie_hdmi_ctl v4l2_test_app v4l2_rgb24_test_app v4l2_capture_verify alsa_test_app alsa_loopback_test_app dmabuf_p2p_test_app loopback_test_app
 
@@ -19,8 +25,8 @@ sc7f0ctl: sc7f0ctl.c qpcie_debug_io.h ../include/qpcie_debug.h
 qpcie_debugd: qpcie_debugd.c qpcie_debug_io.h sc7f0_health.h ../include/qpcie_debug.h
 	$(AARCH64_CC) -O2 -Wall -Wextra -I../include -static -o $@ qpcie_debugd.c
 
-sc7f0_vcud: sc7f0_vcud.c
-	$(AARCH64_CC) -O2 -Wall -Wextra -static -o $@ sc7f0_vcud.c -pthread
+sc7f0_vcud: sc7f0_vcud.cpp
+	$(AARCH64_CXX) -O2 -Wall -Wextra -I$(VCU_INC) -L$(VCU_LIB) -L$(VCU_ALLEGRO_LIB) -Wl,-rpath-link=$(VCU_ALLEGRO_LIB) -o $@ sc7f0_vcud.cpp -lOMX.allegro.core -lOMX.allegro.video_encoder -lpthread
 
 qpcie_upgrade: qpcie_upgrade.c
 	$(CC) $(CFLAGS) -o $@ qpcie_upgrade.c $(LDFLAGS)
