@@ -155,6 +155,14 @@
 #define V4L2_CID_QPCIE_TPG_OVERLAY      (V4L2_CID_USER_BASE + 0x1003)
 #define V4L2_CID_QPCIE_VIDEO_SOURCE     (V4L2_CID_USER_BASE + 0x1004)
 
+/* Card-side hardware output pacer for the Channel 1 VCU bitstream path.
+ * These live in the VCU configuration mailbox (struct
+ * qpcie_vcu_encoder_config, BAR0 QPCIE_BAR0_VCU_CFG_OFFSET + 0xBC / 0xC0) and
+ * are independent from the Channel 0 TPG pacer (V4L2_CID_QPCIE_PACER_ENABLE /
+ * REG_PACER_CTRL). */
+#define V4L2_CID_QPCIE_VCU_PACER_ENABLE        (V4L2_CID_USER_BASE + 0x1010)
+#define V4L2_CID_QPCIE_VCU_PACER_BUFFER_FRAMES (V4L2_CID_USER_BASE + 0x1011)
+
 /* BAR0 DMA Register Offsets */
 #define REG_DMA_CTRL         0x00
 #define REG_DMA_STATUS       0x04
@@ -515,7 +523,16 @@ struct __packed qpcie_vcu_encoder_config {
     u32 ps_encoder_status;    /* 0xB0: 1=Encoding, 0=Idle, <0=Error */
     u32 ps_fps_actual;        /* 0xB4: Measured encoding FPS * 100 */
     u32 ps_bitrate_actual;    /* 0xB8: Measured output bitrate in bps */
+
+    /* Card-side Hardware Output Pacer (Host writes, Card reads) */
+    u32 pacer_enable;         /* 0xBC: 1=Enable hardware pacer, 0=Direct push */
+    u32 pacer_buffer_frames;  /* 0xC0: Buffer depth in frames before pacing starts (default: 8, range: 0..30) */
 };
+
+/* Mailbox offsets of the Card-side pacer knobs.  The Host mirrors the whole
+ * struct word-by-word, so these must stay where the layout above puts them. */
+#define QPCIE_VCU_CFG_PACER_ENABLE_OFFSET        0xBC
+#define QPCIE_VCU_CFG_PACER_BUFFER_FRAMES_OFFSET 0xC0
 
 /* Shared BRAM Host Buffer Ring for Packet C2H DMA (Node 1) */
 #define QPCIE_BAR0_VCU_RING_OFFSET  0x2200

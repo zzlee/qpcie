@@ -1830,6 +1830,15 @@ void qpcie_vcu_sync_config(struct qpcie_v4l2_channel *vch)
     vch->vcu_cfg.version = 1;
     vch->vcu_cfg.config_seq++;
 
+    /* The whole mailbox is mirrored word-by-word below, so the Card-side
+     * pacer knobs land on their advertised offsets (0xBC / 0xC0 inside
+     * QPCIE_BAR0_VCU_CFG_OFFSET, i.e. BAR0 0x21BC / 0x21C0).  Fail the build
+     * if the mailbox layout ever shifts under these comments. */
+    BUILD_BUG_ON(offsetof(struct qpcie_vcu_encoder_config, pacer_enable) !=
+                 QPCIE_VCU_CFG_PACER_ENABLE_OFFSET);
+    BUILD_BUG_ON(offsetof(struct qpcie_vcu_encoder_config, pacer_buffer_frames) !=
+                 QPCIE_VCU_CFG_PACER_BUFFER_FRAMES_OFFSET);
+
     target = qdev->bar0_mmio + QPCIE_BAR0_VCU_CFG_OFFSET;
     words = (const u32 *)&vch->vcu_cfg;
     count = sizeof(struct qpcie_vcu_encoder_config) / sizeof(u32);
@@ -2004,6 +2013,18 @@ static int qpcie_s_ctrl(struct v4l2_ctrl *ctrl)
         vch->vcu_cfg.intra_refresh_mb = ctrl->val;
         qpcie_vcu_sync_config(vch);
         break;
+    case V4L2_CID_QPCIE_VCU_PACER_ENABLE:
+        if (vch->vcu_cfg.pacer_enable == (u32)ctrl->val)
+            break;
+        vch->vcu_cfg.pacer_enable = !!ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_QPCIE_VCU_PACER_BUFFER_FRAMES:
+        if (vch->vcu_cfg.pacer_buffer_frames == (u32)ctrl->val)
+            break;
+        vch->vcu_cfg.pacer_buffer_frames = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
     case V4L2_CID_QPCIE_PACER_ENABLE:
         vch->pacer_enable = !!ctrl->val;
         if (qdev && qdev->bar0_mmio && vb2_is_streaming(&vch->queue)) {
@@ -2087,6 +2108,33 @@ static const struct v4l2_ctrl_config qpcie_pacer_ctrl_config = {
     .max  = 1,
     .step = 1,
     .def  = 1,
+};
+
+/* Card-side hardware pacer for the Channel 1 VCU output bitstream.  Instead of
+ * pushing every finished frame onto the link immediately, the pacer meters the
+ * stream out; the buffer depth says how many encoded frames may accumulate
+ * before pacing kicks in.  Both values are delivered to the Card through the
+ * VCU configuration mailbox (BAR0 + 0x21BC / + 0x21C0). */
+static const struct v4l2_ctrl_config qpcie_vcu_pacer_enable_ctrl_config = {
+    .ops  = &qpcie_ctrl_ops,
+    .id   = V4L2_CID_QPCIE_VCU_PACER_ENABLE,
+    .name = "VCU Pacer Enable",
+    .type = V4L2_CTRL_TYPE_BOOLEAN,
+    .min  = 0,
+    .max  = 1,
+    .step = 1,
+    .def  = 1,
+};
+
+static const struct v4l2_ctrl_config qpcie_vcu_pacer_buffer_frames_ctrl_config = {
+    .ops  = &qpcie_ctrl_ops,
+    .id   = V4L2_CID_QPCIE_VCU_PACER_BUFFER_FRAMES,
+    .name = "VCU Pacer Buffer Frames",
+    .type = V4L2_CTRL_TYPE_INTEGER,
+    .min  = 0,
+    .max  = 30,
+    .step = 1,
+    .def  = 8,
 };
 
 static const struct v4l2_ctrl_config qpcie_tpg_motion_ctrl_config = {
@@ -2318,7 +2366,7 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
         /* Initialize V4L2 Control Handler */
         dev_info(&qdev->pdev->dev, "[DEBUG STEP 2.3] Node %d: Initializing Control Handler...\n", i);
         if (i == 1 && qdev->c2h_only) {
-            v4l2_ctrl_handler_init(&vch->ctrl_handler, 45);
+            v4l2_ctrl_handler_init(&vch->ctrl_handler, 47);
             /* Standard V4L2 Rate Control */
             v4l2_ctrl_new_std_menu(&vch->ctrl_handler, &qpcie_ctrl_ops,
                                    V4L2_CID_MPEG_VIDEO_BITRATE_MODE,
@@ -2462,6 +2510,13 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
                               V4L2_CID_MPEG_VIDEO_CYCLIC_INTRA_REFRESH_MB,
                               0, 8192, 1, 0);
 
+            /* Card-side hardware output pacer (VCU mailbox 0xBC / 0xC0) */
+            v4l2_ctrl_new_custom(&vch->ctrl_handler,
+                                 &qpcie_vcu_pacer_enable_ctrl_config, NULL);
+            v4l2_ctrl_new_custom(&vch->ctrl_handler,
+                                 &qpcie_vcu_pacer_buffer_frames_ctrl_config,
+                                 NULL);
+
             /* Populate default struct values */
             vch->vcu_cfg.magic = QPCIE_VCU_CFG_MAGIC;
             vch->vcu_cfg.version = 1;
@@ -2505,6 +2560,8 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
             vch->vcu_cfg.slice_max_bytes = 0;
             vch->vcu_cfg.slice_max_mb = 0;
             vch->vcu_cfg.intra_refresh_mb = 0;
+            vch->vcu_cfg.pacer_enable = 1;
+            vch->vcu_cfg.pacer_buffer_frames = 8;
             qpcie_vcu_sync_config(vch);
 
             /* Allocate DPC1 completion record ring for Channel 1 */
