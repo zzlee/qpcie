@@ -100,7 +100,7 @@ extern "C" {
 
 #define VCU_WIDTH               3840
 #define VCU_HEIGHT              2160
-#define NUM_IN_BUFFERS          4
+#define NUM_IN_BUFFERS          8
 #define NUM_OUT_BUFFERS         8
 
 struct __attribute__((packed)) qpcie_vcu_encoder_config {
@@ -245,7 +245,31 @@ struct vcud_ctx {
 
     std::vector<uint8_t> cached_sps_pps;
     bool need_idr_on_connect{true};
+    bool was_host_connected{false};
+    /* IDR synchronisation guard: becomes true once an AU that carries an IDR
+     * slice (or at least an SPS) has actually been handed to the host since the
+     * last (re)connection. Until then plain P-frame AUs are dropped so a cold
+     * host decoder never receives a reference-less picture. */
+    bool has_streamed_idr{false};
+    uint32_t pre_idr_drops{0};
+    /* Consecutive callback ticks where the host ring reported head == tail (no
+     * usable host buffer). host_head / ps_tail are monotonically increasing
+     * counters that never wrap back to 0 on streamoff, so "head == 0 &&
+     * tail == 0" can only be true once per process lifetime. Counting matches
+     * instead lets us detect a real host stall / stream stop and re-arm the IDR
+     * gate. Reset to 0 on every tick where head != tail. */
+    uint32_t head_tail_match_count{0};
     uint64_t last_idr_req_ns{0};
+    /* Timestamp of the last drop-triggered self-heal IDR request (ns). throttles
+     * the recovery path independently of the 100ms limit inside
+     * request_idr_keyframe(). */
+    uint64_t last_drop_heal_ns{0};
+
+    const char *dump_path{nullptr};
+    FILE *dump_fp{nullptr};
+    FILE *crc_fp{nullptr};
+    uint32_t dump_max_frames{0};
+    uint32_t dump_frames_count{0};
 
     std::mutex dma_mutex;
 };
@@ -337,6 +361,27 @@ static int submit_packet_dma(struct vcud_ctx *ctx,
     return 0;
 }
 
+static uint32_t calc_crc32(const uint8_t *data, size_t len) {
+    static uint32_t table[256];
+    static bool have_table = false;
+    if (!have_table) {
+        for (uint32_t i = 0; i < 256; i++) {
+            uint32_t rem = i;
+            for (int j = 0; j < 8; j++) {
+                if (rem & 1) rem = (rem >> 1) ^ 0xEDB88320;
+                else rem >>= 1;
+            }
+            table[i] = rem;
+        }
+        have_table = true;
+    }
+    uint32_t crc = 0xFFFFFFFF;
+    for (size_t i = 0; i < len; i++) {
+        crc = (crc >> 8) ^ table[(crc & 0xFF) ^ data[i]];
+    }
+    return crc ^ 0xFFFFFFFF;
+}
+
 struct h264_nal_info {
     bool has_sps;
     bool has_pps;
@@ -347,17 +392,26 @@ struct h264_nal_info {
 
 static struct h264_nal_info scan_h264_nals(const uint8_t *data, size_t len) {
     struct h264_nal_info info = {false, false, false, len, len};
-    for (size_t i = 0; i + 4 < len; i++) {
-        if (data[i] == 0 && data[i+1] == 0 && data[i+2] == 0 && data[i+3] == 1) {
-            uint8_t nal_type = data[i+4] & 0x1F;
-            if (nal_type == 7) {
-                info.has_sps = true;
-                if (info.sps_pos == len) info.sps_pos = i;
-            } else if (nal_type == 8) {
-                info.has_pps = true;
-            } else if (nal_type == 5) {
-                info.is_idr = true;
-                if (info.idr_pos == len) info.idr_pos = i;
+    for (size_t i = 0; i + 3 < len; i++) {
+        if (data[i] == 0 && data[i+1] == 0) {
+            size_t sc_len = 0;
+            if (data[i+2] == 1) {
+                sc_len = 3;
+            } else if (i + 4 < len && data[i+2] == 0 && data[i+3] == 1) {
+                sc_len = 4;
+            }
+            if (sc_len > 0) {
+                uint8_t nal_type = data[i + sc_len] & 0x1F;
+                if (nal_type == 7) {
+                    info.has_sps = true;
+                    if (info.sps_pos == len) info.sps_pos = i;
+                } else if (nal_type == 8) {
+                    info.has_pps = true;
+                } else if (nal_type == 5) {
+                    info.is_idr = true;
+                    if (info.idr_pos == len) info.idr_pos = i;
+                }
+                i += (sc_len - 1);
             }
         }
     }
@@ -407,6 +461,19 @@ static void handle_config_sync(struct vcud_ctx *ctx) {
         if (ctx->vcu_cfg->force_idr) {
             request_idr_keyframe(ctx);
             ctx->vcu_cfg->force_idr = 0;
+        }
+
+        if (ctx->vcu_cfg->bitrate > 0) {
+            OMX_VIDEO_CONFIG_BITRATETYPE br;
+            initHeader(br);
+            br.nPortIndex = 1;
+            uint32_t kbps = ctx->vcu_cfg->bitrate;
+            if (kbps > 100000) kbps /= 1000;
+            br.nEncodeBitrate = kbps;
+            OMX_ERRORTYPE bErr = OMX_SetConfig(ctx->hEncoder, OMX_IndexConfigVideoBitrate, &br);
+            if (bErr == OMX_ErrorNone) {
+                printf("[VCUD] Dynamically updated target bitrate to %u kbps\n", br.nEncodeBitrate);
+            }
         }
 
         ctx->local_ack_seq = host_seq;
@@ -483,68 +550,149 @@ static OMX_ERRORTYPE omx_fill_buffer_done(OMX_HANDLETYPE hComponent, OMX_PTR pAp
             uint32_t tail = ctx->host_ring->ps_tail;
 
             if (head != tail) {
-                /* If host recently connected or dropped, hold off until an IDR keyframe arrives */
-                if (ctx->need_idr_on_connect) {
-                    if (!nal_info.is_idr) {
-                        /* Trigger IDR insertion and skip sending this non-IDR frame */
-                        request_idr_keyframe(ctx);
+                ctx->head_tail_match_count = 0;
+                if (!ctx->was_host_connected) {
+                    ctx->was_host_connected = true;
+                    /* Fresh host session: decoder starts cold, block every AU until an
+                     * IDR/SPS carrying AU makes it through the stream. */
+                    ctx->has_streamed_idr = false;
+                    ctx->pre_idr_drops = 0;
+                    request_idr_keyframe(ctx);
+                    printf("[VCUD] Host connected! Requested initial IDR keyframe, "
+                           "stalling stream until IDR/SPS\n");
+                    if (ctx->dump_path) {
+                        if (ctx->dump_fp) { fclose(ctx->dump_fp); ctx->dump_fp = nullptr; }
+                        if (ctx->crc_fp) { fclose(ctx->crc_fp); ctx->crc_fp = nullptr; }
+                        ctx->dump_fp = fopen(ctx->dump_path, "wb");
+                        char crc_path[512];
+                        snprintf(crc_path, sizeof(crc_path), "%s.crc", ctx->dump_path);
+                        ctx->crc_fp = fopen(crc_path, "w");
+                        if (ctx->crc_fp) {
+                            fprintf(ctx->crc_fp, "frame,len,crc32\n");
+                            fflush(ctx->crc_fp);
+                        }
+                        ctx->dump_frames_count = 0;
+                        printf("[VCUD] Started synchronized stream dump to %s (max_frames=%u)\n",
+                               ctx->dump_path, ctx->dump_max_frames);
+                    }
+                }
+                /* --- IDR synchronisation guard -------------------------------
+                 * Right after the host (re)connects its decoder holds no SPS/PPS
+                 * and no reference frames. Shipping it a leading P-frame AU that
+                 * carries neither SPS/PPS nor an IDR slice corrupts the decoder
+                 * (grey/green output, error concealment storms). Keep the gate
+                 * closed until we actually see an IDR or SPS in the AU. */
+                bool stream_gate_open = true;
+                if (!ctx->has_streamed_idr) {
+                    if (nal_info.is_idr || nal_info.has_sps) {
+                        ctx->has_streamed_idr = true;
+                        printf("[VCUD] First IDR/SPS received after connect! Streaming unlocked\n");
                     } else {
-                        /* Keyframe arrived! Clear flag and proceed to send */
-                        ctx->need_idr_on_connect = false;
+                        /* Drop like any other undeliverable frame (sent stays false) */
+                        stream_gate_open = false;
+                        ctx->pre_idr_drops++;
+                        if (ctx->pre_idr_drops == 1 || (ctx->pre_idr_drops % 30) == 0) {
+                            printf("[VCUD] Stream sync: dropping pre-IDR P-frame AU "
+                                   "(%u bytes, %u dropped so far)\n",
+                                   (unsigned)len, ctx->pre_idr_drops);
+                        }
                     }
                 }
 
-                if (!ctx->need_idr_on_connect) {
-                    uint32_t slot_idx = tail % QPCIE_VCU_RING_SIZE;
-                    volatile struct qpcie_vcu_buffer_slot *slot = &ctx->host_ring->slots[slot_idx];
+                uint32_t slot_idx = tail % QPCIE_VCU_RING_SIZE;
+                volatile struct qpcie_vcu_buffer_slot *slot = &ctx->host_ring->slots[slot_idx];
 
-                    uint64_t host_dst = slot->host_phys_addr;
-                    uint64_t host_comp = slot->host_comp_addr;
-                    uint32_t host_cap = slot->host_buf_len;
+                uint64_t host_dst = slot->host_phys_addr;
+                uint64_t host_comp = slot->host_comp_addr;
+                uint32_t host_cap = slot->host_buf_len;
 
-                    /* Check if we need to prepend cached SPS/PPS */
-                    size_t prefix_len = 0;
-                    if (nal_info.is_idr && !nal_info.has_sps && !ctx->cached_sps_pps.empty()) {
-                        prefix_len = ctx->cached_sps_pps.size();
+                /* Check if we need to prepend cached SPS/PPS */
+                size_t prefix_len = 0;
+                if (nal_info.is_idr && !nal_info.has_sps && !ctx->cached_sps_pps.empty()) {
+                    prefix_len = ctx->cached_sps_pps.size();
+                }
+
+                size_t total_len = prefix_len + len;
+
+                if (stream_gate_open && host_dst && host_comp && host_cap >= total_len) {
+                    /* Copy compressed NAL bitstream into DDR staging buffer */
+                    uint8_t *staging = (uint8_t *)ctx->ddr_staging;
+                    if (prefix_len > 0) {
+                        memcpy(staging, ctx->cached_sps_pps.data(), prefix_len);
                     }
+                    memcpy(staging + prefix_len, payload, len);
 
-                    size_t total_len = prefix_len + len;
+                    /* 16-byte align length as required by packet reader */
+                    uint32_t aligned_len = (total_len + 15) & ~15U;
+                    if (aligned_len > host_cap)
+                        aligned_len = host_cap & ~15U;
+                    if (aligned_len > total_len)
+                        memset(staging + total_len, 0, aligned_len - total_len);
 
-                    if (host_dst && host_comp && host_cap >= total_len) {
-                        /* Copy compressed NAL bitstream into DDR staging buffer */
-                        uint8_t *staging = (uint8_t *)ctx->ddr_staging;
-                        if (prefix_len > 0) {
-                            memcpy(staging, ctx->cached_sps_pps.data(), prefix_len);
+                    /* Prefer the OpenMAX output timestamp, which is propagated from the
+                     * V4L2 DQBUF capture timestamp (HDMI RX sampling time, microseconds)
+                     * attached to the input buffer in run_live_loop(). Using the local
+                     * encode-completion time (get_time_ns()) destroys the capture timeline
+                     * and injects large PTS jitter, because an IDR AU takes ~40ms while a
+                     * P AU takes ~0.5ms. Fall back to now/1000 only when the component
+                     * reports no timestamp (0). 1us == 150 ticks @ 150MHz hardware clock. */
+                    uint64_t pts_us = (pBuffer->nTimeStamp > 0) ? (uint64_t)pBuffer->nTimeStamp : (now / 1000);
+                    uint64_t pts_150mhz = pts_us * 150;
+                    uint32_t flags = (nal_info.is_idr || nal_info.has_sps) ? 0x05 : 0x03; /* AU_START | AU_END | (KEYFRAME) */
+
+                    int ret = submit_packet_dma(ctx,
+                                                DDR_STAGING_BUF_ADDR,
+                                                host_dst,
+                                                aligned_len,
+                                                host_cap,
+                                                host_comp,
+                                                pts_150mhz,
+                                                ctx->frame_seq,
+                                                flags);
+                    if (ret == 0) {
+                        __sync_synchronize();
+                        ctx->host_ring->ps_tail = tail + 1;
+                        ctx->frame_seq++;
+                        ctx->frames_sent++;
+                        ctx->total_bytes_sent += aligned_len;
+                        sent = true;
+
+                        if (ctx->dump_fp && (ctx->dump_max_frames == 0 || ctx->dump_frames_count < ctx->dump_max_frames)) {
+                            fwrite(staging, 1, aligned_len, ctx->dump_fp);
+                            fflush(ctx->dump_fp);
+                            uint32_t crc = calc_crc32(staging, aligned_len);
+                            if (ctx->crc_fp) {
+                                fprintf(ctx->crc_fp, "%u,%u,0x%08X\n", ctx->dump_frames_count, aligned_len, crc);
+                                fflush(ctx->crc_fp);
+                            }
+                            ctx->dump_frames_count++;
+                            if (ctx->dump_max_frames > 0 && ctx->dump_frames_count >= ctx->dump_max_frames) {
+                                printf("[VCUD] Verification dump completed: %u frames written to %s\n",
+                                       ctx->dump_frames_count, ctx->dump_path);
+                                fclose(ctx->dump_fp);
+                                ctx->dump_fp = nullptr;
+                                if (ctx->crc_fp) { fclose(ctx->crc_fp); ctx->crc_fp = nullptr; }
+                            }
                         }
-                        memcpy(staging + prefix_len, payload, len);
-
-                        /* 16-byte align length as required by packet reader */
-                        uint32_t aligned_len = (total_len + 15) & ~15U;
-                        if (aligned_len > host_cap)
-                            aligned_len = host_cap & ~15U;
-                        if (aligned_len > total_len)
-                            memset(staging + total_len, 0, aligned_len - total_len);
-
-                        uint64_t pts_150mhz = (now * 150) / 1000;
-                        uint32_t flags = (nal_info.is_idr || nal_info.has_sps) ? 0x05 : 0x03; /* AU_START | AU_END | (KEYFRAME) */
-
-                        int ret = submit_packet_dma(ctx,
-                                                    DDR_STAGING_BUF_ADDR,
-                                                    host_dst,
-                                                    aligned_len,
-                                                    host_cap,
-                                                    host_comp,
-                                                    pts_150mhz,
-                                                    ctx->frame_seq,
-                                                    flags);
-                        if (ret == 0) {
-                            __sync_synchronize();
-                            ctx->host_ring->ps_tail = tail + 1;
-                            ctx->frame_seq++;
-                            ctx->frames_sent++;
-                            ctx->total_bytes_sent += aligned_len;
-                            sent = true;
-                        }
+                    }
+                }
+            } else {
+                /* When head == tail, host buffer queue is momentarily busy/empty.
+                 * A single tick of head == tail is normal 1-frame jitter and must NOT
+                 * mark the host disconnected (that would cause disastrous IDR insertion
+                 * storms), so require a sustained stall before re-arming the gate.
+                 *
+                 * host_head and ps_tail are monotonically increasing counters and are
+                 * never zeroed on streamoff, so the old "head == 0 && tail == 0" test
+                 * could only ever fire once per process lifetime: after a stream restart
+                 * the gate stayed open and the host decoder was fed orphan P-frames with
+                 * no reference picture (corrupted output). */
+                if (++ctx->head_tail_match_count >= 15) {
+                    if (ctx->was_host_connected) {
+                        ctx->was_host_connected = false;
+                        ctx->has_streamed_idr = false;
+                        /* 主機飢餓或停止串流達 15 幀（~250ms），標記主機已離線，
+                         * 下次恢復時必須重新請求 IDR 並關閉門禁 */
                     }
                 }
             }
@@ -555,9 +703,30 @@ static OMX_ERRORTYPE omx_fill_buffer_done(OMX_HANDLETYPE hComponent, OMX_PTR pAp
                 csr_write32(ctx, REG_PKT_DOORBELL_POP, 1);
             }
             ctx->frames_dropped++;
-            ctx->need_idr_on_connect = true;
             if (ctx->host_ring && ctx->host_ring->magic == QPCIE_VCU_RING_MAGIC) {
                 ctx->host_ring->dropped_count++;
+            }
+
+            /* Self-heal: this AU never reached the host, so the downstream decoder
+             * just lost its reference chain (grey/green artefacts until the next GOP
+             * IDR). Ask the VCU to insert an IDR on the very next frame so the
+             * decoder recovers immediately instead of waiting a full GOP.
+             *
+             * 掉禎自癒間隔限制為 1 秒，避免 Host 短暫飢餓時引發 IDR 暴風雪:
+             * request_idr_keyframe() only rate-limits itself to 1 request/100ms, so
+             * while the host ring stays stalled every dropped frame (30..60/s) would
+             * otherwise punch a new IDR through every 100ms - ~10 huge keyframes per
+             * second, flooding the log and burning VCU bandwidth. Gate the drop-driven
+             * recovery path on our own 1s interval instead.
+             *
+             * Only worth doing once we have actually streamed an IDR to some host:
+             * while nobody has ever connected (offline standby / host ring never
+             * started) there is no downstream reference chain to recover, so asking
+             * the VCU for IDR after every dropped frame just floods the log. */
+            if (ctx->has_streamed_idr &&
+                (now - ctx->last_drop_heal_ns >= 1000000000ULL)) {
+                ctx->last_drop_heal_ns = now;
+                request_idr_keyframe(ctx);
             }
         }
     }
@@ -658,6 +827,7 @@ static int run_live_loop(struct vcud_ctx *ctx) {
     inPort.format.video.nFrameHeight = VCU_HEIGHT;
     inPort.format.video.nStride = VCU_WIDTH;
     inPort.format.video.nSliceHeight = VCU_HEIGHT;
+    inPort.format.video.xFramerate = ctx->target_fps << 16;
     inPort.nBufferCountActual = NUM_IN_BUFFERS;
     OMX_SetParameter(ctx->hEncoder, OMX_IndexParamPortDefinition, &inPort);
     OMX_GetParameter(ctx->hEncoder, OMX_IndexParamPortDefinition, &inPort);
@@ -670,11 +840,72 @@ static int run_live_loop(struct vcud_ctx *ctx) {
     modeIn.eMode = OMX_ALG_BUF_DMA;
     OMX_SetParameter(ctx->hEncoder, (OMX_INDEXTYPE)OMX_ALG_IndexPortParamBufferMode, &modeIn);
 
+    // Set output port format
+    OMX_VIDEO_PARAM_PORTFORMATTYPE outFormat;
+    initHeader(outFormat);
+    outFormat.nPortIndex = 1;
+    OMX_GetParameter(ctx->hEncoder, OMX_IndexParamVideoPortFormat, &outFormat);
+    outFormat.eCompressionFormat = OMX_VIDEO_CodingAVC;
+    outFormat.xFramerate = ctx->target_fps << 16;
+    OMX_SetParameter(ctx->hEncoder, OMX_IndexParamVideoPortFormat, &outFormat);
+
+    // Configure Profile and Level: AVC High Profile, Level 5.1
+    OMX_VIDEO_PARAM_PROFILELEVELTYPE profLvl;
+    initHeader(profLvl);
+    profLvl.nPortIndex = 1;
+    profLvl.eProfile = OMX_VIDEO_AVCProfileHigh;
+    profLvl.eLevel = (OMX_U32)OMX_VIDEO_AVCLevel51;
+    err = OMX_SetParameter(ctx->hEncoder, OMX_IndexParamVideoProfileLevelCurrent, &profLvl);
+    if (err == OMX_ErrorNone) {
+        printf("[VCUD] AVC Profile/Level set to High / Level 5.1\n");
+    } else {
+        fprintf(stderr, "[VCUD WARNING] SetProfileLevel failed: 0x%08x\n", (unsigned)err);
+    }
+
+    // Configure AVC Parameters (CABAC, etc.)
+    OMX_VIDEO_PARAM_AVCTYPE avcParam;
+    initHeader(avcParam);
+    avcParam.nPortIndex = 1;
+    if (OMX_GetParameter(ctx->hEncoder, OMX_IndexParamVideoAvc, &avcParam) == OMX_ErrorNone) {
+        avcParam.eProfile = OMX_VIDEO_AVCProfileHigh;
+        avcParam.eLevel = OMX_VIDEO_AVCLevel51;
+        avcParam.bEntropyCodingCABAC = OMX_TRUE;
+        err = OMX_SetParameter(ctx->hEncoder, OMX_IndexParamVideoAvc, &avcParam);
+        if (err == OMX_ErrorNone) {
+            printf("[VCUD] AVC High Profile, Level 5.1, CABAC enabled\n");
+        } else {
+            fprintf(stderr, "[VCUD WARNING] SetParameter VideoAvc failed: 0x%08x\n", (unsigned)err);
+        }
+    }
+
+    // Disable Filler Data to prevent bandwidth explosion
+    OMX_ALG_VIDEO_PARAM_FILLER_DATA fillerParam;
+    initHeader(fillerParam);
+    fillerParam.nPortIndex = 1;
+    fillerParam.bDisableFillerData = OMX_TRUE;
+    err = OMX_SetParameter(ctx->hEncoder, (OMX_INDEXTYPE)OMX_ALG_IndexParamVideoFillerData, &fillerParam);
+    if (err == OMX_ErrorNone) {
+        printf("[VCUD] Filler data disabled\n");
+    }
+
+    // Disable Prefetch Buffer (direct DMA-BUF path)
+    OMX_ALG_VIDEO_PARAM_PREFETCH_BUFFER prefetchParam;
+    initHeader(prefetchParam);
+    prefetchParam.nPortIndex = 1;
+    prefetchParam.bEnablePrefetchBuffer = OMX_FALSE;
+    err = OMX_SetParameter(ctx->hEncoder, (OMX_INDEXTYPE)OMX_ALG_IndexParamVideoPrefetchBuffer, &prefetchParam);
+    if (err == OMX_ErrorNone) {
+        printf("[VCUD] Prefetch buffer disabled\n");
+    }
+
     // Output port definition
     OMX_PARAM_PORTDEFINITIONTYPE outPort;
     initHeader(outPort);
     outPort.nPortIndex = 1;
     OMX_GetParameter(ctx->hEncoder, OMX_IndexParamPortDefinition, &outPort);
+    outPort.format.video.nFrameWidth = VCU_WIDTH;
+    outPort.format.video.nFrameHeight = VCU_HEIGHT;
+    outPort.format.video.xFramerate = ctx->target_fps << 16;
     outPort.nBufferCountActual = NUM_OUT_BUFFERS;
     OMX_SetParameter(ctx->hEncoder, OMX_IndexParamPortDefinition, &outPort);
     OMX_GetParameter(ctx->hEncoder, OMX_IndexParamPortDefinition, &outPort);
@@ -691,12 +922,50 @@ static int run_live_loop(struct vcud_ctx *ctx) {
     OMX_ALG_VIDEO_PARAM_INSTANTANEOUS_DECODING_REFRESH idrParam;
     initHeader(idrParam);
     idrParam.nPortIndex = 1;
-    idrParam.nInstantaneousDecodingRefreshFrequency = 30; /* Every 30 frames (approx 1 sec @ 30fps) */
+    idrParam.nInstantaneousDecodingRefreshFrequency = 30; /* Every 30 frames (0.5 sec @ 60fps) */
     err = OMX_SetParameter(ctx->hEncoder, (OMX_INDEXTYPE)OMX_ALG_IndexParamVideoInstantaneousDecodingRefresh, &idrParam);
     if (err != OMX_ErrorNone) {
         fprintf(stderr, "[VCUD WARNING] SetParameter IDR failed: 0x%08x\n", (unsigned)err);
     } else {
         printf("[VCUD] Periodic IDR enabled: frequency = %u frames\n", idrParam.nInstantaneousDecodingRefreshFrequency);
+    }
+
+    // Configure Low-Delay P GOP Mode (PG252 low latency)
+    OMX_ALG_VIDEO_PARAM_GOP_CONTROL gopCtrl;
+    initHeader(gopCtrl);
+    gopCtrl.nPortIndex = 1;
+    gopCtrl.eGopControlMode = OMX_ALG_GOP_MODE_LOW_DELAY_P;
+    gopCtrl.eGdrMode = OMX_ALG_GDR_OFF;
+    err = OMX_SetParameter(ctx->hEncoder, (OMX_INDEXTYPE)OMX_ALG_IndexParamVideoGopControl, &gopCtrl);
+    if (err != OMX_ErrorNone) {
+        fprintf(stderr, "[VCUD WARNING] SetParameter GopControl failed: 0x%08x\n", (unsigned)err);
+    } else {
+        printf("[VCUD] Low-delay P GOP mode enabled\n");
+    }
+
+    // Configure 4 Slices for parallel hardware encode
+    OMX_ALG_VIDEO_PARAM_SLICES slices;
+    initHeader(slices);
+    slices.nPortIndex = 1;
+    slices.nNumSlices = 4;
+    slices.nSlicesSize = 0;
+    slices.bDependentSlices = OMX_FALSE;
+    err = OMX_SetParameter(ctx->hEncoder, (OMX_INDEXTYPE)OMX_ALG_IndexParamVideoSlices, &slices);
+    if (err != OMX_ErrorNone) {
+        fprintf(stderr, "[VCUD WARNING] SetParameter Slices failed: 0x%08x\n", (unsigned)err);
+    } else {
+        printf("[VCUD] Slices enabled: %d slices\n", (int)slices.nNumSlices);
+    }
+
+    // Target Bitrate: 25000 kbps (25 Mbps CBR) - Allegro OpenMAX expects kbps!
+    OMX_VIDEO_PARAM_BITRATETYPE bitrateParam;
+    initHeader(bitrateParam);
+    bitrateParam.nPortIndex = 1;
+    bitrateParam.eControlRate = OMX_Video_ControlRateConstant;
+    bitrateParam.nTargetBitrate = 25000; /* 25 Mbps in kbps */
+    err = OMX_SetParameter(ctx->hEncoder, OMX_IndexParamVideoBitrate, &bitrateParam);
+    if (err == OMX_ErrorNone) {
+        printf("[VCUD] Target Bitrate set to %u kbps (25 Mbps)\n", bitrateParam.nTargetBitrate);
     }
 
     // 3. State transition: Loaded -> Idle
@@ -894,6 +1163,10 @@ int main(int argc, char **argv) {
             ctx.target_fps = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--frames") && i + 1 < argc) {
             ctx.max_frames = atoi(argv[++i]);
+        } else if (!strcmp(argv[i], "--dump") && i + 1 < argc) {
+            ctx.dump_path = argv[++i];
+        } else if (!strcmp(argv[i], "--dump-frames") && i + 1 < argc) {
+            ctx.dump_max_frames = atoi(argv[++i]);
         }
     }
 

@@ -547,6 +547,11 @@ struct qpcie_v4l2_buffer {
     struct vb2_v4l2_buffer vb;
     struct list_head list;
     bool sgl_logged;
+    u32 vcu_slot_idx;
+    /* Monotonic VCU ring producer index (host_head) captured when this buffer
+     * was published; compared against the card ps_tail to tell a completion
+     * that is merely late apart from one the PS already consumed. */
+    u32 vcu_seq;
 };
 
 struct qpcie_v4l2_channel {
@@ -593,6 +598,11 @@ struct qpcie_v4l2_channel {
     struct qpcie_vcu_encoder_config vcu_cfg;
     void *comp_ring_virt;
     dma_addr_t comp_ring_dma;
+    /* Session clock offset calibration: translate the precise Card (HDMI RX)
+     * capture timestamps of the VCU compressed bitstream into the Host
+     * CLOCK_MONOTONIC domain.  Sampled once per streaming session. */
+    s64 vcu_card_to_host_offset_ns;
+    bool vcu_offset_calibrated;
 };
 
 struct qpcie_alsa_channel {

@@ -938,6 +938,12 @@ static int qpcie_queue_setup(struct vb2_queue *vq,
     if (vch->channel_id == 1) {
         unsigned int comp_size = 4 * 1024 * 1024;
 
+        /* A fresh queue setup is a fresh capture session: the Card<->Host clock
+         * offset is only valid while both sides keep running, so drop the
+         * calibration and re-derive it from the first PTS of this session. */
+        vch->vcu_offset_calibrated = false;
+        vch->vcu_card_to_host_offset_ns = 0;
+
         /* Reconfiguring buffers means a fresh capture session and happens
          * before any QBUF, so this is the place to make the Host Ring pointers
          * agree again.  host_head lives in BRAM and survives session teardown
@@ -1629,6 +1635,10 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
     u32 stat_reg = vch->ch_reg_base + REG_VCH_OFFSET_STATUS;
 
     if (vch->channel_id == 1 && qdev->c2h_only) {
+        /* The Card<->Host offset of this session is no longer meaningful once
+         * streaming stops: force re-calibration on the next session. */
+        vch->vcu_offset_calibrated = false;
+
         qpcie_return_all_buffers(vch, VB2_BUF_STATE_ERROR);
 
         /* The buffers are back in userspace, so this session owns nothing any
@@ -2832,10 +2842,23 @@ void qpcie_v4l2_node_done(struct qpcie_dev *qdev, int node_idx)
         } else if (actual_len > 0) {
             vb2_set_plane_payload(&buf->vb.vb2_buf, 0, actual_len);
         }
-        if (pts_ns > 0)
-            buf->vb.vb2_buf.timestamp = pts_ns;
-        else
+        if (pts_ns > 0) {
+            /* pts_ns is the Card (HDMI RX) capture timestamp, a different clock
+             * domain than the Host CLOCK_MONOTONIC that vb2 timestamps use.
+             * Calibrate once per session by sampling the instantaneous distance
+             * between the two clocks, then shift every Card PTS into the Host
+             * domain so downstream (rtcp / muxer / sync) sees monotonic values. */
+            if (!vch->vcu_offset_calibrated) {
+                vch->vcu_card_to_host_offset_ns = (s64)ktime_get_ns() - (s64)pts_ns;
+                vch->vcu_offset_calibrated = true;
+                dev_info(&qdev->pdev->dev,
+                         "VCU PTS calibrated: Card %llu ns -> Host offset %+lld ns\n",
+                         (unsigned long long)pts_ns, (long long)vch->vcu_card_to_host_offset_ns);
+            }
+            buf->vb.vb2_buf.timestamp = pts_ns + vch->vcu_card_to_host_offset_ns;
+        } else {
             buf->vb.vb2_buf.timestamp = ktime_get_ns();
+        }
 
         buf->vb.sequence = vch->sequence++;
         vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
