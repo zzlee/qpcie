@@ -22,6 +22,14 @@ iverilog -g2012 -i -s sc7f0_packet_arb_tb -o "$OUT/arbiter" \
     rtl/custom_pcie_dma_top.v rtl/rq_tx_encoder.v tb/sc7f0_packet_arb_tb.sv
 vvp "$OUT/arbiter" > "$OUT/arbiter.log"
 grep -q PACKET_ARBITER_PASS "$OUT/arbiter.log"
+# C2H grant vs FWFT payload pop interlock: a descriptor-fetch MRd offered in
+# the undecided arbitration window must never shift the packet payload by a
+# 256-bit beat (the board-level "DPC1 mismatch / comp_phys holds payload at
+# offset N-32" signature).
+iverilog -g2012 -i -s sc7f0_c2h_pop_interlock_tb -o "$OUT/pop_interlock" \
+    rtl/custom_pcie_dma_top.v rtl/rq_tx_encoder.v tb/sc7f0_c2h_pop_interlock_tb.sv
+vvp "$OUT/pop_interlock" > "$OUT/pop_interlock.log"
+grep -q PKT_POP_INTERLOCK_PASS "$OUT/pop_interlock.log"
 SC7F0_SIM_OUT="$OUT/xsim-dualpath" vivado -mode batch -notrace -nojournal \
     -log "$OUT/dualpath-vivado.log" -source scripts/sim_sc7f0_dualpath.tcl > "$OUT/dualpath.log" 2>&1
 grep -q DUALPATH_SIM_GATE_PASS "$OUT/dualpath.log"

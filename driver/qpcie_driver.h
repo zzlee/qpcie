@@ -566,9 +566,16 @@ struct qpcie_v4l2_buffer {
     bool sgl_logged;
     u32 vcu_slot_idx;
     /* Monotonic VCU ring producer index (host_head) captured when this buffer
-     * was published; compared against the card ps_tail to tell a completion
-     * that is merely late apart from one the PS already consumed. */
+     * was published; identifies the ring slot this buffer owns.  NOT a
+     * liveness proof: the card PS advances ps_tail when it *hands the slot to
+     * Packet DMA*, so ps_tail running ahead is normal pipeline behaviour. */
     u32 vcu_seq;
+    /* Wall-clock (jiffies) instant this buffer was published into the VCU Host
+     * Ring.  The completion path uses it as the only trustworthy liveness
+     * guard: a slot whose DPC1 record has not landed after a physical timeout
+     * is genuinely lost, and is retired with VB2_BUF_STATE_ERROR so it cannot
+     * wedge the completion queue. */
+    unsigned long queued_jiffies;
 };
 
 struct qpcie_v4l2_channel {
@@ -615,6 +622,23 @@ struct qpcie_v4l2_channel {
     struct qpcie_vcu_encoder_config vcu_cfg;
     void *comp_ring_virt;
     dma_addr_t comp_ring_dma;
+    /* Channel 1 (VCU / Packet DMA) slot occupancy guard.
+     *
+     * The Host Ring is a 16-slot circular ring: slots are reused modulo
+     * QPCIE_VCU_RING_SIZE, and the card PS advances ps_tail the moment it
+     * *hands a slot to the Packet DMA engine* - long before the payload and
+     * its DPC1 completion record have landed in host memory.  Head/tail
+     * arithmetic alone therefore cannot prove a slot is free, and publishing
+     * into a slot whose previous frame is still in flight overwrote live
+     * buffers and cleared their completion magic (lost/zero-length frames).
+     *
+     * slot_active[i] names the buffer that currently owns slot i: it is set
+     * by qpcie_publish_buffer() before the slot is written to BRAM, and is
+     * cleared only when that buffer retires (DPC1 completion or the timeout
+     * error path) or when the session is torn down.  A slot with a non-NULL
+     * entry is never republished.  Never dereferenced - an owned slot is only
+     * a mark, so there is no use-after-free risk on the buffer itself. */
+    struct qpcie_v4l2_buffer *slot_active[QPCIE_VCU_RING_SIZE];
     /* Session clock offset calibration: translate the precise Card (HDMI RX)
      * capture timestamps of the VCU compressed bitstream into the Host
      * CLOCK_MONOTONIC domain.  Sampled once per streaming session. */

@@ -75,14 +75,37 @@ module rq_tx_encoder #(
             assign h2c_req_ack      = h2c_ack;
             assign c2h_req_ack      = c2h_ack;
 
-            wire c2h_req_active = c2h_req_valid && !c2h_ack &&
-                                  !irq_req_valid && !desc_req_valid &&
-                                  !sg_req_valid && !h2c_req_valid;
+            // "Taken by the idle encoder" must be evaluated exactly like the
+            // S_IDLE branch chain below, i.e. valid AND its own ack is not
+            // already in flight. Sources hold VALID for a further cycle after
+            // the registered ack, so gating data_ready on the bare *_req_valid
+            // levels disagreed with the branch chain during that overlap:
+            // the encoder latched the FWFT head beat into rq_tdata while
+            // c2h_req_data_ready stayed LOW, so the source FIFO never popped
+            // it. The head beat was then re-read as the next payload beat and
+            // every later header/payload pair of that TLP - plus one residue
+            // beat left for the next TLP - shifted by a whole 256-bit beat.
+            wire idle_take_irq  = irq_req_valid  && !irq_ack;
+            wire idle_take_desc = desc_req_valid && !desc_ack;
+            wire idle_take_sg   = sg_req_valid   && !sg_ack;
+            wire idle_take_h2c  = h2c_req_valid  && !h2c_ack;
+            wire idle_take_c2h  = c2h_req_valid  && !c2h_ack &&
+                                  (c2h_req_dw_len != 11'd0) &&
+                                  !(idle_take_irq  || idle_take_desc ||
+                                    idle_take_sg   || idle_take_h2c);
 
+            // Only edges where c2h_req_data really is latched may pop the
+            // source. In S_MWR_BURST the four held DWORDs precede the next
+            // source beat, so a beat is consumed only while >4 DWORDs remain;
+            // a 1..8 DWORD tail is emitted from hold_hi without a pop.
+            wire mwr_burst_take = (state == S_MWR_BURST) && rq_tvalid &&
+                                  m_axis_rq_tready && !rq_tlast &&
+                                  (rq_payload_left > 11'd4);
+
+            // Pop == sample by construction: this is the union of the two and
+            // only two edges on which the C2H datapath consumes a source beat.
             assign c2h_req_data_ready =
-                (state == S_IDLE && c2h_req_active) ||
-                (state == S_MWR_BURST && rq_tvalid && m_axis_rq_tready &&
-                 !rq_tlast && rq_payload_left > 11'd4);
+                (state == S_IDLE && idle_take_c2h) || mwr_burst_take;
 
             always @(posedge clk or negedge rst_n) begin
                 if (!rst_n) begin
@@ -113,7 +136,7 @@ module rq_tx_encoder #(
                             rq_tdata  <= {DATA_WIDTH{1'b0}};
                             rq_tuser  <= 62'd0;
 
-                            if (irq_req_valid && !irq_req_ack) begin
+                            if (idle_take_irq) begin
                                 rq_tdata[74:64]   <= 11'd0;
                                 rq_tdata[78:75]   <= 4'b0010;
                                 rq_tdata[95:80]   <= active_requester_id;
@@ -123,7 +146,7 @@ module rq_tx_encoder #(
                                 rq_tlast          <= 1'b1;
                                 rq_tvalid         <= 1'b1;
                                 state             <= S_SEND_IRQ;
-                            end else if (desc_req_valid && !desc_req_ack) begin
+                            end else if (idle_take_desc) begin
                                 rq_tdata[63:0]   <= desc_req_addr;
                                 rq_tdata[74:64]  <= desc_req_dw_len;
                                 rq_tdata[78:75]  <= 4'b0000;
@@ -134,7 +157,7 @@ module rq_tx_encoder #(
                                 rq_tlast         <= 1'b1;
                                 rq_tvalid        <= 1'b1;
                                 state            <= S_SEND_DESC;
-                            end else if (sg_req_valid && !sg_req_ack) begin
+                            end else if (idle_take_sg) begin
                                 rq_tdata[63:0]   <= sg_req_addr;
                                 rq_tdata[74:64]  <= sg_req_dw_len;
                                 rq_tdata[78:75]  <= 4'b0000;
@@ -145,7 +168,7 @@ module rq_tx_encoder #(
                                 rq_tlast         <= 1'b1;
                                 rq_tvalid        <= 1'b1;
                                 state            <= S_SEND_SG;
-                            end else if (h2c_req_valid && !h2c_req_ack) begin
+                            end else if (idle_take_h2c) begin
                                 rq_tdata[63:0]   <= h2c_req_addr;
                                 rq_tdata[74:64]  <= h2c_req_dw_len;
                                 rq_tdata[78:75]  <= 4'b0000;
@@ -156,7 +179,7 @@ module rq_tx_encoder #(
                                 rq_tlast         <= 1'b1;
                                 rq_tvalid        <= 1'b1;
                                 state            <= S_SEND_H2C;
-                            end else if (c2h_req_valid && !c2h_req_ack && c2h_req_dw_len != 0) begin
+                            end else if (idle_take_c2h) begin
                                 rq_tdata[63:0]    <= c2h_req_addr;
                                 rq_tdata[74:64]   <= c2h_req_dw_len;
                                 rq_tdata[78:75]   <= 4'b0001; // MWr
@@ -263,6 +286,9 @@ module rq_tx_encoder #(
             wire [10:0] next_payload_dw =
                 (c2h_dw_remaining > DATA_DWORDS) ? DATA_DWORDS : c2h_dw_remaining;
 
+            // 128-bit path pops only in the two payload states, which the C2H
+            // branch alone can enter (IDLE writes a header-only beat), so the
+            // pop edges and the rq_tdata load edges here already coincide.
             assign c2h_req_data_ready =
                 (state == SEND_MWR_HEADER && rq_tvalid && m_axis_rq_tready) ||
                 (state == SEND_MWR_DATA && rq_tvalid && m_axis_rq_tready &&

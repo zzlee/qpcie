@@ -52,6 +52,9 @@ static bool host_writable(loff_t offset)
            offset == DB_H2C_SEQ || offset == DB_H2C_TYPE ||
            offset == DB_H2C_ID || offset == DB_H2C_LEN ||
            offset == DB_C2H_ACK || offset == DB_TIMEOUT_MS ||
+           /* Legacy aperture: 0x400 payload slot (sc7f0ctl / debugd). */
+           (offset >= 0x400 && offset < 0x400 + DB_PAYLOAD) ||
+           /* Current aperture: DB_H2C_DATA payload slot. */
            (offset >= DB_H2C_DATA && offset < DB_H2C_DATA + DB_PAYLOAD);
 }
 static ssize_t debug_read(struct file *file, char __user *buf,

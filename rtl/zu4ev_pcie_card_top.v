@@ -1030,8 +1030,10 @@ module zu4ev_pcie_card_top #(
     xpm_cdc_single #(.DEST_SYNC_FF(4),.SRC_INPUT_REG(1)) u_raw_rx_enable(
         .src_clk(capture_clk),.src_in(video_capture_active&&capture_rst_n&&!capture_use_tpg),
         .dest_clk(phy_rx_video_clk),.dest_out(raw_rx_enabled));
-    // No host / no raw client / TPG selection must not block PS capture.
-    assign rx_ss_video_tready=raw_rx_enabled?raw_csc_input_ready:1'b1;
+    // v_hdmi_rx_ss_0 VIDEO_OUT is an unpausable physical scan source: TREADY must
+    // stay constant high. Raw Video backpressure (raw_csc_input_ready) is confined
+    // to u_rx_csc / u_hdmi_rx_video_cdc_fifo and must never gate PS capture valid.
+    assign rx_ss_video_tready=1'b1;
     video_rgb_to_yuv709 u_rx_csc (
         .clk(phy_rx_video_clk), .rst_n(!rx_video_rst), .enable(rx_csc_enable),
         .s_data(rx_video_packed_tdata), .s_valid(rx_ss_video_tvalid&&raw_rx_enabled),
@@ -1064,7 +1066,7 @@ module zu4ev_pcie_card_top #(
     sc7f0_capture_pipeline u_ps_capture(
         .csr_clk(pl_clk0),.csr_rst_n(sys_100m_rst_n),.mem_clk(capture_clk),.mem_rst_n(dp_mem_rst_n),
         .rx_clk(phy_rx_video_clk),.rx_rst_n(!rx_video_rst),.rx_data(rx_ss_video_tdata),
-        .rx_valid(rx_ss_video_tvalid&&rx_ss_video_tready),.rx_sof(rx_ss_video_tuser),.rx_eol(rx_ss_video_tlast),
+        .rx_valid(rx_ss_video_tvalid),.rx_sof(rx_ss_video_tuser),.rx_eol(rx_ss_video_tlast),
         .s_awaddr(hdmi_ctl_awaddr[223:128]),.s_awvalid(hdmi_ctl_awvalid[6:4]),.s_awready(hdmi_ctl_awready[6:4]),
         .s_wdata(hdmi_ctl_wdata[223:128]),.s_wstrb(hdmi_ctl_wstrb[27:16]),.s_wvalid(hdmi_ctl_wvalid[6:4]),.s_wready(hdmi_ctl_wready[6:4]),
         .s_bresp(hdmi_ctl_bresp[13:8]),.s_bvalid(hdmi_ctl_bvalid[6:4]),.s_bready(hdmi_ctl_bready[6:4]),

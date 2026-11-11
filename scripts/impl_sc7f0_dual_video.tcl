@@ -122,7 +122,50 @@ if {$vcu} {
 puts $audit C2H_PERSONALITY_SYNTH_PASS
 close $audit
 close_design
+# Optional implementation timing knobs, all opt-in: leaving them unset keeps the
+# published default flow (Vivado Implementation Defaults, Default directives) and
+# every archived build reproducible. They exist because the 300 MHz capture group
+# is a placement/routing-margin problem (route delay ~77% of a 9-level path), not
+# a logic-depth problem, so it is closed with implementation effort rather than
+# by editing the capture RTL. SC7F0_TIMING_TUNED reports what was applied.
+proc sc7f0_set_directive {run step prop allowed env} {
+    if {![info exists ::env($env)]} {return}
+    set d [string tolower [string trim $::env($env)]]
+    set hit ""
+    foreach a $allowed {
+        if {[string tolower $a] eq $d} {set hit $a}
+    }
+    if {$hit eq ""} {
+        error "$env must be one of: $allowed (got '$::env($env)')"
+    }
+    set_property $prop $hit $run
+    puts "SC7F0_TIMING_TUNED $step $prop = $hit"
+}
 if {$resume eq ""} {
+set impl_run [get_runs impl_1]
+sc7f0_set_directive $impl_run opt_design    STEPS.OPT_DESIGN.ARGS.DIRECTIVE                    {Default Explore ExploreArea ExploreSequentialArea ExploreWithRemap RuntimeOptimized} SC7F0_OPT_DIRECTIVE
+sc7f0_set_directive $impl_run place_design  STEPS.PLACE_DESIGN.ARGS.DIRECTIVE                   {Default Explore ExtraTimingOpt ExtraNetDelay_high ExtraNetDelay_low ExtraPostPlacementOpt EarlyBlockPlacement Quick} SC7F0_PLACE_DIRECTIVE
+sc7f0_set_directive $impl_run phys_opt_design STEPS.PHYS_OPT_DESIGN.ARGS.DIRECTIVE              {Default Explore ExploreWithHoldFix AggressiveExplore AlternateReplication AggressiveFanoutOpt AddRetime AlternateFlowWithRetiming} SC7F0_PHYS_OPT_DIRECTIVE
+sc7f0_set_directive $impl_run route_design  STEPS.ROUTE_DESIGN.ARGS.DIRECTIVE                   {Default Explore NoTimingRelaxation MoreGlobalIterations HigherDelayCost AdvancedSkewModeling AlternateCLBRouting} SC7F0_ROUTE_DIRECTIVE
+if {[info exists ::env(SC7F0_POST_ROUTE_PHYS_OPT)] && $::env(SC7F0_POST_ROUTE_PHYS_OPT) ne ""} {
+    set prpo [string tolower [string trim $::env(SC7F0_POST_ROUTE_PHYS_OPT)]]
+    set prpo_ok ""
+    foreach a {Default Explore AggressiveExplore AddRetime ExploreWithAggressiveHoldFix} {
+        if {[string tolower $a] eq $prpo} {set prpo_ok $a}
+    }
+    if {$prpo_ok eq ""} {
+        error "SC7F0_POST_ROUTE_PHYS_OPT must be one of: Default Explore AggressiveExplore AddRetime ExploreWithAggressiveHoldFix (got '$::env(SC7F0_POST_ROUTE_PHYS_OPT)')"
+    }
+    set_property STEPS.POST_ROUTE_PHYS_OPT_DESIGN.IS_ENABLED true $impl_run
+    set_property STEPS.POST_ROUTE_PHYS_OPT_DESIGN.ARGS.DIRECTIVE $prpo_ok $impl_run
+    puts "SC7F0_TIMING_TUNED post_route_phys_opt_design DIRECTIVE = $prpo_ok"
+}
+if {[info exists ::env(SC7F0_RESET_IMPL)] && [string tolower $::env(SC7F0_RESET_IMPL)] in {1 true yes}} {
+    # Directives changed on a completed run do not always force a re-run; reset it
+    # explicitly so the routed result and the bitstream are the tuned flow.
+    reset_runs impl_1
+    puts "SC7F0_TIMING_TUNED reset impl_1"
+}
 launch_runs impl_1 -to_step write_bitstream -jobs 6
 wait_on_run impl_1
 if {[string first "write_bitstream Complete" [get_property STATUS [get_runs impl_1]]] < 0} {

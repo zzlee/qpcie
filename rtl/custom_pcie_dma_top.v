@@ -823,6 +823,17 @@ module custom_pcie_dma_top #(
         end
     end
 
+    // Ownership is committed one cycle before the engine can act on it: the
+    // arbiter above is combinational, so in a c2h_owner==0 cycle the selected
+    // source is only a tentative grant. rq_tx_encoder still has to win its own
+    // MRd/MWr priority chain (a same-cycle desc_req_valid, or an ack for the
+    // fetch it is retiring, sends it to S_SEND_DESC instead of sampling C2H),
+    // and a FWFT source FIFO that pops on data_ready can never get that beat
+    // back. Keep C2H invisible to the encoder until the grant is committed so
+    // that "c2h_owner is locked" and "the encoder may sample c2h_req_data" are
+    // the same condition.
+    wire c2h_req_valid_enc = (c2h_owner != 8'd0) ? c2h_req_valid_mux : 1'b0;
+
     always @(posedge clk or negedge dma_rst_n) begin
         if (!dma_rst_n) c2h_owner <= 8'd0;
         else if (c2h_owner == 0 && c2h_req_valid_mux) c2h_owner <= c2h_selected;
@@ -833,18 +844,24 @@ module custom_pcie_dma_top #(
         if(!dma_rst_n)prefer_packet<=1;
         else if(c2h_req_ack_mux)prefer_packet<=c2h_owner!=PACKET_OWNER;
     end
+    // data_ready hands a FWFT source its head beat and is irreversible, so it
+    // may only ever reach the committed owner. A tentative grant is NOT an
+    // acceptance: popping on it drops 32 bytes that rq_tx_encoder never
+    // latched, which shifts every later TLP header/payload pair by one beat
+    // and leaves a residue beat that a later packet (or a completion record
+    // write) then consumes.
     assign packet_req_data_ready=ENABLE_PACKET_C2H &&
-        (c2h_owner==PACKET_OWNER||(c2h_owner==0&&c2h_selected==PACKET_OWNER))&&c2h_req_data_ready_mux;
+        (c2h_owner==PACKET_OWNER)&&c2h_req_data_ready_mux;
     assign packet_req_ack=ENABLE_PACKET_C2H&&c2h_owner==PACKET_OWNER&&c2h_req_ack_mux;
 
     assign sg_c2h_req_data_ready =
-        ((c2h_owner == 8'd1) || (c2h_owner == 8'd0 && c2h_selected == 8'd1)) && c2h_req_data_ready_mux;
+        (c2h_owner == 8'd1) && c2h_req_data_ready_mux;
     assign sg_c2h_req_ack = (c2h_owner == 8'd1) && c2h_req_ack_mux;
     genvar v_ack_i, a_ack_i;
     generate
         for (v_ack_i=0; v_ack_i<NUM_VIDEO_CH; v_ack_i=v_ack_i+1) begin : gen_v_ack
             assign v_c2h_req_data_ready[v_ack_i] =
-                ((c2h_owner == (8'd2+v_ack_i)) || (c2h_owner == 8'd0 && c2h_selected == (8'd2+v_ack_i))) && c2h_req_data_ready_mux;
+                (c2h_owner == (8'd2+v_ack_i)) && c2h_req_data_ready_mux;
             assign v_c2h_req_ack[v_ack_i] =
                 (c2h_owner == (8'd2+v_ack_i)) && c2h_req_ack_mux;
         end
@@ -852,6 +869,11 @@ module custom_pcie_dma_top #(
             assign a_c2h_req_ack[a_ack_i] = (c2h_owner == (8'd2+NUM_VIDEO_CH+a_ack_i)) && c2h_req_ack_mux;
         end
     endgenerate
+
+    // Forward declaration: video_tx_idle below consumes it, and xvlog rejects
+    // a reg that is referenced ahead of its declaration (VRFC 10-3380) which
+    // made the whole module unverifiable in the xsim regression flow.
+    reg         ch0_owner_busy;
 
     // An empty packet FIFO alone is not idle: the frontend may still be
     // producing writes to the current host buffer. Retire the owner first.
@@ -1465,7 +1487,6 @@ module custom_pcie_dma_top #(
     wire        thin_busy;
 
     wire        pcie_frame_done;
-    reg         ch0_owner_busy;
 
     // Canonical v3.0 Native: Pure Thin Descriptor Fetch Requests
     wire        desc_req_valid_mux  = thin_mrd_req_valid;
@@ -1510,7 +1531,7 @@ module custom_pcie_dma_top #(
         .h2c_req_dw_len(sg_h2c_req_dw_len),
         .h2c_req_tag(sg_h2c_req_tag),
         .h2c_req_ack(sg_h2c_req_ack),
-        .c2h_req_valid(c2h_req_valid_mux),
+        .c2h_req_valid(c2h_req_valid_enc),
         .c2h_req_addr(c2h_req_addr_mux),
         .c2h_req_dw_len(c2h_req_dw_len_mux),
         .c2h_req_data(rq_c2h_req_data),

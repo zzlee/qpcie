@@ -136,6 +136,10 @@ test_mcu_nuc1262/*.tcl
 /test_app/sc7f0_ps_watchdog
 test_app/sc7f0_vcud
 test_app/sc7f0_ps_capture
+# Packet DMA standalone unit-test binaries (built by test_app/Makefile dma-test)
+test_app/sc7f0_pkt_dma_test
+test_app/host_pkt_dma_test
+test_app/sc7f0ctl_compat400
 prj/
 runhls.tcl
 

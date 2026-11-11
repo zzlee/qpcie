@@ -29,6 +29,12 @@ module_param(sc7f0_nv_min_buffers, uint, 0400);
 MODULE_PARM_DESC(sc7f0_nv_min_buffers,
                  "Diagnostic minimum NV12/NV16 capture buffers (2..8, default2)");
 
+/* Live telemetry for the Channel 1 (VCU / Packet DMA) completion path: the
+ * first 10 retired buffers of every capture session log their slot index, the
+ * raw DPC1 completion magic and the transferred length, so a running board can
+ * be watched straight from dmesg.  Reset on each fresh queue setup. */
+static u32 qpcie_vcu_done_trace;
+
 static const struct v4l2_file_operations qpcie_v4l2_fops = {
     .owner          = THIS_MODULE,
     .open           = v4l2_fh_open,
@@ -943,6 +949,7 @@ static int qpcie_queue_setup(struct vb2_queue *vq,
          * calibration and re-derive it from the first PTS of this session. */
         vch->vcu_offset_calibrated = false;
         vch->vcu_card_to_host_offset_ns = 0;
+        qpcie_vcu_done_trace = 0;
 
         /* Reconfiguring buffers means a fresh capture session and happens
          * before any QBUF, so this is the place to make the Host Ring pointers
@@ -964,6 +971,37 @@ static int qpcie_queue_setup(struct vb2_queue *vq,
                      ps_tail);
         }
 
+        /* The BRAM head/tail reset above is only half of the story.  The DPC1
+         * completion ring lives in host coherent memory and is zeroed a single
+         * time at channel init (qpcie_v4l2_open()), and the completion path
+         * clears only comp[0] when it retires a slot - comp[10] (the payload
+         * length) is left behind.  A previous session that was killed, or a
+         * previous driver load that recycled the same coherent pages, can
+         * therefore leave stale DPC1 records in the ring: the new session's
+         * first harvest finds comp[0]==DPC1_MAGIC in slots it never published
+         * into, completes them immediately, and trusts the leftover length
+         * (observed 2702190906 == 0xA10F_...).  vb2_set_plane_payload() then
+         * trips WARN_ON(len > vb2_plane_size()) in videobuf2-core.h:1218 and
+         * the FIFO slot tracking slips out of alignment.  Wipe the whole ring
+         * and every slot claim so a fresh session can only ever observe
+         * completions that *this* session produced. */
+        if (vch->comp_ring_virt) {
+            memset((void *)vch->comp_ring_virt, 0, QPCIE_VCU_RING_SIZE * 64);
+            wmb();
+        }
+        /* Under slock, the same lock the completion path uses to clear marks,
+         * so a late MSI cannot re-establish (or race away) a claim while the
+         * table is being wiped. */
+        {
+            unsigned int i;
+            unsigned long rflags;
+
+            spin_lock_irqsave(&vch->slock, rflags);
+            for (i = 0; i < QPCIE_VCU_RING_SIZE; i++)
+                vch->slot_active[i] = NULL;
+            spin_unlock_irqrestore(&vch->slock, rflags);
+        }
+
         if (*nplanes) {
             if (*nplanes != 1 || sizes[0] < 65536)
                 return -EINVAL;
@@ -972,36 +1010,32 @@ static int qpcie_queue_setup(struct vb2_queue *vq,
         *nplanes = 1;
         sizes[0] = comp_size;
         if (qdev->c2h_only) {
-            /* The PS VCU keeps a full QPCIE_VCU_RING_SIZE-deep ring in flight
-         * and its MSI is coalesced across several frames, so one interrupt can
-         * retire up to 16 buffers at once.  If userspace (GStreamer) allocated
-         * fewer buffers than the ring holds, the completed buffers have nowhere
-         * to go: the ring fills, publish is rejected and frames are dropped.
-         * Force at least the full ring depth so the host can always absorb a
-         * coalesced burst.
+            /* Pool depth is a userspace pipeline decision, not a driver
+         * override.  The old code forced the pool to ring+8 (24) no matter
+         * what the caller asked for.  That papered over the real defect it
+         * was aimed at: "ring full" was judged purely from the BRAM head/tail
+         * pointers (head - tail > 16), but the card PS moves ps_tail when it
+         * *hands a slot to the Packet DMA engine*, long before the payload
+         * and its DPC1 completion record land in host memory - so a slot
+         * could be republished while its previous frame was still unfinished,
+         * overwriting live buffer content and clearing its completion magic.
          *
-         * The pool is now deliberately DEEPER than the 16-slot hardware ring.
-         * A QBUF that finds the ring momentarily full is no longer thrown back
-         * at userspace as VB2_BUF_STATE_ERROR (a 0-byte hole in the H.264
-         * stream: lost slices, "Frame num change", MB decode errors); it is
-         * parked on vch->pending_buffers and republished by the next
-         * completion.  Those parked buffers have to come out of the vb2 pool,
-         * so the pool must be bigger than the ring or GStreamer simply runs
-         * out of buffers while it waits.  24 frames ~= 400 ms of 60 fps slack
-         * on top of the 16 ring slots; 32 is the ceiling so a deep pool can
-         * never mask a genuinely stuck card for more than ~0.5 s. */
+         * vch->slot_active[] now pins each of the 16 slots to the buffer that
+         * owns it and is cleared only when that buffer retires (DPC1
+         * completion, timeout error, or session teardown), so an unfinished
+         * slot can never be taken over.  With that guarantee in place the
+         * caller is free to choose its own depth.
+         *
+         * Keep a sane window: >= 4 buffers for any pipeline to make progress,
+         * <= 2x the ring (16 or 24 are the usual picks) so a deep parked pool
+         * still cannot mask a genuinely stuck card for more than ~0.5 s. */
             unsigned int requested = *nbuffers;
-            unsigned int depth = clamp_t(unsigned int, *nbuffers,
-                                         QPCIE_VCU_RING_SIZE,
-                                         QPCIE_VCU_RING_SIZE * 2);
 
-            if (depth < QPCIE_VCU_RING_SIZE + 8)
-                depth = QPCIE_VCU_RING_SIZE + 8;
-            *nbuffers = depth;
+            *nbuffers = clamp_t(unsigned int, requested, 4,
+                                QPCIE_VCU_RING_SIZE * 2);
             dev_info(&qdev->pdev->dev,
-                     "VCU ch1 buffer pool: requested %u -> %u (ring %u + %u parked-slack frames)\n",
-                     requested, depth, QPCIE_VCU_RING_SIZE,
-                     depth - QPCIE_VCU_RING_SIZE);
+                     "VCU ch1 buffer pool: requested %u -> %u (ring %u, userspace depth honoured, slot_active[] occupancy guard)\n",
+                     requested, *nbuffers, QPCIE_VCU_RING_SIZE);
         } else {
             *nbuffers = clamp_t(unsigned int, *nbuffers, 4, QPCIE_VCU_RING_SIZE);
         }
@@ -1080,6 +1114,7 @@ static int qpcie_buf_init(struct vb2_buffer *vb)
     buf->sgl_logged = false;
     buf->vcu_slot_idx = 0;
     buf->vcu_seq = 0;
+    buf->queued_jiffies = 0;
     return 0;
 }
 
@@ -1138,23 +1173,42 @@ static int qpcie_publish_buffer(struct qpcie_v4l2_channel *vch,
             in_flight = 1;
         }
 
-        if (in_flight > QPCIE_VCU_RING_SIZE) {
-            /* Back-pressure, not a fault: all 16 slots are handed to the card.
+        if (in_flight > QPCIE_VCU_RING_SIZE || vch->slot_active[slot_idx] != NULL) {
+            /* Back-pressure, not a fault: either all 16 slots are handed to the
+             * card, or the slot this publish would take is still owned by a
+             * buffer that has not retired yet.  The pointer test is the real
+             * occupancy proof: ps_tail only says the card *picked up* the slot,
+             * never that its payload and DPC1 record have landed, so head/tail
+             * arithmetic alone could otherwise republish a slot that is still
+             * being written and clear the completion magic under the old frame.
+             *
              * The caller parks the buffer on pending_buffers (QBUF) or leaves
              * it queued for the next completion (drain) - a buffer is NEVER
              * errored out on this path any more. */
             dev_warn_ratelimited(&qdev->pdev->dev,
-                                 "VCU Host Ring full (head=%u, tail=%u, in_flight=%d): parking publisher, no buffer dropped\n",
-                                 host_head, ps_tail, in_flight);
+                                 "VCU Host Ring full (head=%u, tail=%u, in_flight=%d, slot %u %s): parking publisher, no buffer dropped\n",
+                                 host_head, ps_tail, in_flight, slot_idx,
+                                 vch->slot_active[slot_idx] ? "still owned" : "free");
             return -ENOSPC;
         }
 
-        sgt0 = vb2_dma_sg_plane_desc(vb, 0);
-        if (WARN_ON(!sgt0 || sgt0->nents == 0))
+        /* Channel 1 buffers come from vb2_dma_contig_memops, so plane 0 is a
+         * single IOVA-contiguous region: read its base address and full length
+         * directly instead of unwrapping a scatter/gather table. */
+        dma_addr = vb2_dma_contig_plane_dma_addr(vb, 0);
+        dma_len = vb2_plane_size(vb, 0);
+        if (WARN_ON(!dma_addr || dma_len == 0))
             return -EINVAL;
-        sg = sgt0->sgl;
-        dma_addr = sg_dma_address(sg);
-        dma_len = sg_dma_len(sg);
+
+        /* Claim the slot BEFORE a single byte of the descriptor (or the
+         * doorbell) reaches BRAM: from this point on the slot is owned by this
+         * buffer, and only qpcie_v4l2_node_done() (completion / timeout) or
+         * qpcie_return_all_buffers() (session teardown) may give it back.
+         * Publishers are serialised by qdev->ring_lock, so this claim cannot
+         * double-book a slot; a completion running on another CPU can only
+         * clear a slot that has already retired, which is exactly the case in
+         * which republishing is legal. */
+        vch->slot_active[slot_idx] = buf;
 
         slot_mmio = ring_mmio + offsetof(struct qpcie_vcu_host_ring, slots) +
                     slot_idx * sizeof(struct qpcie_vcu_buffer_slot);
@@ -1175,14 +1229,36 @@ static int qpcie_publish_buffer(struct qpcie_v4l2_channel *vch,
         iowrite32(vb->index, slot_mmio + offsetof(struct qpcie_vcu_buffer_slot, host_buf_id));
         iowrite32(0, slot_mmio + offsetof(struct qpcie_vcu_buffer_slot, flags));
 
+        /* Ring slots are reused modulo QPCIE_VCU_RING_SIZE, so the slot being
+         * republished may still carry the DPC1 record of the frame that used it
+         * 16 jobs ago.  Clear the completion magic *and* the recorded length
+         * before host_head makes the slot visible to the card, otherwise the
+         * completion path would accept that stale record as this frame having
+         * landed - and comp[10] is the field that names the payload length, so
+         * a leftover value alone can produce a bogus bytesused even when the
+         * magic has already been cleared.  The wmb() orders the clears (and the
+         * slot descriptor writes) ahead of the doorbell. */
+        if (vch->comp_ring_virt) {
+            volatile u32 *comp = (volatile u32 *)((u8 *)vch->comp_ring_virt + slot_idx * 64);
+
+            comp[0] = 0;
+            comp[10] = 0;
+            wmb();
+        }
+
+        /* Start the physical liveness timer for this slot: the completion path
+         * may only declare a frame lost on real elapsed time, never on a
+         * ps_tail difference. */
+        buf->queued_jiffies = jiffies;
+
         wmb();
         iowrite32(next_head, ring_mmio + offsetof(struct qpcie_vcu_host_ring, host_head));
         ioread32(ring_mmio + offsetof(struct qpcie_vcu_host_ring, host_head));
 
         buf->vcu_slot_idx = slot_idx;
-        /* Remember which ring sequence this buffer owns so the completion
-         * path can ask the card PS whether the slot has already been
-         * consumed even when its DPC1 record never arrived. */
+        /* Remember which ring sequence this buffer owns so diagnostics can
+         * name the slot; liveness is decided by queued_jiffies, not by
+         * ps_tail. */
         buf->vcu_seq = host_head;
 
         spin_lock_irqsave(&vch->slock, flags);
@@ -1465,6 +1541,7 @@ static void qpcie_return_all_buffers(struct qpcie_v4l2_channel *vch,
                                        enum vb2_buffer_state state)
 {
     struct qpcie_dev *qdev = vch->qdev;
+    unsigned long rflags;
 
     for (;;) {
         struct qpcie_v4l2_buffer *buf;
@@ -1495,6 +1572,29 @@ static void qpcie_return_all_buffers(struct qpcie_v4l2_channel *vch,
         list_del(&buf->list);
         spin_unlock_irq(&vch->slock);
         vb2_buffer_done(&buf->vb.vb2_buf, state);
+    }
+
+    /* Session reset: no buffer is in flight any more, so every Channel 1 slot
+     * claim dies with the session.  Leaving a stale mark behind would wedge
+     * the next STREAMON, because its publishes would be refused forever on a
+     * slot that nothing owns.  Done under slock - the same lock the completion
+     * path uses to clear marks - so a late completion cannot re-establish (or
+     * race away) a claim while the table is being wiped. */
+    {
+        unsigned int s;
+        int owned = 0;
+
+        spin_lock_irqsave(&vch->slock, rflags);
+        for (s = 0; s < QPCIE_VCU_RING_SIZE; s++)
+            if (vch->slot_active[s])
+                owned++;
+        memset(vch->slot_active, 0, sizeof(vch->slot_active));
+        spin_unlock_irqrestore(&vch->slock, rflags);
+
+        if (owned)
+            dev_info(&qdev->pdev->dev,
+                     "VCU ch1 session reset: released %u slot_active[] claim(s)\n",
+                     owned);
     }
 }
 
@@ -1541,6 +1641,14 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
         /* QBUFs that arrived before STREAMON (or that raced the session ring
          * reset) may already be parked; give them their first slot now. */
         qpcie_vcu_drain_pending(vch);
+
+        /* Enable the Channel 1 hardware interrupt sources (BIT(8) frame/packet
+         * done, BIT(0) channel done) so completions do not rely solely on the
+         * polling path. The following read backs the write before returning. */
+        if (qdev->bar0_mmio) {
+            iowrite32(BIT(8) | BIT(0), qdev->bar0_mmio + REG_VCH_BASE(1) + REG_VCH_OFFSET_CTRL);
+            ioread32(qdev->bar0_mmio + REG_VCH_BASE(1) + REG_VCH_OFFSET_CTRL);
+        }
         return 0;
     }
 
@@ -1788,6 +1896,14 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
             dev_info(&qdev->pdev->dev,
                      "VCU Host Ring STREAMOFF reset: host_head <- ps_tail=%u\n",
                      ps_tail);
+        }
+
+        /* Clear the Channel 1 control register so its hardware interrupts are
+         * disabled with the session: no completion IRQ may still fire for
+         * buffers that are about to be handed back to userspace. */
+        if (qdev->bar0_mmio) {
+            iowrite32(0, qdev->bar0_mmio + REG_VCH_BASE(1) + REG_VCH_OFFSET_CTRL);
+            ioread32(qdev->bar0_mmio + REG_VCH_BASE(1) + REG_VCH_OFFSET_CTRL);
         }
 
         atomic_dec(&qdev->streaming_count);
@@ -2384,6 +2500,13 @@ static void qpcie_v4l2_hdmi_monitor_work_fn(struct work_struct *work)
 
     qpcie_v4l2_check_source_change(vch);
 
+    /* Background watchdog for the Channel 1 (VCU) path: the hardware interrupt
+     * is the fast path, but a lost or coalesced completion must not stall the
+     * ring forever. Poll the completion path on every monitor tick while the
+     * V4L2 nodes are registered. */
+    if (vch->qdev && vch->qdev->c2h_only && vch->qdev->v4l2_registered)
+        qpcie_v4l2_node_done(vch->qdev, 1);
+
     if (vch->hdmi_monitor_running)
         schedule_delayed_work(&vch->hdmi_monitor_work, msecs_to_jiffies(250));
 }
@@ -2746,14 +2869,19 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
             goto unreg_v4l2;
         }
 
-        /* Initialize vb2_queue: all nodes use vb2_dma_sg */
-        dev_info(&qdev->pdev->dev, "[DEBUG STEP 2.4] Node %d: Initializing vb2_queue with vb2_dma_sg...\n", i);
+        /* Initialize vb2_queue: Channel 1 (Packet DMA / VCU) uses the contiguous
+         * allocator so every plane lands in one physically/IOVA-contiguous buffer;
+         * Channel 0 keeps the scatter/gather allocator. */
+        dev_info(&qdev->pdev->dev,
+                 "[DEBUG STEP 2.4] Node %d: Initializing vb2_queue with %s allocator...\n",
+                 i, (i == 1) ? "vb2_dma_contig" : "vb2_dma_sg");
         vch->queue.type            = vch->buf_type;
         vch->queue.io_modes        = VB2_MMAP | VB2_USERPTR | VB2_DMABUF;
         vch->queue.drv_priv        = vch;
         vch->queue.buf_struct_size = sizeof(struct qpcie_v4l2_buffer);
         vch->queue.ops             = &qpcie_vb2_ops;
-        vch->queue.mem_ops         = &vb2_dma_sg_memops;
+        vch->queue.mem_ops         = (vch->channel_id == 1) ?
+                                     &vb2_dma_contig_memops : &vb2_dma_sg_memops;
         vch->queue.dma_dir         =
             vch->buf_type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE ?
             DMA_TO_DEVICE : DMA_FROM_DEVICE;
@@ -2951,8 +3079,19 @@ void qpcie_v4l2_node_done(struct qpcie_dev *qdev, int node_idx)
     while (!list_empty(&vch->active_buffers)) {
         u32 actual_len = 0;
         u64 pts_ns = 0;
+        u32 comp_magic = 0;
+        u32 slot;
+        bool owned_slot;
 
         buf = list_first_entry(&vch->active_buffers, struct qpcie_v4l2_buffer, list);
+
+        /* Slot ownership follows the c2h-only VCU publish path (see
+         * qpcie_publish_buffer()); capture it for this buffer up front so the
+         * occupancy mark can be released at whichever retirement point follows
+         * (timeout error or normal completion). */
+        slot = buf->vcu_slot_idx;
+        owned_slot = (vch->channel_id == 1 && qdev->c2h_only &&
+                      slot < QPCIE_VCU_RING_SIZE);
 
         if (coalesced) {
             volatile u32 *comp = (volatile u32 *)((u8 *)vch->comp_ring_virt +
@@ -2960,35 +3099,67 @@ void qpcie_v4l2_node_done(struct qpcie_dev *qdev, int node_idx)
 
             /* active_buffers is FIFO in publish order, so the head is the
              * oldest slot still in flight: if its completion has not landed,
-             * no later slot can have either - stop and wait for the next MSI. */
+             * no later slot can have either - stop and wait for the next MSI.
+             *
+             * A missing DPC1 record alone says nothing about the slot being
+             * lost.  The card PS advances ps_tail when it *hands the slot to
+             * the Packet DMA engine*, long before the payload (and the DPC1
+             * write) lands in host memory, and a PCIe burst or concurrent
+             * Video0 load widens that window arbitrarily.  The old
+             * "(s32)(ps_tail - vcu_seq) > 2" test therefore mis-classified
+             * perfectly healthy in-flight frames as "skipped" and retired 184
+             * buffers as 0-byte VB2_BUF_STATE_ERROR.  Liveness is decided on
+             * wall-clock time only: a slot whose completion has not arrived
+             * after a physical 3 s has genuinely been lost, and is retired with
+             * an error so it cannot wedge the completion queue (and starve the
+             * vb2 pool).  Anything younger keeps waiting for the next MSI. */
             if (comp[0] != QPCIE_VCU_DPC1_MAGIC) {
-                void __iomem *ring_mmio = qdev->bar0_mmio ?
-                    qdev->bar0_mmio + QPCIE_BAR0_VCU_RING_OFFSET : NULL;
-                u32 ps_tail = ring_mmio ?
-                    ioread32(ring_mmio + offsetof(struct qpcie_vcu_host_ring,
-                                                  ps_tail)) : 0;
+                /* Diagnostic: a non-zero first word means *something* wrote into
+                 * this 64-byte completion slot, it just is not the DPC1 magic the
+                 * PS writes.  Dump the whole record (16 x 32-bit words = 64 B)
+                 * plus its IOVA so the writer can be identified (PS completion
+                 * record layout, a neighbouring slot's payload, a Packet DMA
+                 * buffer overwrite, stale data from an earlier frame, ...).
+                 * Independent of the timeout below: an alien magic that shows up
+                 * while the slot is still young is exactly the interesting case,
+                 * and waiting 3 s would only report the cleared/aged content. */
+                if (comp[0] != 0) {
+                    dev_info(&qdev->pdev->dev,
+                             "VCU slot %u (seq %u) DPC1 mismatch! comp[0]=0x%08x comp_dma=0x%llx: [0..7]=%08x %08x %08x %08x %08x %08x %08x %08x [8..15]=%08x %08x %08x %08x %08x %08x %08x %08x\n",
+                             buf->vcu_slot_idx, buf->vcu_seq, comp[0],
+                             (unsigned long long)(vch->comp_ring_dma + buf->vcu_slot_idx * 64),
+                             comp[0], comp[1], comp[2], comp[3],
+                             comp[4], comp[5], comp[6], comp[7],
+                             comp[8], comp[9], comp[10], comp[11],
+                             comp[12], comp[13], comp[14], comp[15]);
+                }
 
-                /* The card PS increments ps_tail *when it hands slot S to the
-                 * Packet DMA engine*, not when the payload has landed: pushing
-                 * buffer S advances ps_tail to S + 1, so a frame that is still
-                 * in flight on the PCIe C2H DMA shows exactly
-                 * (ps_tail - vcu_seq) == 1 while its DPC1 record has not been
-                 * written yet.  Treating any ps_tail advance as "slot skipped"
-                 * therefore retired healthy frames with VB2_BUF_STATE_ERROR on
-                 * the microsecond-long window between the PS push and the DPC1
-                 * write - dropped frames plus missing P-frame references (MB
-                 * decode errors).  Only a PS that has moved on to genuinely
-                 * later frames (>= 2 slots ahead, i.e. at least one further
-                 * job submitted after this one while this DPC1 still never
-                 * landed) proves the slot is lost for good; retire it with an
-                 * error so one dead slot cannot wedge the completion queue (and
-                 * starve the vb2 pool).  Anything <= 2 apart is still inside
-                 * the normal DMA pipeline: keep waiting for the next MSI or the
-                 * DPC1 write. */
-                if (ring_mmio && (s32)(ps_tail - buf->vcu_seq) > 2) {
-                    dev_warn_ratelimited(&qdev->pdev->dev,
-                                         "VCU slot %u (seq %u) skipped by PS (tail %u): completing with ERROR\n",
-                                         buf->vcu_slot_idx, buf->vcu_seq, ps_tail);
+                if (time_after(jiffies, buf->queued_jiffies + msecs_to_jiffies(3000))) {
+                    /* Same full record on the timeout path: by then the slot has
+                     * had 3 s to settle, so the dump shows its final content -
+                     * zero (never written), DPC1 (landed after the deadline), or
+                     * garbage (something else owns the slot). */
+                    dev_err_ratelimited(&qdev->pdev->dev,
+                                        "VCU slot %u (seq %u) timed out (>3s): completing with ERROR (comp[0]=0x%08x comp_dma=0x%llx: [0..7]=%08x %08x %08x %08x %08x %08x %08x %08x [8..15]=%08x %08x %08x %08x %08x %08x %08x %08x)\n",
+                                        buf->vcu_slot_idx, buf->vcu_seq, comp[0],
+                                        (unsigned long long)(vch->comp_ring_dma + buf->vcu_slot_idx * 64),
+                                        comp[0], comp[1], comp[2], comp[3],
+                                        comp[4], comp[5], comp[6], comp[7],
+                                        comp[8], comp[9], comp[10], comp[11],
+                                        comp[12], comp[13], comp[14], comp[15]);
+
+                    /* The frame is lost, but the slot is not: retire the buffer
+                     * AND release its occupancy mark, otherwise the mark would
+                     * keep a dead buffer's claim on the slot forever and every
+                     * later publish into that slot would be refused. */
+                    if (owned_slot) {
+                        if (vch->slot_active[slot] == buf)
+                            vch->slot_active[slot] = NULL;
+                        else
+                            dev_err(&qdev->pdev->dev,
+                                    "VCU slot %u occupancy mismatch on timeout (retiring buf%u, mark owned by another buffer): leaving mark alone\n",
+                                    slot, buf->vb.vb2_buf.index);
+                    }
 
                     list_del(&buf->list);
                     qdev->ring_completed++;
@@ -3002,12 +3173,43 @@ void qpcie_v4l2_node_done(struct qpcie_dev *qdev, int node_idx)
                 break;
             }
 
+            comp_magic = comp[0];            /* DPC1 magic, before the re-arm */
             actual_len = comp[10];           /* Transferred Payload Bytes */
+
+            /* Length guard: comp[10] is written by the card, so a stale record
+             * (or a bus glitch) can still name more bytes than the buffer the
+             * host actually owns.  vb2_set_plane_payload() WARN_ONs and, worse,
+             * hands userspace a payload that reads past the mapping - clamp it
+             * to 0 (empty frame) and say so instead. */
+            if (actual_len > vb2_plane_size(&buf->vb.vb2_buf, 0)) {
+                dev_err_ratelimited(&qdev->pdev->dev,
+                                    "VCU slot %u actual_len %u > plane size %lu: ignoring bogus len\n",
+                                    slot, actual_len, vb2_plane_size(&buf->vb.vb2_buf, 0));
+                actual_len = 0;
+            }
             if (comp[6] || comp[7])          /* PTS hi:lo */
                 pts_ns = (((u64)comp[7] << 32) | comp[6]) * 1000 / 150;
 
-            /* Re-arm the slot before the buffer can be republished into it. */
+            /* Re-arm the slot before the buffer can be republished into it.
+             * Clear the recorded length together with the magic: comp[10] is
+             * read before the magic is validated anywhere else, so a leftover
+             * length must never survive into the next use of this slot. */
             comp[0] = 0;                     /* Clear completion magic */
+            comp[10] = 0;                    /* Clear transferred length */
+        }
+
+        /* Normal retirement: give the slot back.  Clearing the mark is what
+         * makes this slot publishable again - until this point no publisher
+         * can take it, which is exactly the guarantee that stops slot 0..15
+         * from being overwritten (and their completion magic cleared) while
+         * the previous frame is still landing in host memory. */
+        if (owned_slot) {
+            if (vch->slot_active[slot] == buf)
+                vch->slot_active[slot] = NULL;
+            else
+                dev_err(&qdev->pdev->dev,
+                        "VCU slot %u occupancy mismatch (retiring buf%u, mark owned by another buffer): leaving mark alone\n",
+                        slot, buf->vb.vb2_buf.index);
         }
 
         list_del(&buf->list);
@@ -3056,6 +3258,17 @@ void qpcie_v4l2_node_done(struct qpcie_dev *qdev, int node_idx)
         buf->vb.sequence = vch->sequence++;
         vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
 
+        /* Live monitoring of the first 10 completions (slot / magic / length).
+         * Printed after vb2_buffer_done() using locals only - the buffer itself
+         * belongs to userspace again by then. */
+        if (owned_slot && qpcie_vcu_done_trace < 10) {
+            qpcie_vcu_done_trace++;
+            dev_info(&qdev->pdev->dev,
+                     "VCU done[%u]: slot %u comp[0]=0x%08x actual_len=%u (buf%u, ring seq %u)\n",
+                     qpcie_vcu_done_trace, slot, comp_magic, actual_len,
+                     buf->vb.vb2_buf.index, buf->vcu_seq);
+        }
+
         /* Channels without a per-slot completion record signal one frame per
          * interrupt: keep the original single-shot behaviour and leave. */
         if (!coalesced)
@@ -3079,6 +3292,17 @@ void qpcie_v4l2_node_done(struct qpcie_dev *qdev, int node_idx)
 
 void qpcie_v4l2_irq_handler(struct qpcie_dev *qdev)
 {
-    if (qdev && qdev->v4l2_registered)
-        qpcie_v4l2_node_done(qdev, 0);
+    if (!qdev || !qdev->v4l2_registered)
+        return;
+
+    qpcie_v4l2_node_done(qdev, 0);
+
+    /* On the c2h-only personality Node 1 is the VCU / Packet DMA compressed
+     * stream.  Its frame-done MSI (BIT(8)/BIT(0) of the Channel 1 block) used
+     * to be serviced only by the opportunistic harvest in QBUF context, so a
+     * quiet stretch with no QBUFs left completed slots - and therefore their
+     * slot_active[] claims - unreleased, starving the ring.  Harvest Node 1
+     * from the interrupt path as well. */
+    if (qdev->c2h_only)
+        qpcie_v4l2_node_done(qdev, 1);
 }
