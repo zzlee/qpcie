@@ -11,19 +11,27 @@ ENTRY(Reset_Handler)
 
 SECTIONS
 {
-	.text :
+	.vectors :
 	{
 		KEEP(*(.vectors))
 		__Vectors_End = .;
 		__Vectors_Size = __Vectors_End - __Vectors;
+		KEEP(*(.vector_load_anchor))
+	} > FLASH
+	.compat_edid : { KEEP(*(.compat_edid)) } > FLASH
+	ASSERT(. <= 0x204, "vectors/EDID overlap legacy reset compatibility slot")
+	.legacy_reset_compat 0x204 : { KEEP(*(.legacy_reset_compat)) } > FLASH
+	ASSERT(SIZEOF(.legacy_reset_compat) == 0x1c, "legacy reset shim must remain 28 bytes")
+	.text 0x220 :
+	{
 		__end__ = .;
-
 		*(.text*)
 
 		KEEP(*(.init))
 		KEEP(*(.fini))
 
 		*(.rodata*)
+		KEEP(*(.fw_identity))
 		KEEP(*(.eh_frame*))
 	} > FLASH
 
@@ -46,7 +54,9 @@ SECTIONS
 		__data_start__ = .;
 		*(vtable)
 		*(.data*)
+		__ramfunc_start__ = .;
 		*(.ramfunc*)
+		__ramfunc_end__ = .;
 
 		. = ALIGN(4);
 		PROVIDE_HIDDEN (__preinit_array_start = .);
@@ -89,6 +99,13 @@ SECTIONS
 		__HeapLimit = .;
 	} > RAM
 
+	.upgrade_stage 0x20001000 (NOLOAD) :
+	{
+		__upgrade_stage_start__ = .;
+		. += 0x2000;
+		__upgrade_stage_end__ = .;
+	} > RAM
+
 	.stack_dummy (COPY):
 	{
 		KEEP(*(.stack*))
@@ -98,5 +115,7 @@ SECTIONS
 	__StackLimit = __StackTop - SIZEOF(.stack_dummy);
 	PROVIDE(__stack = __StackTop);
 
+	ASSERT(__HeapLimit <= 0x20001000, "data/heap overlaps MCU upgrade staging")
+	ASSERT(__StackLimit >= 0x20003000, "stack overlaps MCU upgrade staging")
 	ASSERT(__StackLimit >= __HeapLimit, "region RAM overflowed with stack")
 }

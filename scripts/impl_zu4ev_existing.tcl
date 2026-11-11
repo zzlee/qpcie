@@ -57,7 +57,11 @@ if {[get_property PROGRESS [get_runs impl_1]] != "100%" ||
 open_run impl_1
 set impl_dir [get_property DIRECTORY [get_runs impl_1]]
 set probes_out "$impl_dir/zu4ev_pcie_card_top.ltx"
-write_debug_probes -force $probes_out
+if {[llength [get_debug_cores -quiet]]} {
+    write_debug_probes -force $probes_out
+} else {
+    puts "No ILA/debug cores; no LTX export required."
+}
 puts " ILA debug probes: $probes_out"
 foreach f [glob -nocomplain "$impl_dir/*.bit"] {
     puts " Bitstream: $f ([file size $f] bytes)"

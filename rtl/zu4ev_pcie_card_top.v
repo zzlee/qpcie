@@ -17,7 +17,7 @@
 `timescale 1ns / 1ps
 
 module zu4ev_pcie_card_top #(
-    parameter [31:0] C_VERSION = 32'h2610_2201,
+    parameter [31:0] C_VERSION = 32'h2610_2901,
     parameter PCIE_DATA_WIDTH  = 256,
     parameter PCIE_KEEP_WIDTH  = PCIE_DATA_WIDTH / 32, // 8 DW keep for 256-bit
     parameter NUM_VIDEO_CH     = 4,
@@ -120,12 +120,12 @@ module zu4ev_pcie_card_top #(
     wire hdmi_ps_bvalid, hdmi_ps_bready, hdmi_ps_arvalid, hdmi_ps_arready;
     wire hdmi_ps_rvalid, hdmi_ps_rready;
     wire [1:0] hdmi_ps_bresp, hdmi_ps_rresp;
-    wire [95:0] hdmi_ctl_awaddr, hdmi_ctl_araddr, hdmi_ctl_wdata, hdmi_ctl_rdata;
-    wire [11:0] hdmi_ctl_wstrb;
-    wire [2:0] hdmi_ctl_awvalid, hdmi_ctl_awready, hdmi_ctl_wvalid, hdmi_ctl_wready;
-    wire [2:0] hdmi_ctl_bvalid, hdmi_ctl_bready, hdmi_ctl_arvalid, hdmi_ctl_arready;
-    wire [2:0] hdmi_ctl_rvalid, hdmi_ctl_rready;
-    wire [5:0] hdmi_ctl_bresp, hdmi_ctl_rresp;
+    wire [223:0] hdmi_ctl_awaddr, hdmi_ctl_araddr, hdmi_ctl_wdata, hdmi_ctl_rdata;
+    wire [27:0] hdmi_ctl_wstrb;
+    wire [6:0] hdmi_ctl_awvalid, hdmi_ctl_awready, hdmi_ctl_wvalid, hdmi_ctl_wready;
+    wire [6:0] hdmi_ctl_bvalid, hdmi_ctl_bready, hdmi_ctl_arvalid, hdmi_ctl_arready;
+    wire [6:0] hdmi_ctl_rvalid, hdmi_ctl_rready;
+    wire [13:0] hdmi_ctl_bresp, hdmi_ctl_rresp;
     axi_crossbar_hdmi u_hdmi_control (
         .aclk(pl_clk0), .aresetn(sys_100m_rst_n),
         .s_axi_awaddr(hdmi_ps_awaddr), .s_axi_awprot(3'b000),
@@ -170,8 +170,8 @@ module zu4ev_pcie_card_top #(
 
     proc_sys_reset_0 u_300m_reset (
         .slowest_sync_clk(pl_clk_300m),
-        // Same polarity note: pcie_user_rst_n is ACTIVE-LOW.
-        .ext_reset_in(~pcie_user_rst_n),
+        // Keep the capture/memory clock alive across host PCIe resets.
+        .ext_reset_in(~pl_resetn0),
         .aux_reset_in(1'b0),
         .mb_debug_sys_rst(1'b0),
         .dcm_locked(1'b1),
@@ -210,16 +210,40 @@ module zu4ev_pcie_card_top #(
 
     wire capture_clk, capture_rst_n;
     wire video_capture_active;
+    wire capture_use_tpg;
+    wire dp_packet_valid,dp_packet_data_ready,dp_packet_ack;
+    wire [63:0] dp_packet_addr;
+    wire [10:0] dp_packet_dw_len;
+    wire [3:0] dp_packet_first_be,dp_packet_last_be;
+    wire [255:0] dp_packet_data;
+`ifdef SC7F0_DEBUG_ONLY
+    assign dp_packet_valid=0;assign dp_packet_addr=0;assign dp_packet_dw_len=0;
+    assign dp_packet_first_be=0;assign dp_packet_last_be=0;assign dp_packet_data=0;
+`else
+    wire dp_mem_reset,dp_mem_rst_n,dp_irq,capture_irq;
+    xpm_cdc_async_rst #(.DEST_SYNC_FF(4),.RST_ACTIVE_HIGH(1)) u_dp_mem_reset(
+        .src_arst(!sys_100m_rst_n||!sys_300m_rst_n),
+        .dest_clk(capture_clk),.dest_arst(dp_mem_reset));
+    assign dp_mem_rst_n=!dp_mem_reset;
+    wire [48:0] dp_awaddr,dp_araddr;
+    wire [7:0] dp_awlen,dp_arlen;
+    wire [2:0] dp_awsize,dp_arsize;
+    wire [1:0] dp_awburst,dp_arburst,dp_bresp,dp_rresp;
+    wire dp_awvalid,dp_awready,dp_wvalid,dp_wready,dp_wlast,dp_bvalid,dp_bready;
+    wire dp_arvalid,dp_arready,dp_rvalid,dp_rready,dp_rlast;
+    wire [127:0] dp_wdata,dp_rdata;
+    wire [15:0] dp_wstrb;
+`endif
 `ifdef SC7F0_DEBUG_ONLY
     assign capture_clk = pcie_user_clk;
     assign capture_rst_n = video_engine_rst_n;
 `else
-    BUFGCE_DIV #(.BUFGCE_DIVIDE(2)) u_capture_clock (
+    BUFGCE_DIV #(.BUFGCE_DIVIDE(1)) u_capture_clock (
         .I(pl_clk_300m_ibufg), .CE(1'b1), .CLR(!sys_300m_rst_n),
         .O(capture_clk));
     wire capture_reset;
     xpm_cdc_async_rst #(.DEST_SYNC_FF(4), .RST_ACTIVE_HIGH(1)) u_capture_reset (
-        .src_arst(!video_engine_rst_n || !sys_300m_rst_n),
+        .src_arst(!sys_100m_rst_n || !sys_300m_rst_n),
         .dest_clk(capture_clk), .dest_arst(capture_reset));
     assign capture_rst_n = !capture_reset;
 `endif
@@ -403,6 +427,7 @@ module zu4ev_pcie_card_top #(
     wire [11:0] tpg_axis_tstrb;
     wire        tpg_interrupt;
 
+`ifndef SC7F0_C2H_ONLY
     v_tpg_0 u_v_tpg (
         .ap_clk(pcie_user_clk),
         .ap_rst_n(video_tpg_rst_n),
@@ -442,6 +467,30 @@ module zu4ev_pcie_card_top #(
         .m_axis_video_TDEST()
     );
 
+`else
+    assign tpg_axis_tdata=0; assign tpg_axis_tvalid=0; assign tpg_axis_tlast=0; assign tpg_axis_tuser=0;
+    assign tpg_axis_tkeep=0; assign tpg_axis_tstrb=0; assign tpg_interrupt=0;
+    sc7f0_axil_disabled #(.ADDR_WIDTH(8)) u_disabled_tpg (.clk(pcie_user_clk), .rst_n(pcie_user_rst_n),
+        .s_axil_awaddr(tpg_axi_awaddr),
+        .s_axil_awvalid(tpg_axi_awvalid),
+        .s_axil_awready(tpg_axi_awready),
+        .s_axil_wdata(tpg_axi_wdata),
+        .s_axil_wstrb(tpg_axi_wstrb),
+        .s_axil_wvalid(tpg_axi_wvalid),
+        .s_axil_wready(tpg_axi_wready),
+        .s_axil_bresp(tpg_axi_bresp),
+        .s_axil_bvalid(tpg_axi_bvalid),
+        .s_axil_bready(tpg_axi_bready),
+        .s_axil_araddr(tpg_axi_araddr),
+        .s_axil_arvalid(tpg_axi_arvalid),
+        .s_axil_arready(tpg_axi_arready),
+        .s_axil_rdata(tpg_axi_rdata),
+        .s_axil_rresp(tpg_axi_rresp),
+        .s_axil_rvalid(tpg_axi_rvalid),
+        .s_axil_rready(tpg_axi_rready)
+    );
+`endif
+
     // =========================================================================
     // AES3 Audio Pattern Generator (audio_pattern_gen) Wires & Instantiation
     // =========================================================================
@@ -450,6 +499,7 @@ module zu4ev_pcie_card_top #(
     wire        aud_pat_axis_tlast;
     wire        aud_pat_axis_tready;
 
+`ifndef SC7F0_C2H_ONLY
     audio_pattern_gen #(
         .ADDR_WIDTH(8),
         .DATA_WIDTH(32)
@@ -482,6 +532,29 @@ module zu4ev_pcie_card_top #(
         .m_axis_audio_tlast(aud_pat_axis_tlast),
         .m_axis_audio_tready(aud_pat_axis_tready)
     );
+
+`else
+    assign aud_pat_axis_tdata=0; assign aud_pat_axis_tvalid=0; assign aud_pat_axis_tlast=0;
+    sc7f0_axil_disabled #(.ADDR_WIDTH(8)) u_disabled_audio_tpg (.clk(pcie_user_clk), .rst_n(pcie_user_rst_n),
+        .s_axil_awaddr(aud_axi_awaddr),
+        .s_axil_awvalid(aud_axi_awvalid),
+        .s_axil_awready(aud_axi_awready),
+        .s_axil_wdata(aud_axi_wdata),
+        .s_axil_wstrb(aud_axi_wstrb),
+        .s_axil_wvalid(aud_axi_wvalid),
+        .s_axil_wready(aud_axi_wready),
+        .s_axil_bresp(aud_axi_bresp),
+        .s_axil_bvalid(aud_axi_bvalid),
+        .s_axil_bready(aud_axi_bready),
+        .s_axil_araddr(aud_axi_araddr),
+        .s_axil_arvalid(aud_axi_arvalid),
+        .s_axil_arready(aud_axi_arready),
+        .s_axil_rdata(aud_axi_rdata),
+        .s_axil_rresp(aud_axi_rresp),
+        .s_axil_rvalid(aud_axi_rvalid),
+        .s_axil_rready(aud_axi_rready)
+    );
+`endif
 
     // =========================================================================
     // Dynamic EDID RAM & HDMI HPD Controller (BAR1 Offset 0x2000)
@@ -579,6 +652,7 @@ module zu4ev_pcie_card_top #(
     wire [15:0] dma_overlay_width;
     wire [15:0] dma_overlay_height;
 
+`ifndef SC7F0_C2H_ONLY
     tpg_marker_overlay #(
         .FRAME_WIDTH(4096),
         .FRAME_HEIGHT(2160)
@@ -599,6 +673,11 @@ module zu4ev_pcie_card_top #(
         .m_axis_tuser(tpg_capture_tuser),
         .m_axis_tready(tpg_capture_tready)
     );
+
+`else
+    assign tpg_axis_tready=1; assign tpg_capture_tdata=0; assign tpg_capture_tvalid=0;
+    assign tpg_capture_tlast=0; assign tpg_capture_tuser=0;
+`endif
 
     // =========================================================================
     // HDMI RX & TX Wires & Bridge Instances (4-Channel Dedicated Streams)
@@ -733,13 +812,13 @@ module zu4ev_pcie_card_top #(
     // Each generated HDMI clock may start/stop during PHY programming.
     // Assert asynchronously, release only after that destination clock runs.
     xpm_cdc_async_rst #(.DEST_SYNC_FF(4), .RST_ACTIVE_HIGH(1)) u_rx_link_reset (
-        .src_arst(!video_engine_rst_n), .dest_clk(phy_rxoutclk), .dest_arst(rx_link_rst));
+        .src_arst(!sys_100m_rst_n), .dest_clk(phy_rxoutclk), .dest_arst(rx_link_rst));
     xpm_cdc_async_rst #(.DEST_SYNC_FF(4), .RST_ACTIVE_HIGH(1)) u_tx_link_reset (
-        .src_arst(!video_engine_rst_n), .dest_clk(phy_txoutclk), .dest_arst(tx_link_rst));
+        .src_arst(!sys_100m_rst_n), .dest_clk(phy_txoutclk), .dest_arst(tx_link_rst));
     xpm_cdc_async_rst #(.DEST_SYNC_FF(4), .RST_ACTIVE_HIGH(1)) u_rx_video_reset (
-        .src_arst(!video_engine_rst_n), .dest_clk(phy_rx_video_clk), .dest_arst(rx_video_rst));
+        .src_arst(!sys_100m_rst_n||!sys_300m_rst_n), .dest_clk(phy_rx_video_clk), .dest_arst(rx_video_rst));
     xpm_cdc_async_rst #(.DEST_SYNC_FF(4), .RST_ACTIVE_HIGH(1)) u_tx_video_reset (
-        .src_arst(!video_engine_rst_n), .dest_clk(phy_tx_video_clk), .dest_arst(tx_video_rst));
+        .src_arst(!sys_100m_rst_n), .dest_clk(phy_tx_video_clk), .dest_arst(tx_video_rst));
 
     wire [39:0] phy_rx_axi4s_ch0_tdata;
     wire        phy_rx_axi4s_ch0_tvalid;
@@ -877,7 +956,7 @@ module zu4ev_pcie_card_top #(
         .irq                   (hdmi_rx_irq),
         .video_clk             (phy_rx_video_clk),
         .fid                   (),
-        .s_axis_video_aresetn  (!rx_video_rst),
+        .s_axis_video_aresetn  (sys_100m_rst_n),
         .s_axis_video_aclk     (phy_rx_video_clk),
         .LINK_DATA0_IN_tdata   (phy_rx_axi4s_ch0_tdata),
         .LINK_DATA0_IN_tvalid  (phy_rx_axi4s_ch0_tvalid),
@@ -946,12 +1025,20 @@ module zu4ev_pcie_card_top #(
         .dma_data(rx_video_packed_tdata));
 
     wire [127:0] rx_csc_data;
-    wire rx_csc_valid, rx_csc_sof, rx_csc_eol, rx_csc_ready;
+    wire rx_csc_valid, rx_csc_sof, rx_csc_eol, rx_csc_ready,raw_csc_input_ready;
+    wire raw_rx_enabled;
+    xpm_cdc_single #(.DEST_SYNC_FF(4),.SRC_INPUT_REG(1)) u_raw_rx_enable(
+        .src_clk(capture_clk),.src_in(video_capture_active&&capture_rst_n&&!capture_use_tpg),
+        .dest_clk(phy_rx_video_clk),.dest_out(raw_rx_enabled));
+    // v_hdmi_rx_ss_0 VIDEO_OUT is an unpausable physical scan source: TREADY must
+    // stay constant high. Raw Video backpressure (raw_csc_input_ready) is confined
+    // to u_rx_csc / u_hdmi_rx_video_cdc_fifo and must never gate PS capture valid.
+    assign rx_ss_video_tready=1'b1;
     video_rgb_to_yuv709 u_rx_csc (
         .clk(phy_rx_video_clk), .rst_n(!rx_video_rst), .enable(rx_csc_enable),
-        .s_data(rx_video_packed_tdata), .s_valid(rx_ss_video_tvalid),
+        .s_data(rx_video_packed_tdata), .s_valid(rx_ss_video_tvalid&&raw_rx_enabled),
         .s_sof(rx_ss_video_tuser), .s_eol(rx_ss_video_tlast),
-        .s_ready(rx_ss_video_tready),
+        .s_ready(raw_csc_input_ready),
         .m_data(rx_csc_data), .m_valid(rx_csc_valid),
         .m_sof(rx_csc_sof), .m_eol(rx_csc_eol), .m_ready(rx_csc_ready));
 
@@ -965,6 +1052,80 @@ module zu4ev_pcie_card_top #(
         .m_sof(hdmi_rx_v_tuser), .m_eol(hdmi_rx_v_tlast),
         .m_ready(hdmi_rx_v_tready)
     );
+
+    // Official PS V4L2 branch: no downstream READY is connected to RX.
+    wire [63:0] fb_awaddr,fb_araddr;
+    wire [7:0] fb_arlen,pkt_arlen;
+    wire [2:0] fb_arsize,pkt_arsize;
+    wire [1:0] fb_arburst,pkt_arburst,fb_rresp,pkt_rresp;
+    wire fb_arvalid,fb_arready,fb_rlast,fb_rvalid,fb_rready;
+    wire pkt_arvalid,pkt_arready,pkt_rlast,pkt_rvalid,pkt_rready;
+    wire [39:0] pkt_araddr;
+    wire [127:0] fb_rdata,pkt_rdata;
+    assign dp_awaddr=fb_awaddr[48:0];
+    sc7f0_capture_pipeline u_ps_capture(
+        .csr_clk(pl_clk0),.csr_rst_n(sys_100m_rst_n),.mem_clk(capture_clk),.mem_rst_n(dp_mem_rst_n),
+        .rx_clk(phy_rx_video_clk),.rx_rst_n(!rx_video_rst),.rx_data(rx_ss_video_tdata),
+        .rx_valid(rx_ss_video_tvalid),.rx_sof(rx_ss_video_tuser),.rx_eol(rx_ss_video_tlast),
+        .s_awaddr(hdmi_ctl_awaddr[223:128]),.s_awvalid(hdmi_ctl_awvalid[6:4]),.s_awready(hdmi_ctl_awready[6:4]),
+        .s_wdata(hdmi_ctl_wdata[223:128]),.s_wstrb(hdmi_ctl_wstrb[27:16]),.s_wvalid(hdmi_ctl_wvalid[6:4]),.s_wready(hdmi_ctl_wready[6:4]),
+        .s_bresp(hdmi_ctl_bresp[13:8]),.s_bvalid(hdmi_ctl_bvalid[6:4]),.s_bready(hdmi_ctl_bready[6:4]),
+        .s_araddr(hdmi_ctl_araddr[223:128]),.s_arvalid(hdmi_ctl_arvalid[6:4]),.s_arready(hdmi_ctl_arready[6:4]),
+        .s_rdata(hdmi_ctl_rdata[223:128]),.s_rresp(hdmi_ctl_rresp[13:8]),.s_rvalid(hdmi_ctl_rvalid[6:4]),.s_rready(hdmi_ctl_rready[6:4]),
+        .irq(capture_irq),
+        .awaddr(fb_awaddr),.awlen(dp_awlen),.awsize(dp_awsize),.awburst(dp_awburst),.awvalid(dp_awvalid),.awready(dp_awready),
+        .wdata(dp_wdata),.wstrb(dp_wstrb),.wlast(dp_wlast),.wvalid(dp_wvalid),.wready(dp_wready),
+        .bresp(dp_bresp),.bvalid(dp_bvalid),.bready(dp_bready),
+        .araddr(fb_araddr),.arlen(fb_arlen),.arsize(fb_arsize),.arburst(fb_arburst),.arvalid(fb_arvalid),.arready(fb_arready),
+        .rdata(fb_rdata),.rresp(fb_rresp),.rlast(fb_rlast),.rvalid(fb_rvalid),.rready(fb_rready));
+    wire dp_packet_done_msi_pulse;
+    wire [31:0] dp_pkt_sub_cnt, dp_pkt_done_cnt, dp_pkt_err_cnt, dp_pkt_msi_cnt;
+    wire [31:0] dp_pkt_bytes_lo, dp_pkt_bytes_hi, dp_pkt_fsm_state, dp_pkt_last_len;
+    wire [31:0] dp_pkt_last_pts_lo, dp_pkt_last_pts_hi;
+
+    // Keep variable-length packet DMA, but retire the custom image writer.
+    sc7f0_dualpath #(.LEGACY_CAPTURE(0)) u_dualpath(
+        .csr_clk(pl_clk0),.csr_rst_n(sys_100m_rst_n),
+        .mem_clk(capture_clk),.mem_rst_n(dp_mem_rst_n),
+        .pcie_clk(pcie_user_clk),.pcie_rst_n(pcie_user_rst_n),
+        .video_data(128'd0),.video_valid(1'b0),.video_sof(1'b0),.video_eol(1'b0),
+        .s_awaddr(hdmi_ctl_awaddr[127:96]),.s_awvalid(hdmi_ctl_awvalid[3]),.s_awready(hdmi_ctl_awready[3]),
+        .s_wdata(hdmi_ctl_wdata[127:96]),.s_wstrb(hdmi_ctl_wstrb[15:12]),
+        .s_wvalid(hdmi_ctl_wvalid[3]),.s_wready(hdmi_ctl_wready[3]),
+        .s_bresp(hdmi_ctl_bresp[7:6]),.s_bvalid(hdmi_ctl_bvalid[3]),.s_bready(hdmi_ctl_bready[3]),
+        .s_araddr(hdmi_ctl_araddr[127:96]),.s_arvalid(hdmi_ctl_arvalid[3]),.s_arready(hdmi_ctl_arready[3]),
+        .s_rdata(hdmi_ctl_rdata[127:96]),.s_rresp(hdmi_ctl_rresp[7:6]),
+        .s_rvalid(hdmi_ctl_rvalid[3]),.s_rready(hdmi_ctl_rready[3]),.irq(dp_irq),
+        .awaddr(),.awlen(),.awsize(),.awburst(),.awvalid(),.awready(1'b0),
+        .wdata(),.wstrb(),.wlast(),.wvalid(),.wready(1'b0),.bresp(2'b00),.bvalid(1'b0),.bready(),
+        .araddr(pkt_araddr),.arlen(pkt_arlen),.arsize(pkt_arsize),.arburst(pkt_arburst),
+        .arvalid(pkt_arvalid),.arready(pkt_arready),.rdata(pkt_rdata),.rresp(pkt_rresp),
+        .rlast(pkt_rlast),.rvalid(pkt_rvalid),.rready(pkt_rready),
+        .packet_valid(dp_packet_valid),.packet_addr(dp_packet_addr),.packet_dw_len(dp_packet_dw_len),
+        .packet_first_be(dp_packet_first_be),.packet_last_be(dp_packet_last_be),
+        .packet_data(dp_packet_data),.packet_data_ready(dp_packet_data_ready),.packet_ack(dp_packet_ack),
+        .packet_done_msi_pulse(dp_packet_done_msi_pulse),
+        .probe_pkt_submit_cnt(dp_pkt_sub_cnt),
+        .probe_pkt_done_cnt(dp_pkt_done_cnt),
+        .probe_pkt_err_cnt(dp_pkt_err_cnt),
+        .probe_pkt_msi_cnt(dp_pkt_msi_cnt),
+        .probe_pkt_bytes_lo(dp_pkt_bytes_lo),
+        .probe_pkt_bytes_hi(dp_pkt_bytes_hi),
+        .probe_pkt_fsm_state(dp_pkt_fsm_state),
+        .probe_pkt_last_len(dp_pkt_last_len),
+        .probe_pkt_last_pts_lo(dp_pkt_last_pts_lo),
+        .probe_pkt_last_pts_hi(dp_pkt_last_pts_hi));
+    sc7f0_axi_read_arbiter u_hp1_read_arbiter(
+        .clk(capture_clk),.rst_n(dp_mem_rst_n),
+        .s0_addr({9'd0,pkt_araddr}),.s0_len(pkt_arlen),.s0_size(pkt_arsize),.s0_burst(pkt_arburst),
+        .s0_valid(pkt_arvalid),.s0_ready(pkt_arready),.s0_data(pkt_rdata),.s0_resp(pkt_rresp),
+        .s0_last(pkt_rlast),.s0_rvalid(pkt_rvalid),.s0_rready(pkt_rready),
+        .s1_addr(fb_araddr[48:0]),.s1_len(fb_arlen),.s1_size(fb_arsize),.s1_burst(fb_arburst),
+        .s1_valid(fb_arvalid),.s1_ready(fb_arready),.s1_data(fb_rdata),.s1_resp(fb_rresp),
+        .s1_last(fb_rlast),.s1_rvalid(fb_rvalid),.s1_rready(fb_rready),
+        .m_addr(dp_araddr),.m_len(dp_arlen),.m_size(dp_arsize),.m_burst(dp_arburst),
+        .m_valid(dp_arvalid),.m_ready(dp_arready),.m_data(dp_rdata),.m_resp(dp_rresp),
+        .m_last(dp_rlast),.m_rvalid(dp_rvalid),.m_rready(dp_rready));
 
     // Synchronize 5V Cable Detect & HPD status to pcie_user_clk
     (* ASYNC_REG = "TRUE" *) reg [1:0] sync_5v_det_q;
@@ -1020,6 +1181,7 @@ module zu4ev_pcie_card_top #(
     wire        tx_ss_audio_tlast;
     wire        tx_ss_locked;
 
+`ifndef SC7F0_C2H_ONLY
     v_hdmi_tx_ss_0 u_hdmi_tx_ss (
         .s_axi_cpu_aclk        (pl_clk0),
         .s_axi_cpu_aresetn     (sys_100m_rst_n),
@@ -1121,6 +1283,34 @@ module zu4ev_pcie_card_top #(
         .m_axis_audio_tready(tx_ss_audio_tready),
         .m_axis_audio_tlast(tx_ss_audio_tlast)
     );
+
+`else
+    // Shared PHY/refclks stay unchanged; TX protocol and bridges are absent.
+    assign phy_tx_axi4s_ch0_tdata=0; assign phy_tx_axi4s_ch0_tvalid=0;
+    assign phy_tx_axi4s_ch1_tdata=0; assign phy_tx_axi4s_ch1_tvalid=0;
+    assign phy_tx_axi4s_ch2_tdata=0; assign phy_tx_axi4s_ch2_tvalid=0;
+    assign tx_ddc_scl_o=0; assign tx_ddc_scl_t=1; assign tx_ddc_sda_o=0; assign tx_ddc_sda_t=1;
+    assign hdmi_tx_status_w=0; assign m_video_tready[1]=1; assign m_audio_tready[1]=1;
+    sc7f0_axil_disabled #(.ADDR_WIDTH(32)) u_disabled_hdmi_tx (.clk(pl_clk0), .rst_n(sys_100m_rst_n),
+        .s_axil_awaddr(hdmi_ctl_awaddr[95:64]),
+        .s_axil_awvalid(hdmi_ctl_awvalid[2]),
+        .s_axil_awready(hdmi_ctl_awready[2]),
+        .s_axil_wdata(hdmi_ctl_wdata[95:64]),
+        .s_axil_wstrb(hdmi_ctl_wstrb[11:8]),
+        .s_axil_wvalid(hdmi_ctl_wvalid[2]),
+        .s_axil_wready(hdmi_ctl_wready[2]),
+        .s_axil_bresp(hdmi_ctl_bresp[5:4]),
+        .s_axil_bvalid(hdmi_ctl_bvalid[2]),
+        .s_axil_bready(hdmi_ctl_bready[2]),
+        .s_axil_araddr(hdmi_ctl_araddr[95:64]),
+        .s_axil_arvalid(hdmi_ctl_arvalid[2]),
+        .s_axil_arready(hdmi_ctl_arready[2]),
+        .s_axil_rdata(hdmi_ctl_rdata[95:64]),
+        .s_axil_rresp(hdmi_ctl_rresp[5:4]),
+        .s_axil_rvalid(hdmi_ctl_rvalid[2]),
+        .s_axil_rready(hdmi_ctl_rready[2])
+    );
+`endif
 
     // =========================================================================
     // SC7F0 Hardware Probing and Frequency Meter Module
@@ -1265,6 +1455,8 @@ module zu4ev_pcie_card_top #(
     wire [31:0] vch0_ctrl_w;
 `ifdef SC7F0_DEBUG_ONLY
     wire ch0_use_tpg = 1'b1;
+`elsif SC7F0_C2H_ONLY
+    wire ch0_use_tpg = 1'b0;
 `else
     wire ch0_use_tpg = (vch0_ctrl_w[21:20] == 2'b01) ||
                        (!sync_5v_det_q[1] && (vch0_ctrl_w[21:20] != 2'b10));
@@ -1272,12 +1464,12 @@ module zu4ev_pcie_card_top #(
 
     // Source changes are allowed only while stopped. Audio retains the
     // PCIe-domain selector; video gets its own synchronized selector.
-    wire capture_use_tpg;
     xpm_cdc_single #(.DEST_SYNC_FF(4), .SRC_INPUT_REG(1)) u_capture_source (
         .src_clk(pcie_user_clk), .src_in(ch0_use_tpg),
         .dest_clk(capture_clk), .dest_out(capture_use_tpg));
     wire [127:0] tpg_cdc_data;
     wire tpg_cdc_valid, tpg_cdc_sof, tpg_cdc_eol, tpg_cdc_ready;
+`ifndef SC7F0_C2H_ONLY
     video_axis_async_fifo #(.DEPTH(32), .MEMORY_TYPE("distributed")) u_tpg_video_cdc (
         .s_clk(pcie_user_clk), .s_rst_n(video_engine_rst_n),
         .s_data(tpg_capture_tdata), .s_valid(tpg_capture_tvalid),
@@ -1287,6 +1479,11 @@ module zu4ev_pcie_card_top #(
         .m_data(tpg_cdc_data), .m_valid(tpg_cdc_valid),
         .m_sof(tpg_cdc_sof), .m_eol(tpg_cdc_eol), .m_ready(tpg_cdc_ready)
     );
+`else
+    assign tpg_capture_tready=1; assign tpg_cdc_data=0; assign tpg_cdc_valid=0;
+    assign tpg_cdc_sof=0; assign tpg_cdc_eol=0;
+`endif
+
     wire [127:0] video_ch0_mux_tdata  = capture_use_tpg ? tpg_cdc_data  : hdmi_rx_v_tdata;
     wire         video_ch0_mux_tvalid = capture_use_tpg ? tpg_cdc_valid : hdmi_rx_v_tvalid;
     wire         video_ch0_mux_tlast  = capture_use_tpg ? tpg_cdc_eol   : hdmi_rx_v_tlast;
@@ -1309,12 +1506,21 @@ module zu4ev_pcie_card_top #(
     assign s_video_tuser[0]     = video_ch0_mux_tuser;
     assign m_video_tready[0]    = 1'b1;
 
+`ifdef SC7F0_C2H_ONLY
+    assign s_audio_tdata[31:0]=hdmi_rx_a_tdata;
+    assign s_audio_tvalid[0]=(audio_capture_control[4] || audio_capture_control[5]) && hdmi_rx_a_tvalid;
+    assign s_audio_tlast[0]=hdmi_rx_a_tlast;
+    assign hdmi_rx_a_tready=(audio_capture_control[4] || audio_capture_control[5]) ? s_audio_tready[0] : 1'b1;
+    assign m_audio_tready[0]=1;
+`else
     // ADEV0 CTRL[4] is independent of video: 0=legacy TPG raw, 1=HDMI PCM.
     assign s_audio_tdata[31:0] = (audio_capture_control[4] || audio_capture_control[5]) ? hdmi_rx_a_tdata : aud_pat_axis_tdata;
     assign s_audio_tvalid[0] = (audio_capture_control[4] || audio_capture_control[5]) ? hdmi_rx_a_tvalid : aud_pat_axis_tvalid;
     assign s_audio_tlast[0] = audio_capture_control[4] ? hdmi_rx_a_tlast : aud_pat_axis_tlast;
     assign hdmi_rx_a_tready = (audio_capture_control[4] || audio_capture_control[5]) ? s_audio_tready[0] : 1'b1;
     assign m_audio_tready[0]    = 1'b1;
+
+`endif
 
     // Channel 1 (HDMI TX):
     assign s_video_tdata[255:128] = 128'd0;
@@ -1326,6 +1532,13 @@ module zu4ev_pcie_card_top #(
     assign s_audio_tvalid[1]      = 1'b0;
     assign s_audio_tlast[1]       = 1'b0;
 
+`ifdef SC7F0_C2H_ONLY
+    assign s_video_tdata[511:256]=0;
+    assign s_video_tvalid[3:2]=0; assign s_video_tlast[3:2]=0; assign s_video_tuser[3:2]=0;
+    assign m_video_tready[3:2]=2'b11;
+    assign s_audio_tdata[127:64]=0; assign s_audio_tvalid[3:2]=0; assign s_audio_tlast[3:2]=0;
+    assign m_audio_tready[3:2]=2'b11; assign aud_pat_axis_tready=1;
+`else
     // Channel 2 (Internal Hardware Loopback):
     assign s_video_tdata[383:256] = m_video_tdata[383:256];
     assign s_video_tvalid[2]      = m_video_tvalid[2];
@@ -1352,6 +1565,7 @@ module zu4ev_pcie_card_top #(
     assign m_audio_tready[3]      = 1'b1;
 
     // =========================================================================
+`endif
     // PCIe AXI-Stream CQ / CC / RQ / RC Wires (256-bit)
     // =========================================================================
     wire [PCIE_DATA_WIDTH-1:0] m_axis_cq_tdata;
@@ -1861,7 +2075,23 @@ module zu4ev_pcie_card_top #(
         .NUM_AUDIO_CH(NUM_AUDIO_CH),
         .VIDEO_DATA_WIDTH(VIDEO_DATA_WIDTH),
         .AUDIO_DATA_WIDTH(AUDIO_DATA_WIDTH)
+        ,.ENABLE_PACKET_C2H(1)
     ) u_dma_top (
+        .packet_req_valid(dp_packet_valid),.packet_req_addr(dp_packet_addr),
+        .packet_req_dw_len(dp_packet_dw_len),.packet_req_data(dp_packet_data),
+        .packet_req_first_be(dp_packet_first_be),.packet_req_last_be(dp_packet_last_be),
+        .packet_req_data_ready(dp_packet_data_ready),.packet_req_ack(dp_packet_ack),
+        .packet_done_irq(dp_packet_done_msi_pulse),
+        .in_pkt_submit_cnt(dp_pkt_sub_cnt),
+        .in_pkt_done_cnt(dp_pkt_done_cnt),
+        .in_pkt_err_cnt(dp_pkt_err_cnt),
+        .in_pkt_msi_cnt(dp_pkt_msi_cnt),
+        .in_pkt_bytes_lo(dp_pkt_bytes_lo),
+        .in_pkt_bytes_hi(dp_pkt_bytes_hi),
+        .in_pkt_fsm_state(dp_pkt_fsm_state),
+        .in_pkt_last_len(dp_pkt_last_len),
+        .in_pkt_last_pts_lo(dp_pkt_last_pts_lo),
+        .in_pkt_last_pts_hi(dp_pkt_last_pts_hi),
         .clk(pcie_user_clk),
         .rst_n(pcie_user_rst_n),
         .pl_clk0(pl_clk0),
@@ -2067,6 +2297,26 @@ module zu4ev_pcie_card_top #(
     // =========================================================================
     zu4ev_ps_bd_wrapper u_zu4ev_ps_bd (
 `ifndef SC7F0_DEBUG_ONLY
+        .dp_mem_clk(capture_clk),
+        .S_AXI_HP1_FPD_awaddr(dp_awaddr),.S_AXI_HP1_FPD_awlen(dp_awlen),
+        .S_AXI_HP1_FPD_awsize(dp_awsize),.S_AXI_HP1_FPD_awburst(dp_awburst),
+        .S_AXI_HP1_FPD_awid(6'd0),.S_AXI_HP1_FPD_awlock(1'b0),
+        .S_AXI_HP1_FPD_awcache(4'd3),.S_AXI_HP1_FPD_awprot(3'd0),
+        .S_AXI_HP1_FPD_awqos(4'd0),.S_AXI_HP1_FPD_awuser(1'b0),
+        .S_AXI_HP1_FPD_awvalid(dp_awvalid),.S_AXI_HP1_FPD_awready(dp_awready),
+        .S_AXI_HP1_FPD_wdata(dp_wdata),.S_AXI_HP1_FPD_wstrb(dp_wstrb),
+        .S_AXI_HP1_FPD_wlast(dp_wlast),.S_AXI_HP1_FPD_wvalid(dp_wvalid),
+        .S_AXI_HP1_FPD_wready(dp_wready),.S_AXI_HP1_FPD_bid(),
+        .S_AXI_HP1_FPD_bresp(dp_bresp),.S_AXI_HP1_FPD_bvalid(dp_bvalid),.S_AXI_HP1_FPD_bready(dp_bready),
+        .S_AXI_HP1_FPD_araddr(dp_araddr),.S_AXI_HP1_FPD_arlen(dp_arlen),
+        .S_AXI_HP1_FPD_arsize(dp_arsize),.S_AXI_HP1_FPD_arburst(dp_arburst),
+        .S_AXI_HP1_FPD_arid(6'd0),.S_AXI_HP1_FPD_arlock(1'b0),
+        .S_AXI_HP1_FPD_arcache(4'd3),.S_AXI_HP1_FPD_arprot(3'd0),
+        .S_AXI_HP1_FPD_arqos(4'd0),.S_AXI_HP1_FPD_aruser(1'b0),
+        .S_AXI_HP1_FPD_arvalid(dp_arvalid),.S_AXI_HP1_FPD_arready(dp_arready),
+        .S_AXI_HP1_FPD_rdata(dp_rdata),.S_AXI_HP1_FPD_rid(),
+        .S_AXI_HP1_FPD_rresp(dp_rresp),.S_AXI_HP1_FPD_rlast(dp_rlast),
+        .S_AXI_HP1_FPD_rvalid(dp_rvalid),.S_AXI_HP1_FPD_rready(dp_rready),
         // M_AXI_HPM1_FPD (full AXI4 PS master -> protocol converter -> HDMI crossbar)
         .M_AXI_HPM1_FPD_araddr(ps_hpm1_araddr),
         .M_AXI_HPM1_FPD_arburst(ps_hpm1_arburst),
@@ -2115,7 +2365,7 @@ module zu4ev_pcie_card_top #(
 `else
         // Both HDMI IRQs originate in the PS pl_clk0 AXI-Lite domain.
         // [0]=existing PS notification, [1]=VPHY, [2]=HDMI RX SS.
-        .pl_ps_irq0({hdmi_rx_irq, hdmi_phy_irq, ps_irq_pulse_w}),
+        .pl_ps_irq0({capture_irq,dp_irq,hdmi_rx_irq,hdmi_phy_irq,ps_irq_pulse_w}),
 `endif
 
         // M_AXI_HPM0_FPD (full AXI4 PS master -> protocol converter)

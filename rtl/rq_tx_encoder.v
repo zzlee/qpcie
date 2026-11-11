@@ -11,7 +11,8 @@
 module rq_tx_encoder #(
     parameter DATA_WIDTH = 128,
     parameter KEEP_WIDTH = (DATA_WIDTH == 256) ? 8 : (DATA_WIDTH / 8),
-    parameter [15:0] REQUESTER_ID = 16'h0001
+    parameter [15:0] REQUESTER_ID = 16'h0001,
+    parameter ENABLE_C2H_BYTE_ENABLE = 0
 )(
     input wire clk, input wire rst_n,
     input wire [15:0] requester_id,
@@ -29,7 +30,9 @@ module rq_tx_encoder #(
     input wire [10:0] h2c_req_dw_len, input wire [7:0] h2c_req_tag, output wire h2c_req_ack,
     input wire c2h_req_valid, input wire [63:0] c2h_req_addr,
     input wire [10:0] c2h_req_dw_len, input wire [DATA_WIDTH-1:0] c2h_req_data,
-    input wire c2h_req_last, output wire c2h_req_data_ready,
+    input wire c2h_req_last,
+    input wire [3:0] c2h_req_first_be, c2h_req_last_be,
+    output wire c2h_req_data_ready,
     output wire c2h_req_ack
 );
     wire unused_c2h_req_last = c2h_req_last;
@@ -37,7 +40,9 @@ module rq_tx_encoder #(
     wire [3:0] desc_last_be = (desc_req_dw_len > 11'd1) ? 4'hF : 4'h0;
     wire [3:0] sg_last_be   = (sg_req_dw_len > 11'd1)   ? 4'hF : 4'h0;
     wire [3:0] h2c_last_be  = (h2c_req_dw_len > 11'd1)  ? 4'hF : 4'h0;
-    wire [3:0] c2h_last_be  = (c2h_req_dw_len > 11'd1)  ? 4'hF : 4'h0;
+    wire [3:0] c2h_first_be = ENABLE_C2H_BYTE_ENABLE ? c2h_req_first_be : 4'hf;
+    wire [3:0] c2h_last_be = c2h_req_dw_len>1 ?
+        (ENABLE_C2H_BYTE_ENABLE ? c2h_req_last_be : 4'hf) : 4'h0;
 
     generate
         if (DATA_WIDTH == 256) begin : gen_256b
@@ -57,7 +62,7 @@ module rq_tx_encoder #(
             reg irq_ack, desc_ack, sg_ack, h2c_ack, c2h_ack;
 
             reg [127:0] hold_hi;
-            reg [3:0]   rq_beats_left;
+            reg [10:0] rq_payload_left;
 
             assign m_axis_rq_tdata  = rq_tdata;
             assign m_axis_rq_tvalid = rq_tvalid;
@@ -70,13 +75,37 @@ module rq_tx_encoder #(
             assign h2c_req_ack      = h2c_ack;
             assign c2h_req_ack      = c2h_ack;
 
-            wire c2h_req_active = c2h_req_valid && !c2h_ack &&
-                                  !irq_req_valid && !desc_req_valid &&
-                                  !sg_req_valid && !h2c_req_valid;
+            // "Taken by the idle encoder" must be evaluated exactly like the
+            // S_IDLE branch chain below, i.e. valid AND its own ack is not
+            // already in flight. Sources hold VALID for a further cycle after
+            // the registered ack, so gating data_ready on the bare *_req_valid
+            // levels disagreed with the branch chain during that overlap:
+            // the encoder latched the FWFT head beat into rq_tdata while
+            // c2h_req_data_ready stayed LOW, so the source FIFO never popped
+            // it. The head beat was then re-read as the next payload beat and
+            // every later header/payload pair of that TLP - plus one residue
+            // beat left for the next TLP - shifted by a whole 256-bit beat.
+            wire idle_take_irq  = irq_req_valid  && !irq_ack;
+            wire idle_take_desc = desc_req_valid && !desc_ack;
+            wire idle_take_sg   = sg_req_valid   && !sg_ack;
+            wire idle_take_h2c  = h2c_req_valid  && !h2c_ack;
+            wire idle_take_c2h  = c2h_req_valid  && !c2h_ack &&
+                                  (c2h_req_dw_len != 11'd0) &&
+                                  !(idle_take_irq  || idle_take_desc ||
+                                    idle_take_sg   || idle_take_h2c);
 
+            // Only edges where c2h_req_data really is latched may pop the
+            // source. In S_MWR_BURST the four held DWORDs precede the next
+            // source beat, so a beat is consumed only while >4 DWORDs remain;
+            // a 1..8 DWORD tail is emitted from hold_hi without a pop.
+            wire mwr_burst_take = (state == S_MWR_BURST) && rq_tvalid &&
+                                  m_axis_rq_tready && !rq_tlast &&
+                                  (rq_payload_left > 11'd4);
+
+            // Pop == sample by construction: this is the union of the two and
+            // only two edges on which the C2H datapath consumes a source beat.
             assign c2h_req_data_ready =
-                (state == S_IDLE && c2h_req_active) ||
-                (state == S_MWR_BURST && m_axis_rq_tready && rq_beats_left > 4'd1);
+                (state == S_IDLE && idle_take_c2h) || mwr_burst_take;
 
             always @(posedge clk or negedge rst_n) begin
                 if (!rst_n) begin
@@ -92,7 +121,7 @@ module rq_tx_encoder #(
                     h2c_ack       <= 1'b0;
                     c2h_ack       <= 1'b0;
                     hold_hi       <= 128'd0;
-                    rq_beats_left <= 4'd0;
+                    rq_payload_left <= 11'd0;
                 end else begin
                     irq_ack  <= 1'b0;
                     desc_ack <= 1'b0;
@@ -107,7 +136,7 @@ module rq_tx_encoder #(
                             rq_tdata  <= {DATA_WIDTH{1'b0}};
                             rq_tuser  <= 62'd0;
 
-                            if (irq_req_valid && !irq_req_ack) begin
+                            if (idle_take_irq) begin
                                 rq_tdata[74:64]   <= 11'd0;
                                 rq_tdata[78:75]   <= 4'b0010;
                                 rq_tdata[95:80]   <= active_requester_id;
@@ -117,7 +146,7 @@ module rq_tx_encoder #(
                                 rq_tlast          <= 1'b1;
                                 rq_tvalid         <= 1'b1;
                                 state             <= S_SEND_IRQ;
-                            end else if (desc_req_valid && !desc_req_ack) begin
+                            end else if (idle_take_desc) begin
                                 rq_tdata[63:0]   <= desc_req_addr;
                                 rq_tdata[74:64]  <= desc_req_dw_len;
                                 rq_tdata[78:75]  <= 4'b0000;
@@ -128,7 +157,7 @@ module rq_tx_encoder #(
                                 rq_tlast         <= 1'b1;
                                 rq_tvalid        <= 1'b1;
                                 state            <= S_SEND_DESC;
-                            end else if (sg_req_valid && !sg_req_ack) begin
+                            end else if (idle_take_sg) begin
                                 rq_tdata[63:0]   <= sg_req_addr;
                                 rq_tdata[74:64]  <= sg_req_dw_len;
                                 rq_tdata[78:75]  <= 4'b0000;
@@ -139,7 +168,7 @@ module rq_tx_encoder #(
                                 rq_tlast         <= 1'b1;
                                 rq_tvalid        <= 1'b1;
                                 state            <= S_SEND_SG;
-                            end else if (h2c_req_valid && !h2c_req_ack) begin
+                            end else if (idle_take_h2c) begin
                                 rq_tdata[63:0]   <= h2c_req_addr;
                                 rq_tdata[74:64]  <= h2c_req_dw_len;
                                 rq_tdata[78:75]  <= 4'b0000;
@@ -150,7 +179,7 @@ module rq_tx_encoder #(
                                 rq_tlast         <= 1'b1;
                                 rq_tvalid        <= 1'b1;
                                 state            <= S_SEND_H2C;
-                            end else if (c2h_req_valid && !c2h_req_ack && c2h_req_dw_len != 0) begin
+                            end else if (idle_take_c2h) begin
                                 rq_tdata[63:0]    <= c2h_req_addr;
                                 rq_tdata[74:64]   <= c2h_req_dw_len;
                                 rq_tdata[78:75]   <= 4'b0001; // MWr
@@ -158,7 +187,7 @@ module rq_tx_encoder #(
                                 rq_tdata[103:96]  <= 8'd0;
                                 rq_tdata[127:104] <= 24'd0;
                                 rq_tdata[255:128] <= c2h_req_data[127:0];
-                                rq_tuser          <= {54'd0, c2h_last_be, 4'hF};
+                                rq_tuser          <= {54'd0, c2h_last_be, c2h_first_be};
                                 rq_tvalid         <= 1'b1;
 
                                 if (c2h_req_dw_len <= 11'd4) begin
@@ -166,13 +195,11 @@ module rq_tx_encoder #(
                                                      (c2h_req_dw_len == 2) ? 8'h3F :
                                                      (c2h_req_dw_len == 3) ? 8'h7F : 8'hFF;
                                     rq_tlast      <= 1'b1;
-                                    rq_beats_left <= 4'd0;
+                                    rq_payload_left <= 11'd0;
                                 end else begin
                                     rq_tkeep      <= 8'hFF;
                                     rq_tlast      <= 1'b0;
-                                    rq_beats_left <= (c2h_req_dw_len == 11'd64) ? 4'd8 :
-                                                     (c2h_req_dw_len == 11'd32) ? 4'd4 :
-                                                     ((c2h_req_dw_len - 11'd4 + 11'd7) / 8);
+                                    rq_payload_left <= c2h_req_dw_len - 11'd4;
                                     hold_hi       <= c2h_req_data[255:128];
                                 end
                                 state <= S_MWR_BURST;
@@ -216,27 +243,21 @@ module rq_tx_encoder #(
                         end
 
                         S_MWR_BURST: begin
-                            if (m_axis_rq_tready) begin
-                                if (rq_beats_left == 4'd0) begin
-                                    c2h_ack   <= 1'b1;
-                                    rq_tvalid <= 1'b0;
-                                    rq_tlast  <= 1'b0;
-                                    state     <= S_IDLE;
-                                end else if (rq_beats_left == 4'd1) begin
-                                    rq_tdata      <= {{128{1'b0}}, hold_hi};
-                                    rq_tuser      <= 62'd0;
-                                    rq_tkeep      <= 8'h0F;
-                                    rq_tlast      <= 1'b1;
-                                    rq_tvalid     <= 1'b1;
-                                    rq_beats_left <= 4'd0;
+                            if (rq_tvalid && m_axis_rq_tready) begin
+                                if (rq_tlast) begin
+                                    c2h_ack <= 1'b1;
+                                    rq_tvalid <= 1'b0; rq_tlast <= 1'b0; state <= S_IDLE;
                                 end else begin
-                                    rq_tdata      <= {c2h_req_data[127:0], hold_hi};
-                                    rq_tuser      <= 62'd0;
-                                    hold_hi       <= c2h_req_data[255:128];
-                                    rq_tkeep      <= 8'hFF;
-                                    rq_tlast      <= 1'b0;
-                                    rq_tvalid     <= 1'b1;
-                                    rq_beats_left <= rq_beats_left - 1'b1;
+                                    // Four held DWORDs precede the next source beat.
+                                    // A variable-length tail can contain 1..8 DWORDs.
+                                    rq_tdata <= rq_payload_left>4 ?
+                                        {c2h_req_data[127:0],hold_hi} : {128'd0,hold_hi};
+                                    if(rq_payload_left>4)hold_hi<=c2h_req_data[255:128];
+                                    rq_tuser<=0;rq_tvalid<=1;
+                                    rq_tkeep<=rq_payload_left>=8 ? 8'hff :
+                                        ((9'd1<<rq_payload_left)-1'b1);
+                                    rq_tlast<=rq_payload_left<=8;
+                                    rq_payload_left<=rq_payload_left>8 ? rq_payload_left-8 : 0;
                                 end
                             end
                         end
@@ -265,6 +286,9 @@ module rq_tx_encoder #(
             wire [10:0] next_payload_dw =
                 (c2h_dw_remaining > DATA_DWORDS) ? DATA_DWORDS : c2h_dw_remaining;
 
+            // 128-bit path pops only in the two payload states, which the C2H
+            // branch alone can enter (IDLE writes a header-only beat), so the
+            // pop edges and the rq_tdata load edges here already coincide.
             assign c2h_req_data_ready =
                 (state == SEND_MWR_HEADER && rq_tvalid && m_axis_rq_tready) ||
                 (state == SEND_MWR_DATA && rq_tvalid && m_axis_rq_tready &&
@@ -374,7 +398,7 @@ module rq_tx_encoder #(
                                 rq_tdata[78:75] <= 4'b0001;
                                 rq_tdata[95:80] <= active_requester_id;
                                 rq_tdata[103:96] <= 8'd0;
-                                rq_tuser <= {54'd0, c2h_last_be, 4'hF};
+                                rq_tuser <= {54'd0, c2h_last_be, c2h_first_be};
                                 rq_tkeep <= {KEEP_WIDTH{1'b1}};
                                 rq_tlast <= 1'b0;
                                 rq_tvalid <= 1'b1;

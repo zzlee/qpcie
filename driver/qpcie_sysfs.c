@@ -830,6 +830,131 @@ static ssize_t hdmi_status_show(struct device *dev, struct device_attribute *att
 }
 static DEVICE_ATTR_RO(hdmi_status);
 
+/* ============================================================================
+ * Packet DMA (SC7F0 Path B) Telemetry Probes Sysfs Attribute
+ * ============================================================================ */
+static ssize_t packet_stats_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+    struct pci_dev *pdev = to_pci_dev(dev);
+    struct qpcie_dev *qdev = pci_get_drvdata(pdev);
+    u32 submit_cnt = 0, done_cnt = 0, err_cnt = 0, msi_cnt = 0;
+    u32 bytes_lo = 0, bytes_hi = 0, fsm_state = 0, last_len = 0;
+    u32 pts_lo = 0, pts_hi = 0;
+    u64 total_bytes = 0, last_pts = 0;
+
+    if (qdev && qdev->bar0_mmio) {
+        void __iomem *base = qdev->bar0_mmio + REG_VCH_BASE(1);
+        submit_cnt = ioread32(base + REG_VCH_OFFSET_PKT_SUBMIT_CNT);
+        done_cnt   = ioread32(base + REG_VCH_OFFSET_PKT_DONE_CNT);
+        err_cnt    = ioread32(base + REG_VCH_OFFSET_PKT_ERR_CNT);
+        msi_cnt    = ioread32(base + REG_VCH_OFFSET_PKT_MSI_CNT);
+        bytes_lo   = ioread32(base + REG_VCH_OFFSET_PKT_BYTES_LO);
+        bytes_hi   = ioread32(base + REG_VCH_OFFSET_PKT_BYTES_HI);
+        fsm_state  = ioread32(base + REG_VCH_OFFSET_PKT_FSM_STATE);
+        last_len   = ioread32(base + REG_VCH_OFFSET_PKT_LAST_LEN);
+        pts_lo     = ioread32(base + REG_VCH_OFFSET_PKT_LAST_PTS_LO);
+        pts_hi     = ioread32(base + REG_VCH_OFFSET_PKT_LAST_PTS_HI);
+        total_bytes = ((u64)bytes_hi << 32) | bytes_lo;
+        last_pts    = ((u64)pts_hi << 32) | pts_lo;
+    }
+
+    return sysfs_emit(buf,
+                      "submit_cnt: %u\n"
+                      "done_cnt: %u\n"
+                      "err_cnt: %u\n"
+                      "msi_cnt: %u\n"
+                      "bytes_transferred: %llu\n"
+                      "fsm_state: 0x%02x\n"
+                      "last_len: %u\n"
+                      "last_pts: %llu\n",
+                      submit_cnt, done_cnt, err_cnt, msi_cnt,
+                      total_bytes, fsm_state & 0xFF, last_len, last_pts);
+}
+static DEVICE_ATTR_RO(packet_stats);
+
+static ssize_t vcu_encoder_config_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+    struct pci_dev *pdev = to_pci_dev(dev);
+    struct qpcie_dev *qdev = pci_get_drvdata(pdev);
+    struct qpcie_vcu_encoder_config cfg;
+    struct qpcie_v4l2_channel *vch;
+    void __iomem *target;
+    u32 *words;
+    int i, count;
+
+    if (!qdev)
+        return -ENODEV;
+
+    vch = &qdev->v4l2_ch[1];
+    cfg = vch->vcu_cfg;
+
+    /* Read back PS feedback if BAR0 is available */
+    if (qdev->bar0_mmio) {
+        target = qdev->bar0_mmio + QPCIE_BAR0_VCU_CFG_OFFSET;
+        words = (u32 *)&cfg;
+        count = sizeof(struct qpcie_vcu_encoder_config) / sizeof(u32);
+        for (i = 0; i < count; i++)
+            words[i] = ioread32(target + (i * 4));
+    }
+
+    return sysfs_emit(buf,
+        "=== SC7F0 VCU Hardware Video Encoder Configuration ===\n"
+        "Magic:             0x%08X (Expected 0x%08X)\n"
+        "Config Sequence:   %u (PS Ack: %u)\n"
+        "Codec Selected:    %s\n"
+        "Bitrate Mode:      %s\n"
+        "Target Bitrate:    %u bps (%u kbps)\n"
+        "Peak Bitrate:      %u bps (%u kbps)\n"
+        "Frame RC Enable:   %u\n"
+        "MB/CTU RC Enable:  %u\n"
+        "Constant Quality:  %u\n"
+        "GOP Size:          %u\n"
+        "B-Frames:          %u\n"
+        "Repeat Seq Header: %u\n"
+        "Header Mode:       %s\n"
+        "H.264 Profile:     %u\n"
+        "H.264 Level:       %u\n"
+        "H.264 Entropy:     %s\n"
+        "H.264 QP (min/max/I/P/B): %u / %u / %u / %u / %u\n"
+        "H.264 CPB Size:    %u kbits\n"
+        "H.264 8x8 Trans:   %u\n"
+        "HEVC Profile:      %u\n"
+        "HEVC Level:        %u\n"
+        "HEVC Tier:         %s\n"
+        "HEVC QP (min/max/I/P/B): %u / %u / %u / %u / %u\n"
+        "HEVC Refresh Type: %s\n"
+        "HEVC Wavefront:    %u\n"
+        "Multi-Slice Mode:  %u (max_bytes=%u, max_mb=%u)\n"
+        "Intra Refresh MBs: %u\n"
+        "PS Encoder Status: %u (%s)\n"
+        "PS Measured FPS:   %u.%02u\n"
+        "PS Measured Bps:   %u bps\n",
+        cfg.magic, QPCIE_VCU_CFG_MAGIC,
+        cfg.config_seq, cfg.ps_ack_seq,
+        cfg.codec_type == 1 ? "HEVC / H.265" : "AVC / H.264",
+        cfg.bitrate_mode == 1 ? "CBR" : (cfg.bitrate_mode == 2 ? "CQ" : "VBR"),
+        cfg.bitrate, cfg.bitrate / 1000,
+        cfg.bitrate_peak, cfg.bitrate_peak / 1000,
+        cfg.frame_rc_enable, cfg.mb_rc_enable, cfg.const_quality,
+        cfg.gop_size, cfg.b_frames, cfg.repeat_seq_header,
+        cfg.header_mode == 1 ? "Joined with 1st Frame" : "Separate",
+        cfg.h264_profile, cfg.h264_level,
+        cfg.h264_entropy_mode == 1 ? "CABAC" : "CAVLC",
+        cfg.h264_min_qp, cfg.h264_max_qp, cfg.h264_i_qp, cfg.h264_p_qp, cfg.h264_b_qp,
+        cfg.h264_cpb_size, cfg.h264_8x8_transform,
+        cfg.hevc_profile, cfg.hevc_level,
+        cfg.hevc_tier == 1 ? "High Tier" : "Main Tier",
+        cfg.hevc_min_qp, cfg.hevc_max_qp, cfg.hevc_i_qp, cfg.hevc_p_qp, cfg.hevc_b_qp,
+        cfg.hevc_refresh_type == 2 ? "IDR" : (cfg.hevc_refresh_type == 1 ? "CRA" : "None"),
+        cfg.hevc_wavefront,
+        cfg.slice_mode, cfg.slice_max_bytes, cfg.slice_max_mb,
+        cfg.intra_refresh_mb,
+        cfg.ps_encoder_status, cfg.ps_encoder_status == 1 ? "Encoding" : "Idle",
+        cfg.ps_fps_actual / 100, cfg.ps_fps_actual % 100,
+        cfg.ps_bitrate_actual);
+}
+static DEVICE_ATTR_RO(vcu_encoder_config);
+
 /* Sysfs Attribute Group Table */
 static struct attribute *qpcie_sysfs_attrs[] = {
     &dev_attr_tpg_pattern.attr,
@@ -853,6 +978,8 @@ static struct attribute *qpcie_sysfs_attrs[] = {
     &dev_attr_aud_sample_cnt.attr,
     &dev_attr_version.attr,
     &dev_attr_hdmi_status.attr,
+    &dev_attr_packet_stats.attr,
+    &dev_attr_vcu_encoder_config.attr,
     /* Phase 5 per-channel sysfs */
     &dev_attr_ch0_frames.attr,
     &dev_attr_ch0_drops.attr,
@@ -865,8 +992,20 @@ static struct attribute *qpcie_sysfs_attrs[] = {
     NULL,
 };
 
+static umode_t qpcie_sysfs_visible(struct kobject *kobj, struct attribute *attr, int index)
+{
+    struct qpcie_dev *qdev = pci_get_drvdata(to_pci_dev(kobj_to_dev(kobj)));
+
+    if (qdev && qdev->c2h_only &&
+        (!strncmp(attr->name, "tpg_", 4) || !strncmp(attr->name, "aud_", 4) ||
+         !strncmp(attr->name, "ch1_", 4)))
+        return 0;
+    return attr->mode;
+}
+
 static const struct attribute_group qpcie_sysfs_attr_group = {
     .attrs = qpcie_sysfs_attrs,
+    .is_visible = qpcie_sysfs_visible,
 };
 
 int qpcie_sysfs_init(struct qpcie_dev *qdev)

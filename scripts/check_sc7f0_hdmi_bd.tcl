@@ -9,7 +9,8 @@ cd $scratch
 create_project -in_memory -part xczu4ev-fbvb900-2-e
 source $root/scripts/create_zu4ev_ps_bd.tcl
 create_zu4ev_ps_bd $hdmi_control
-set irq_width [expr {$hdmi_control ? 3 : 1}]
+# [0]=upgrade/mailbox, [1]=HDMI PHY, [2]=HDMI RX SS, [3]=DP DMA, [4]=capture.
+set irq_width [expr {$hdmi_control ? 5 : 1}]
 if {[get_property CONFIG.PSU__NUM_F2P0__INTR__INPUTS [get_bd_cells zynq_ultra_ps_e_0]] != $irq_width ||
     [get_property LEFT [get_bd_ports pl_ps_irq0]] != $irq_width - 1 ||
     [get_property RIGHT [get_bd_ports pl_ps_irq0]] != 0} {

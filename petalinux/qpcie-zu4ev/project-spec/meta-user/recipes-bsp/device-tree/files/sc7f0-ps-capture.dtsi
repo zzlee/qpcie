@@ -1,0 +1,113 @@
+/* ONLY for official-capture hardware0x26102801+: new apertures/IRQ/reset ABI.
+ * Never enable on26102702/26102703. Imported XSA and BOOT must match.
+ */
+#include <dt-bindings/gpio/gpio.h>
+/* Stable DT enums from2023.2 xilinx-vip.h: RBG=2, YUV_420=3.
+ * DTG's standalone include tree does not ship that kernel-only header. */
+/ {
+	/* Physical Si5341 OUT8=300MHz / BUFGCE_DIV1, independent of PCIe. */
+	sc7f0_capture_clk: capture-clock {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <300000000>;
+	};
+	/* VIPP becomes the sole master binding the HDMI RX subdevice. */
+	qpcie_v4l2_bridge { status = "disabled"; };
+	sc7f0_ps_video: video-capture {
+		compatible = "xlnx,video";
+		dmas = <&sc7f0_ps_frmbuf 0>;
+		dma-names = "port0";
+		yuan,frame-tap = <&sc7f0_frame_tap>;
+		status = "okay";
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			port@0 {
+				reg = <0>;
+				direction = "input";
+				sc7f0_capture_in: endpoint { remote-endpoint = <&sc7f0_csc_out>; };
+			};
+		};
+	};
+
+};
+&sc7f0_hdmirx {
+	ports {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		port@0 {
+			reg = <0>;
+			xlnx,video-format = <2>;
+			xlnx,video-width = <8>;
+			sc7f0_rx_to_tap: endpoint { remote-endpoint = <&sc7f0_tap_in>; };
+		};
+	};
+};
+&amba_pl {
+	sc7f0_frame_tap: frame-tap@b0070000 {
+		compatible = "yuan,sc7f0-frame-tap-1.0";
+		reg = <0 0xb0070000 0 0x1000>;
+		clocks = <&zynqmp_clk 71>; /* CSR100MHz; timestamp rate is150MHz. */
+		status = "okay";
+		gpio-controller;
+		#gpio-cells = <2>;
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			port@0 {
+				reg = <0>;
+				xlnx,video-format = <2>;
+				xlnx,video-width = <8>;
+				sc7f0_tap_in: endpoint { remote-endpoint = <&sc7f0_rx_to_tap>; };
+			};
+			port@1 {
+				reg = <1>;
+				xlnx,video-format = <2>;
+				xlnx,video-width = <8>;
+				sc7f0_tap_out: endpoint { remote-endpoint = <&sc7f0_csc_in>; };
+			};
+		};
+	};
+	sc7f0_ps_csc: vpss-csc@b0060000 {
+		compatible = "xlnx,v-vpss-csc";
+		reg = <0 0xb0060000 0 0x10000>;
+		clocks = <&sc7f0_capture_clk>;
+		reset-gpios = <&sc7f0_frame_tap 1 GPIO_ACTIVE_LOW>;
+		xlnx,max-width = <4096>;
+		xlnx,max-height = <2160>;
+		status = "okay";
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			port@0 {
+				reg = <0>;
+				xlnx,video-format = <2>;
+				xlnx,video-width = <8>;
+				sc7f0_csc_in: endpoint { remote-endpoint = <&sc7f0_tap_out>; };
+			};
+			port@1 {
+				reg = <1>;
+				xlnx,video-format = <3>;
+				xlnx,video-width = <8>;
+				sc7f0_csc_out: endpoint { remote-endpoint = <&sc7f0_capture_in>; };
+			};
+		};
+	};
+	sc7f0_ps_frmbuf: framebuffer@b0050000 {
+		compatible = "xlnx,axi-frmbuf-wr-v2.2";
+		reg = <0 0xb0050000 0 0x1000>;
+		#dma-cells = <1>;
+		interrupt-parent = <&gic>;
+		interrupts = <0 93 4>; /* PL IRQ0[4], level high. */
+		clocks = <&sc7f0_capture_clk>;
+		clock-names = "ap_clk";
+		reset-gpios = <&sc7f0_frame_tap 0 GPIO_ACTIVE_LOW>;
+		xlnx,dma-addr-width = <64>;
+		xlnx,pixels-per-clock = <4>;
+		xlnx,dma-align = <32>;
+		xlnx,max-width = <4096>;
+		xlnx,max-height = <2160>;
+		xlnx,vid-formats = "nv12";
+		status = "okay";
+	};
+};

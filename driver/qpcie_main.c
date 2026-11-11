@@ -94,7 +94,7 @@ static irqreturn_t qpcie_irq_handler(int irq, void *data)
         u32 ch_irq = ioread32(qdev->bar0_mmio + REG_VCH_BASE(1) + REG_VCH_OFFSET_IRQ_STATUS);
         if (ch_irq & BIT(0)) {
             if (qdev->v4l2_registered)
-                qpcie_v4l2_node_done(qdev, 2);
+                qpcie_v4l2_node_done(qdev, qdev->c2h_only ? 1 : 2);
         }
         if (ch_irq & BIT(1))
             dev_warn_ratelimited(&qdev->pdev->dev, "VCH1 overflow IRQ detected\n");
@@ -268,7 +268,8 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
     date = ioread32(qdev->bar0_mmio + REG_NEW_GLOBAL_BUILDTIME);
     caps = ioread32(qdev->bar0_mmio + REG_NEW_GLOBAL_CAPS);
     qdev->debug_only = ver == QDBG_HW_VERSION && (caps & QDBG_CAP_DEBUG_ONLY);
-    qdev->is_zu4ev = qdev->debug_only;
+    qdev->c2h_only = !!(caps & QPCIE_CAP_C2H_ONLY);
+    qdev->is_zu4ev = qdev->debug_only || qdev->c2h_only;
     ctrl = magic;
 
     dev_info(&pdev->dev, "  BAR0 [0x00] Magic Device ID: 0x%08X (Canonical v3.0 Map Active)\n", magic);
@@ -283,9 +284,10 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
      * Hardware Platform Detection & Dynamic BAR1 Offset Assignment
      * ------------------------------------------------------------------------ */
     if (qdev->bar1_mmio) {
-        u32 bar1_zero = ioread32(qdev->bar1_mmio + 0x0000);
+        /* Production personality is explicit; do not probe removed IP. */
+        u32 bar1_zero = qdev->c2h_only ? 0 : ioread32(qdev->bar1_mmio + 0x0000);
         /* ZU4EV (SC7F0): 4 video channels or DECERR hole at BAR1 0x0000 (reads 0xFFFFFFFF) */
-        if (qdev->debug_only || bar1_zero == 0xFFFFFFFF || ((caps >> 16) & 0x0F) == 4) {
+        if (qdev->c2h_only || qdev->debug_only || bar1_zero == 0xFFFFFFFF || ((caps >> 16) & 0x0F) == 4) {
             qdev->is_zu4ev = true;
             qdev->bar1_offset_tpg = BAR1_ZU4EV_OFFSET_TPG;
             qdev->bar1_offset_i2c = 0;       /* No I2C on BAR1 for ZU4EV */

@@ -4,6 +4,10 @@
 #include "clk.h"
 #include "gpio.h"
 
+/* Audit the actual compiled header value, not a separate linker command. */
+__attribute__((used, section(".fw_identity")))
+const uint32_t sc7f0_mcu_version = MCU_FW_VERSION;
+
 void board_delay_ms(uint32_t ms)
 {
     for (uint32_t i = 0; i < ms; i++) {

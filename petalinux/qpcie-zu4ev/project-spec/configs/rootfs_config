@@ -3154,10 +3154,10 @@ CONFIG_tcf-agent=y
 #
 # v4l-utils 
 #
-# CONFIG_v4l-utils is not set
+CONFIG_v4l-utils=y
 # CONFIG_libv4l is not set
 # CONFIG_ir-keytable is not set
-# CONFIG_media-ctl is not set
+CONFIG_media-ctl=y
 # CONFIG_v4l-utils-dbg is not set
 # CONFIG_rc-keymaps is not set
 # CONFIG_v4l-utils-dev is not set
@@ -4083,6 +4083,7 @@ CONFIG_Init-manager-systemd=y
 # CONFIG_peekpoke is not set
 CONFIG_qpcie-debugd=y
 CONFIG_qpcie-v4l2-bridge=y
+CONFIG_sc7f0-ps-capture=y
 
 #
 # PetaLinux RootFS Settings

@@ -52,6 +52,13 @@ sim_*
 !scripts/sim_sc7f0_csr_cdc.tcl
 !scripts/sim_sc7f0_hdmi_bridges.tcl
 !scripts/sim_sc7f0_hdmi_control.tcl
+!scripts/sim_sc7f0_dualpath.tcl
+!scripts/sim_sc7f0_official_capture.tcl
+!scripts/sim_sc7f0_frame_tap.tcl
+!scripts/sim_sc7f0_capture_pipeline.tcl
+!scripts/sim_sc7f0_capture_pipeline_4k.tcl
+!scripts/sim_sc7f0_capture_width_4k.tcl
+!scripts/sim_sc7f0_stop_ack.tcl
 *.vvp
 *.out
 *.fst
@@ -127,3 +134,12 @@ test_mcu_nuc1262/*.elf
 test_mcu_nuc1262/*.bin
 test_mcu_nuc1262/*.tcl
 /test_app/sc7f0_ps_watchdog
+test_app/sc7f0_vcud
+test_app/sc7f0_ps_capture
+# Packet DMA standalone unit-test binaries (built by test_app/Makefile dma-test)
+test_app/sc7f0_pkt_dma_test
+test_app/host_pkt_dma_test
+test_app/sc7f0ctl_compat400
+prj/
+runhls.tcl
+

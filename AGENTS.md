@@ -18,6 +18,14 @@
 
 **主要硬體來源:** `/home/zzlee/llm-wiki/raw/SC7F0_N1_HDMI2_V11/SC7F0 N1 HDMI2 V11.pdf`, YUAN Hightech 規格書，標題 `SC7F0 N1 HDMI2 V11`，版本 1，日期 2024-01-23 (PDF 創建於 2024-02-26)。請使用 **V11**，而不是 V10/V20 版本，用於此板卡。直接與規格書第 10、11 和 36 頁核對；A11→K11 和 R8/R7 的分配與 `constraints/zu4ev_pcie_pinout.xdc` 符合。維基總結只是指引，不是規格書的替代品。元件安裝和特定板卡上的實際電壓仍需要檢查/測量。
 
+## Current operator authorization — complete HDMI → PS → VCU → HOST
+
+The operator explicitly authorizes direct SC7F0 firmware updates, test-host reboot and MCU flashing/testing without routine confirmation pauses until the complete path works. This supersedes earlier no-MCU/no-host-reboot limitations, not safety gates: use matching validated artifacts, retain backups/evidence, one COMMIT per attempt, independent eMMC SHA and actual boot-ID proof; never retry an ambiguous COMMIT or reset active DMA to reclaim memory. Preserve unrelated original-repository WIP. Prefer targeted diagnosis over repeated resets. MCU flash authorization does not make rejected/offline-only recovery images deployable. A controlled restart of existing MCU v1.1.15 restored R6 FPGA RX after the checked upstream lock was established; permanent TX/SCDC re-handshake recovery still requires fixing/testing.
+
+## SC7F0 HDMI signal diagnosis order (operator requirement)
+
+After every change/deployment that leaves HDMI undetected, **read IT6663 before asking the operator to inspect the source**. Use the existing checked MCU proxy for read commands only; do not restart/update the MCU or alter IT configuration/banks merely to classify source presence; no arbitrary MMIO. Authorized targeted recovery/firmware work follows after the read-only diagnosis. Perform one bounded transaction per PS exec, validate each transaction's downstream status, and stop on transport failure (which is NOT evidence of no signal). Sample RXP0 bank/0x13/0x14/0x19 before and after two timing reads at0x98..0xAA. Require stable bank0, clock/symbol/SCDT lock and valid stable geometry. If IT6663 locks and reports a format, investigate the downstream Vivado/PHY/PS chain first; do not shift source checking to the operator. Only report a source-detection failure when checked IT6663 reads actually establish it. Do not infer FPS from geometry alone. Current evidence: `build/sc7f0-capture-26102804-r1/deployment/it6663-readonly.{json,txt}`.
+
 ## 🛠️ FPGA 模組建置與 SPI Flash 燃錄流程
 
 ### 1. 建置 FPGA 模組 (Vivado 批次模式)

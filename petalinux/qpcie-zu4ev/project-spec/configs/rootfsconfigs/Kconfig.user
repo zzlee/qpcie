@@ -7,12 +7,16 @@ config peekpoke
 	 bool "peekpoke"
 	 help
 	
-config qpcie-debugd
+config qpcie-debugd  
 	 bool "qpcie-debugd"
 	 help
-
+	
 config qpcie-v4l2-bridge  
 	 bool "qpcie-v4l2-bridge"
+	 help
+	
+config sc7f0-ps-capture  
+	 bool "sc7f0-ps-capture"
 	 help
 	
 endmenu

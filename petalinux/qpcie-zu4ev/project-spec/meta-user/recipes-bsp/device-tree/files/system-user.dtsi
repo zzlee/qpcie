@@ -1,17 +1,18 @@
 #include "common.dtsi"
 
 ////////////////////////////////////////////////////////////////////////////
-// Recovery's only NIC (gem0) is physically Production eth1.
-// Map it to alias ethernet1 so U-Boot fdt_fixup_ethernet injects
-// eth1addr from the shared U-Boot environment, keeping the MAC identical
-// to Production eth1. (ethernet0 would inject ethaddr, which belongs to
-// the Production Dante Ultra port.)
+// SC7F0 Standalone Capture Card: No Ethernet (GEM0 disabled)
+// Remove ethernet aliases so U-Boot / Linux do not attempt network init.
 
 / {
 	aliases {
 		/delete-property/ ethernet0;
-		ethernet1 = &gem0;
+		/delete-property/ ethernet1;
 	};
+};
+
+&gem0 {
+	status = "disabled";
 };
 
 ////////////////////////////////////////////////////////////////////////////
@@ -27,6 +28,9 @@
 /* Pair this image only with the HDMI RX IRQ-enabled hardware (26101906+). */
 #if defined(SC7F0_HDMI_RX_ENABLE) && SC7F0_HDMI_RX_ENABLE
 #include "sc7f0-hdmi-rx.dtsi"
+#if defined(SC7F0_PS_CAPTURE_ENABLE) && SC7F0_PS_CAPTURE_ENABLE
+#include "sc7f0-ps-capture.dtsi"
+#endif
 #else
 /* Never probe HDMI register apertures on the debug-only hardware. */
 / {
@@ -36,3 +40,6 @@
 	};
 };
 #endif
+
+/* Must stay last: pins the card-validated bootargs after any hardware import. */
+#include "sc7f0-memory-layout.dtsi"

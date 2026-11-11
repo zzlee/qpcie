@@ -171,6 +171,16 @@ module axil_reg_space #(
     input  wire [3:0]  in_vch1_irq_status,
     output reg  [3:0]  out_vch1_irq_status_w1c,
     output wire        out_vch1_irq_en,
+    input  wire [31:0] in_pkt_submit_cnt,
+    input  wire [31:0] in_pkt_done_cnt,
+    input  wire [31:0] in_pkt_err_cnt,
+    input  wire [31:0] in_pkt_msi_cnt,
+    input  wire [31:0] in_pkt_bytes_lo,
+    input  wire [31:0] in_pkt_bytes_hi,
+    input  wire [31:0] in_pkt_fsm_state,
+    input  wire [31:0] in_pkt_last_len,
+    input  wire [31:0] in_pkt_last_pts_lo,
+    input  wire [31:0] in_pkt_last_pts_hi,
 
     // Phase 4 P4-2: Audio DEV0 Ports
     output wire [31:0] out_adev0_ctrl,
@@ -301,6 +311,9 @@ module axil_reg_space #(
     // Bit31 = debug-first ZU4EV profile. No advertised video/audio channels;
     // bit4 = canonical register map. Internal DMA plumbing remains testable.
     localparam [31:0] HARDWARE_CAPS_VAL   = 32'h8000_0010;
+`elsif SC7F0_C2H_ONLY
+    // Bit28: RX-only personality. Packet DMA is independent of raw geometry.
+    localparam [31:0] HARDWARE_CAPS_VAL = 32'h1001_011F;
 `elsif QPCIe_single_rgb24_path
     // Single-path build: 4 Audio, 1 Video (RGB24 TPG only), Caps: 2D+AES3+DualBAR+Stream, [4]=NEW_MAP_PRESENT
     localparam [31:0] HARDWARE_CAPS_VAL   = 32'h0001_041F;
@@ -880,6 +893,16 @@ module axil_reg_space #(
                             8'h60: s_axil_rdata <= in_vch1_frame_count;
                             8'h64: s_axil_rdata <= in_vch1_drop_count;
                             8'h70: s_axil_rdata <= {28'd0, in_vch1_irq_status};
+                            8'hC0: s_axil_rdata <= in_pkt_submit_cnt;
+                            8'hC4: s_axil_rdata <= in_pkt_done_cnt;
+                            8'hC8: s_axil_rdata <= in_pkt_err_cnt;
+                            8'hCC: s_axil_rdata <= in_pkt_msi_cnt;
+                            8'hD0: s_axil_rdata <= in_pkt_bytes_lo;
+                            8'hD4: s_axil_rdata <= in_pkt_bytes_hi;
+                            8'hD8: s_axil_rdata <= in_pkt_fsm_state;
+                            8'hDC: s_axil_rdata <= in_pkt_last_len;
+                            8'hE0: s_axil_rdata <= in_pkt_last_pts_lo;
+                            8'hE4: s_axil_rdata <= in_pkt_last_pts_hi;
                             default: s_axil_rdata <= 32'd0;
                         endcase
                     end

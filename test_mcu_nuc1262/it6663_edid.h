@@ -5,7 +5,9 @@
 #include <stdint.h>
 
 /* Official SC710 / SC7F0 4K HDR 60Hz 256-byte CEA-861 EDID */
-static const uint8_t g_default_edid_4k[256] = {
+/* Fill the pre-shim Flash region without growing the field image ABI. */
+static const uint8_t g_default_edid_4k[256]
+    __attribute__((section(".compat_edid"), used, aligned(4))) = {
     /* Block 0: Base EDID (128 bytes) */
     0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00,
     0x66, 0xAE, 0x90, 0x06, 0x74, 0x17, 0x31, 0x84,

@@ -100,9 +100,9 @@ set_property PACKAGE_PIN AE17 [get_ports pl_clk_300m_n]
 set_property IOSTANDARD LVDS [get_ports pl_clk_300m_p]
 set_property IOSTANDARD LVDS [get_ports pl_clk_300m_n]
 create_clock -period 3.333 -name pl_clk_300m [get_ports pl_clk_300m_p]
-# HDMI08: native HDMI bursts must not be throttled to PCIe's 125 MHz.
-create_generated_clock -name capture_clk_150m -source [get_ports pl_clk_300m_p] \
-    -divide_by 2 [get_pins u_capture_clock/O]
+# HDMI08 / VCU: 300MHz native capture & memory access clock.
+create_generated_clock -name capture_clk_300m -source [get_ports pl_clk_300m_p] \
+    -divide_by 1 [get_pins u_capture_clock/O]
 
 ## 8. Diagnostic Probing CDC Max Delay Constraints
 set_max_delay -datapath_only 10.0 -from [get_cells -hierarchical -filter {NAME =~ *u_meter*/*snapshot_test_reg[*]}] -to [get_cells -hierarchical -filter {NAME =~ *u_meter*/*measured_freq_hz_reg[*] || NAME =~ *u_meter*/*raw_cycle_count_reg[*]}]

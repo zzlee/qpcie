@@ -1,0 +1,220 @@
+From: SC7F0 integration
+Subject: [PATCH] media: xilinx: opt-in source SOF/credits and fenced capture teardown
+
+--- a/drivers/media/platform/xilinx/Kconfig
++++ b/drivers/media/platform/xilinx/Kconfig
+@@ -229,3 +229,9 @@
+ 	  mapped in this driver.
+ 	  To compile this driver as a module, choose M here.
+ 	  If unsure, choose N
++
++config VIDEO_SC7F0_FRAME_TAP
++	bool "SC7F0 frame-safe observer, buffer credits and SOF timestamps"
++	depends on VIDEO_XILINX=y && GPIOLIB
++	help
++	  Board-specific passive video tap. Does not replace framebuffer DMA.
+--- a/drivers/media/platform/xilinx/Makefile
++++ b/drivers/media/platform/xilinx/Makefile
+@@ -32,3 +32,5 @@
+ obj-$(CONFIG_VIDEO_XILINX_VPSS_CSC) += xilinx-vpss-csc.o
+ obj-$(CONFIG_VIDEO_XILINX_VPSS_SCALER) += xilinx-vpss-scaler.o
+ obj-$(CONFIG_VIDEO_XILINX_VTC) += xilinx-vtc.o
++
++obj-$(CONFIG_VIDEO_SC7F0_FRAME_TAP) += sc7f0-frame-tap.o
+--- a/drivers/media/platform/xilinx/xilinx-dma.c
++++ b/drivers/media/platform/xilinx/xilinx-dma.c
+@@ -25,6 +25,7 @@
+ #include <media/videobuf2-dma-contig.h>
+ 
+ #include "xilinx-dma.h"
++#include "sc7f0-frame-tap.h"
+ #include "xilinx-vip.h"
+ #include "xilinx-vipp.h"
+ 
+@@ -273,6 +274,7 @@
+ 	int i, sizeimage;
+ 	u32 fid = 0;
+ 	int status;
++	bool frame_error;
+ 
+ 	spin_lock(&dma->queued_lock);
+ 	list_del(&buf->queue);
+@@ -281,6 +283,7 @@
+ 	buf->buf.field = V4L2_FIELD_NONE;
+ 	buf->buf.sequence = dma->sequence++;
+ 	buf->buf.vb2_buf.timestamp = ktime_get_ns();
++	frame_error = sc7f0_tap_finish(dma->frame_tap, &buf->buf) < 0;
+ 
+ 	status = xilinx_xdma_get_fid(dma->dma, buf->desc, &fid);
+ 	if (!status) {
+@@ -313,7 +316,7 @@
+ 		vb2_set_plane_payload(&buf->buf.vb2_buf, 0, sizeimage);
+ 	}
+ 
+-	vb2_buffer_done(&buf->buf.vb2_buf, VB2_BUF_STATE_DONE);
++	vb2_buffer_done(&buf->buf.vb2_buf, frame_error ? VB2_BUF_STATE_ERROR : VB2_BUF_STATE_DONE);
+ }
+ 
+ static int
+@@ -515,8 +518,18 @@
+ 					EARLY_CALLBACK_START_DESC);
+ 	dmaengine_submit(desc);
+ 
+-	if (vb2_is_streaming(&dma->queue))
++	if (vb2_is_streaming(&dma->queue)) {
++		if (dma->frame_tap) {
++			/* Initial buffers are credited together by start_streaming. */
++			if (!dma->tap_streaming)
++				return;
++			if (sc7f0_tap_credit(dma->frame_tap, 1)) {
++				dev_err(dma->xdev->dev, "Frame-tap credit unavailable\n");
++				return; /* Descriptor stays owned until stop/terminate. */
++			}
++		}
+ 		dma_async_issue_pending(dma->dma);
++	}
+ }
+ 
+ static int xvip_dma_start_streaming(struct vb2_queue *vq, unsigned int count)
+@@ -524,8 +537,18 @@
+ 	struct xvip_dma *dma = vb2_get_drv_priv(vq);
+ 	struct xvip_dma_buffer *buf, *nbuf;
+ 	struct xvip_pipeline *pipe;
++	unsigned long irqflags;
++	unsigned int queued = 0;
+ 	int ret;
+ 
++	dma->tap_streaming = false;
++	ret = sc7f0_tap_prepare(dma->frame_tap);
++	if (ret)
++		goto error;
++	if (dma->frame_tap && dma->low_latency_cap) {
++		ret = -EOPNOTSUPP;
++		goto error;
++	}
+ 	dma->sequence = 0;
+ 	dma->prev_fid = ~0;
+ 
+@@ -561,12 +584,33 @@
+ 	 * applications will start DMA using S_CTRL at later point of time.
+ 	 */
+ 	if (!dma->low_latency_cap) {
++		if (dma->frame_tap) {
++			/* AUTO_RESTART stages completion one frame late. Use the
++			 * official one-shot mode: one credit, one descriptor, one DONE. */
++			xilinx_xdma_set_mode(dma->dma, DEFAULT);
++			spin_lock_irqsave(&dma->queued_lock, irqflags);
++			list_for_each_entry(buf, &dma->queued_bufs, queue)
++				queued++;
++			spin_unlock_irqrestore(&dma->queued_lock, irqflags);
++		}
+ 		dma_async_issue_pending(dma->dma);
+ 
+ 		/* Start the pipeline. */
+ 		ret = xvip_pipeline_set_stream(pipe, true);
+ 		if (ret < 0)
+ 			goto error_stop;
++		/* The tap subdevice may start before downstream CSC in the graph
++		 * walk. Withhold admission until every downstream block is ready;
++		 * a 4K line FIFO cannot hide CPU-side CSC programming latency. */
++		if (dma->frame_tap) {
++			ret = sc7f0_tap_credit(dma->frame_tap, queued);
++			if (ret) {
++				sc7f0_tap_quiesce(dma->frame_tap);
++				xvip_pipeline_set_stream(pipe, false);
++				goto error_stop;
++			}
++		}
++		dma->tap_streaming = true;
+ 	} else {
+ 		/* For low latency capture, return the first buffer early
+ 		 * so that consumer can initialize until we start DMA.
+@@ -583,7 +627,11 @@
+ 	video_device_pipeline_stop(&dma->video);
+ 
+ error:
++	/* VB2 will reclaim buffers on return; do not reset an active writer. */
++	dma->tap_streaming = false;
++	sc7f0_tap_quiesce(dma->frame_tap);
+ 	dmaengine_terminate_all(dma->dma);
++	sc7f0_tap_abort(dma->frame_tap);
+ 	/* Give back all queued buffers to videobuf2. */
+ 	spin_lock_irq(&dma->queued_lock);
+ 	list_for_each_entry_safe(buf, nbuf, &dma->queued_bufs, queue) {
+@@ -601,11 +649,15 @@
+ 	struct xvip_pipeline *pipe = to_xvip_pipeline(&dma->video);
+ 	struct xvip_dma_buffer *buf, *nbuf;
+ 
+-	/* Stop the pipeline. */
++	dma->tap_streaming = false;
++	/* Quiesce BEFORE graph shutdown; the vendor graph stop drops errors. */
++	sc7f0_tap_quiesce(dma->frame_tap);
++	/* Stop the pipeline only after admitted frame DMAs have retired. */
+ 	xvip_pipeline_set_stream(pipe, false);
+ 
+ 	/* Stop and reset the DMA engine. */
+ 	dmaengine_terminate_all(dma->dma);
++	sc7f0_tap_abort(dma->frame_tap);
+ 
+ 	/* Cleanup the pipeline and mark it as being stopped. */
+ 	xvip_pipeline_cleanup(pipe);
+@@ -1152,6 +1204,11 @@
+ 		to_xvip_pipeline(&dma->video) : &dma->pipe;
+ 	struct xvip_dma_buffer *buf, *nbuf;
+ 
++	if (dma->frame_tap) {
++		/* Never expose a buffer before its frame DMA has completed. */
++		return ctl->id == V4L2_CID_XILINX_LOW_LATENCY &&
++		       ctl->val == XVIP_LOW_LATENCY_DISABLE ? 0 : -EOPNOTSUPP;
++	}
+ 	switch (ctl->id)  {
+ 	case V4L2_CID_XILINX_LOW_LATENCY:
+ 		if (ctl->val == XVIP_LOW_LATENCY_ENABLE) {
+@@ -1227,7 +1284,7 @@
+ 
+ 		mutex_lock(&dma->lock);
+ 		dma->low_latency_cap = false;
+-		xilinx_xdma_set_mode(dma->dma, AUTO_RESTART);
++		xilinx_xdma_set_mode(dma->dma, dma->frame_tap ? DEFAULT : AUTO_RESTART);
+ 		mutex_unlock(&dma->lock);
+ 	}
+ 
+@@ -1275,6 +1332,10 @@
+ 	int ret;
+ 	u32 i, hsub, vsub, width, height;
+ 
++	dma->frame_tap = sc7f0_tap_get(xdev->dev);
++	if (IS_ERR(dma->frame_tap))
++		return PTR_ERR(dma->frame_tap);
++	dma->tap_streaming = false;
+ 	dma->xdev = xdev;
+ 	dma->port = port;
+ 	mutex_init(&dma->lock);
+@@ -1427,7 +1488,7 @@
+ 	dma->queue.ops = &xvip_dma_queue_qops;
+ 	dma->queue.mem_ops = &vb2_dma_contig_memops;
+ 	dma->queue.timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC
+-				   | V4L2_BUF_FLAG_TSTAMP_SRC_EOF;
++				   | (dma->frame_tap ? V4L2_BUF_FLAG_TSTAMP_SRC_SOE : V4L2_BUF_FLAG_TSTAMP_SRC_EOF);
+ 	dma->queue.dev = dma->xdev->dev;
+ 	ret = vb2_queue_init(&dma->queue);
+ 	if (ret < 0) {
+--- a/drivers/media/platform/xilinx/xilinx-dma.h
++++ b/drivers/media/platform/xilinx/xilinx-dma.h
+@@ -25,6 +25,7 @@
+ struct dma_chan;
+ struct xvip_composite_device;
+ struct xvip_video_format;
++struct sc7f0_frame_tap;
+ 
+ /**
+  * struct xvip_pipeline - Xilinx Video IP pipeline structure
+@@ -117,6 +118,8 @@
+ 
+ 	u32 prev_fid;
+ 	u32 low_latency_cap;
++	struct sc7f0_frame_tap *frame_tap;
++	bool tap_streaming;
+ };
+ 
+ #define to_xvip_dma(vdev)	container_of(vdev, struct xvip_dma, video)

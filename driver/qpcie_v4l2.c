@@ -29,6 +29,12 @@ module_param(sc7f0_nv_min_buffers, uint, 0400);
 MODULE_PARM_DESC(sc7f0_nv_min_buffers,
                  "Diagnostic minimum NV12/NV16 capture buffers (2..8, default2)");
 
+/* Live telemetry for the Channel 1 (VCU / Packet DMA) completion path: the
+ * first 10 retired buffers of every capture session log their slot index, the
+ * raw DPC1 completion magic and the transferred length, so a running board can
+ * be watched straight from dmesg.  Reset on each fresh queue setup. */
+static u32 qpcie_vcu_done_trace;
+
 static const struct v4l2_file_operations qpcie_v4l2_fops = {
     .owner          = THIS_MODULE,
     .open           = v4l2_fh_open,
@@ -54,6 +60,19 @@ static int qpcie_vidioc_querycap(struct file *file, void *priv, struct v4l2_capa
 
 static int qpcie_vidioc_enum_fmt_vid_cap_mplane(struct file *file, void *priv, struct v4l2_fmtdesc *f)
 {
+    struct qpcie_v4l2_channel *vch = video_drvdata(file);
+
+    if (vch && vch->channel_id == 1) {
+        if (f->index == 0) {
+            f->pixelformat = V4L2_PIX_FMT_H264;
+            return 0;
+        }
+        if (f->index == 1) {
+            f->pixelformat = V4L2_PIX_FMT_HEVC;
+            return 0;
+        }
+        return -EINVAL;
+    }
     if (f->index == 0) {
         f->pixelformat = V4L2_PIX_FMT_NV12M;
         return 0;
@@ -316,6 +335,17 @@ static int qpcie_vidioc_g_fmt_vid_cap(struct file *file, void *priv, struct v4l2
     struct qpcie_v4l2_channel *vch = video_drvdata(file);
     const struct qpcie_video_mode *mode;
 
+    if (vch->channel_id == 1) {
+        f->fmt.pix.width = vch->width ? vch->width : 3840;
+        f->fmt.pix.height = vch->height ? vch->height : 2160;
+        f->fmt.pix.field = V4L2_FIELD_NONE;
+        f->fmt.pix.pixelformat = vch->pixelformat ? vch->pixelformat : V4L2_PIX_FMT_H264;
+        f->fmt.pix.bytesperline = 0;
+        f->fmt.pix.sizeimage = 4 * 1024 * 1024;
+        f->fmt.pix.colorspace = V4L2_COLORSPACE_REC709;
+        return 0;
+    }
+
     mode = qpcie_find_video_mode(vch->width, vch->height);
     f->fmt.pix.width = mode->width;
     f->fmt.pix.height = mode->height;
@@ -332,6 +362,57 @@ static int qpcie_vidioc_g_fmt_vid_cap(struct file *file, void *priv, struct v4l2
         f->fmt.pix.colorspace = V4L2_COLORSPACE_REC709;
     }
     return 0;
+}
+
+static int qpcie_vidioc_try_fmt_vid_cap(struct file *file, void *priv, struct v4l2_format *f)
+{
+    struct qpcie_v4l2_channel *vch = video_drvdata(file);
+
+    if (vch->channel_id == 1) {
+        if (f->fmt.pix.pixelformat != V4L2_PIX_FMT_HEVC)
+            f->fmt.pix.pixelformat = V4L2_PIX_FMT_H264;
+        f->fmt.pix.field = V4L2_FIELD_NONE;
+        f->fmt.pix.bytesperline = 0;
+        f->fmt.pix.sizeimage = 4 * 1024 * 1024;
+        f->fmt.pix.colorspace = V4L2_COLORSPACE_REC709;
+        return 0;
+    }
+    if (f->fmt.pix.pixelformat != V4L2_PIX_FMT_RGB24)
+        f->fmt.pix.pixelformat = V4L2_PIX_FMT_NV12;
+    f->fmt.pix.field = V4L2_FIELD_NONE;
+    f->fmt.pix.colorspace = (f->fmt.pix.pixelformat == V4L2_PIX_FMT_RGB24) ?
+        V4L2_COLORSPACE_SRGB : V4L2_COLORSPACE_REC709;
+    return 0;
+}
+
+static int qpcie_vidioc_s_fmt_vid_cap(struct file *file, void *priv, struct v4l2_format *f)
+{
+    struct qpcie_v4l2_channel *vch = video_drvdata(file);
+
+    if (vb2_is_busy(&vch->queue)) {
+        if (vch->channel_id == 1 &&
+            f->fmt.pix.pixelformat == vch->pixelformat &&
+            (!f->fmt.pix.width || f->fmt.pix.width == vch->width) &&
+            (!f->fmt.pix.height || f->fmt.pix.height == vch->height)) {
+            return qpcie_vidioc_g_fmt_vid_cap(file, priv, f);
+        }
+        return -EBUSY;
+    }
+
+    if (vch->channel_id == 1) {
+        if (f->fmt.pix.pixelformat == V4L2_PIX_FMT_HEVC)
+            vch->pixelformat = V4L2_PIX_FMT_HEVC;
+        else
+            vch->pixelformat = V4L2_PIX_FMT_H264;
+        if (f->fmt.pix.width && f->fmt.pix.height) {
+            vch->width = f->fmt.pix.width;
+            vch->height = f->fmt.pix.height;
+        }
+        vch->vcu_cfg.codec_type = (vch->pixelformat == V4L2_PIX_FMT_HEVC) ? 1 : 0;
+        qpcie_vcu_sync_config(vch);
+        return qpcie_vidioc_g_fmt_vid_cap(file, priv, f);
+    }
+    return -EINVAL;
 }
 
 static int qpcie_vidioc_try_fmt_vid_cap_mplane(struct file *file, void *priv,
@@ -479,7 +560,11 @@ static int qpcie_vidioc_s_parm(struct file *file, void *priv, struct v4l2_stream
 
 static int qpcie_vidioc_enum_framesizes(struct file *file, void *priv, struct v4l2_frmsizeenum *fsize)
 {
-    if (fsize->pixel_format != V4L2_PIX_FMT_NV12M && fsize->pixel_format != V4L2_PIX_FMT_NV16M && fsize->pixel_format != V4L2_PIX_FMT_RGB24)
+    if (fsize->pixel_format != V4L2_PIX_FMT_NV12M &&
+        fsize->pixel_format != V4L2_PIX_FMT_NV16M &&
+        fsize->pixel_format != V4L2_PIX_FMT_RGB24 &&
+        fsize->pixel_format != V4L2_PIX_FMT_H264 &&
+        fsize->pixel_format != V4L2_PIX_FMT_HEVC)
         return -EINVAL;
 
     if (fsize->index >= ARRAY_SIZE(qpcie_video_modes))
@@ -497,7 +582,11 @@ static const struct v4l2_fract supported_frameintervals[] = {
 
 static int qpcie_vidioc_enum_frameintervals(struct file *file, void *priv, struct v4l2_frmivalenum *fival)
 {
-    if (fival->pixel_format != V4L2_PIX_FMT_NV12M && fival->pixel_format != V4L2_PIX_FMT_NV16M && fival->pixel_format != V4L2_PIX_FMT_RGB24)
+    if (fival->pixel_format != V4L2_PIX_FMT_NV12M &&
+        fival->pixel_format != V4L2_PIX_FMT_NV16M &&
+        fival->pixel_format != V4L2_PIX_FMT_RGB24 &&
+        fival->pixel_format != V4L2_PIX_FMT_H264 &&
+        fival->pixel_format != V4L2_PIX_FMT_HEVC)
         return -EINVAL;
 
     if (fival->index >= ARRAY_SIZE(supported_frameintervals))
@@ -657,7 +746,7 @@ static int qpcie_vidioc_query_dv_timings(struct file *file, void *_fh,
     int ret;
 
     if (vch->channel_id != 0)
-        return -ENODATA;
+        return -ENOTTY;
 
     if (!qdev || !qdev->bar0_mmio)
         return -ENODEV;
@@ -706,7 +795,7 @@ static int qpcie_vidioc_g_dv_timings(struct file *file, void *_fh,
 {
     struct qpcie_v4l2_channel *vch = video_drvdata(file);
     if (vch->channel_id != 0)
-        return -ENODATA;
+        return -ENOTTY;
     return qpcie_vidioc_query_dv_timings(file, _fh, timings);
 }
 
@@ -715,7 +804,7 @@ static int qpcie_vidioc_s_dv_timings(struct file *file, void *_fh,
 {
     struct qpcie_v4l2_channel *vch = video_drvdata(file);
     if (vch->channel_id != 0)
-        return -ENODATA;
+        return -ENOTTY;
     if (vb2_is_busy(&vch->queue))
         return -EBUSY;
     if (timings->type != V4L2_DV_BT_656_1120)
@@ -732,7 +821,7 @@ static int qpcie_vidioc_dv_timings_cap(struct file *file, void *_fh,
 {
     struct qpcie_v4l2_channel *vch = video_drvdata(file);
     if (vch->channel_id != 0)
-        return -ENODATA;
+        return -ENOTTY;
 
     memset(cap, 0, sizeof(*cap));
     cap->type = V4L2_DV_BT_656_1120;
@@ -764,12 +853,19 @@ static int qpcie_vidioc_subscribe_event(struct v4l2_fh *fh,
 
 static int qpcie_vidioc_enum_input(struct file *file, void *priv, struct v4l2_input *inp)
 {
+    struct qpcie_v4l2_channel *vch = video_drvdata(file);
+
     if (inp->index > 0)
         return -EINVAL;
     inp->type = V4L2_INPUT_TYPE_CAMERA;
     inp->std = 0;
-    inp->capabilities = V4L2_IN_CAP_DV_TIMINGS;
-    strscpy(inp->name, "HDMI / TPG Input", sizeof(inp->name));
+    if (vch && vch->channel_id != 0) {
+        inp->capabilities = 0;
+        strscpy(inp->name, "VCU Hardware Stream", sizeof(inp->name));
+    } else {
+        inp->capabilities = V4L2_IN_CAP_DV_TIMINGS;
+        strscpy(inp->name, "HDMI / TPG Input", sizeof(inp->name));
+    }
     return 0;
 }
 
@@ -793,6 +889,8 @@ static const struct v4l2_ioctl_ops qpcie_v4l2_ioctl_ops = {
     .vidioc_s_input                 = qpcie_vidioc_s_input,
     .vidioc_enum_fmt_vid_cap        = qpcie_vidioc_enum_fmt_vid_cap_mplane,
     .vidioc_g_fmt_vid_cap           = qpcie_vidioc_g_fmt_vid_cap,
+    .vidioc_try_fmt_vid_cap         = qpcie_vidioc_try_fmt_vid_cap,
+    .vidioc_s_fmt_vid_cap           = qpcie_vidioc_s_fmt_vid_cap,
     .vidioc_g_fmt_vid_cap_mplane    = qpcie_vidioc_g_fmt_vid_cap_mplane,
     .vidioc_try_fmt_vid_cap_mplane  = qpcie_vidioc_try_fmt_vid_cap_mplane,
     .vidioc_s_fmt_vid_cap_mplane    = qpcie_vidioc_s_fmt_vid_cap_mplane,
@@ -839,9 +937,114 @@ static int qpcie_queue_setup(struct vb2_queue *vq,
                             unsigned int sizes[], struct device *alloc_devs[])
 {
     struct qpcie_v4l2_channel *vch = vb2_get_drv_priv(vq);
-    unsigned int exp_planes = (vch->pixelformat == V4L2_PIX_FMT_RGB24) ? 1 : 2;
-    unsigned int y_size = vch->stride * vch->height;
-    unsigned int uv_size = (vch->pixelformat == V4L2_PIX_FMT_RGB24) ? 0 :
+    struct qpcie_dev *qdev = vch->qdev;
+    unsigned int exp_planes;
+    unsigned int y_size, uv_size;
+
+    if (vch->channel_id == 1) {
+        unsigned int comp_size = 4 * 1024 * 1024;
+
+        /* A fresh queue setup is a fresh capture session: the Card<->Host clock
+         * offset is only valid while both sides keep running, so drop the
+         * calibration and re-derive it from the first PTS of this session. */
+        vch->vcu_offset_calibrated = false;
+        vch->vcu_card_to_host_offset_ns = 0;
+        qpcie_vcu_done_trace = 0;
+
+        /* Reconfiguring buffers means a fresh capture session and happens
+         * before any QBUF, so this is the place to make the Host Ring pointers
+         * agree again.  host_head lives in BRAM and survives session teardown
+         * (and even driver reload, since the PS owns that BRAM): if the
+         * previous session left host_head ahead of ps_tail, every QBUF of the
+         * new session computes a huge in_flight and is rejected as Ring Full
+         * (-ENOSPC) forever.  Snap host_head onto ps_tail so the new session
+         * starts from a provably empty ring. */
+        if (qdev->c2h_only && qdev->bar0_mmio) {
+            void __iomem *ring_mmio = qdev->bar0_mmio + QPCIE_BAR0_VCU_RING_OFFSET;
+            u32 ps_tail = ioread32(ring_mmio + offsetof(struct qpcie_vcu_host_ring, ps_tail));
+
+            iowrite32(ps_tail, ring_mmio + offsetof(struct qpcie_vcu_host_ring, host_head));
+            ioread32(ring_mmio + offsetof(struct qpcie_vcu_host_ring, host_head));
+
+            dev_info(&qdev->pdev->dev,
+                     "VCU Host Ring session reset: host_head <- ps_tail=%u\n",
+                     ps_tail);
+        }
+
+        /* The BRAM head/tail reset above is only half of the story.  The DPC1
+         * completion ring lives in host coherent memory and is zeroed a single
+         * time at channel init (qpcie_v4l2_open()), and the completion path
+         * clears only comp[0] when it retires a slot - comp[10] (the payload
+         * length) is left behind.  A previous session that was killed, or a
+         * previous driver load that recycled the same coherent pages, can
+         * therefore leave stale DPC1 records in the ring: the new session's
+         * first harvest finds comp[0]==DPC1_MAGIC in slots it never published
+         * into, completes them immediately, and trusts the leftover length
+         * (observed 2702190906 == 0xA10F_...).  vb2_set_plane_payload() then
+         * trips WARN_ON(len > vb2_plane_size()) in videobuf2-core.h:1218 and
+         * the FIFO slot tracking slips out of alignment.  Wipe the whole ring
+         * and every slot claim so a fresh session can only ever observe
+         * completions that *this* session produced. */
+        if (vch->comp_ring_virt) {
+            memset((void *)vch->comp_ring_virt, 0, QPCIE_VCU_RING_SIZE * 64);
+            wmb();
+        }
+        /* Under slock, the same lock the completion path uses to clear marks,
+         * so a late MSI cannot re-establish (or race away) a claim while the
+         * table is being wiped. */
+        {
+            unsigned int i;
+            unsigned long rflags;
+
+            spin_lock_irqsave(&vch->slock, rflags);
+            for (i = 0; i < QPCIE_VCU_RING_SIZE; i++)
+                vch->slot_active[i] = NULL;
+            spin_unlock_irqrestore(&vch->slock, rflags);
+        }
+
+        if (*nplanes) {
+            if (*nplanes != 1 || sizes[0] < 65536)
+                return -EINVAL;
+            return 0;
+        }
+        *nplanes = 1;
+        sizes[0] = comp_size;
+        if (qdev->c2h_only) {
+            /* Pool depth is a userspace pipeline decision, not a driver
+         * override.  The old code forced the pool to ring+8 (24) no matter
+         * what the caller asked for.  That papered over the real defect it
+         * was aimed at: "ring full" was judged purely from the BRAM head/tail
+         * pointers (head - tail > 16), but the card PS moves ps_tail when it
+         * *hands a slot to the Packet DMA engine*, long before the payload
+         * and its DPC1 completion record land in host memory - so a slot
+         * could be republished while its previous frame was still unfinished,
+         * overwriting live buffer content and clearing its completion magic.
+         *
+         * vch->slot_active[] now pins each of the 16 slots to the buffer that
+         * owns it and is cleared only when that buffer retires (DPC1
+         * completion, timeout error, or session teardown), so an unfinished
+         * slot can never be taken over.  With that guarantee in place the
+         * caller is free to choose its own depth.
+         *
+         * Keep a sane window: >= 4 buffers for any pipeline to make progress,
+         * <= 2x the ring (16 or 24 are the usual picks) so a deep parked pool
+         * still cannot mask a genuinely stuck card for more than ~0.5 s. */
+            unsigned int requested = *nbuffers;
+
+            *nbuffers = clamp_t(unsigned int, requested, 4,
+                                QPCIE_VCU_RING_SIZE * 2);
+            dev_info(&qdev->pdev->dev,
+                     "VCU ch1 buffer pool: requested %u -> %u (ring %u, userspace depth honoured, slot_active[] occupancy guard)\n",
+                     requested, *nbuffers, QPCIE_VCU_RING_SIZE);
+        } else {
+            *nbuffers = clamp_t(unsigned int, *nbuffers, 4, QPCIE_VCU_RING_SIZE);
+        }
+        return 0;
+    }
+
+    exp_planes = (vch->pixelformat == V4L2_PIX_FMT_RGB24) ? 1 : 2;
+    y_size = vch->stride * vch->height;
+    uv_size = (vch->pixelformat == V4L2_PIX_FMT_RGB24) ? 0 :
                             vch->stride * (vch->pixelformat == V4L2_PIX_FMT_NV16M ?
                                            vch->height : vch->height / 2);
 
@@ -870,6 +1073,22 @@ static int qpcie_buf_prepare(struct vb2_buffer *vb)
     struct qpcie_v4l2_channel *vch = vb2_get_drv_priv(vb->vb2_queue);
     int i;
 
+    if (vch->channel_id == 1) {
+        if (vb2_plane_size(vb, 0) < 65536) {
+            v4l2_err(&vch->qdev->v4l2_dev,
+                     "Plane 0 size %lu < min required 65536\n",
+                     vb2_plane_size(vb, 0));
+            return -EINVAL;
+        }
+        /* No DMA has run yet: the payload is unknown, so stage 0 bytes.
+         * Staging the full plane size (4MiB) here would let a buffer that is
+         * never filled - or that retires with an error - export 4MiB of stale
+         * page content to userspace.  The real length is applied at completion
+         * from the DPC1 record (or the last-packet CSR fallback). */
+        vb2_set_plane_payload(vb, 0, 0);
+        return 0;
+    }
+
     /* Validate plane size for MMAP, USERPTR, and DMABUF memory modes */
     for (i = 0; i < vb->num_planes; i++) {
         unsigned long size = (i == 0) ? (vch->stride * vch->height) :
@@ -893,6 +1112,9 @@ static int qpcie_buf_init(struct vb2_buffer *vb)
     struct qpcie_v4l2_buffer *buf = container_of(vbuf, struct qpcie_v4l2_buffer, vb);
 
     buf->sgl_logged = false;
+    buf->vcu_slot_idx = 0;
+    buf->vcu_seq = 0;
+    buf->queued_jiffies = 0;
     return 0;
 }
 
@@ -921,9 +1143,136 @@ static int qpcie_publish_buffer(struct qpcie_v4l2_channel *vch,
     struct scatterlist *sg;
     struct sg_table *sgt0, *sgt1;
     unsigned int i;
+    unsigned long flags;
     u32 thin_tail;
     u32 entries_added = 0;
     bool is_rgb;
+
+    if (vch->channel_id == 1 && qdev->c2h_only) {
+        void __iomem *ring_mmio = qdev->bar0_mmio + QPCIE_BAR0_VCU_RING_OFFSET;
+        u32 host_head = ioread32(ring_mmio + offsetof(struct qpcie_vcu_host_ring, host_head));
+        u32 ps_tail = ioread32(ring_mmio + offsetof(struct qpcie_vcu_host_ring, ps_tail));
+        u32 slot_idx = host_head % QPCIE_VCU_RING_SIZE;
+        u32 next_head = host_head + 1;
+        s32 in_flight = (s32)(next_head - ps_tail);
+        void __iomem *slot_mmio;
+        dma_addr_t dma_addr;
+        u32 dma_len;
+
+        if (in_flight <= 0) {
+            /* ps_tail ran ahead of host_head (driver reload or PS/driver
+             * pointer desync): the naive unsigned difference would underflow
+             * into a huge value and reject every QBUF with -ENOSPC forever.
+             * Snap host_head back onto ps_tail so the ring recovers health. */
+            dev_warn(&qdev->pdev->dev,
+                     "VCU Host Ring resync: host_head=%u behind ps_tail=%u; snapping to tail\n",
+                     host_head, ps_tail);
+            host_head = ps_tail;
+            next_head = host_head + 1;
+            slot_idx = host_head % QPCIE_VCU_RING_SIZE;
+            in_flight = 1;
+        }
+
+        if (in_flight > QPCIE_VCU_RING_SIZE || vch->slot_active[slot_idx] != NULL) {
+            /* Back-pressure, not a fault: either all 16 slots are handed to the
+             * card, or the slot this publish would take is still owned by a
+             * buffer that has not retired yet.  The pointer test is the real
+             * occupancy proof: ps_tail only says the card *picked up* the slot,
+             * never that its payload and DPC1 record have landed, so head/tail
+             * arithmetic alone could otherwise republish a slot that is still
+             * being written and clear the completion magic under the old frame.
+             *
+             * The caller parks the buffer on pending_buffers (QBUF) or leaves
+             * it queued for the next completion (drain) - a buffer is NEVER
+             * errored out on this path any more. */
+            dev_warn_ratelimited(&qdev->pdev->dev,
+                                 "VCU Host Ring full (head=%u, tail=%u, in_flight=%d, slot %u %s): parking publisher, no buffer dropped\n",
+                                 host_head, ps_tail, in_flight, slot_idx,
+                                 vch->slot_active[slot_idx] ? "still owned" : "free");
+            return -ENOSPC;
+        }
+
+        /* Channel 1 buffers come from vb2_dma_contig_memops, so plane 0 is a
+         * single IOVA-contiguous region: read its base address and full length
+         * directly instead of unwrapping a scatter/gather table. */
+        dma_addr = vb2_dma_contig_plane_dma_addr(vb, 0);
+        dma_len = vb2_plane_size(vb, 0);
+        if (WARN_ON(!dma_addr || dma_len == 0))
+            return -EINVAL;
+
+        /* Claim the slot BEFORE a single byte of the descriptor (or the
+         * doorbell) reaches BRAM: from this point on the slot is owned by this
+         * buffer, and only qpcie_v4l2_node_done() (completion / timeout) or
+         * qpcie_return_all_buffers() (session teardown) may give it back.
+         * Publishers are serialised by qdev->ring_lock, so this claim cannot
+         * double-book a slot; a completion running on another CPU can only
+         * clear a slot that has already retired, which is exactly the case in
+         * which republishing is legal. */
+        vch->slot_active[slot_idx] = buf;
+
+        slot_mmio = ring_mmio + offsetof(struct qpcie_vcu_host_ring, slots) +
+                    slot_idx * sizeof(struct qpcie_vcu_buffer_slot);
+
+        iowrite32(lower_32_bits(dma_addr), slot_mmio + offsetof(struct qpcie_vcu_buffer_slot, host_phys_addr));
+        iowrite32(upper_32_bits(dma_addr), slot_mmio + offsetof(struct qpcie_vcu_buffer_slot, host_phys_addr) + 4);
+
+        if (vch->comp_ring_dma) {
+            dma_addr_t comp_addr = vch->comp_ring_dma + slot_idx * 64;
+            iowrite32(lower_32_bits(comp_addr), slot_mmio + offsetof(struct qpcie_vcu_buffer_slot, host_comp_addr));
+            iowrite32(upper_32_bits(comp_addr), slot_mmio + offsetof(struct qpcie_vcu_buffer_slot, host_comp_addr) + 4);
+        } else {
+            iowrite32(0, slot_mmio + offsetof(struct qpcie_vcu_buffer_slot, host_comp_addr));
+            iowrite32(0, slot_mmio + offsetof(struct qpcie_vcu_buffer_slot, host_comp_addr) + 4);
+        }
+
+        iowrite32(dma_len, slot_mmio + offsetof(struct qpcie_vcu_buffer_slot, host_buf_len));
+        iowrite32(vb->index, slot_mmio + offsetof(struct qpcie_vcu_buffer_slot, host_buf_id));
+        iowrite32(0, slot_mmio + offsetof(struct qpcie_vcu_buffer_slot, flags));
+
+        /* Ring slots are reused modulo QPCIE_VCU_RING_SIZE, so the slot being
+         * republished may still carry the DPC1 record of the frame that used it
+         * 16 jobs ago.  Clear the completion magic *and* the recorded length
+         * before host_head makes the slot visible to the card, otherwise the
+         * completion path would accept that stale record as this frame having
+         * landed - and comp[10] is the field that names the payload length, so
+         * a leftover value alone can produce a bogus bytesused even when the
+         * magic has already been cleared.  The wmb() orders the clears (and the
+         * slot descriptor writes) ahead of the doorbell. */
+        if (vch->comp_ring_virt) {
+            volatile u32 *comp = (volatile u32 *)((u8 *)vch->comp_ring_virt + slot_idx * 64);
+
+            comp[0] = 0;
+            comp[10] = 0;
+            wmb();
+        }
+
+        /* Start the physical liveness timer for this slot: the completion path
+         * may only declare a frame lost on real elapsed time, never on a
+         * ps_tail difference. */
+        buf->queued_jiffies = jiffies;
+
+        wmb();
+        iowrite32(next_head, ring_mmio + offsetof(struct qpcie_vcu_host_ring, host_head));
+        ioread32(ring_mmio + offsetof(struct qpcie_vcu_host_ring, host_head));
+
+        buf->vcu_slot_idx = slot_idx;
+        /* Remember which ring sequence this buffer owns so diagnostics can
+         * name the slot; liveness is decided by queued_jiffies, not by
+         * ps_tail. */
+        buf->vcu_seq = host_head;
+
+        spin_lock_irqsave(&vch->slock, flags);
+        list_add_tail(&buf->list, &vch->active_buffers);
+        spin_unlock_irqrestore(&vch->slock, flags);
+
+        if (!buf->sgl_logged) {
+            dev_info(&qdev->pdev->dev,
+                     "VCU Ring buf%u queued (slot %u, phys=0x%llx len=%u, head: %u -> %u)\n",
+                     vb->index, slot_idx, (unsigned long long)dma_addr, dma_len, host_head, next_head);
+            buf->sgl_logged = true;
+        }
+        return 0;
+    }
 
     if (!vch->thin_ring_virt) {
         dev_err(&qdev->pdev->dev, "V4L2 ch%d: thin ring not configured\n", vch->channel_id);
@@ -931,7 +1280,9 @@ static int qpcie_publish_buffer(struct qpcie_v4l2_channel *vch,
     }
 
     thin_tail = vch->thin_ring_tail;
-    is_rgb = (vch->pixelformat == V4L2_PIX_FMT_RGB24);
+    is_rgb = (vch->pixelformat == V4L2_PIX_FMT_RGB24 ||
+              vch->pixelformat == V4L2_PIX_FMT_H264 ||
+              vch->pixelformat == V4L2_PIX_FMT_HEVC);
 
     sgt0 = vb2_dma_sg_plane_desc(vb, 0);
     if (WARN_ON(!sgt0))
@@ -964,9 +1315,9 @@ static int qpcie_publish_buffer(struct qpcie_v4l2_channel *vch,
         vch->thin_ring1_tail = (thin_tail1 + entries_added1) % RING_BUFFER_SIZE;
     }
 
-    spin_lock(&vch->slock);
+    spin_lock_irqsave(&vch->slock, flags);
     list_add_tail(&buf->list, &vch->active_buffers);
-    spin_unlock(&vch->slock);
+    spin_unlock_irqrestore(&vch->slock, flags);
 
     /* Descriptor data must be globally visible before ringing doorbell */
     dma_wmb();
@@ -1000,6 +1351,71 @@ static int qpcie_publish_buffer(struct qpcie_v4l2_channel *vch,
     return 0;
 }
 
+/* Lifetime telemetry for the parked-buffer path: how many QBUFs found the
+ * 16-slot VCU Host Ring full and were parked instead of being errored out. */
+static atomic_t qpcie_vcu_ring_parks = ATOMIC_INIT(0);
+static atomic_t qpcie_vcu_park_republished = ATOMIC_INIT(0);
+
+/*
+ * Republish buffers that a previous QBUF had to park because the VCU Host Ring
+ * was full.
+ *
+ * qpcie_buf_queue() parks a ch1 QBUF on vch->pending_buffers rather than
+ * calling vb2_buffer_done(VB2_BUF_STATE_ERROR): an ERROR completion hands
+ * GStreamer a 0-byte payload, and one hole in the H.264 byte stream costs the
+ * decoder a slice ("Frame num change from 8 to 9", "decode_slice_header
+ * error", "top block unavailable for requested intra mode") plus visible
+ * macroblock corruption until the next IDR.  Every slot this function
+ * publishes is a frame that reaches userspace intact.
+ *
+ * Locking: called with no locks held.  It takes qdev->ring_lock for the whole
+ * loop because qpcie_publish_buffer() writes the shared BRAM ring pointers and
+ * takes vch->slock internally, so the ordering stays ring_lock -> slock, the
+ * very same order qpcie_buf_queue() uses.  Callers must therefore never hold
+ * vch->slock here (qpcie_v4l2_node_done() drops it first), otherwise an IRQ on
+ * another CPU could invert the two locks.
+ *
+ * A rejected publish means the ring filled up again: the buffer is put back at
+ * the head of the list so QBUF order (and therefore ring slot order) is
+ * preserved, and the attempt is repeated on the next completion.
+ */
+static void qpcie_vcu_drain_pending(struct qpcie_v4l2_channel *vch)
+{
+    struct qpcie_dev *qdev = vch->qdev;
+    unsigned long flags;
+    int published = 0;
+
+    if (vch->channel_id != 1 || !qdev->c2h_only || !qdev->bar0_mmio)
+        return;
+
+    spin_lock_irqsave(&qdev->ring_lock, flags);
+    while (!list_empty(&vch->pending_buffers)) {
+        struct qpcie_v4l2_buffer *pbuf =
+            list_first_entry(&vch->pending_buffers,
+                             struct qpcie_v4l2_buffer, list);
+
+        /* Unlink BEFORE publishing: qpcie_publish_buffer() relinks this very
+         * list_head into vch->active_buffers on success, so a list_del() after
+         * the call would rip the freshly queued buffer straight back out of the
+         * active list and wedge its completion. */
+        list_del_init(&pbuf->list);
+        if (qpcie_publish_buffer(vch, pbuf)) {
+            list_add(&pbuf->list, &vch->pending_buffers);
+            break;
+        }
+        published++;
+    }
+    spin_unlock_irqrestore(&qdev->ring_lock, flags);
+
+    if (published) {
+        atomic_add(published, &qpcie_vcu_park_republished);
+        dev_dbg(&qdev->pdev->dev,
+                "VCU Host Ring: republished %u parked buffer(s) (lifetime parks=%d republished=%d)\n",
+                published, atomic_read(&qpcie_vcu_ring_parks),
+                atomic_read(&qpcie_vcu_park_republished));
+    }
+}
+
 static void qpcie_buf_queue(struct vb2_buffer *vb)
 {
     struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
@@ -1008,19 +1424,70 @@ static void qpcie_buf_queue(struct vb2_buffer *vb)
     struct qpcie_v4l2_channel *vch = vb2_get_drv_priv(vb->vb2_queue);
     struct qpcie_dev *qdev = vch->qdev;
     struct qpcie_v4l2_channel *out_vch, *cap_vch;
-    struct qpcie_v4l2_buffer *out_buf, *cap_buf;
+    struct qpcie_v4l2_buffer *out_buf, *cap_buf, *pbuf;
     unsigned long flags;
+    unsigned int depth;
     int ret;
 
-    if (vch->channel_id == 0) {
+    if (vch->channel_id == 0 || (qdev->c2h_only && vch->channel_id == 1)) {
         spin_lock_irqsave(&qdev->ring_lock, flags);
         ret = qpcie_publish_buffer(vch, buf);
+        if (ret == -ENOSPC && vch->channel_id == 1 && qdev->c2h_only) {
+            /* Ring temporarily full: PARK the buffer, never error it.
+             *
+             * -ENOSPC is not a buffer fault, it is back-pressure from a ring
+             * that is 16 slots deep and full for a microsecond.  The buffer is
+             * healthy, mapped, prepared and empty - exactly what the next free
+             * slot needs.  Erroing it here was the direct cause of the periodic
+             * stall + macroblock corruption: GStreamer received a 0-byte
+             * buffer, h264parse lost a slice and ffmpeg/vah264dec reported
+             * "Frame num change", "decode_slice_header error" and "top block
+             * unavailable" while the picture broke up.
+             *
+             * Parked buffers stay in QBUF order on vch->pending_buffers and are
+             * republished by qpcie_vcu_drain_pending() the moment a completion
+             * frees a slot.  Harvest + drain below, which also covers a lost or
+             * coalesced MSI for this very QBUF. */
+            list_add_tail(&buf->list, &vch->pending_buffers);
+
+            /* A park that clears on the next completion is normal back-pressure.
+             * A deep parked queue means the card stopped consuming the ring at
+             * all, which is a genuine stall - say so instead of hiding it. */
+            depth = 0;
+            list_for_each_entry(pbuf, &vch->pending_buffers, list)
+                depth++;
+            spin_unlock_irqrestore(&qdev->ring_lock, flags);
+
+            if (atomic_inc_return(&qpcie_vcu_ring_parks) <= 4)
+                dev_info(&qdev->pdev->dev,
+                         "VCU ch1 buf%u: ring busy, parked in QBUF order (park#%d)\n",
+                         vb->index, atomic_read(&qpcie_vcu_ring_parks));
+            if (depth >= 8)
+                dev_warn_ratelimited(&qdev->pdev->dev,
+                                     "VCU ch1: %u QBUFs parked, card is not consuming the Host Ring\n",
+                                     depth);
+
+            qpcie_v4l2_node_done(qdev, 1);
+            return;
+        }
         spin_unlock_irqrestore(&qdev->ring_lock, flags);
         if (ret) {
             dev_err(&qdev->pdev->dev,
                     "V4L2 ch%u buf%u: descriptor publish rejected (%d)\n",
                     vch->channel_id, buf->vb.vb2_buf.index, ret);
+            /* Nothing was ever written into this buffer: never hand the
+             * staged payload of the VCU stream channel to userspace. */
+            if (vch->channel_id == 1)
+                vb2_set_plane_payload(&buf->vb.vb2_buf, 0, 0);
             vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_ERROR);
+        } else if (vch->channel_id == 1 && qdev->c2h_only) {
+            /* Opportunistic completion harvest in process context.  MSI
+             * coalescing (and lost VCH1 interrupts) can leave already-completed
+             * DPC1 slots sitting on active_buffers until the next interrupt
+             * arrives; harvesting here bounds that latency.  Must run outside
+             * ring_lock: node_done takes vch->slock and retires buffers.  It
+             * also drains this channel's parked buffers. */
+            qpcie_v4l2_node_done(qdev, 1);
         }
         return;
     }
@@ -1074,6 +1541,7 @@ static void qpcie_return_all_buffers(struct qpcie_v4l2_channel *vch,
                                        enum vb2_buffer_state state)
 {
     struct qpcie_dev *qdev = vch->qdev;
+    unsigned long rflags;
 
     for (;;) {
         struct qpcie_v4l2_buffer *buf;
@@ -1104,6 +1572,29 @@ static void qpcie_return_all_buffers(struct qpcie_v4l2_channel *vch,
         list_del(&buf->list);
         spin_unlock_irq(&vch->slock);
         vb2_buffer_done(&buf->vb.vb2_buf, state);
+    }
+
+    /* Session reset: no buffer is in flight any more, so every Channel 1 slot
+     * claim dies with the session.  Leaving a stale mark behind would wedge
+     * the next STREAMON, because its publishes would be refused forever on a
+     * slot that nothing owns.  Done under slock - the same lock the completion
+     * path uses to clear marks - so a late completion cannot re-establish (or
+     * race away) a claim while the table is being wiped. */
+    {
+        unsigned int s;
+        int owned = 0;
+
+        spin_lock_irqsave(&vch->slock, rflags);
+        for (s = 0; s < QPCIE_VCU_RING_SIZE; s++)
+            if (vch->slot_active[s])
+                owned++;
+        memset(vch->slot_active, 0, sizeof(vch->slot_active));
+        spin_unlock_irqrestore(&vch->slock, rflags);
+
+        if (owned)
+            dev_info(&qdev->pdev->dev,
+                     "VCU ch1 session reset: released %u slot_active[] claim(s)\n",
+                     owned);
     }
 }
 
@@ -1141,6 +1632,25 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
     bool is_tpg_source = false;
     bool convert_rgb = false;
     int ret;
+
+    if (vch->channel_id == 1 && qdev->c2h_only) {
+        atomic_inc(&qdev->streaming_count);
+        dev_info(&qdev->pdev->dev,
+                 "VCU STREAMON (Node 1): %u buffers queued, ring size=%u (parked republish armed)\n",
+                 count, QPCIE_VCU_RING_SIZE);
+        /* QBUFs that arrived before STREAMON (or that raced the session ring
+         * reset) may already be parked; give them their first slot now. */
+        qpcie_vcu_drain_pending(vch);
+
+        /* Enable the Channel 1 hardware interrupt sources (BIT(8) frame/packet
+         * done, BIT(0) channel done) so completions do not rely solely on the
+         * polling path. The following read backs the write before returning. */
+        if (qdev->bar0_mmio) {
+            iowrite32(BIT(8) | BIT(0), qdev->bar0_mmio + REG_VCH_BASE(1) + REG_VCH_OFFSET_CTRL);
+            ioread32(qdev->bar0_mmio + REG_VCH_BASE(1) + REG_VCH_OFFSET_CTRL);
+        }
+        return 0;
+    }
 
     if (count < 2) {
         qpcie_cancel_unstarted_rings(vch);
@@ -1270,7 +1780,9 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
     }
 
     if (vch->thin_ring_virt) {
-        bool is_rgb = (vch->pixelformat == V4L2_PIX_FMT_RGB24);
+        bool is_rgb = (vch->pixelformat == V4L2_PIX_FMT_RGB24 ||
+                       vch->pixelformat == V4L2_PIX_FMT_H264 ||
+                       vch->pixelformat == V4L2_PIX_FMT_HEVC);
         u32 stride0 = is_rgb ? (vch->stride ? vch->stride : (vch->width * 3)) :
                                (vch->stride ? vch->stride : vch->width);
         u32 stride1 = is_rgb ? 0 :
@@ -1363,6 +1875,45 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
     u32 head = 0;
     u32 stat_reg = vch->ch_reg_base + REG_VCH_OFFSET_STATUS;
 
+    if (vch->channel_id == 1 && qdev->c2h_only) {
+        /* The Card<->Host offset of this session is no longer meaningful once
+         * streaming stops: force re-calibration on the next session. */
+        vch->vcu_offset_calibrated = false;
+
+        qpcie_return_all_buffers(vch, VB2_BUF_STATE_ERROR);
+
+        /* The buffers are back in userspace, so this session owns nothing any
+         * more - but host_head/ps_tail in BRAM still carry its unfinished
+         * in_flight difference.  Align host_head onto ps_tail here so a dead
+         * session cannot hand a full ring to the next STREAMON. */
+        if (qdev->bar0_mmio) {
+            void __iomem *ring_mmio = qdev->bar0_mmio + QPCIE_BAR0_VCU_RING_OFFSET;
+            u32 ps_tail = ioread32(ring_mmio + offsetof(struct qpcie_vcu_host_ring, ps_tail));
+
+            iowrite32(ps_tail, ring_mmio + offsetof(struct qpcie_vcu_host_ring, host_head));
+            ioread32(ring_mmio + offsetof(struct qpcie_vcu_host_ring, host_head));
+
+            dev_info(&qdev->pdev->dev,
+                     "VCU Host Ring STREAMOFF reset: host_head <- ps_tail=%u\n",
+                     ps_tail);
+        }
+
+        /* Clear the Channel 1 control register so its hardware interrupts are
+         * disabled with the session: no completion IRQ may still fire for
+         * buffers that are about to be handed back to userspace. */
+        if (qdev->bar0_mmio) {
+            iowrite32(0, qdev->bar0_mmio + REG_VCH_BASE(1) + REG_VCH_OFFSET_CTRL);
+            ioread32(qdev->bar0_mmio + REG_VCH_BASE(1) + REG_VCH_OFFSET_CTRL);
+        }
+
+        atomic_dec(&qdev->streaming_count);
+        dev_info(&qdev->pdev->dev,
+                 "VCU STREAMOFF (Node 1): ring parks=%d republished=%d\n",
+                 atomic_read(&qpcie_vcu_ring_parks),
+                 atomic_read(&qpcie_vcu_park_republished));
+        return;
+    }
+
     /*
      * Ordering is the whole point of this function: the card must be provably
      * done writing into these buffers BEFORE they are handed back to userspace.
@@ -1371,7 +1922,7 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
      */
 
     /* 1. Stop the frame source so no new frame enters the pipeline. */
-    if (vch->channel_id == 0 && qdev->bar1_mmio) {
+    if (vch->channel_id == 0 && qdev->bar1_mmio && !qdev->c2h_only) {
         void __iomem *tpg = qdev->bar1_mmio + qdev->bar1_offset_tpg;
 
         qpcie_tpg_pace_stop(qdev);
@@ -1514,12 +2065,218 @@ static const char * const qpcie_tpg_pattern_strings[] = {
     NULL
 };
 
+void qpcie_vcu_sync_config(struct qpcie_v4l2_channel *vch)
+{
+    struct qpcie_dev *qdev;
+    void __iomem *target;
+    const u32 *words;
+    int i, count;
+
+    if (!vch || vch->channel_id != 1)
+        return;
+    qdev = vch->qdev;
+    if (!qdev || !qdev->bar0_mmio || !qdev->c2h_only)
+        return;
+
+    vch->vcu_cfg.magic = QPCIE_VCU_CFG_MAGIC;
+    vch->vcu_cfg.version = 1;
+    vch->vcu_cfg.config_seq++;
+
+    /* The whole mailbox is mirrored word-by-word below, so the Card-side
+     * pacer knobs land on their advertised offsets (0xBC / 0xC0 inside
+     * QPCIE_BAR0_VCU_CFG_OFFSET, i.e. BAR0 0x21BC / 0x21C0).  Fail the build
+     * if the mailbox layout ever shifts under these comments. */
+    BUILD_BUG_ON(offsetof(struct qpcie_vcu_encoder_config, pacer_enable) !=
+                 QPCIE_VCU_CFG_PACER_ENABLE_OFFSET);
+    BUILD_BUG_ON(offsetof(struct qpcie_vcu_encoder_config, pacer_buffer_frames) !=
+                 QPCIE_VCU_CFG_PACER_BUFFER_FRAMES_OFFSET);
+
+    target = qdev->bar0_mmio + QPCIE_BAR0_VCU_CFG_OFFSET;
+    words = (const u32 *)&vch->vcu_cfg;
+    count = sizeof(struct qpcie_vcu_encoder_config) / sizeof(u32);
+
+    for (i = 0; i < count; i++)
+        iowrite32(words[i], target + (i * 4));
+
+    /* Memory barrier and PCIe write flush */
+    wmb();
+    ioread32(target);
+}
+
 static int qpcie_s_ctrl(struct v4l2_ctrl *ctrl)
 {
     struct qpcie_v4l2_channel *vch = container_of(ctrl->handler, struct qpcie_v4l2_channel, ctrl_handler);
     struct qpcie_dev *qdev = vch->qdev;
 
     switch (ctrl->id) {
+    case V4L2_CID_MPEG_VIDEO_BITRATE_MODE:
+        vch->vcu_cfg.bitrate_mode = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_BITRATE:
+        vch->vcu_cfg.bitrate = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_BITRATE_PEAK:
+        vch->vcu_cfg.bitrate_peak = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_FRAME_RC_ENABLE:
+        vch->vcu_cfg.frame_rc_enable = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_MB_RC_ENABLE:
+        vch->vcu_cfg.mb_rc_enable = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_CONSTANT_QUALITY:
+        vch->vcu_cfg.const_quality = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_GOP_SIZE:
+        vch->vcu_cfg.gop_size = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_B_FRAMES:
+        vch->vcu_cfg.b_frames = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME:
+        vch->vcu_cfg.force_idr = 1;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_REPEAT_SEQ_HEADER:
+        vch->vcu_cfg.repeat_seq_header = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_HEADER_MODE:
+        vch->vcu_cfg.header_mode = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_H264_PROFILE:
+        vch->vcu_cfg.h264_profile = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_H264_LEVEL:
+        vch->vcu_cfg.h264_level = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_H264_ENTROPY_MODE:
+        vch->vcu_cfg.h264_entropy_mode = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_H264_MIN_QP:
+        vch->vcu_cfg.h264_min_qp = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_H264_MAX_QP:
+        vch->vcu_cfg.h264_max_qp = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_H264_I_FRAME_QP:
+        vch->vcu_cfg.h264_i_qp = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_H264_P_FRAME_QP:
+        vch->vcu_cfg.h264_p_qp = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_H264_B_FRAME_QP:
+        vch->vcu_cfg.h264_b_qp = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_H264_CPB_SIZE:
+        vch->vcu_cfg.h264_cpb_size = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_H264_LOOP_FILTER_MODE:
+        vch->vcu_cfg.h264_loop_filter_mode = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_H264_8X8_TRANSFORM:
+        vch->vcu_cfg.h264_8x8_transform = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_HEVC_PROFILE:
+        vch->vcu_cfg.hevc_profile = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_HEVC_LEVEL:
+        vch->vcu_cfg.hevc_level = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_HEVC_TIER:
+        vch->vcu_cfg.hevc_tier = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_HEVC_MIN_QP:
+        vch->vcu_cfg.hevc_min_qp = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_HEVC_MAX_QP:
+        vch->vcu_cfg.hevc_max_qp = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_HEVC_I_FRAME_QP:
+        vch->vcu_cfg.hevc_i_qp = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_HEVC_P_FRAME_QP:
+        vch->vcu_cfg.hevc_p_qp = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_HEVC_B_FRAME_QP:
+        vch->vcu_cfg.hevc_b_qp = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_HEVC_LOOP_FILTER_MODE:
+        vch->vcu_cfg.hevc_loop_filter_mode = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_HEVC_REFRESH_TYPE:
+        vch->vcu_cfg.hevc_refresh_type = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_HEVC_STRONG_SMOOTHING:
+        vch->vcu_cfg.hevc_strong_smoothing = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_HEVC_CONST_INTRA_PRED:
+        vch->vcu_cfg.hevc_const_intra_pred = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_HEVC_WAVEFRONT:
+        vch->vcu_cfg.hevc_wavefront = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MODE:
+        vch->vcu_cfg.slice_mode = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MAX_BYTES:
+        vch->vcu_cfg.slice_max_bytes = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MAX_MB:
+        vch->vcu_cfg.slice_max_mb = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_MPEG_VIDEO_CYCLIC_INTRA_REFRESH_MB:
+        vch->vcu_cfg.intra_refresh_mb = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_QPCIE_VCU_PACER_ENABLE:
+        if (vch->vcu_cfg.pacer_enable == (u32)ctrl->val)
+            break;
+        vch->vcu_cfg.pacer_enable = !!ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
+    case V4L2_CID_QPCIE_VCU_PACER_BUFFER_FRAMES:
+        if (vch->vcu_cfg.pacer_buffer_frames == (u32)ctrl->val)
+            break;
+        vch->vcu_cfg.pacer_buffer_frames = ctrl->val;
+        qpcie_vcu_sync_config(vch);
+        break;
     case V4L2_CID_QPCIE_PACER_ENABLE:
         vch->pacer_enable = !!ctrl->val;
         if (qdev && qdev->bar0_mmio && vb2_is_streaming(&vch->queue)) {
@@ -1546,6 +2303,8 @@ static int qpcie_s_ctrl(struct v4l2_ctrl *ctrl)
         }
         break;
     case V4L2_CID_QPCIE_VIDEO_SOURCE:
+        if (qdev->c2h_only && ctrl->val != 2)
+            return -EOPNOTSUPP;
         /* The mux selector crosses as a quasi-static level. Switching source
          * inside a frame would splice two rasters into one host buffer. */
         if (vb2_is_streaming(&vch->queue) && vch->video_source != ctrl->val)
@@ -1601,6 +2360,33 @@ static const struct v4l2_ctrl_config qpcie_pacer_ctrl_config = {
     .max  = 1,
     .step = 1,
     .def  = 1,
+};
+
+/* Card-side hardware pacer for the Channel 1 VCU output bitstream.  Instead of
+ * pushing every finished frame onto the link immediately, the pacer meters the
+ * stream out; the buffer depth says how many encoded frames may accumulate
+ * before pacing kicks in.  Both values are delivered to the Card through the
+ * VCU configuration mailbox (BAR0 + 0x21BC / + 0x21C0). */
+static const struct v4l2_ctrl_config qpcie_vcu_pacer_enable_ctrl_config = {
+    .ops  = &qpcie_ctrl_ops,
+    .id   = V4L2_CID_QPCIE_VCU_PACER_ENABLE,
+    .name = "VCU Pacer Enable",
+    .type = V4L2_CTRL_TYPE_BOOLEAN,
+    .min  = 0,
+    .max  = 1,
+    .step = 1,
+    .def  = 1,
+};
+
+static const struct v4l2_ctrl_config qpcie_vcu_pacer_buffer_frames_ctrl_config = {
+    .ops  = &qpcie_ctrl_ops,
+    .id   = V4L2_CID_QPCIE_VCU_PACER_BUFFER_FRAMES,
+    .name = "VCU Pacer Buffer Frames",
+    .type = V4L2_CTRL_TYPE_INTEGER,
+    .min  = 0,
+    .max  = 30,
+    .step = 1,
+    .def  = 8,
 };
 
 static const struct v4l2_ctrl_config qpcie_tpg_motion_ctrl_config = {
@@ -1714,6 +2500,13 @@ static void qpcie_v4l2_hdmi_monitor_work_fn(struct work_struct *work)
 
     qpcie_v4l2_check_source_change(vch);
 
+    /* Background watchdog for the Channel 1 (VCU) path: the hardware interrupt
+     * is the fast path, but a lost or coalesced completion must not stall the
+     * ring forever. Poll the completion path on every monitor tick while the
+     * V4L2 nodes are registered. */
+    if (vch->qdev && vch->qdev->c2h_only && vch->qdev->v4l2_registered)
+        qpcie_v4l2_node_done(vch->qdev, 1);
+
     if (vch->hdmi_monitor_running)
         schedule_delayed_work(&vch->hdmi_monitor_work, msecs_to_jiffies(250));
 }
@@ -1752,8 +2545,12 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
                 hw_caps);
         return -EOPNOTSUPP;
     }
-    node_count = 1 + (2 * min(hw_video_ch - 1,
-                              (unsigned int)(NUM_VIDEO_CHANNELS - 1)));
+    if (qdev->c2h_only) {
+        node_count = 2; /* Node 0: Raw HDMI capture; Node 1: VCU Stream (Packet DMA) capture */
+    } else {
+        node_count = 1 + (2 * min(hw_video_ch - 1,
+                                  (unsigned int)(NUM_VIDEO_CHANNELS - 1)));
+    }
     dev_info(&qdev->pdev->dev,
              "[V4L2] FPGA capability check passed: %u video channels, registering %u node(s) (caps=0x%08x)\n",
              hw_video_ch, node_count, hw_caps);
@@ -1784,13 +2581,23 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
         vch->stride     = 1920;
         vch->pixelformat= V4L2_PIX_FMT_NV12M;
         vch->pacer_enable = true;
+        if (qdev->c2h_only)
+            vch->video_source = 2; /* No automatic TPG fallback. */
 
         if (i == 0) {
             vch->channel_id = 0;
             vch->buf_type   = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
         } else if (i == 1) {
             vch->channel_id = 1;
-            vch->buf_type   = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+            vch->buf_type   = qdev->c2h_only ?
+                V4L2_BUF_TYPE_VIDEO_CAPTURE :
+                V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+            if (qdev->c2h_only) {
+                vch->pixelformat = V4L2_PIX_FMT_H264;
+                vch->width = 3840;
+                vch->height = 2160;
+                vch->stride = 0;
+            }
         } else if (i == 2) {
             vch->channel_id = 1;
             vch->buf_type   = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
@@ -1817,36 +2624,264 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
 
         /* Initialize V4L2 Control Handler */
         dev_info(&qdev->pdev->dev, "[DEBUG STEP 2.3] Node %d: Initializing Control Handler...\n", i);
-        v4l2_ctrl_handler_init(&vch->ctrl_handler, i == 0 ? 6 : 1);
-        if (i == 0) {
-            v4l2_ctrl_new_std_menu_items(&vch->ctrl_handler, &qpcie_ctrl_ops,
-                                         V4L2_CID_TEST_PATTERN,
-                                         6, BIT(0), 3, qpcie_tpg_pattern_strings);
+        if (i == 1 && qdev->c2h_only) {
+            v4l2_ctrl_handler_init(&vch->ctrl_handler, 47);
+            /* Standard V4L2 Rate Control */
+            v4l2_ctrl_new_std_menu(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                                   V4L2_CID_MPEG_VIDEO_BITRATE_MODE,
+                                   V4L2_MPEG_VIDEO_BITRATE_MODE_CQ, 0,
+                                   V4L2_MPEG_VIDEO_BITRATE_MODE_CBR);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_BITRATE,
+                              25000, 100000000, 1000, 25000000);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_BITRATE_PEAK,
+                              25000, 120000000, 1000, 30000000);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_FRAME_RC_ENABLE,
+                              0, 1, 1, 1);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_MB_RC_ENABLE,
+                              0, 1, 1, 1);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_CONSTANT_QUALITY,
+                              0, 51, 1, 28);
+
+            /* Standard V4L2 GOP & Framing */
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_GOP_SIZE,
+                              1, 300, 1, 60);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_B_FRAMES,
+                              0, 4, 1, 0);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME,
+                              0, 0, 0, 0);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_REPEAT_SEQ_HEADER,
+                              0, 1, 1, 1);
+            v4l2_ctrl_new_std_menu(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                                   V4L2_CID_MPEG_VIDEO_HEADER_MODE,
+                                   V4L2_MPEG_VIDEO_HEADER_MODE_JOINED_WITH_1ST_FRAME, 0,
+                                   V4L2_MPEG_VIDEO_HEADER_MODE_JOINED_WITH_1ST_FRAME);
+
+            /* Standard V4L2 H.264 Controls */
+            v4l2_ctrl_new_std_menu(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                                   V4L2_CID_MPEG_VIDEO_H264_PROFILE,
+                                   V4L2_MPEG_VIDEO_H264_PROFILE_HIGH,
+                                   ~((1 << V4L2_MPEG_VIDEO_H264_PROFILE_BASELINE) |
+                                     (1 << V4L2_MPEG_VIDEO_H264_PROFILE_CONSTRAINED_BASELINE) |
+                                     (1 << V4L2_MPEG_VIDEO_H264_PROFILE_MAIN) |
+                                     (1 << V4L2_MPEG_VIDEO_H264_PROFILE_HIGH)),
+                                   V4L2_MPEG_VIDEO_H264_PROFILE_HIGH);
+            v4l2_ctrl_new_std_menu(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                                   V4L2_CID_MPEG_VIDEO_H264_LEVEL,
+                                   V4L2_MPEG_VIDEO_H264_LEVEL_5_2, 0,
+                                   V4L2_MPEG_VIDEO_H264_LEVEL_5_1);
+            v4l2_ctrl_new_std_menu(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                                   V4L2_CID_MPEG_VIDEO_H264_ENTROPY_MODE,
+                                   V4L2_MPEG_VIDEO_H264_ENTROPY_MODE_CABAC, 0,
+                                   V4L2_MPEG_VIDEO_H264_ENTROPY_MODE_CABAC);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_H264_MIN_QP,
+                              0, 51, 1, 10);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_H264_MAX_QP,
+                              0, 51, 1, 51);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_H264_I_FRAME_QP,
+                              0, 51, 1, 26);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_H264_P_FRAME_QP,
+                              0, 51, 1, 28);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_H264_B_FRAME_QP,
+                              0, 51, 1, 30);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_H264_CPB_SIZE,
+                              64, 100000, 64, 10000);
+            v4l2_ctrl_new_std_menu(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                                   V4L2_CID_MPEG_VIDEO_H264_LOOP_FILTER_MODE,
+                                   V4L2_MPEG_VIDEO_H264_LOOP_FILTER_MODE_DISABLED_AT_SLICE_BOUNDARY, 0,
+                                   V4L2_MPEG_VIDEO_H264_LOOP_FILTER_MODE_ENABLED);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_H264_8X8_TRANSFORM,
+                              0, 1, 1, 1);
+
+            /* Standard V4L2 HEVC / H.265 Controls */
+            v4l2_ctrl_new_std_menu(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                                   V4L2_CID_MPEG_VIDEO_HEVC_PROFILE,
+                                   V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN_10, 0,
+                                   V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN);
+            v4l2_ctrl_new_std_menu(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                                   V4L2_CID_MPEG_VIDEO_HEVC_LEVEL,
+                                   V4L2_MPEG_VIDEO_HEVC_LEVEL_6_2, 0,
+                                   V4L2_MPEG_VIDEO_HEVC_LEVEL_5_1);
+            v4l2_ctrl_new_std_menu(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                                   V4L2_CID_MPEG_VIDEO_HEVC_TIER,
+                                   V4L2_MPEG_VIDEO_HEVC_TIER_HIGH, 0,
+                                   V4L2_MPEG_VIDEO_HEVC_TIER_MAIN);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_HEVC_MIN_QP,
+                              0, 51, 1, 10);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_HEVC_MAX_QP,
+                              0, 51, 1, 51);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_HEVC_I_FRAME_QP,
+                              0, 51, 1, 26);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_HEVC_P_FRAME_QP,
+                              0, 51, 1, 28);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_HEVC_B_FRAME_QP,
+                              0, 51, 1, 30);
+            v4l2_ctrl_new_std_menu(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                                   V4L2_CID_MPEG_VIDEO_HEVC_LOOP_FILTER_MODE,
+                                   V4L2_MPEG_VIDEO_HEVC_LOOP_FILTER_MODE_DISABLED_AT_SLICE_BOUNDARY, 0,
+                                   V4L2_MPEG_VIDEO_HEVC_LOOP_FILTER_MODE_ENABLED);
+            v4l2_ctrl_new_std_menu(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                                   V4L2_CID_MPEG_VIDEO_HEVC_REFRESH_TYPE,
+                                   V4L2_MPEG_VIDEO_HEVC_REFRESH_IDR, 0,
+                                   V4L2_MPEG_VIDEO_HEVC_REFRESH_IDR);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_HEVC_STRONG_SMOOTHING,
+                              0, 1, 1, 1);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_HEVC_CONST_INTRA_PRED,
+                              0, 1, 1, 0);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_HEVC_WAVEFRONT,
+                              0, 1, 1, 1);
+
+            /* Slicing & Resilience */
+            v4l2_ctrl_new_std_menu(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                                   V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MODE,
+                                   V4L2_MPEG_VIDEO_MULTI_SLICE_MODE_MAX_BYTES, 0,
+                                   V4L2_MPEG_VIDEO_MULTI_SLICE_MODE_SINGLE);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MAX_BYTES,
+                              0, 65535, 1, 0);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MAX_MB,
+                              0, 65535, 1, 0);
+            v4l2_ctrl_new_std(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                              V4L2_CID_MPEG_VIDEO_CYCLIC_INTRA_REFRESH_MB,
+                              0, 8192, 1, 0);
+
+            /* Card-side hardware output pacer (VCU mailbox 0xBC / 0xC0) */
             v4l2_ctrl_new_custom(&vch->ctrl_handler,
-                                 &qpcie_tpg_motion_ctrl_config, NULL);
+                                 &qpcie_vcu_pacer_enable_ctrl_config, NULL);
             v4l2_ctrl_new_custom(&vch->ctrl_handler,
-                                 &qpcie_frame_drop_ctrl_config, NULL);
+                                 &qpcie_vcu_pacer_buffer_frames_ctrl_config,
+                                 NULL);
+
+            /* Populate default struct values */
+            vch->vcu_cfg.magic = QPCIE_VCU_CFG_MAGIC;
+            vch->vcu_cfg.version = 1;
+            vch->vcu_cfg.codec_type = (vch->pixelformat == V4L2_PIX_FMT_HEVC) ? 1 : 0;
+            vch->vcu_cfg.bitrate_mode = V4L2_MPEG_VIDEO_BITRATE_MODE_CBR;
+            vch->vcu_cfg.bitrate = 25000000;
+            vch->vcu_cfg.bitrate_peak = 30000000;
+            vch->vcu_cfg.frame_rc_enable = 1;
+            vch->vcu_cfg.mb_rc_enable = 1;
+            vch->vcu_cfg.const_quality = 28;
+            vch->vcu_cfg.gop_size = 60;
+            vch->vcu_cfg.b_frames = 0;
+            vch->vcu_cfg.force_idr = 0;
+            vch->vcu_cfg.repeat_seq_header = 1;
+            vch->vcu_cfg.header_mode = V4L2_MPEG_VIDEO_HEADER_MODE_JOINED_WITH_1ST_FRAME;
+            vch->vcu_cfg.h264_profile = V4L2_MPEG_VIDEO_H264_PROFILE_HIGH;
+            vch->vcu_cfg.h264_level = V4L2_MPEG_VIDEO_H264_LEVEL_5_1;
+            vch->vcu_cfg.h264_entropy_mode = V4L2_MPEG_VIDEO_H264_ENTROPY_MODE_CABAC;
+            vch->vcu_cfg.h264_min_qp = 10;
+            vch->vcu_cfg.h264_max_qp = 51;
+            vch->vcu_cfg.h264_i_qp = 26;
+            vch->vcu_cfg.h264_p_qp = 28;
+            vch->vcu_cfg.h264_b_qp = 30;
+            vch->vcu_cfg.h264_cpb_size = 10000;
+            vch->vcu_cfg.h264_loop_filter_mode = V4L2_MPEG_VIDEO_H264_LOOP_FILTER_MODE_ENABLED;
+            vch->vcu_cfg.h264_8x8_transform = 1;
+            vch->vcu_cfg.hevc_profile = V4L2_MPEG_VIDEO_HEVC_PROFILE_MAIN;
+            vch->vcu_cfg.hevc_level = V4L2_MPEG_VIDEO_HEVC_LEVEL_5_1;
+            vch->vcu_cfg.hevc_tier = V4L2_MPEG_VIDEO_HEVC_TIER_MAIN;
+            vch->vcu_cfg.hevc_min_qp = 10;
+            vch->vcu_cfg.hevc_max_qp = 51;
+            vch->vcu_cfg.hevc_i_qp = 26;
+            vch->vcu_cfg.hevc_p_qp = 28;
+            vch->vcu_cfg.hevc_b_qp = 30;
+            vch->vcu_cfg.hevc_loop_filter_mode = V4L2_MPEG_VIDEO_HEVC_LOOP_FILTER_MODE_ENABLED;
+            vch->vcu_cfg.hevc_refresh_type = V4L2_MPEG_VIDEO_HEVC_REFRESH_IDR;
+            vch->vcu_cfg.hevc_strong_smoothing = 1;
+            vch->vcu_cfg.hevc_const_intra_pred = 0;
+            vch->vcu_cfg.hevc_wavefront = 1;
+            vch->vcu_cfg.slice_mode = V4L2_MPEG_VIDEO_MULTI_SLICE_MODE_SINGLE;
+            vch->vcu_cfg.slice_max_bytes = 0;
+            vch->vcu_cfg.slice_max_mb = 0;
+            vch->vcu_cfg.intra_refresh_mb = 0;
+            vch->vcu_cfg.pacer_enable = 1;
+            vch->vcu_cfg.pacer_buffer_frames = 8;
+            qpcie_vcu_sync_config(vch);
+
+            /* Allocate DPC1 completion record ring for Channel 1 */
+            vch->comp_ring_virt = dma_alloc_coherent(&qdev->pdev->dev,
+                                                     QPCIE_VCU_RING_SIZE * 64,
+                                                     &vch->comp_ring_dma, GFP_KERNEL);
+            if (vch->comp_ring_virt)
+                memset(vch->comp_ring_virt, 0, QPCIE_VCU_RING_SIZE * 64);
+            if (qdev->bar0_mmio) {
+                void __iomem *ring_mmio = qdev->bar0_mmio + QPCIE_BAR0_VCU_RING_OFFSET;
+                iowrite32(QPCIE_VCU_RING_MAGIC, ring_mmio + offsetof(struct qpcie_vcu_host_ring, magic));
+                iowrite32(1, ring_mmio + offsetof(struct qpcie_vcu_host_ring, version));
+                iowrite32(QPCIE_VCU_RING_SIZE, ring_mmio + offsetof(struct qpcie_vcu_host_ring, ring_size));
+                iowrite32(0, ring_mmio + offsetof(struct qpcie_vcu_host_ring, host_head));
+                iowrite32(0, ring_mmio + offsetof(struct qpcie_vcu_host_ring, ps_tail));
+                iowrite32(0, ring_mmio + offsetof(struct qpcie_vcu_host_ring, dropped_count));
+            }
+        } else {
+            v4l2_ctrl_handler_init(&vch->ctrl_handler, i == 0 ? 6 : 1);
+            if (i == 0 && !qdev->c2h_only) {
+                v4l2_ctrl_new_std_menu_items(&vch->ctrl_handler, &qpcie_ctrl_ops,
+                                             V4L2_CID_TEST_PATTERN,
+                                             6, BIT(0), 3, qpcie_tpg_pattern_strings);
+                v4l2_ctrl_new_custom(&vch->ctrl_handler,
+                                     &qpcie_tpg_motion_ctrl_config, NULL);
+                v4l2_ctrl_new_custom(&vch->ctrl_handler,
+                                     &qpcie_frame_drop_ctrl_config, NULL);
+                v4l2_ctrl_new_custom(&vch->ctrl_handler,
+                                     &qpcie_tpg_overlay_ctrl_config, NULL);
+                v4l2_ctrl_new_custom(&vch->ctrl_handler,
+                                     &qpcie_video_source_ctrl_config, NULL);
+            }
+            if (i == 0 && qdev->c2h_only) {
+                struct v4l2_ctrl_config source = qpcie_video_source_ctrl_config;
+
+                source.def = 2;
+                source.menu_skip_mask = BIT(0) | BIT(1);
+                v4l2_ctrl_new_custom(&vch->ctrl_handler, &source, NULL);
+            }
             v4l2_ctrl_new_custom(&vch->ctrl_handler,
-                                 &qpcie_tpg_overlay_ctrl_config, NULL);
-            v4l2_ctrl_new_custom(&vch->ctrl_handler,
-                                 &qpcie_video_source_ctrl_config, NULL);
+                                 &qpcie_pacer_ctrl_config, NULL);
         }
-        v4l2_ctrl_new_custom(&vch->ctrl_handler,
-                             &qpcie_pacer_ctrl_config, NULL);
         if (vch->ctrl_handler.error) {
             ret = vch->ctrl_handler.error;
             dev_err(&qdev->pdev->dev, "[DEBUG ERROR] Node %d: Control handler error: %d\n", i, ret);
             goto unreg_v4l2;
         }
 
-        /* Initialize vb2_queue: all nodes use vb2_dma_sg */
-        dev_info(&qdev->pdev->dev, "[DEBUG STEP 2.4] Node %d: Initializing vb2_queue with vb2_dma_sg...\n", i);
+        /* Initialize vb2_queue: Channel 1 (Packet DMA / VCU) uses the contiguous
+         * allocator so every plane lands in one physically/IOVA-contiguous buffer;
+         * Channel 0 keeps the scatter/gather allocator. */
+        dev_info(&qdev->pdev->dev,
+                 "[DEBUG STEP 2.4] Node %d: Initializing vb2_queue with %s allocator...\n",
+                 i, (i == 1) ? "vb2_dma_contig" : "vb2_dma_sg");
         vch->queue.type            = vch->buf_type;
         vch->queue.io_modes        = VB2_MMAP | VB2_USERPTR | VB2_DMABUF;
         vch->queue.drv_priv        = vch;
         vch->queue.buf_struct_size = sizeof(struct qpcie_v4l2_buffer);
         vch->queue.ops             = &qpcie_vb2_ops;
-        vch->queue.mem_ops         = &vb2_dma_sg_memops;
+        vch->queue.mem_ops         = (vch->channel_id == 1) ?
+                                     &vb2_dma_contig_memops : &vb2_dma_sg_memops;
         vch->queue.dma_dir         =
             vch->buf_type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE ?
             DMA_TO_DEVICE : DMA_FROM_DEVICE;
@@ -1854,9 +2889,9 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
         vch->queue.lock            = &vch->lock;
         vch->queue.dev             = &qdev->pdev->dev;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0)
-        vch->queue.min_queued_buffers = 2;
+        vch->queue.min_queued_buffers = (vch->channel_id == 1) ? 8 : 2;
 #else
-        vch->queue.min_buffers_needed = 2;
+        vch->queue.min_buffers_needed = (vch->channel_id == 1) ? 8 : 2;
 #endif
         ret = vb2_queue_init(&vch->queue);
         if (ret) {
@@ -1866,13 +2901,20 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
 
         dev_info(&qdev->pdev->dev, "[DEBUG STEP 2.5] Node %d: Registering Video Device /dev/videoX...\n", i);
         if (i == 0) {
-            snprintf(vdev->name, sizeof(vdev->name), "qpcie-capture-tpg0");
+            snprintf(vdev->name, sizeof(vdev->name), "%s",
+                     qdev->c2h_only ? "sc7f0-hdmi-raw" : "qpcie-capture-tpg0");
             vdev->device_caps = V4L2_CAP_VIDEO_CAPTURE_MPLANE | V4L2_CAP_STREAMING;
             vdev->vfl_dir     = VFL_DIR_RX;
         } else if (i == 1) {
-            snprintf(vdev->name, sizeof(vdev->name), "qpcie-loopback-out1");
-            vdev->device_caps = V4L2_CAP_VIDEO_OUTPUT_MPLANE | V4L2_CAP_STREAMING;
-            vdev->vfl_dir     = VFL_DIR_TX;
+            if (qdev->c2h_only) {
+                snprintf(vdev->name, sizeof(vdev->name), "sc7f0-vcu-stream");
+                vdev->device_caps = V4L2_CAP_VIDEO_CAPTURE | V4L2_CAP_STREAMING;
+                vdev->vfl_dir     = VFL_DIR_RX;
+            } else {
+                snprintf(vdev->name, sizeof(vdev->name), "qpcie-loopback-out1");
+                vdev->device_caps = V4L2_CAP_VIDEO_OUTPUT_MPLANE | V4L2_CAP_STREAMING;
+                vdev->vfl_dir     = VFL_DIR_TX;
+            }
         } else if (i == 2) {
             snprintf(vdev->name, sizeof(vdev->name), "qpcie-loopback-cap1");
             vdev->device_caps = V4L2_CAP_VIDEO_CAPTURE_MPLANE | V4L2_CAP_STREAMING;
@@ -1993,6 +3035,13 @@ void qpcie_v4l2_remove(struct qpcie_dev *qdev)
     qdev->v4l2_registered = false;
     for (i = 0; i < qdev->v4l2_node_count; i++) {
         struct qpcie_v4l2_channel *vch = &qdev->v4l2_ch[i];
+        if (vch->comp_ring_virt) {
+            dma_free_coherent(&qdev->pdev->dev,
+                              QPCIE_VCU_RING_SIZE * 64,
+                              vch->comp_ring_virt,
+                              vch->comp_ring_dma);
+            vch->comp_ring_virt = NULL;
+        }
         if (video_is_registered(&vch->vdev))
             video_unregister_device(&vch->vdev);
         v4l2_ctrl_handler_free(&vch->ctrl_handler);
@@ -2000,25 +3049,242 @@ void qpcie_v4l2_remove(struct qpcie_dev *qdev)
     v4l2_device_unregister(&qdev->v4l2_dev);
 }
 
+/* "DPC1": magic the PS writes into a slot's 64-byte host completion record
+ * once the frame DMA for that VCU ring slot has fully landed in host memory. */
+#define QPCIE_VCU_DPC1_MAGIC        0x44504331
+
 void qpcie_v4l2_node_done(struct qpcie_dev *qdev, int node_idx)
 {
     struct qpcie_v4l2_channel *vch;
     struct qpcie_v4l2_buffer *buf;
+    unsigned long flags;
+    bool coalesced;
 
     if (!qdev || node_idx < 0 || node_idx >= qdev->v4l2_node_count)
         return;
 
     vch = &qdev->v4l2_ch[node_idx];
-    spin_lock(&vch->slock);
-    if (!list_empty(&vch->active_buffers)) {
+    /* Per-slot completion can only be proven where the PS writes a DPC1 record,
+     * i.e. the c2h-only VCU stream on channel 1.  Raw video (ch0) and the
+     * legacy/loopback paths keep the original one-buffer-per-interrupt path. */
+    coalesced = (vch->channel_id == 1 && qdev->c2h_only && vch->comp_ring_virt);
+
+    /* Runs from the MSI hardirq handler: must mask interrupts so a
+     * process-context publisher cannot be deadlocked by this IRQ. */
+    spin_lock_irqsave(&vch->slock, flags);
+    /* The VCU MSI is coalesced: a single interrupt can cover several finished
+     * frames.  Retiring only the head buffer per interrupt leaves completed
+     * slots queued on active_buffers, starves the vb2 pool (buffer exhaustion
+     * stall) and loses frames, so drain every slot whose DPC1 record landed. */
+    while (!list_empty(&vch->active_buffers)) {
+        u32 actual_len = 0;
+        u64 pts_ns = 0;
+        u32 comp_magic = 0;
+        u32 slot;
+        bool owned_slot;
+
         buf = list_first_entry(&vch->active_buffers, struct qpcie_v4l2_buffer, list);
+
+        /* Slot ownership follows the c2h-only VCU publish path (see
+         * qpcie_publish_buffer()); capture it for this buffer up front so the
+         * occupancy mark can be released at whichever retirement point follows
+         * (timeout error or normal completion). */
+        slot = buf->vcu_slot_idx;
+        owned_slot = (vch->channel_id == 1 && qdev->c2h_only &&
+                      slot < QPCIE_VCU_RING_SIZE);
+
+        if (coalesced) {
+            volatile u32 *comp = (volatile u32 *)((u8 *)vch->comp_ring_virt +
+                                                  buf->vcu_slot_idx * 64);
+
+            /* active_buffers is FIFO in publish order, so the head is the
+             * oldest slot still in flight: if its completion has not landed,
+             * no later slot can have either - stop and wait for the next MSI.
+             *
+             * A missing DPC1 record alone says nothing about the slot being
+             * lost.  The card PS advances ps_tail when it *hands the slot to
+             * the Packet DMA engine*, long before the payload (and the DPC1
+             * write) lands in host memory, and a PCIe burst or concurrent
+             * Video0 load widens that window arbitrarily.  The old
+             * "(s32)(ps_tail - vcu_seq) > 2" test therefore mis-classified
+             * perfectly healthy in-flight frames as "skipped" and retired 184
+             * buffers as 0-byte VB2_BUF_STATE_ERROR.  Liveness is decided on
+             * wall-clock time only: a slot whose completion has not arrived
+             * after a physical 3 s has genuinely been lost, and is retired with
+             * an error so it cannot wedge the completion queue (and starve the
+             * vb2 pool).  Anything younger keeps waiting for the next MSI. */
+            if (comp[0] != QPCIE_VCU_DPC1_MAGIC) {
+                /* Diagnostic: a non-zero first word means *something* wrote into
+                 * this 64-byte completion slot, it just is not the DPC1 magic the
+                 * PS writes.  Dump the whole record (16 x 32-bit words = 64 B)
+                 * plus its IOVA so the writer can be identified (PS completion
+                 * record layout, a neighbouring slot's payload, a Packet DMA
+                 * buffer overwrite, stale data from an earlier frame, ...).
+                 * Independent of the timeout below: an alien magic that shows up
+                 * while the slot is still young is exactly the interesting case,
+                 * and waiting 3 s would only report the cleared/aged content. */
+                if (comp[0] != 0) {
+                    dev_info(&qdev->pdev->dev,
+                             "VCU slot %u (seq %u) DPC1 mismatch! comp[0]=0x%08x comp_dma=0x%llx: [0..7]=%08x %08x %08x %08x %08x %08x %08x %08x [8..15]=%08x %08x %08x %08x %08x %08x %08x %08x\n",
+                             buf->vcu_slot_idx, buf->vcu_seq, comp[0],
+                             (unsigned long long)(vch->comp_ring_dma + buf->vcu_slot_idx * 64),
+                             comp[0], comp[1], comp[2], comp[3],
+                             comp[4], comp[5], comp[6], comp[7],
+                             comp[8], comp[9], comp[10], comp[11],
+                             comp[12], comp[13], comp[14], comp[15]);
+                }
+
+                if (time_after(jiffies, buf->queued_jiffies + msecs_to_jiffies(3000))) {
+                    /* Same full record on the timeout path: by then the slot has
+                     * had 3 s to settle, so the dump shows its final content -
+                     * zero (never written), DPC1 (landed after the deadline), or
+                     * garbage (something else owns the slot). */
+                    dev_err_ratelimited(&qdev->pdev->dev,
+                                        "VCU slot %u (seq %u) timed out (>3s): completing with ERROR (comp[0]=0x%08x comp_dma=0x%llx: [0..7]=%08x %08x %08x %08x %08x %08x %08x %08x [8..15]=%08x %08x %08x %08x %08x %08x %08x %08x)\n",
+                                        buf->vcu_slot_idx, buf->vcu_seq, comp[0],
+                                        (unsigned long long)(vch->comp_ring_dma + buf->vcu_slot_idx * 64),
+                                        comp[0], comp[1], comp[2], comp[3],
+                                        comp[4], comp[5], comp[6], comp[7],
+                                        comp[8], comp[9], comp[10], comp[11],
+                                        comp[12], comp[13], comp[14], comp[15]);
+
+                    /* The frame is lost, but the slot is not: retire the buffer
+                     * AND release its occupancy mark, otherwise the mark would
+                     * keep a dead buffer's claim on the slot forever and every
+                     * later publish into that slot would be refused. */
+                    if (owned_slot) {
+                        if (vch->slot_active[slot] == buf)
+                            vch->slot_active[slot] = NULL;
+                        else
+                            dev_err(&qdev->pdev->dev,
+                                    "VCU slot %u occupancy mismatch on timeout (retiring buf%u, mark owned by another buffer): leaving mark alone\n",
+                                    slot, buf->vb.vb2_buf.index);
+                    }
+
+                    list_del(&buf->list);
+                    qdev->ring_completed++;
+                    buf->vb.sequence = vch->sequence++;
+                    /* Frame DMA failed or its completion was lost: the buffer
+                     * content is undefined, so export 0 payload. */
+                    vb2_set_plane_payload(&buf->vb.vb2_buf, 0, 0);
+                    vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_ERROR);
+                    continue;
+                }
+                break;
+            }
+
+            comp_magic = comp[0];            /* DPC1 magic, before the re-arm */
+            actual_len = comp[10];           /* Transferred Payload Bytes */
+
+            /* Length guard: comp[10] is written by the card, so a stale record
+             * (or a bus glitch) can still name more bytes than the buffer the
+             * host actually owns.  vb2_set_plane_payload() WARN_ONs and, worse,
+             * hands userspace a payload that reads past the mapping - clamp it
+             * to 0 (empty frame) and say so instead. */
+            if (actual_len > vb2_plane_size(&buf->vb.vb2_buf, 0)) {
+                dev_err_ratelimited(&qdev->pdev->dev,
+                                    "VCU slot %u actual_len %u > plane size %lu: ignoring bogus len\n",
+                                    slot, actual_len, vb2_plane_size(&buf->vb.vb2_buf, 0));
+                actual_len = 0;
+            }
+            if (comp[6] || comp[7])          /* PTS hi:lo */
+                pts_ns = (((u64)comp[7] << 32) | comp[6]) * 1000 / 150;
+
+            /* Re-arm the slot before the buffer can be republished into it.
+             * Clear the recorded length together with the magic: comp[10] is
+             * read before the magic is validated anywhere else, so a leftover
+             * length must never survive into the next use of this slot. */
+            comp[0] = 0;                     /* Clear completion magic */
+            comp[10] = 0;                    /* Clear transferred length */
+        }
+
+        /* Normal retirement: give the slot back.  Clearing the mark is what
+         * makes this slot publishable again - until this point no publisher
+         * can take it, which is exactly the guarantee that stops slot 0..15
+         * from being overwritten (and their completion magic cleared) while
+         * the previous frame is still landing in host memory. */
+        if (owned_slot) {
+            if (vch->slot_active[slot] == buf)
+                vch->slot_active[slot] = NULL;
+            else
+                dev_err(&qdev->pdev->dev,
+                        "VCU slot %u occupancy mismatch (retiring buf%u, mark owned by another buffer): leaving mark alone\n",
+                        slot, buf->vb.vb2_buf.index);
+        }
+
         list_del(&buf->list);
         qdev->ring_completed++;
-        buf->vb.vb2_buf.timestamp = ktime_get_ns();
+
+        if (!coalesced && vch->channel_id == 1 && qdev->bar0_mmio) {
+            /* No completion ring (VCU without DPC1 records): fall back to the
+             * last-packet CSRs, which describe the most recent frame only. */
+            u32 pts_lo = ioread32(qdev->bar0_mmio + REG_VCH_BASE(1) + REG_VCH_OFFSET_PKT_LAST_PTS_LO);
+            u32 pts_hi = ioread32(qdev->bar0_mmio + REG_VCH_BASE(1) + REG_VCH_OFFSET_PKT_LAST_PTS_HI);
+
+            actual_len = ioread32(qdev->bar0_mmio + REG_VCH_BASE(1) + REG_VCH_OFFSET_PKT_LAST_LEN);
+            if (pts_lo || pts_hi)
+                pts_ns = (((u64)pts_hi << 32) | pts_lo) * 1000 / 150;
+        }
+
+        if (vch->channel_id == 1) {
+            /* ch1 (VCU compressed bitstream): bytesused comes from the
+             * completion only.  A zero-length completion must export 0, never
+             * the full plane size staged at buffer_prepare. */
+            if (actual_len > 0)
+                vb2_set_plane_payload(&buf->vb.vb2_buf, 0, actual_len);
+            else
+                vb2_set_plane_payload(&buf->vb.vb2_buf, 0, 0);
+        } else if (actual_len > 0) {
+            vb2_set_plane_payload(&buf->vb.vb2_buf, 0, actual_len);
+        }
+        if (pts_ns > 0) {
+            /* pts_ns is the Card (HDMI RX) capture timestamp, a different clock
+             * domain than the Host CLOCK_MONOTONIC that vb2 timestamps use.
+             * Calibrate once per session by sampling the instantaneous distance
+             * between the two clocks, then shift every Card PTS into the Host
+             * domain so downstream (rtcp / muxer / sync) sees monotonic values. */
+            if (!vch->vcu_offset_calibrated) {
+                vch->vcu_card_to_host_offset_ns = (s64)ktime_get_ns() - (s64)pts_ns;
+                vch->vcu_offset_calibrated = true;
+                dev_info(&qdev->pdev->dev,
+                         "VCU PTS calibrated: Card %llu ns -> Host offset %+lld ns\n",
+                         (unsigned long long)pts_ns, (long long)vch->vcu_card_to_host_offset_ns);
+            }
+            buf->vb.vb2_buf.timestamp = pts_ns + vch->vcu_card_to_host_offset_ns;
+        } else {
+            buf->vb.vb2_buf.timestamp = ktime_get_ns();
+        }
+
         buf->vb.sequence = vch->sequence++;
         vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
+
+        /* Live monitoring of the first 10 completions (slot / magic / length).
+         * Printed after vb2_buffer_done() using locals only - the buffer itself
+         * belongs to userspace again by then. */
+        if (owned_slot && qpcie_vcu_done_trace < 10) {
+            qpcie_vcu_done_trace++;
+            dev_info(&qdev->pdev->dev,
+                     "VCU done[%u]: slot %u comp[0]=0x%08x actual_len=%u (buf%u, ring seq %u)\n",
+                     qpcie_vcu_done_trace, slot, comp_magic, actual_len,
+                     buf->vb.vb2_buf.index, buf->vcu_seq);
+        }
+
+        /* Channels without a per-slot completion record signal one frame per
+         * interrupt: keep the original single-shot behaviour and leave. */
+        if (!coalesced)
+            break;
     }
-    spin_unlock(&vch->slock);
+    spin_unlock_irqrestore(&vch->slock, flags);
+
+    /* Harvesting above retired buffers, and every retired buffer freed one
+     * VCU Host Ring slot.  QBUFs that found the ring full are parked on
+     * pending_buffers waiting for precisely that space, so drain them here:
+     * this is what keeps the 16-slot ring saturated instead of starving the
+     * card for a frame every time the ring tips over full.  Must run after
+     * slock is dropped (qpcie_publish_buffer() takes it) and it takes
+     * ring_lock itself in the same order qpcie_buf_queue() uses. */
+    if (vch->channel_id == 1 && qdev->c2h_only)
+        qpcie_vcu_drain_pending(vch);
 
     if (node_idx == 0)
         qpcie_v4l2_check_source_change(vch);
@@ -2026,6 +3292,17 @@ void qpcie_v4l2_node_done(struct qpcie_dev *qdev, int node_idx)
 
 void qpcie_v4l2_irq_handler(struct qpcie_dev *qdev)
 {
-    if (qdev && qdev->v4l2_registered)
-        qpcie_v4l2_node_done(qdev, 0);
+    if (!qdev || !qdev->v4l2_registered)
+        return;
+
+    qpcie_v4l2_node_done(qdev, 0);
+
+    /* On the c2h-only personality Node 1 is the VCU / Packet DMA compressed
+     * stream.  Its frame-done MSI (BIT(8)/BIT(0) of the Channel 1 block) used
+     * to be serviced only by the opportunistic harvest in QBUF context, so a
+     * quiet stretch with no QBUFs left completed slots - and therefore their
+     * slot_active[] claims - unreleased, starving the ring.  Harvest Node 1
+     * from the interrupt path as well. */
+    if (qdev->c2h_only)
+        qpcie_v4l2_node_done(qdev, 1);
 }

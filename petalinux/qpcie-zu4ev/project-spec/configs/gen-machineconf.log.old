@@ -1,7 +1,7 @@
 [DEBUG] Using xsct from : /opt/Xilinx/petalinux/2023.2/tools/xsct/bin/xsct
 [DEBUG] Using conf/mconf from : /opt/Xilinx/petalinux/2023.2/components/yocto/buildtools/sysroots/x86_64-petalinux-linux/usr/bin/mconf
 [INFO] Silentconfig project
-[DEBUG] Running CMD: yes "" | env KCONFIG_CONFIG=/home/zzlee/qpcie/petalinux/qpcie-zu4ev/project-spec/configs/config conf /home/zzlee/qpcie/petalinux/qpcie-zu4ev/project-spec/configs/configs/Kconfig
+[DEBUG] Running CMD: yes "" | env KCONFIG_CONFIG=/home/zzlee/vibecoding/sc7f0-dual-video/petalinux/qpcie-zu4ev/project-spec/configs/config conf /home/zzlee/vibecoding/sc7f0-dual-video/petalinux/qpcie-zu4ev/project-spec/configs/configs/Kconfig
 [DEBUG] *
 * PetaLinux System Configuration
 *
@@ -86,11 +86,8 @@ Subsystem AUTO Hardware Settings (SUBSYSTEM_HARDWARE_AUTO) [Y/?] y
   * Ethernet Settings
   *
   Primary Ethernet
-  > 1. psu_ethernet_0 (SUBSYSTEM_ETHERNET_PSU_ETHERNET_0_SELECT)
-    2. manual (SUBSYSTEM_ETHERNET_MANUAL_SELECT)
-  choice[1-2?]:   Randomise MAC address (SUBSYSTEM_ETHERNET_PSU_ETHERNET_0_MAC_AUTO) [N/y/?] 
-    Ethernet MAC address (SUBSYSTEM_ETHERNET_PSU_ETHERNET_0_MAC) [ff:ff:ff:ff:ff:ff] 
-  Obtain IP address automatically (SUBSYSTEM_ETHERNET_PSU_ETHERNET_0_USE_DHCP) [Y/n/?] 
+  > 1. manual (SUBSYSTEM_ETHERNET_MANUAL_SELECT)
+  choice[1]: 1
   *
   * Flash Settings
   *
@@ -125,7 +122,7 @@ Extra dts/dtsi files (SUBSYSTEM_EXTRA_DT_FILES) []
 *
 generate boot args automatically (SUBSYSTEM_BOOTARGS_AUTO) [Y/n/?] 
 enable kernel earlyprintk (SUBSYSTEM_BOOTARGS_EARLYPRINTK) [Y/n/?] 
-Auto generated bootargs (NO EDIT!) (SUBSYSTEM_BOOTARGS_GENERATED) [earlycon console=ttyPS0,115200 clk_ignore_unused root=/dev/ram0 rw] 
+Auto generated bootargs (NO EDIT!) (SUBSYSTEM_BOOTARGS_GENERATED) [earlycon console=ttyPS0,115200 clk_ignore_unused root=/dev/ram0 rw cma=1000M] 
 Add extra boot args (SUBSYSTEM_EXTRA_BOOTARGS) [] 
 Devicetree compiler flags (SUBSYSTEM_DEVICETREE_COMPILER_FLAGS) [-@] 
 Devicetree overlay (SUBSYSTEM_DTB_OVERLAY) [N/y/?] 
@@ -266,10 +263,10 @@ Enable Buildtools Extended (YOCTO_BUILDTOOLS_EXTENDED) [N/y/?]
 *
 user layer 0 (USER_LAYER_0) [] 
 #
-# configuration written to /home/zzlee/qpcie/petalinux/qpcie-zu4ev/project-spec/configs/config
+# configuration written to /home/zzlee/vibecoding/sc7f0-dual-video/petalinux/qpcie-zu4ev/project-spec/configs/config
 #
 [INFO] Silentconfig rootfs
-[DEBUG] Running CMD: yes "" | env KCONFIG_CONFIG=/home/zzlee/qpcie/petalinux/qpcie-zu4ev/project-spec/configs/rootfs_config conf /home/zzlee/qpcie/petalinux/qpcie-zu4ev/project-spec/configs/rootfsconfigs/Kconfig
+[DEBUG] Running CMD: yes "" | env KCONFIG_CONFIG=/home/zzlee/vibecoding/sc7f0-dual-video/petalinux/qpcie-zu4ev/project-spec/configs/rootfs_config conf /home/zzlee/vibecoding/sc7f0-dual-video/petalinux/qpcie-zu4ev/project-spec/configs/rootfsconfigs/Kconfig
 [DEBUG] *
 * Configuration
 *
@@ -3016,10 +3013,10 @@ util-macros-dev (util-macros-dev) [N/y/?]
 *
 * v4l-utils 
 *
-v4l-utils (v4l-utils) [N/y/?] 
+v4l-utils (v4l-utils) [Y/n/?] 
 libv4l (libv4l) [N/y/?] 
 ir-keytable (ir-keytable) [N/y/?] 
-media-ctl (media-ctl) [N/y/?] 
+media-ctl (media-ctl) [Y/n/?] 
 v4l-utils-dbg (v4l-utils-dbg) [N/y/?] 
 rc-keymaps (rc-keymaps) [N/y/?] 
 v4l-utils-dev (v4l-utils-dev) [N/y/?] 
@@ -3816,6 +3813,7 @@ gpio-demo (gpio-demo) [N/y/?]
 peekpoke (peekpoke) [N/y/?] 
 qpcie-debugd (qpcie-debugd) [Y/n/?] 
 qpcie-v4l2-bridge (qpcie-v4l2-bridge) [Y/n/?] 
+sc7f0-ps-capture (sc7f0-ps-capture) [Y/n/?] 
 *
 * PetaLinux RootFS Settings
 *
@@ -3824,5 +3822,5 @@ Create new Groups (CREATE_NEW_GROUPS) [aie;]
 Add Users to Groups (ADD_USERS_TO_GROUPS) [petalinux:audio,video,aie,input;] 
 Add Users to Sudo users (ADD_USERS_TO_SUDOERS) [petalinux] 
 #
-# configuration written to /home/zzlee/qpcie/petalinux/qpcie-zu4ev/project-spec/configs/rootfs_config
+# configuration written to /home/zzlee/vibecoding/sc7f0-dual-video/petalinux/qpcie-zu4ev/project-spec/configs/rootfs_config
 #

@@ -1,9 +1,24 @@
 # ==============================================================================
 # Block Design Generator for ZU4EV Processing System (zu4ev_ps_bd)
 # Generates zynq_ultra_ps_e with M_AXI_HPM0_FPD, S_AXI_HP0_FPD, and pl_ps_irq0
+# Optional encoder-only VCU (create_zu4ev_ps_bd 1 1) - see the VCU section.
+# The 3rd argument picks the VCU memory interconnect style (sc | xbar | xbar8);
+# the default is the slimmed topology measured in Todo 1.2b, and "sc" reproduces
+# the Todo 1.1 baseline for before/after measurements.
 # ==============================================================================
 
-proc create_zu4ev_ps_bd {{hdmi_control 0}} {
+# VCU memory-side interconnect style used when $vcu is 1 and the caller does not
+# name one.  "xbar" = axi_crossbar(2 SI/1 MI) + axi_dwidth_converter, "xbar8" =
+# the same crossbar with its acceptance/issuing depth pinned to 8 instead of the
+# propagated 16, "sc" = the two SmartConnects measured in Todo 1.2 (7,385 LUT of
+# fabric for no real switching work).  A "one HP port per VCU master" variant is
+# not possible on this part: the 2023.2 zynq_ultra_ps_e only elaborates
+# S_AXI_HP0..HP3_FPD (GP2..GP5) plus S_AXI_LPD, and HP0/HP1 belong to the
+# capture path.
+proc vcu_ic_default {} { return "xbar" }
+
+proc create_zu4ev_ps_bd {{hdmi_control 0} {vcu 0} {vcu_ic {}}} {
+  if {$vcu_ic eq ""} { set vcu_ic [vcu_ic_default] }
   set design_name "zu4ev_ps_bd"
   create_bd_design $design_name
   current_bd_design $design_name
@@ -322,9 +337,9 @@ proc create_zu4ev_ps_bd {{hdmi_control 0}} {
     CONFIG.PSU_MIO_9_INPUT_TYPE {schmitt} \
     CONFIG.PSU_MIO_9_PULLUPDOWN {pullup} \
     CONFIG.PSU_MIO_9_SLEW {slow} \
-    CONFIG.PSU_MIO_TREE_PERIPHERALS {#############SD 0#SD 0#SD 0#SD 0#SD 0#SD 0#SD 0#SD 0#SD 0#SD 0#SD 0###Gem 0#Gem 0#Gem 0#Gem 0#Gem 0#Gem 0#Gem 0#Gem 0#Gem 0#Gem 0#Gem 0#Gem 0#UART 0#UART 0#I2C 1#I2C\
-1####SD 1#SD 1#SD 1#SD 1#SD 1#SD 1#SD 1#USB 0#USB 0#USB 0#USB 0#USB 0#USB 0#USB 0#USB 0#USB 0#USB 0#USB 0#USB 0#USB 1#USB 1#USB 1#USB 1#USB 1#USB 1#USB 1#USB 1#USB 1#USB 1#USB 1#USB 1#MDIO 0#MDIO 0} \
-    CONFIG.PSU_MIO_TREE_SIGNALS {#############sdio0_data_out[0]#sdio0_data_out[1]#sdio0_data_out[2]#sdio0_data_out[3]#sdio0_data_out[4]#sdio0_data_out[5]#sdio0_data_out[6]#sdio0_data_out[7]#sdio0_cmd_out#sdio0_clk_out#sdio0_bus_pow###rgmii_tx_clk#rgmii_txd[0]#rgmii_txd[1]#rgmii_txd[2]#rgmii_txd[3]#rgmii_tx_ctl#rgmii_rx_clk#rgmii_rxd[0]#rgmii_rxd[1]#rgmii_rxd[2]#rgmii_rxd[3]#rgmii_rx_ctl#rxd#txd#scl_out#sda_out####sdio1_cd_n#sdio1_data_out[0]#sdio1_data_out[1]#sdio1_data_out[2]#sdio1_data_out[3]#sdio1_cmd_out#sdio1_clk_out#ulpi_clk_in#ulpi_dir#ulpi_tx_data[2]#ulpi_nxt#ulpi_tx_data[0]#ulpi_tx_data[1]#ulpi_stp#ulpi_tx_data[3]#ulpi_tx_data[4]#ulpi_tx_data[5]#ulpi_tx_data[6]#ulpi_tx_data[7]#ulpi_clk_in#ulpi_dir#ulpi_tx_data[2]#ulpi_nxt#ulpi_tx_data[0]#ulpi_tx_data[1]#ulpi_stp#ulpi_tx_data[3]#ulpi_tx_data[4]#ulpi_tx_data[5]#ulpi_tx_data[6]#ulpi_tx_data[7]#gem0_mdc#gem0_mdio_out}\
+    CONFIG.PSU_MIO_TREE_PERIPHERALS {#############SD 0#SD 0#SD 0#SD 0#SD 0#SD 0#SD 0#SD 0#SD 0#SD 0#SD 0###############UART 0#UART 0#I2C 1#I2C\
+1####SD 1#SD 1#SD 1#SD 1#SD 1#SD 1#SD 1#USB 0#USB 0#USB 0#USB 0#USB 0#USB 0#USB 0#USB 0#USB 0#USB 0#USB 0#USB 0#USB 1#USB 1#USB 1#USB 1#USB 1#USB 1#USB 1#USB 1#USB 1#USB 1#USB 1#USB 1##} \
+    CONFIG.PSU_MIO_TREE_SIGNALS {#############sdio0_data_out[0]#sdio0_data_out[1]#sdio0_data_out[2]#sdio0_data_out[3]#sdio0_data_out[4]#sdio0_data_out[5]#sdio0_data_out[6]#sdio0_data_out[7]#sdio0_cmd_out#sdio0_clk_out#sdio0_bus_pow###############rxd#txd#scl_out#sda_out####sdio1_cd_n#sdio1_data_out[0]#sdio1_data_out[1]#sdio1_data_out[2]#sdio1_data_out[3]#sdio1_cmd_out#sdio1_clk_out#ulpi_clk_in#ulpi_dir#ulpi_tx_data[2]#ulpi_nxt#ulpi_tx_data[0]#ulpi_tx_data[1]#ulpi_stp#ulpi_tx_data[3]#ulpi_tx_data[4]#ulpi_tx_data[5]#ulpi_tx_data[6]#ulpi_tx_data[7]#ulpi_clk_in#ulpi_dir#ulpi_tx_data[2]#ulpi_nxt#ulpi_tx_data[0]#ulpi_tx_data[1]#ulpi_stp#ulpi_tx_data[3]#ulpi_tx_data[4]#ulpi_tx_data[5]#ulpi_tx_data[6]#ulpi_tx_data[7]##}\
 \
     CONFIG.PSU_PERIPHERAL_BOARD_PRESET {} \
     CONFIG.PSU_SD0_INTERNAL_BUS_WIDTH {8} \
@@ -637,10 +652,8 @@ proc create_zu4ev_ps_bd {{hdmi_control 0}} {
     CONFIG.PSU__DLL__ISUSED {1} \
     CONFIG.PSU__ENABLE__DDR__REFRESH__SIGNALS {0} \
     CONFIG.PSU__ENET0__FIFO__ENABLE {0} \
-    CONFIG.PSU__ENET0__GRP_MDIO__ENABLE {1} \
-    CONFIG.PSU__ENET0__GRP_MDIO__IO {MIO 76 .. 77} \
-    CONFIG.PSU__ENET0__PERIPHERAL__ENABLE {1} \
-    CONFIG.PSU__ENET0__PERIPHERAL__IO {MIO 26 .. 37} \
+    CONFIG.PSU__ENET0__GRP_MDIO__ENABLE {0} \
+    CONFIG.PSU__ENET0__PERIPHERAL__ENABLE {0} \
     CONFIG.PSU__ENET0__PTP__ENABLE {0} \
     CONFIG.PSU__ENET0__TSU__ENABLE {0} \
     CONFIG.PSU__ENET1__PERIPHERAL__ENABLE {0} \
@@ -851,13 +864,13 @@ proc create_zu4ev_ps_bd {{hdmi_control 0}} {
 Firmware   |   SA:0xFFCC0000 ;SIZE:64;UNIT:KB ;RegionTZ:Secure ;WrAllowed:Read/Write;subsystemId:PMU Firmware   |   SA:0xFF180000 ;SIZE:768;UNIT:KB ;RegionTZ:Secure ;WrAllowed:Read/Write;subsystemId:PMU\
 Firmware   |   SA:0xFF410000 ;SIZE:640;UNIT:KB ;RegionTZ:Secure ;WrAllowed:Read/Write;subsystemId:PMU Firmware   |   SA:0xFFA70000 ;SIZE:64;UNIT:KB ;RegionTZ:Secure ;WrAllowed:Read/Write;subsystemId:PMU\
 Firmware   |   SA:0xFF9A0000 ;SIZE:64;UNIT:KB ;RegionTZ:Secure ;WrAllowed:Read/Write;subsystemId:PMU Firmware} \
-    CONFIG.PSU__PROTECTION__MASTERS {USB1:NonSecure;1|USB0:NonSecure;1|S_AXI_LPD:NA;0|S_AXI_HPC1_FPD:NA;1|S_AXI_HPC0_FPD:NA;1|S_AXI_HP3_FPD:NA;1|S_AXI_HP2_FPD:NA;1|S_AXI_HP1_FPD:NA;1|S_AXI_HP0_FPD:NA;1|S_AXI_ACP:NA;0|S_AXI_ACE:NA;0|SD1:NonSecure;1|SD0:NonSecure;1|SATA1:NonSecure;0|SATA0:NonSecure;0|RPU1:Secure;1|RPU0:Secure;1|QSPI:NonSecure;0|PMU:NA;1|PCIe:NonSecure;0|NAND:NonSecure;0|LDMA:NonSecure;1|GPU:NonSecure;1|GEM3:NonSecure;0|GEM2:NonSecure;0|GEM1:NonSecure;0|GEM0:NonSecure;1|FDMA:NonSecure;1|DP:NonSecure;0|DAP:NA;1|Coresight:NA;1|CSU:NA;1|APU:NA;1}\
+    CONFIG.PSU__PROTECTION__MASTERS {USB1:NonSecure;1|USB0:NonSecure;1|S_AXI_LPD:NA;0|S_AXI_HPC1_FPD:NA;1|S_AXI_HPC0_FPD:NA;1|S_AXI_HP3_FPD:NA;1|S_AXI_HP2_FPD:NA;1|S_AXI_HP1_FPD:NA;1|S_AXI_HP0_FPD:NA;1|S_AXI_ACP:NA;0|S_AXI_ACE:NA;0|SD1:NonSecure;1|SD0:NonSecure;1|SATA1:NonSecure;0|SATA0:NonSecure;0|RPU1:Secure;1|RPU0:Secure;1|QSPI:NonSecure;0|PMU:NA;1|PCIe:NonSecure;0|NAND:NonSecure;0|LDMA:NonSecure;1|GPU:NonSecure;1|GEM3:NonSecure;0|GEM2:NonSecure;0|GEM1:NonSecure;0|GEM0:NonSecure;0|FDMA:NonSecure;1|DP:NonSecure;0|DAP:NA;1|Coresight:NA;1|CSU:NA;1|APU:NA;1}\
 \
     CONFIG.PSU__PROTECTION__MASTERS_TZ {GEM0:NonSecure|SD1:NonSecure|GEM2:NonSecure|GEM1:NonSecure|GEM3:NonSecure|PCIe:NonSecure|DP:NonSecure|NAND:NonSecure|GPU:NonSecure|USB1:NonSecure|USB0:NonSecure|LDMA:NonSecure|FDMA:NonSecure|QSPI:NonSecure|SD0:NonSecure}\
 \
     CONFIG.PSU__PROTECTION__OCM_SEGMENTS {NONE} \
     CONFIG.PSU__PROTECTION__PRESUBSYSTEMS {NONE} \
-    CONFIG.PSU__PROTECTION__SLAVES {LPD;USB3_1_XHCI;FE300000;FE3FFFFF;1|LPD;USB3_1;FF9E0000;FF9EFFFF;1|LPD;USB3_0_XHCI;FE200000;FE2FFFFF;1|LPD;USB3_0;FF9D0000;FF9DFFFF;1|LPD;UART1;FF010000;FF01FFFF;1|LPD;UART0;FF000000;FF00FFFF;1|LPD;TTC3;FF140000;FF14FFFF;1|LPD;TTC2;FF130000;FF13FFFF;1|LPD;TTC1;FF120000;FF12FFFF;1|LPD;TTC0;FF110000;FF11FFFF;1|FPD;SWDT1;FD4D0000;FD4DFFFF;1|LPD;SWDT0;FF150000;FF15FFFF;1|LPD;SPI1;FF050000;FF05FFFF;0|LPD;SPI0;FF040000;FF04FFFF;0|FPD;SMMU_REG;FD5F0000;FD5FFFFF;1|FPD;SMMU;FD800000;FDFFFFFF;1|FPD;SIOU;FD3D0000;FD3DFFFF;1|FPD;SERDES;FD400000;FD47FFFF;1|LPD;SD1;FF170000;FF17FFFF;1|LPD;SD0;FF160000;FF16FFFF;1|FPD;SATA;FD0C0000;FD0CFFFF;0|LPD;RTC;FFA60000;FFA6FFFF;1|LPD;RSA_CORE;FFCE0000;FFCEFFFF;1|LPD;RPU;FF9A0000;FF9AFFFF;1|LPD;R5_TCM_RAM_GLOBAL;FFE00000;FFE3FFFF;1|LPD;R5_1_Instruction_Cache;FFEC0000;FFECFFFF;1|LPD;R5_1_Data_Cache;FFED0000;FFEDFFFF;1|LPD;R5_1_BTCM_GLOBAL;FFEB0000;FFEBFFFF;1|LPD;R5_1_ATCM_GLOBAL;FFE90000;FFE9FFFF;1|LPD;R5_0_Instruction_Cache;FFE40000;FFE4FFFF;1|LPD;R5_0_Data_Cache;FFE50000;FFE5FFFF;1|LPD;R5_0_BTCM_GLOBAL;FFE20000;FFE2FFFF;1|LPD;R5_0_ATCM_GLOBAL;FFE00000;FFE0FFFF;1|LPD;QSPI_Linear_Address;C0000000;DFFFFFFF;1|LPD;QSPI;FF0F0000;FF0FFFFF;0|LPD;PMU_RAM;FFDC0000;FFDDFFFF;1|LPD;PMU_GLOBAL;FFD80000;FFDBFFFF;1|FPD;PCIE_MAIN;FD0E0000;FD0EFFFF;0|FPD;PCIE_LOW;E0000000;EFFFFFFF;0|FPD;PCIE_HIGH2;8000000000;BFFFFFFFFF;0|FPD;PCIE_HIGH1;600000000;7FFFFFFFF;0|FPD;PCIE_DMA;FD0F0000;FD0FFFFF;0|FPD;PCIE_ATTRIB;FD480000;FD48FFFF;0|LPD;OCM_XMPU_CFG;FFA70000;FFA7FFFF;1|LPD;OCM_SLCR;FF960000;FF96FFFF;1|OCM;OCM;FFFC0000;FFFFFFFF;1|LPD;NAND;FF100000;FF10FFFF;0|LPD;MBISTJTAG;FFCF0000;FFCFFFFF;1|LPD;LPD_XPPU_SINK;FF9C0000;FF9CFFFF;1|LPD;LPD_XPPU;FF980000;FF98FFFF;1|LPD;LPD_SLCR_SECURE;FF4B0000;FF4DFFFF;1|LPD;LPD_SLCR;FF410000;FF4AFFFF;1|LPD;LPD_GPV;FE100000;FE1FFFFF;1|LPD;LPD_DMA_7;FFAF0000;FFAFFFFF;1|LPD;LPD_DMA_6;FFAE0000;FFAEFFFF;1|LPD;LPD_DMA_5;FFAD0000;FFADFFFF;1|LPD;LPD_DMA_4;FFAC0000;FFACFFFF;1|LPD;LPD_DMA_3;FFAB0000;FFABFFFF;1|LPD;LPD_DMA_2;FFAA0000;FFAAFFFF;1|LPD;LPD_DMA_1;FFA90000;FFA9FFFF;1|LPD;LPD_DMA_0;FFA80000;FFA8FFFF;1|LPD;IPI_CTRL;FF380000;FF3FFFFF;1|LPD;IOU_SLCR;FF180000;FF23FFFF;1|LPD;IOU_SECURE_SLCR;FF240000;FF24FFFF;1|LPD;IOU_SCNTRS;FF260000;FF26FFFF;1|LPD;IOU_SCNTR;FF250000;FF25FFFF;1|LPD;IOU_GPV;FE000000;FE0FFFFF;1|LPD;I2C1;FF030000;FF03FFFF;1|LPD;I2C0;FF020000;FF02FFFF;0|FPD;GPU;FD4B0000;FD4BFFFF;1|LPD;GPIO;FF0A0000;FF0AFFFF;1|LPD;GEM3;FF0E0000;FF0EFFFF;0|LPD;GEM2;FF0D0000;FF0DFFFF;0|LPD;GEM1;FF0C0000;FF0CFFFF;0|LPD;GEM0;FF0B0000;FF0BFFFF;1|FPD;FPD_XMPU_SINK;FD4F0000;FD4FFFFF;1|FPD;FPD_XMPU_CFG;FD5D0000;FD5DFFFF;1|FPD;FPD_SLCR_SECURE;FD690000;FD6CFFFF;1|FPD;FPD_SLCR;FD610000;FD68FFFF;1|FPD;FPD_DMA_CH7;FD570000;FD57FFFF;1|FPD;FPD_DMA_CH6;FD560000;FD56FFFF;1|FPD;FPD_DMA_CH5;FD550000;FD55FFFF;1|FPD;FPD_DMA_CH4;FD540000;FD54FFFF;1|FPD;FPD_DMA_CH3;FD530000;FD53FFFF;1|FPD;FPD_DMA_CH2;FD520000;FD52FFFF;1|FPD;FPD_DMA_CH1;FD510000;FD51FFFF;1|FPD;FPD_DMA_CH0;FD500000;FD50FFFF;1|LPD;EFUSE;FFCC0000;FFCCFFFF;1|FPD;Display\
+    CONFIG.PSU__PROTECTION__SLAVES {LPD;USB3_1_XHCI;FE300000;FE3FFFFF;1|LPD;USB3_1;FF9E0000;FF9EFFFF;1|LPD;USB3_0_XHCI;FE200000;FE2FFFFF;1|LPD;USB3_0;FF9D0000;FF9DFFFF;1|LPD;UART1;FF010000;FF01FFFF;1|LPD;UART0;FF000000;FF00FFFF;1|LPD;TTC3;FF140000;FF14FFFF;1|LPD;TTC2;FF130000;FF13FFFF;1|LPD;TTC1;FF120000;FF12FFFF;1|LPD;TTC0;FF110000;FF11FFFF;1|FPD;SWDT1;FD4D0000;FD4DFFFF;1|LPD;SWDT0;FF150000;FF15FFFF;1|LPD;SPI1;FF050000;FF05FFFF;0|LPD;SPI0;FF040000;FF04FFFF;0|FPD;SMMU_REG;FD5F0000;FD5FFFFF;1|FPD;SMMU;FD800000;FDFFFFFF;1|FPD;SIOU;FD3D0000;FD3DFFFF;1|FPD;SERDES;FD400000;FD47FFFF;1|LPD;SD1;FF170000;FF17FFFF;1|LPD;SD0;FF160000;FF16FFFF;1|FPD;SATA;FD0C0000;FD0CFFFF;0|LPD;RTC;FFA60000;FFA6FFFF;1|LPD;RSA_CORE;FFCE0000;FFCEFFFF;1|LPD;RPU;FF9A0000;FF9AFFFF;1|LPD;R5_TCM_RAM_GLOBAL;FFE00000;FFE3FFFF;1|LPD;R5_1_Instruction_Cache;FFEC0000;FFECFFFF;1|LPD;R5_1_Data_Cache;FFED0000;FFEDFFFF;1|LPD;R5_1_BTCM_GLOBAL;FFEB0000;FFEBFFFF;1|LPD;R5_1_ATCM_GLOBAL;FFE90000;FFE9FFFF;1|LPD;R5_0_Instruction_Cache;FFE40000;FFE4FFFF;1|LPD;R5_0_Data_Cache;FFE50000;FFE5FFFF;1|LPD;R5_0_BTCM_GLOBAL;FFE20000;FFE2FFFF;1|LPD;R5_0_ATCM_GLOBAL;FFE00000;FFE0FFFF;1|LPD;QSPI_Linear_Address;C0000000;DFFFFFFF;1|LPD;QSPI;FF0F0000;FF0FFFFF;0|LPD;PMU_RAM;FFDC0000;FFDDFFFF;1|LPD;PMU_GLOBAL;FFD80000;FFDBFFFF;1|FPD;PCIE_MAIN;FD0E0000;FD0EFFFF;0|FPD;PCIE_LOW;E0000000;EFFFFFFF;0|FPD;PCIE_HIGH2;8000000000;BFFFFFFFFF;0|FPD;PCIE_HIGH1;600000000;7FFFFFFFF;0|FPD;PCIE_DMA;FD0F0000;FD0FFFFF;0|FPD;PCIE_ATTRIB;FD480000;FD48FFFF;0|LPD;OCM_XMPU_CFG;FFA70000;FFA7FFFF;1|LPD;OCM_SLCR;FF960000;FF96FFFF;1|OCM;OCM;FFFC0000;FFFFFFFF;1|LPD;NAND;FF100000;FF10FFFF;0|LPD;MBISTJTAG;FFCF0000;FFCFFFFF;1|LPD;LPD_XPPU_SINK;FF9C0000;FF9CFFFF;1|LPD;LPD_XPPU;FF980000;FF98FFFF;1|LPD;LPD_SLCR_SECURE;FF4B0000;FF4DFFFF;1|LPD;LPD_SLCR;FF410000;FF4AFFFF;1|LPD;LPD_GPV;FE100000;FE1FFFFF;1|LPD;LPD_DMA_7;FFAF0000;FFAFFFFF;1|LPD;LPD_DMA_6;FFAE0000;FFAEFFFF;1|LPD;LPD_DMA_5;FFAD0000;FFADFFFF;1|LPD;LPD_DMA_4;FFAC0000;FFACFFFF;1|LPD;LPD_DMA_3;FFAB0000;FFABFFFF;1|LPD;LPD_DMA_2;FFAA0000;FFAAFFFF;1|LPD;LPD_DMA_1;FFA90000;FFA9FFFF;1|LPD;LPD_DMA_0;FFA80000;FFA8FFFF;1|LPD;IPI_CTRL;FF380000;FF3FFFFF;1|LPD;IOU_SLCR;FF180000;FF23FFFF;1|LPD;IOU_SECURE_SLCR;FF240000;FF24FFFF;1|LPD;IOU_SCNTRS;FF260000;FF26FFFF;1|LPD;IOU_SCNTR;FF250000;FF25FFFF;1|LPD;IOU_GPV;FE000000;FE0FFFFF;1|LPD;I2C1;FF030000;FF03FFFF;1|LPD;I2C0;FF020000;FF02FFFF;0|FPD;GPU;FD4B0000;FD4BFFFF;1|LPD;GPIO;FF0A0000;FF0AFFFF;1|LPD;GEM3;FF0E0000;FF0EFFFF;0|LPD;GEM2;FF0D0000;FF0DFFFF;0|LPD;GEM1;FF0C0000;FF0CFFFF;0|LPD;GEM0;FF0B0000;FF0BFFFF;0|FPD;FPD_XMPU_SINK;FD4F0000;FD4FFFFF;1|FPD;FPD_XMPU_CFG;FD5D0000;FD5DFFFF;1|FPD;FPD_SLCR_SECURE;FD690000;FD6CFFFF;1|FPD;FPD_SLCR;FD610000;FD68FFFF;1|FPD;FPD_DMA_CH7;FD570000;FD57FFFF;1|FPD;FPD_DMA_CH6;FD560000;FD56FFFF;1|FPD;FPD_DMA_CH5;FD550000;FD55FFFF;1|FPD;FPD_DMA_CH4;FD540000;FD54FFFF;1|FPD;FPD_DMA_CH3;FD530000;FD53FFFF;1|FPD;FPD_DMA_CH2;FD520000;FD52FFFF;1|FPD;FPD_DMA_CH1;FD510000;FD51FFFF;1|FPD;FPD_DMA_CH0;FD500000;FD50FFFF;1|LPD;EFUSE;FFCC0000;FFCCFFFF;1|FPD;Display\
 Port;FD4A0000;FD4AFFFF;0|FPD;DPDMA;FD4C0000;FD4CFFFF;0|FPD;DDR_XMPU5_CFG;FD050000;FD05FFFF;1|FPD;DDR_XMPU4_CFG;FD040000;FD04FFFF;1|FPD;DDR_XMPU3_CFG;FD030000;FD03FFFF;1|FPD;DDR_XMPU2_CFG;FD020000;FD02FFFF;1|FPD;DDR_XMPU1_CFG;FD010000;FD01FFFF;1|FPD;DDR_XMPU0_CFG;FD000000;FD00FFFF;1|FPD;DDR_QOS_CTRL;FD090000;FD09FFFF;1|FPD;DDR_PHY;FD080000;FD08FFFF;1|DDR;DDR_LOW;0;7FFFFFFF;1|DDR;DDR_HIGH;800000000;800000000;0|FPD;DDDR_CTRL;FD070000;FD070FFF;1|LPD;Coresight;FE800000;FEFFFFFF;1|LPD;CSU_DMA;FFC80000;FFC9FFFF;1|LPD;CSU;FFCA0000;FFCAFFFF;1|LPD;CRL_APB;FF5E0000;FF85FFFF;1|FPD;CRF_APB;FD1A0000;FD2DFFFF;1|FPD;CCI_REG;FD5E0000;FD5EFFFF;1|LPD;CAN1;FF070000;FF07FFFF;0|LPD;CAN0;FF060000;FF06FFFF;0|FPD;APU;FD5C0000;FD5CFFFF;1|LPD;APM_INTC_IOU;FFA20000;FFA2FFFF;1|LPD;APM_FPD_LPD;FFA30000;FFA3FFFF;1|FPD;APM_5;FD490000;FD49FFFF;1|FPD;APM_0;FD0B0000;FD0BFFFF;1|LPD;APM2;FFA10000;FFA1FFFF;1|LPD;APM1;FFA00000;FFA0FFFF;1|LPD;AMS;FFA50000;FFA5FFFF;1|FPD;AFI_5;FD3B0000;FD3BFFFF;1|FPD;AFI_4;FD3A0000;FD3AFFFF;1|FPD;AFI_3;FD390000;FD39FFFF;1|FPD;AFI_2;FD380000;FD38FFFF;1|FPD;AFI_1;FD370000;FD37FFFF;1|FPD;AFI_0;FD360000;FD36FFFF;1|LPD;AFIFM6;FF9B0000;FF9BFFFF;1|FPD;ACPU_GIC;F9010000;F907FFFF;1}\
 \
     CONFIG.PSU__PROTECTION__SUBSYSTEMS {PMU Firmware:PMU} \
@@ -1037,7 +1050,6 @@ Port;FD4A0000;FD4AFFFF;0|FPD;DPDMA;FD4C0000;FD4CFFFF;0|FPD;DDR_XMPU5_CFG;FD05000
   ] $zynq_ultra_ps_e_0
 
 
-
   # Customize interface enablement for QPCIe SC7F0
   set_property -dict [list \
     CONFIG.PSU__USE__M_AXI_GP0 {1} \
@@ -1057,6 +1069,14 @@ Port;FD4A0000;FD4AFFFF;0|FPD;DPDMA;FD4C0000;FD4CFFFF;0|FPD;DDR_XMPU5_CFG;FD05000
 
   # Create external interface ports
   if {$hdmi_control} {
+    # HP1 is reserved for the independent dual-video memory path (300MHz).
+    set_property -dict [list CONFIG.PSU__USE__S_AXI_GP3 {1} CONFIG.PSU__SAXIGP3__DATA_WIDTH {128}] $zynq_ultra_ps_e_0
+    set hp1 [create_bd_intf_port -mode Slave -vlnv xilinx.com:interface:aximm_rtl:1.0 S_AXI_HP1_FPD]
+    set_property -dict [list CONFIG.DATA_WIDTH {128} CONFIG.ADDR_WIDTH {49} CONFIG.AWUSER_WIDTH {1} CONFIG.ARUSER_WIDTH {1} CONFIG.FREQ_HZ {300000000}] $hp1
+    connect_bd_intf_net $hp1 [get_bd_intf_pins zynq_ultra_ps_e_0/S_AXI_HP1_FPD]
+    create_bd_port -dir I -type clk -freq_hz 300000000 dp_mem_clk
+    set_property CONFIG.ASSOCIATED_BUSIF S_AXI_HP1_FPD [get_bd_ports dp_mem_clk]
+    connect_bd_net [get_bd_ports dp_mem_clk] [get_bd_pins zynq_ultra_ps_e_0/saxihp1_fpd_aclk]
     # Independent PS control path: HDMI remains configurable without PCIe.
     set_property -dict [list \
       CONFIG.PSU__USE__M_AXI_GP1 {1} \
@@ -1064,9 +1084,239 @@ Port;FD4A0000;FD4AFFFF;0|FPD;DPDMA;FD4C0000;FD4CFFFF;0|FPD;DDR_XMPU5_CFG;FD05000
     ] $zynq_ultra_ps_e_0
     set m_axi1 [ create_bd_intf_port -mode Master -vlnv xilinx.com:interface:aximm_rtl:1.0 M_AXI_HPM1_FPD ]
     set_property -dict [list CONFIG.DATA_WIDTH {32} CONFIG.ADDR_WIDTH {40} CONFIG.FREQ_HZ {99990005}] $m_axi1
-    connect_bd_intf_net $m_axi1 [get_bd_intf_pins zynq_ultra_ps_e_0/M_AXI_HPM1_FPD]
+    if {!$vcu} {
+      connect_bd_intf_net $m_axi1 [get_bd_intf_pins zynq_ultra_ps_e_0/M_AXI_HPM1_FPD]
+    }
     connect_bd_net [get_bd_pins zynq_ultra_ps_e_0/pl_clk0] [get_bd_pins zynq_ultra_ps_e_0/maxihpm1_fpd_aclk]
   }
+
+  # ==========================================================================
+  # Encoder-only VCU (xilinx.com:ip:vcu:1.2).  Everything the VCU needs is
+  # internal to this BD, so the existing wrapper interface
+  # (dp_mem_clk / pl_clk0 / pl_resetn0 / pl_ps_irq0[4:0] / HP0 / HP1) keeps
+  # its meaning:
+  #   memory    M_AXI_ENC0 + M_AXI_ENC1 -> $vcu_ic interconnect -> S_AXI_HP2_FPD
+  #             M_AXI_MCU (32b)         -> $vcu_ic width converter -> S_AXI_HP3_FPD
+  #   control   M_AXI_HPM1_FPD -> axi_interconnect -> S_AXI_LITE @ 0xB0100000
+  #   clocks    pll_ref = PS pl_clk1 (33.333333MHz, PS BUFG), memory AXI =
+  #             dp_mem_clk (150MHz, same domain as HP1), AXI-Lite = pl_clk0
+  #   reset     vcu_resetn = pl_resetn0; interconnect resets are synchronous
+  #             releases from proc_sys_reset in each VCU clock domain
+  #   interrupt vcu_host_interrupt -> xlconcat bit 5 -> pl_ps_irq0[5], i.e.
+  #             GIC SPI 89+5 = 94 (the legacy 5-bit vector stays in bits 4:0)
+  # ==========================================================================
+  if {$vcu} {
+    if {!$hdmi_control} {
+      error "VCU integration requires the full (hdmi_control) PS BD profile: it needs the 300MHz dp_mem_clk memory clock that only that profile creates"
+    }
+
+    switch -- $vcu_ic {sc -
+      xbar -
+      xbar8 {}
+      default {
+        error "VCU interconnect style must be sc, xbar or xbar8 (got '$vcu_ic')"
+      }
+    }
+
+    # PS side: HP2/HP3 memory ports, and pl_clk1 as the VCU PLL reference.
+    # Note: M_AXI_GP2 (LPD) is NOT used; VCU S_AXI_LITE is connected via M_AXI_HPM1_FPD.
+    set ps_vcu_props [list \
+      CONFIG.PSU__USE__S_AXI_GP4 {1} \
+      CONFIG.PSU__SAXIGP4__DATA_WIDTH {128} \
+      CONFIG.PSU__USE__S_AXI_GP5 {1} \
+      CONFIG.PSU__SAXIGP5__DATA_WIDTH {128} \
+      CONFIG.PSU__USE__M_AXI_GP2 {0} \
+      CONFIG.PSU__FPGA_PL1_ENABLE {1} \
+      CONFIG.PSU__PL_CLK1_BUF {TRUE} \
+      CONFIG.PSU__CRL_APB__PL1_REF_CTRL__FREQMHZ {33.333333}]
+    set_property -dict $ps_vcu_props $zynq_ultra_ps_e_0
+
+    # VCU: encoder only, no decoder datapath.  3840x2160 NV12 (4:2:0, 8-bit)
+    # at source rate; the AXI clock parameters report the real 150MHz fabric
+    # clock instead of the 333MHz IP default.  No on-chip encoder buffer: the
+    # card already spends 89.5/128 BRAM36 equivalents on capture/PCIe.
+    set vcu_0 [create_bd_cell -type ip -vlnv xilinx.com:ip:vcu:1.2 vcu_0]
+    set_property -dict [list \
+      CONFIG.ENABLE_ENCODER {true} \
+      CONFIG.ENABLE_DECODER {false} \
+      CONFIG.PLL_BYPASS {0} \
+      CONFIG.PLL_CLK {33.333333} \
+      CONFIG.CORE_CLK {667} \
+      CONFIG.AXI_ENC_CLK {300} \
+      CONFIG.AXI_MCU_CLK {300} \
+      CONFIG.ENC_FRAME_SIZE {4} \
+      CONFIG.ENC_FPS {3} \
+      CONFIG.ENC_COLOR_FORMAT {0} \
+      CONFIG.ENC_COLOR_DEPTH {0} \
+      CONFIG.ENC_BUFFER_EN {false} \
+    ] $vcu_0
+
+    # Clocks and reset.  pl_clk1 only feeds the VCU PLL, so it is not exported.
+    connect_bd_net [get_bd_pins zynq_ultra_ps_e_0/pl_clk1] [get_bd_pins vcu_0/pll_ref_clk]
+    connect_bd_net [get_bd_ports dp_mem_clk] \
+      [get_bd_pins vcu_0/m_axi_enc_aclk] [get_bd_pins vcu_0/m_axi_mcu_aclk] \
+      [get_bd_pins zynq_ultra_ps_e_0/saxihp2_fpd_aclk] \
+      [get_bd_pins zynq_ultra_ps_e_0/saxihp3_fpd_aclk]
+    connect_bd_net [get_bd_pins zynq_ultra_ps_e_0/pl_clk0] \
+      [get_bd_pins vcu_0/s_axi_lite_aclk]
+    # VCU reset via independent PS EMIO GPIO bit 0 (EMIO GPIO 0 -> Linux GPIO 78).
+    # Xilinx device tree generator (axi_vcu.tcl) requires vcu_resetn to be driven
+    # by an xlslice from zynq_ultra_ps_e emio_gpio_o in order to generate
+    # the reset-gpios property (<&gpio 78 0>).
+    set vcu_reset_slice [create_bd_cell -type ip -vlnv xilinx.com:ip:xlslice:1.0 vcu_reset_slice]
+    set_property -dict [list \
+      CONFIG.DIN_WIDTH {95} \
+      CONFIG.DIN_FROM {0} \
+      CONFIG.DIN_TO {0} \
+      CONFIG.DOUT_WIDTH {1} \
+    ] $vcu_reset_slice
+    connect_bd_net [get_bd_pins zynq_ultra_ps_e_0/emio_gpio_o] [get_bd_pins vcu_reset_slice/Din]
+    connect_bd_net [get_bd_pins vcu_reset_slice/Dout] [get_bd_pins vcu_0/vcu_resetn]
+
+    # Synchronous reset release for the VCU interconnect clock domains.
+    #
+    # Polarity here is NOT the proc_sys_reset default.  A standalone IP boots
+    # with C_EXT_RESET_HIGH = 1, but validate_bd_design propagates the polarity
+    # of the reset that drives this cell (pl_resetn0, active low, on
+    # aux_reset_in) onto BOTH reset inputs, so the shipped output products of
+    # every build (r1..r5) carry C_EXT_RESET_HIGH = C_AUX_RESET_HIGH = 0:
+    #   ip/zu4ev_ps_bd_vcu_rst_lite_0/zu4ev_ps_bd_vcu_rst_lite_0.xml
+    #     C_EXT_RESET_HIGH = 0  ->  proc_sys_reset samples  exr_d1 <= not ext_reset_in
+    # i.e. ext_reset_in is ACTIVE LOW in this design and the inactive level is
+    # 1 (verified: xsim of the shipped vcu_rst_lite netlist gives
+    # peripheral_aresetn = 1 with ext_reset_in = 1 and = 0 with ext_reset_in = 0).
+    # Tying the constant to 0 therefore holds peripheral_aresetn at 0 for ever
+    # and leaves axil_vcu in reset - that is what hangs the AXI bus (and the
+    # CPU) on the first xilinx-vcu access to the SLCR at 0x800c_0000.
+    # scripts/check_sc7f0_vcu_bd.tcl now gates the tie against the *propagated*
+    # polarity instead of the IP default, so neither value can be flipped
+    # silently again.
+    set vcu_rst_const [create_bd_cell -type ip -vlnv xilinx.com:ip:xlconstant:1.1 vcu_rst_const]
+    set_property -dict [list CONFIG.CONST_WIDTH {1} CONFIG.CONST_VAL {1}] $vcu_rst_const
+    set vcu_rst_lite [create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset:5.0 vcu_rst_lite]
+    set vcu_rst_mem [create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset:5.0 vcu_rst_mem]
+    connect_bd_net [get_bd_pins vcu_rst_const/dout] \
+      [get_bd_pins vcu_rst_lite/ext_reset_in] [get_bd_pins vcu_rst_mem/ext_reset_in]
+    connect_bd_net [get_bd_pins zynq_ultra_ps_e_0/pl_resetn0] \
+      [get_bd_pins vcu_rst_lite/aux_reset_in] [get_bd_pins vcu_rst_mem/aux_reset_in]
+    connect_bd_net [get_bd_pins zynq_ultra_ps_e_0/pl_clk0] [get_bd_pins vcu_rst_lite/slowest_sync_clk]
+    connect_bd_net [get_bd_ports dp_mem_clk] [get_bd_pins vcu_rst_mem/slowest_sync_clk]
+
+    # ---------------------------------------------------------------------
+    # Memory-side interconnect.  Todo 1.2 measured the two SmartConnects at
+    # 4,166 + 3,219 = 7,385 LUT and 11,942 FF - 92 % of the whole VCU fabric
+    # cost - because SmartConnect builds a queued, multi-threaded arbiter on
+    # every port even when there is nothing to arbitrate.  Slim styles:
+    #   xbar   - M_AXI_ENC0 + M_AXI_ENC1 -> axi_crossbar(2 SI / 1 MI) -> HP2,
+    #            M_AXI_MCU -> axi_dwidth_converter(32 -> 128) -> HP3.
+    #            The crossbar keeps a per-source ID tag, so B/R still find their
+    #            master, and it has no thread queueing.
+    #   xbar8  - identical, except the crossbar's acceptance/issuing depth is
+    #            pinned to 8 instead of the propagated 16 (see the inline note).
+    # (A "one HP port per master, no PL logic at all" variant was ruled out:
+    #  this PS IP only has S_AXI_HP0..HP3_FPD and HP0/HP1 carry the capture
+    #  path, so the two DBI streams really do have to be merged.)
+    # The VCU AXI properties say NUM_READ_THREADS = NUM_WRITE_THREADS = 1 on
+    # ENC0/ENC1/MCU, so collapsing the interconnect to a single ordering
+    # context per master is what the IP actually asks for.
+    # ---------------------------------------------------------------------
+    if {$vcu_ic eq "sc"} {
+      set smc_vcu_enc [create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect:1.0 smc_vcu_enc]
+      connect_bd_intf_net [get_bd_intf_pins vcu_0/M_AXI_ENC0] [get_bd_intf_pins smc_vcu_enc/S00_AXI]
+      connect_bd_intf_net [get_bd_intf_pins vcu_0/M_AXI_ENC1] [get_bd_intf_pins smc_vcu_enc/S01_AXI]
+      connect_bd_net [get_bd_ports dp_mem_clk] [get_bd_pins smc_vcu_enc/aclk]
+      connect_bd_net [get_bd_pins vcu_rst_mem/peripheral_aresetn] [get_bd_pins smc_vcu_enc/aresetn]
+      connect_bd_intf_net [get_bd_intf_pins smc_vcu_enc/M00_AXI] [get_bd_intf_pins zynq_ultra_ps_e_0/S_AXI_HP2_FPD]
+
+      set smc_vcu_mcu [create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect:1.0 smc_vcu_mcu]
+      connect_bd_intf_net [get_bd_intf_pins vcu_0/M_AXI_MCU] [get_bd_intf_pins smc_vcu_mcu/S00_AXI]
+      connect_bd_net [get_bd_ports dp_mem_clk] [get_bd_pins smc_vcu_mcu/aclk]
+      connect_bd_net [get_bd_pins vcu_rst_mem/peripheral_aresetn] [get_bd_pins smc_vcu_mcu/aresetn]
+      connect_bd_intf_net [get_bd_intf_pins smc_vcu_mcu/M00_AXI] [get_bd_intf_pins zynq_ultra_ps_e_0/S_AXI_HP3_FPD]
+
+      set enc_ic_cell smc_vcu_enc
+      set enc_ic_ports {S_AXI_HP2_FPD S_AXI_HP2_FPD}
+      set mcu_ic_cell smc_vcu_mcu
+      set mcu_hp S_AXI_HP3_FPD
+    } elseif {[string match "xbar*" $vcu_ic]} {
+      # 128-bit DBI merge.  ADDR_WIDTH follows the VCU masters (44); the PS GP
+      # slave ports declare 49 and only the DDR decode range matters, so the
+      # unused top bits are tied off by the BD.  ID_WIDTH is one bit wider than
+      # the VCU's 4-bit DBI ID: axi_crossbar routes B/R with the ID bits at the
+      # S01_BASE_ID position (0x8 for a 4-bit ID, i.e. it would eat the VCU's
+      # own MSB), and with 5 bits S01's source tag moves to bit 4 so all 16
+      # encoder IDs pass through unchanged (HP2 accepts up to 6).
+      set xbar_vcu_enc [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_crossbar:2.1 xbar_vcu_enc]
+      # axi_crossbar has no READ_WRITE_MODE parameter at all (setting it costs a
+      # BD 41-1276 CRITICAL WARNING), and it registers nothing unless asked - the
+      # only queueing it has is the acceptance/issuing depth tuned below.
+      set_property -dict [list \
+        CONFIG.NUM_SI {2} CONFIG.NUM_MI {1} \
+        CONFIG.PROTOCOL {AXI4} \
+        CONFIG.DATA_WIDTH {128} CONFIG.ADDR_WIDTH {44} CONFIG.ID_WIDTH {5} \
+      ] $xbar_vcu_enc
+      if {$vcu_ic eq "xbar8"} {
+        # Optional queue-depth trim.  validate_bd_design propagates 16 accepted
+        # / issued bursts per port from S_AXI_HP2_FPD's NUM_READ/WRITE_OUTSTANDING
+        # and leaves an explicit setting alone.  Depth 8 still keeps
+        # 8 x 4 KiB = 32 KiB in flight per direction and per master, ~140x the
+        # 230 B (1.92 GB/s x ~120 ns DDR latency) needed to keep the port busy,
+        # while halving the crossbar's acceptance/issuing counters.
+        set_property -dict [list \
+          CONFIG.S00_READ_ACCEPTANCE 8 CONFIG.S00_WRITE_ACCEPTANCE 8 \
+          CONFIG.S01_READ_ACCEPTANCE 8 CONFIG.S01_WRITE_ACCEPTANCE 8 \
+          CONFIG.M00_READ_ISSUING 8 CONFIG.M00_WRITE_ISSUING 8] $xbar_vcu_enc
+      }
+      connect_bd_intf_net [get_bd_intf_pins vcu_0/M_AXI_ENC0] [get_bd_intf_pins xbar_vcu_enc/S00_AXI]
+      connect_bd_intf_net [get_bd_intf_pins vcu_0/M_AXI_ENC1] [get_bd_intf_pins xbar_vcu_enc/S01_AXI]
+      connect_bd_net [get_bd_ports dp_mem_clk] [get_bd_pins xbar_vcu_enc/aclk]
+      connect_bd_net [get_bd_pins vcu_rst_mem/peripheral_aresetn] [get_bd_pins xbar_vcu_enc/aresetn]
+      connect_bd_intf_net [get_bd_intf_pins xbar_vcu_enc/M00_AXI] [get_bd_intf_pins zynq_ultra_ps_e_0/S_AXI_HP2_FPD]
+
+      # MCU path: a 1:1 32 -> 128-bit upsizer, nothing else.  SI_ID_WIDTH keeps
+      # the VCU's 3-bit MCU ID so responses find their requester.
+      set dwc_vcu_mcu [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_dwidth_converter:2.1 dwc_vcu_mcu]
+      set_property -dict [list \
+        CONFIG.PROTOCOL {AXI4} CONFIG.READ_WRITE_MODE {READ_WRITE} \
+        CONFIG.ADDR_WIDTH {44} CONFIG.SI_DATA_WIDTH {32} CONFIG.MI_DATA_WIDTH {128} \
+        CONFIG.SI_ID_WIDTH {3} \
+      ] $dwc_vcu_mcu
+      connect_bd_intf_net [get_bd_intf_pins vcu_0/M_AXI_MCU] [get_bd_intf_pins dwc_vcu_mcu/S_AXI]
+      connect_bd_net [get_bd_ports dp_mem_clk] [get_bd_pins dwc_vcu_mcu/*aclk*]
+      connect_bd_net [get_bd_pins vcu_rst_mem/peripheral_aresetn] [get_bd_pins dwc_vcu_mcu/*aresetn*]
+      connect_bd_intf_net [get_bd_intf_pins dwc_vcu_mcu/M_AXI] \
+        [get_bd_intf_pins zynq_ultra_ps_e_0/S_AXI_HP3_FPD]
+
+      set enc_ic_cell xbar_vcu_enc
+      set enc_ic_ports {S_AXI_HP2_FPD S_AXI_HP2_FPD}
+      set mcu_ic_cell dwc_vcu_mcu
+      set mcu_hp S_AXI_HP3_FPD
+    }
+    puts "SC7F0_VCU_IC style=$vcu_ic enc_ic=$enc_ic_cell enc_hp=$enc_ic_ports mcu_ic=$mcu_ic_cell mcu_hp=$mcu_hp"
+
+    # VCU register space: connected to M_AXI_HPM1_FPD via 1-to-2 interconnect ic_hpm1.
+    # M00 -> external port M_AXI_HPM1_FPD (HDMI crossbar @ 0xB0000000)
+    # M01 -> vcu_0/S_AXI_LITE (@ 0xB0100000)
+    set ic_hpm1 [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_interconnect:2.1 ic_hpm1]
+    set_property -dict [list CONFIG.NUM_SI {1} CONFIG.NUM_MI {2}] $ic_hpm1
+
+    connect_bd_net [get_bd_pins zynq_ultra_ps_e_0/pl_clk0] \
+      [get_bd_pins ic_hpm1/ACLK] \
+      [get_bd_pins ic_hpm1/S00_ACLK] \
+      [get_bd_pins ic_hpm1/M00_ACLK] \
+      [get_bd_pins ic_hpm1/M01_ACLK]
+
+    connect_bd_net [get_bd_pins vcu_rst_lite/interconnect_aresetn] [get_bd_pins ic_hpm1/ARESETN]
+    connect_bd_net [get_bd_pins vcu_rst_lite/peripheral_aresetn] \
+      [get_bd_pins ic_hpm1/S00_ARESETN] \
+      [get_bd_pins ic_hpm1/M00_ARESETN] \
+      [get_bd_pins ic_hpm1/M01_ARESETN]
+
+    connect_bd_intf_net [get_bd_intf_pins zynq_ultra_ps_e_0/M_AXI_HPM1_FPD] [get_bd_intf_pins ic_hpm1/S00_AXI]
+    connect_bd_intf_net [get_bd_intf_pins ic_hpm1/M00_AXI] $m_axi1
+    connect_bd_intf_net [get_bd_intf_pins ic_hpm1/M01_AXI] [get_bd_intf_pins vcu_0/S_AXI_LITE]
+  }
+
   set m_axi [ create_bd_intf_port -mode Master -vlnv xilinx.com:interface:aximm_rtl:1.0 M_AXI_HPM0_FPD ]
   set_property -dict [list CONFIG.DATA_WIDTH {32} CONFIG.ADDR_WIDTH {40} CONFIG.FREQ_HZ {99990005}] $m_axi
   connect_bd_intf_net $m_axi [get_bd_intf_pins zynq_ultra_ps_e_0/M_AXI_HPM0_FPD]
@@ -1078,16 +1328,31 @@ Port;FD4A0000;FD4AFFFF;0|FPD;DPDMA;FD4C0000;FD4CFFFF;0|FPD;DDR_XMPU5_CFG;FD05000
   # ZynqMP PL IRQ0[0..2] -> GIC IDs 121..123 (DT SPIs 89..91).
   # Preserve the original upgrade/mailbox notification on bit 0.
   set irq_msb 0
-  if {$hdmi_control} {set irq_msb 2}
+  if {$hdmi_control} {set irq_msb 4}
   # NUM_F2P0_INTR_INPUTS is read-only in IP Integrator: width propagates
   # from this port at validate_bd_design, rather than a set_property override.
+  # The wrapper port stays [$irq_msb:0]; the VCU adds bit 5 inside the BD.
   create_bd_port -dir I -from $irq_msb -to 0 -type intr pl_ps_irq0
-  connect_bd_net [get_bd_ports pl_ps_irq0] [get_bd_pins zynq_ultra_ps_e_0/pl_ps_irq0]
+  if {$vcu} {
+    # xlconcat keeps the legacy vector in dout[4:0] and puts the VCU encoder
+    # interrupt in dout[5] (GIC SPI 94).  IN0_WIDTH makes In0 a 5-bit input.
+    set vcu_irq_cat [create_bd_cell -type ip -vlnv xilinx.com:ip:xlconcat:2.1 vcu_irq_cat]
+    set_property -dict [list CONFIG.NUM_PORTS {2} CONFIG.IN0_WIDTH {5} CONFIG.IN1_WIDTH {1}] $vcu_irq_cat
+    connect_bd_net [get_bd_ports pl_ps_irq0] [get_bd_pins vcu_irq_cat/In0]
+    connect_bd_net [get_bd_pins vcu_0/vcu_host_interrupt] [get_bd_pins vcu_irq_cat/In1]
+    connect_bd_net [get_bd_pins vcu_irq_cat/dout] [get_bd_pins zynq_ultra_ps_e_0/pl_ps_irq0]
+  } else {
+    connect_bd_net [get_bd_ports pl_ps_irq0] [get_bd_pins zynq_ultra_ps_e_0/pl_ps_irq0]
+  }
 
   # Address mapping
   assign_bd_address
   if {$hdmi_control} {
     assign_bd_address -force -offset 0xB0000000 -range 0x00100000 -target_address_space [get_bd_addr_spaces zynq_ultra_ps_e_0/Data] [get_bd_addr_segs M_AXI_HPM1_FPD/Reg]
+    if {$vcu} {
+      # VCU register block on M_AXI_HPM1_FPD (encoder @ 0xB0100000, slcr @ 0xB0140000, logicore @ 0xB0141000)
+      assign_bd_address -force -offset 0xB0100000 -range 0x00100000 -target_address_space [get_bd_addr_spaces zynq_ultra_ps_e_0/Data] [get_bd_addr_segs vcu_0/S_AXI_LITE/Reg]
+    }
   }
 
   # Export pl_clk0 (100MHz) and connect it to PS AXI interfaces

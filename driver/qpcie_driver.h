@@ -27,6 +27,7 @@
 #include <media/v4l2-device.h>
 #include <media/v4l2-ioctl.h>
 #include <media/v4l2-ctrls.h>
+#include <uapi/linux/v4l2-controls.h>
 #include <media/videobuf2-v4l2.h>
 #include <media/videobuf2-dma-sg.h>
 #include <media/videobuf2-dma-contig.h>
@@ -154,6 +155,14 @@
 #define V4L2_CID_QPCIE_TPG_OVERLAY      (V4L2_CID_USER_BASE + 0x1003)
 #define V4L2_CID_QPCIE_VIDEO_SOURCE     (V4L2_CID_USER_BASE + 0x1004)
 
+/* Card-side hardware output pacer for the Channel 1 VCU bitstream path.
+ * These live in the VCU configuration mailbox (struct
+ * qpcie_vcu_encoder_config, BAR0 QPCIE_BAR0_VCU_CFG_OFFSET + 0xBC / 0xC0) and
+ * are independent from the Channel 0 TPG pacer (V4L2_CID_QPCIE_PACER_ENABLE /
+ * REG_PACER_CTRL). */
+#define V4L2_CID_QPCIE_VCU_PACER_ENABLE        (V4L2_CID_USER_BASE + 0x1010)
+#define V4L2_CID_QPCIE_VCU_PACER_BUFFER_FRAMES (V4L2_CID_USER_BASE + 0x1011)
+
 /* BAR0 DMA Register Offsets */
 #define REG_DMA_CTRL         0x00
 #define REG_DMA_STATUS       0x04
@@ -228,6 +237,7 @@
 #define REG_NEW_GLOBAL_ID           0x00
 #define REG_NEW_GLOBAL_VERSION      0x04
 #define REG_NEW_GLOBAL_CAPS         0x08
+#define QPCIE_CAP_C2H_ONLY          BIT(28) /* No TX, TPG or auxiliary streams. */
 #define REG_NEW_GLOBAL_GITHASH      0x0C
 #define REG_NEW_GLOBAL_BUILDTIME    0x10
 #define REG_NEW_GLOBAL_RESET        0x14
@@ -265,6 +275,18 @@
 #define REG_VCH_OFFSET_FRAMES       0x60
 #define REG_VCH_OFFSET_DROPS        0x64
 #define REG_VCH_OFFSET_IRQ_STATUS   0x70
+
+/* Video CH1 Packet DMA Probes (BAR0 Offsets 0x02C0..0x02E4) */
+#define REG_VCH_OFFSET_PKT_SUBMIT_CNT    0xC0
+#define REG_VCH_OFFSET_PKT_DONE_CNT      0xC4
+#define REG_VCH_OFFSET_PKT_ERR_CNT       0xC8
+#define REG_VCH_OFFSET_PKT_MSI_CNT       0xCC
+#define REG_VCH_OFFSET_PKT_BYTES_LO      0xD0
+#define REG_VCH_OFFSET_PKT_BYTES_HI      0xD4
+#define REG_VCH_OFFSET_PKT_FSM_STATE     0xD8
+#define REG_VCH_OFFSET_PKT_LAST_LEN      0xDC
+#define REG_VCH_OFFSET_PKT_LAST_PTS_LO   0xE0
+#define REG_VCH_OFFSET_PKT_LAST_PTS_HI   0xE4
 
 #define REG_VCH_CTRL(n)             (REG_VCH_BASE(n) + REG_VCH_OFFSET_CTRL)
 #define REG_VCH_STATUS(n)           (REG_VCH_BASE(n) + REG_VCH_OFFSET_STATUS)
@@ -436,10 +458,124 @@ struct __packed qpcie_sgl_entry {
 
 struct qpcie_dev;
 
+/* VCU H.264 / H.265 Hardware Video Encoder Configuration Mailbox */
+#define QPCIE_BAR0_VCU_CFG_OFFSET 0x2100
+#define QPCIE_PS_VCU_CFG_ADDR     0xA0002100
+#define QPCIE_VCU_CFG_MAGIC       0x56435543 /* "VCUC" */
+
+struct __packed qpcie_vcu_encoder_config {
+    u32 magic;                /* 0x00: QPCIE_VCU_CFG_MAGIC ("VCUC") */
+    u32 version;              /* 0x04: 1 */
+    u32 config_seq;           /* 0x08: monotonic incrementing seq */
+    u32 codec_type;           /* 0x0C: 0=H.264, 1=HEVC */
+
+    /* Rate Control */
+    u32 bitrate_mode;         /* 0x10: 0=VBR, 1=CBR, 2=CQ */
+    u32 bitrate;              /* 0x14: Target bitrate in bps */
+    u32 bitrate_peak;         /* 0x18: Peak bitrate in bps */
+    u32 frame_rc_enable;      /* 0x1C: Frame-level RC enable */
+    u32 mb_rc_enable;         /* 0x20: Macroblock/CTU-level RC enable */
+    u32 const_quality;        /* 0x24: Constant Quality QP (0..51) */
+
+    /* GOP Structure */
+    u32 gop_size;             /* 0x28: GOP size / Keyframe interval */
+    u32 b_frames;             /* 0x2C: Consecutive B-frames (0=IP only) */
+    u32 force_idr;            /* 0x30: 1=Generate immediate IDR */
+    u32 repeat_seq_header;    /* 0x34: 1=Repeat SPS/PPS/VPS on IDR */
+    u32 header_mode;          /* 0x38: 0=Separate, 1=Joined with 1st frame */
+
+    /* H.264 Specific */
+    u32 h264_profile;         /* 0x3C: Baseline, Main, High */
+    u32 h264_level;           /* 0x40: Level 1.0 .. 6.2 */
+    u32 h264_entropy_mode;    /* 0x44: 0=CAVLC, 1=CABAC */
+    u32 h264_min_qp;          /* 0x48: Min QP (0..51) */
+    u32 h264_max_qp;          /* 0x4C: Max QP (0..51) */
+    u32 h264_i_qp;            /* 0x50: I-frame QP */
+    u32 h264_p_qp;            /* 0x54: P-frame QP */
+    u32 h264_b_qp;            /* 0x58: B-frame QP */
+    u32 h264_cpb_size;        /* 0x5C: CPB/HRD buffer size in kbits */
+    u32 h264_loop_filter_mode;/* 0x60: 0=Enabled, 1=Disabled, 2=Disabled at boundary */
+    u32 h264_8x8_transform;   /* 0x64: 1=Enable 8x8 DCT */
+
+    /* HEVC Specific */
+    u32 hevc_profile;         /* 0x68: Main, Main 10 */
+    u32 hevc_level;           /* 0x6C: Level 1 .. 6.2 */
+    u32 hevc_tier;            /* 0x70: 0=Main Tier, 1=High Tier */
+    u32 hevc_min_qp;          /* 0x74: Min QP (0..51) */
+    u32 hevc_max_qp;          /* 0x78: Max QP (0..51) */
+    u32 hevc_i_qp;            /* 0x7C: I-frame QP */
+    u32 hevc_p_qp;            /* 0x80: P-frame QP */
+    u32 hevc_b_qp;            /* 0x84: B-frame QP */
+    u32 hevc_loop_filter_mode;/* 0x88: 0=Disabled, 1=Enabled, 2=Disabled at boundary */
+    u32 hevc_refresh_type;    /* 0x8C: 1=CRA, 2=IDR */
+    u32 hevc_strong_smoothing;/* 0x90: 1=Strong intra smoothing */
+    u32 hevc_const_intra_pred;/* 0x94: 1=Constrained intra prediction */
+    u32 hevc_wavefront;       /* 0x98: 1=Wavefront parallel processing (WPP) */
+
+    /* Slicing & Resilience */
+    u32 slice_mode;           /* 0x9C: 0=Single, 1=Max MB, 2=Max Bytes */
+    u32 slice_max_bytes;      /* 0xA0: Max bytes per slice */
+    u32 slice_max_mb;         /* 0xA4: Max MB / CTUs per slice */
+    u32 intra_refresh_mb;     /* 0xA8: Cyclic intra refresh MBs */
+
+    /* Status & Feedback from PS */
+    u32 ps_ack_seq;           /* 0xAC: PS writes matching config_seq when applied */
+    u32 ps_encoder_status;    /* 0xB0: 1=Encoding, 0=Idle, <0=Error */
+    u32 ps_fps_actual;        /* 0xB4: Measured encoding FPS * 100 */
+    u32 ps_bitrate_actual;    /* 0xB8: Measured output bitrate in bps */
+
+    /* Card-side Hardware Output Pacer (Host writes, Card reads) */
+    u32 pacer_enable;         /* 0xBC: 1=Enable hardware pacer, 0=Direct push */
+    u32 pacer_buffer_frames;  /* 0xC0: Buffer depth in frames before pacing starts (default: 8, range: 0..30) */
+};
+
+/* Mailbox offsets of the Card-side pacer knobs.  The Host mirrors the whole
+ * struct word-by-word, so these must stay where the layout above puts them. */
+#define QPCIE_VCU_CFG_PACER_ENABLE_OFFSET        0xBC
+#define QPCIE_VCU_CFG_PACER_BUFFER_FRAMES_OFFSET 0xC0
+
+/* Shared BRAM Host Buffer Ring for Packet C2H DMA (Node 1) */
+#define QPCIE_BAR0_VCU_RING_OFFSET  0x2200
+#define QPCIE_PS_VCU_RING_ADDR      0xA0002200
+#define QPCIE_VCU_RING_MAGIC        0x56435552 /* "VCUR" */
+#define QPCIE_VCU_RING_SIZE         16
+
+struct __packed qpcie_vcu_buffer_slot {
+    u64 host_phys_addr;    /* 0x00: Host physical address for encoded payload */
+    u64 host_comp_addr;    /* 0x08: Host physical address for 64-byte DPC1 completion */
+    u32 host_buf_len;      /* 0x10: Allocated buffer size in bytes (e.g. 4MB) */
+    u32 host_buf_id;       /* 0x14: VB2 buffer index / cookie */
+    u32 flags;             /* 0x18: Flags */
+    u32 reserved;          /* 0x1C: Reserved padding */
+};
+
+struct __packed qpcie_vcu_host_ring {
+    u32 magic;             /* 0x00: 0x56435552 ("VCUR") */
+    u32 version;           /* 0x04: 1 */
+    u32 ring_size;         /* 0x08: QPCIE_VCU_RING_SIZE (16) */
+    u32 host_head;         /* 0x0C: Producer index (Host increments upon QBUF) */
+    u32 ps_tail;           /* 0x10: Consumer index (Card PS increments after pushing job) */
+    u32 dropped_count;     /* 0x14: Incremented if no host buffers available */
+    u32 reserved[10];      /* 0x18..0x3C: 40 bytes padding to 64-byte boundary */
+    struct qpcie_vcu_buffer_slot slots[QPCIE_VCU_RING_SIZE]; /* 16 * 32 = 512 bytes */
+};
+
 struct qpcie_v4l2_buffer {
     struct vb2_v4l2_buffer vb;
     struct list_head list;
     bool sgl_logged;
+    u32 vcu_slot_idx;
+    /* Monotonic VCU ring producer index (host_head) captured when this buffer
+     * was published; identifies the ring slot this buffer owns.  NOT a
+     * liveness proof: the card PS advances ps_tail when it *hands the slot to
+     * Packet DMA*, so ps_tail running ahead is normal pipeline behaviour. */
+    u32 vcu_seq;
+    /* Wall-clock (jiffies) instant this buffer was published into the VCU Host
+     * Ring.  The completion path uses it as the only trustworthy liveness
+     * guard: a slot whose DPC1 record has not landed after a physical timeout
+     * is genuinely lost, and is retired with VB2_BUF_STATE_ERROR so it cannot
+     * wedge the completion queue. */
+    unsigned long queued_jiffies;
 };
 
 struct qpcie_v4l2_channel {
@@ -482,6 +618,32 @@ struct qpcie_v4l2_channel {
     u32 last_rx_tlm_sig;   /* timing-valid/interlaced/media-bus signature */
     struct delayed_work hdmi_monitor_work;
     bool hdmi_monitor_running;
+    /* VCU Hardware Encoder Controls (Channel 1) */
+    struct qpcie_vcu_encoder_config vcu_cfg;
+    void *comp_ring_virt;
+    dma_addr_t comp_ring_dma;
+    /* Channel 1 (VCU / Packet DMA) slot occupancy guard.
+     *
+     * The Host Ring is a 16-slot circular ring: slots are reused modulo
+     * QPCIE_VCU_RING_SIZE, and the card PS advances ps_tail the moment it
+     * *hands a slot to the Packet DMA engine* - long before the payload and
+     * its DPC1 completion record have landed in host memory.  Head/tail
+     * arithmetic alone therefore cannot prove a slot is free, and publishing
+     * into a slot whose previous frame is still in flight overwrote live
+     * buffers and cleared their completion magic (lost/zero-length frames).
+     *
+     * slot_active[i] names the buffer that currently owns slot i: it is set
+     * by qpcie_publish_buffer() before the slot is written to BRAM, and is
+     * cleared only when that buffer retires (DPC1 completion or the timeout
+     * error path) or when the session is torn down.  A slot with a non-NULL
+     * entry is never republished.  Never dereferenced - an owned slot is only
+     * a mark, so there is no use-after-free risk on the buffer itself. */
+    struct qpcie_v4l2_buffer *slot_active[QPCIE_VCU_RING_SIZE];
+    /* Session clock offset calibration: translate the precise Card (HDMI RX)
+     * capture timestamps of the VCU compressed bitstream into the Host
+     * CLOCK_MONOTONIC domain.  Sampled once per streaming session. */
+    s64 vcu_card_to_host_offset_ns;
+    bool vcu_offset_calibrated;
 };
 
 struct qpcie_alsa_channel {
@@ -575,6 +737,7 @@ struct qpcie_dev {
     /* Dynamic Platform & BAR1 Offsets */
     bool is_zu4ev;
     bool debug_only; /* Explicit debug-profile capability, not an AV failure fallback. */
+    bool c2h_only; /* Raw video + encoded packet + raw audio personality. */
     struct qpcie_debug *debug;
     u32 bar1_offset_tpg;
     u32 bar1_offset_i2c;
@@ -587,6 +750,7 @@ void qpcie_v4l2_remove(struct qpcie_dev *qdev);
 void qpcie_v4l2_irq_handler(struct qpcie_dev *qdev);
 void qpcie_v4l2_node_done(struct qpcie_dev *qdev, int node_idx);
 void qpcie_v4l2_check_source_change(struct qpcie_v4l2_channel *vch);
+void qpcie_vcu_sync_config(struct qpcie_v4l2_channel *vch);
 void qpcie_dma_soft_reset(struct qpcie_dev *qdev);
 void qpcie_reprogram_rings(struct qpcie_dev *qdev);
 

@@ -1,0 +1,29 @@
+/*
+ * SC7F0 PS memory-layout pin.
+ *
+ * Included last from system-user.dtsi on purpose.  Importing a hardware
+ * description regenerates project-spec/configs/config, and the 0x26102902
+ * encoder VCU import rewrote CONFIG_SUBSYSTEM_BOOTARGS_GENERATED to add a
+ * global "cma=1000M".  Nothing else in the image changed (same kernel binary,
+ * same rootfs), but that one bootarg was enough that the card stopped reaching
+ * PS userspace: this board's low DDR bank is 0x0-0x7ff00000 and already carries
+ * dau_fpga@30000000 (256 MB, no-map), cma,video@40000000 (256 MB),
+ * cma,qdmabuf@50000000 (64 MB) and cma,vcu@54000000 (672 MB), and the root is
+ * root=/dev/ram0, so the initrd lives in that bank too.  A second, global 1 GB
+ * CMA reservation does not fit underneath that.
+ *
+ * Evidence: build/sc7f0-vcu-ps-26102902-20261029/INCIDENT-26102902-first-boot.md
+ * Gate: scripts/check_sc7f0_memory_layout.py refuses a build or a release whose
+ * bootargs, /memory or /reserved-memory map drifts from the card-validated
+ * baseline, whatever the hardware description asked for.
+ *
+ * If the encoder runtime ever needs more contiguous memory, give it a named
+ * reserved region in /reserved-memory and point memory-region at it (the
+ * cma,vcu pool already exists) - never a second global CMA.
+ */
+/ {
+	chosen {
+		/delete-property/ bootargs;
+		bootargs = "earlycon console=ttyPS0,115200 clk_ignore_unused root=/dev/ram0 rw";
+	};
+};

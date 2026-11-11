@@ -1,0 +1,413 @@
+diff --git a/hdmi/phy-vphy.c b/hdmi/phy-vphy.c
+index 7f47ba5..ddc621a 100644
+--- a/hdmi/phy-vphy.c
++++ b/hdmi/phy-vphy.c
+@@ -256,6 +256,7 @@ static irqreturn_t xvphy_irq_handler(int irq, void *dev_id)
+ {
+ 	struct xvphy_dev *vphydev;
+ 
++	pr_info_ratelimited("xilinx-vphy: [VPHY-IRQ] xvphy_irq_handler entry irq=%d\n", irq);
+ 	vphydev = (struct xvphy_dev *)dev_id;
+ 	if (!vphydev)
+ 		return IRQ_NONE;
+@@ -576,7 +577,7 @@ static int xvphy_probe(struct platform_device *pdev)
+ 	void __iomem *iomem1;
+ 	const struct of_device_id *match;
+ 
+-	dev_info(&pdev->dev, "probe started\n");
++	dev_info(&pdev->dev, "[VPHY-DBG 0] probe started\n");
+ 	vphydev = devm_kzalloc(&pdev->dev, sizeof(*vphydev), GFP_KERNEL);
+ 	if (!vphydev)
+ 		return -ENOMEM;
+@@ -600,13 +601,16 @@ static int xvphy_probe(struct platform_device *pdev)
+ 	XVphy_ConfigTable[instance].DeviceId = VPHY_DEVICE_ID_BASE + instance;
+ 	XHdmiphy1_ConfigTable[instance].DeviceId = VPHY_DEVICE_ID_BASE + instance;
+ 
+-	dev_dbg(vphydev->dev,"DT parse start\n");
++	dev_info(vphydev->dev, "[VPHY-DBG 1] DT parse start (isvphy=%d)\n", vphydev->isvphy);
+ 	if (vphydev->isvphy)
+ 		ret = vphy_parse_of(vphydev, &XVphy_ConfigTable[instance]);
+ 	else
+ 		ret = vphy_parse_of(vphydev, &XHdmiphy1_ConfigTable[instance]);
+-	if (ret) return ret;
+-	dev_dbg(vphydev->dev,"DT parse done\n");
++	if (ret) {
++		dev_err(vphydev->dev, "[VPHY-DBG 1-ERR] DT parse failed: %d\n", ret);
++		return ret;
++	}
++	dev_info(vphydev->dev, "[VPHY-DBG 2] DT parse done, creating PHY lanes...\n");
+ 
+ 	for_each_child_of_node(np, child) {
+ 		struct xvphy_lane *vphy_lane;
+@@ -647,15 +651,19 @@ static int xvphy_probe(struct platform_device *pdev)
+ 		phy_set_drvdata(phy, vphydev->lanes[port]);
+ 		/* and each vphy_lane points back to parent device */
+ 		vphy_lane->data = vphydev;
++		dev_info(&pdev->dev, "[VPHY-DBG 2a] child lane created: port=%d index=%d\n", port, index);
+ 		port++;
+ 		index++;
+ 	}
+ 
++	dev_info(&pdev->dev, "[VPHY-DBG 3] %d PHY lanes created. Getting MEM resource...\n", port);
+ 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+ 	vphydev->iomem = devm_ioremap_resource(&pdev->dev, res);
+ 	if (IS_ERR(vphydev->iomem))
+ 		return PTR_ERR(vphydev->iomem);
+ 
++	dev_info(&pdev->dev, "[VPHY-DBG 4] ioremap done: iomem=%p (res %pR). Getting IRQ...\n", vphydev->iomem, res);
++
+ 	/* set address in configuration data */
+ 	XVphy_ConfigTable[instance].BaseAddr = (uintptr_t)vphydev->iomem;
+ 	XHdmiphy1_ConfigTable[instance].BaseAddr = (uintptr_t)vphydev->iomem;
+@@ -666,6 +674,8 @@ static int xvphy_probe(struct platform_device *pdev)
+ 		return vphydev->irq;
+ 	}
+ 
++	dev_info(&pdev->dev, "[VPHY-DBG 5] got irq=%d. Getting and enabling axi_lite_clk...\n", vphydev->irq);
++
+ 	/* the AXI lite clock is used for the clock rate detector */
+ 	if (vphydev->isvphy)
+ 		vphydev->axi_lite_clk = devm_clk_get(&pdev->dev, "vid_phy_axi4lite_aclk");
+@@ -687,7 +697,7 @@ static int xvphy_probe(struct platform_device *pdev)
+ 		return ret;
+ 	}
+ 	axi_lite_rate = clk_get_rate(vphydev->axi_lite_clk);
+-	dev_dbg(vphydev->dev,"AXI Lite clock rate = %lu Hz\n", axi_lite_rate);
++	dev_info(vphydev->dev, "[VPHY-DBG 6] axi_lite_clk enabled (rate=%lu Hz), checking dru_clk...\n", axi_lite_rate);
+ 
+ 	/* set axi-lite clk in configuration data */
+ 	XVphy_ConfigTable[instance].AxiLiteClkFreq = axi_lite_rate;
+@@ -698,6 +708,7 @@ static int xvphy_probe(struct platform_device *pdev)
+ 	/* dru-clk is used for the nidru block for low res support */
+ 	if ((vphydev->isvphy && (XVphy_ConfigTable[instance].DruIsPresent == (TRUE))) ||
+ 		(!vphydev->isvphy && (XHdmiphy1_ConfigTable[instance].DruIsPresent == (TRUE)))) {
++		dev_info(&pdev->dev, "[VPHY-DBG 7] dru-clk present, requesting clock...\n");
+ 		vphydev->dru_clk = devm_clk_get(&pdev->dev, "dru-clk");
+ 		if (IS_ERR(vphydev->dru_clk)) {
+ 			ret = PTR_ERR(vphydev->dru_clk);
+@@ -716,7 +727,7 @@ static int xvphy_probe(struct platform_device *pdev)
+ 		}
+ 
+ 		dru_clk_rate = clk_get_rate(vphydev->dru_clk);
+-		dev_dbg(vphydev->dev, "default dru-clk rate = %lu\n", dru_clk_rate);
++		dev_info(vphydev->dev, "[VPHY-DBG 7a] default dru-clk rate = %lu Hz\n", dru_clk_rate);
+ 		if ((vphydev->isvphy && (dru_clk_rate != XVPHY_DRU_REF_CLK_HZ)) ||
+ 			(!vphydev->isvphy && (dru_clk_rate != XHDMIPHY1_DRU_REF_CLK_HZ))) {
+ 
+@@ -729,20 +740,22 @@ static int xvphy_probe(struct platform_device *pdev)
+ 				dev_err(&pdev->dev, "Cannot set rate : %d\n", ret);
+ 			}
+ 			dru_clk_rate = clk_get_rate(vphydev->dru_clk);
+-			dev_dbg(vphydev->dev, "ref dru-clk rate = %lu\n", dru_clk_rate);
++			dev_info(vphydev->dev, "[VPHY-DBG 7b] ref dru-clk rate set to %lu Hz\n", dru_clk_rate);
+ 		}
+ 	}
+ 	else
+ 	{
+-		dev_dbg(vphydev->dev, "DRU is not enabled from device tree\n");
++		dev_info(vphydev->dev, "[VPHY-DBG 7] DRU is not enabled from device tree\n");
+ 	}
+ 
++	dev_info(&pdev->dev, "[VPHY-DBG 8] registering of_phy_provider...\n");
+ 	provider = devm_of_phy_provider_register(&pdev->dev, xvphy_xlate);
+ 	if (IS_ERR(provider)) {
+ 		dev_err(&pdev->dev, "registering provider failed\n");
+ 			return PTR_ERR(provider);
+ 	}
+ 
++	dev_info(&pdev->dev, "[VPHY-DBG 9] phy provider registered. Initializing HDMI VPHY registers...\n");
+ 	/* Initialize HDMI VPHY */
+ 	if (vphydev->isvphy)
+ 		Status = XVphy_Hdmi_CfgInitialize(&vphydev->xvphy, 0/*QuadID*/,
+@@ -751,25 +764,27 @@ static int xvphy_probe(struct platform_device *pdev)
+ 		Status = XHdmiphy1_Hdmi_CfgInitialize(&vphydev->xgtphy, 0/*QuadID*/,
+ 				&XHdmiphy1_ConfigTable[instance]);
+ 	if (Status != XST_SUCCESS) {
+-		dev_err(&pdev->dev, "HDMI VPHY initialization error\n");
++		dev_err(&pdev->dev, "[VPHY-DBG 9-ERR] HDMI VPHY initialization error (%d)\n", Status);
+ 		return ENODEV;
+ 	}
+ 
++	dev_info(&pdev->dev, "[VPHY-DBG 10] VPHY CfgInitialize done. Reading VPhy version register...\n");
+ 	if (vphydev->isvphy)
+ 		Data = XVphy_GetVersion(&vphydev->xvphy);
+ 	else
+ 		Data = XHdmiphy1_GetVersion(&vphydev->xgtphy);
+-	dev_info(vphydev->dev, "VPhy version : %02d.%02d (%04x)\n", ((Data >> 24) & 0xFF),
++	dev_info(vphydev->dev, "[VPHY-DBG 10a] VPhy version : %02d.%02d (%04x)\n", ((Data >> 24) & 0xFF),
+ 			((Data >> 16) & 0xFF), (Data & 0xFFFF));
+ 
+-
++	dev_info(&pdev->dev, "[VPHY-DBG 11] requesting threaded IRQ %d...\n", vphydev->irq);
+ 	ret = devm_request_threaded_irq(&pdev->dev, vphydev->irq, xvphy_irq_handler, xvphy_irq_thread,
+ 			IRQF_TRIGGER_HIGH /*IRQF_SHARED*/, "xilinx-vphy", vphydev/*dev_id*/);
+ 
+ 	if (ret) {
+-		dev_err(&pdev->dev, "unable to request IRQ %d\n", vphydev->irq);
++		dev_err(&pdev->dev, "[VPHY-DBG 11-ERR] unable to request IRQ %d: %d\n", vphydev->irq, ret);
+ 		return ret;
+ 	}
++	dev_info(&pdev->dev, "[VPHY-DBG 11a] threaded IRQ requested successfully\n");
+ 
+ 	if (vphydev->isvphy) {
+ 		dev_dbg(vphydev->dev,"config.DruIsPresent = %d\n", XVphy_ConfigTable[instance].DruIsPresent);
+@@ -785,7 +800,7 @@ static int xvphy_probe(struct platform_device *pdev)
+ 		}
+ 	}
+ 
+-	dev_info(&pdev->dev, "probe successful\n");
++	dev_info(&pdev->dev, "[VPHY-DBG 12-SUCCESS] xvphy probe successful!\n");
+ 	/* probe has succeeded for this instance, increment instance index */
+ 	instance++;
+ 	return 0;
+diff --git a/hdmi/xilinx-hdmirx.c b/hdmi/xilinx-hdmirx.c
+index b413e70..24ea2c7 100644
+--- a/hdmi/xilinx-hdmirx.c
++++ b/hdmi/xilinx-hdmirx.c
+@@ -651,8 +651,13 @@ static irqreturn_t hdmirx_irq_handler(int irq, void *dev_id)
+ 	xhdmi = (struct xhdmi_device *)dev_id;
+ 	HdmiRxSsPtr = (XV_HdmiRxSs *)&xhdmi->xv_hdmirxss;
+ 
+-	if (HdmiRxSsPtr->IsReady != XIL_COMPONENT_IS_READY) {
+-		printk(KERN_INFO "hdmirx_irq_handler(): HDMI RX SS is not initialized?!\n");
++	pr_info_ratelimited("xilinx-hdmi-rx: [HDMIRX-IRQ] hdmirx_irq_handler entry irq=%d ready=%d\n",
++		irq, (HdmiRxSsPtr && HdmiRxSsPtr->HdmiRxPtr) ? HdmiRxSsPtr->IsReady : -1);
++
++	if (!HdmiRxSsPtr || !HdmiRxSsPtr->HdmiRxPtr || HdmiRxSsPtr->IsReady != XIL_COMPONENT_IS_READY) {
++		pr_warn_ratelimited("xilinx-hdmi-rx: [HDMIRX-IRQ] HDMI RX SS is not initialized yet (IsReady=%d)!\n",
++			HdmiRxSsPtr ? HdmiRxSsPtr->IsReady : -1);
++		return IRQ_HANDLED;
+ 	}
+ 
+ 	/* read status registers */
+@@ -2132,7 +2137,7 @@ static int xhdmi_probe(struct platform_device *pdev)
+ 	struct xlnx_hdmirx_audio_data *adata;
+ 	u32 Status;
+ 
+-	dev_info(&pdev->dev, "probe started\n");
++	dev_info(&pdev->dev, "[HDMIRX-DBG 0] probe started\n");
+ 	/* allocate zeroed HDMI RX device structure */
+ 	xhdmi = devm_kzalloc(&pdev->dev, sizeof(*xhdmi), GFP_KERNEL);
+ 	if (!xhdmi)
+@@ -2155,19 +2160,21 @@ static int xhdmi_probe(struct platform_device *pdev)
+ 	/* work queues */
+ 	xhdmi->work_queue = create_singlethread_workqueue("xilinx-hdmi-rx");
+ 	if (!xhdmi->work_queue) {
+-		dev_info(xhdmi->dev, "Could not create work queue\n");
++		dev_info(xhdmi->dev, "[HDMIRX-DBG-ERR] Could not create work queue\n");
+ 		return -ENOMEM;
+ 	}
+ 
+ 	INIT_DELAYED_WORK(&xhdmi->delayed_work_enable_hotplug,
+ 		xhdmi_delayed_work_enable_hotplug);
+ 
+-	dev_dbg(xhdmi->dev,"DT parse start\n");
++	dev_info(xhdmi->dev, "[HDMIRX-DBG 1] workqueue created, parsing DT...\n");
+ 	/* parse open firmware device tree data */
+ 	ret = xhdmi_parse_of(xhdmi, &xhdmi->config);
+-	if (ret < 0)
++	if (ret < 0) {
++		dev_err(xhdmi->dev, "[HDMIRX-DBG 1-ERR] xhdmi_parse_of failed: %d\n", ret);
+ 		return ret;
+-	dev_dbg(xhdmi->dev,"DT parse done\n");
++	}
++	dev_info(xhdmi->dev, "[HDMIRX-DBG 2] DT parse done, acquiring 3 phy lanes...\n");
+ 
+ 	/* acquire vphy lanes */
+ 	for (index = 0; index < 3; index++)
+@@ -2181,6 +2188,7 @@ static int xhdmi_probe(struct platform_device *pdev)
+ 
+ 		char phy_name[16];
+ 		snprintf(phy_name, sizeof(phy_name), "hdmi-phy%d", index);
++		dev_info(xhdmi->dev, "[HDMIRX-DBG 3a] lane %d devm_phy_get(%s)...\n", index, phy_name);
+ 		xhdmi->phy[index] = devm_phy_get(xhdmi->dev, phy_name);
+ 		if (IS_ERR(xhdmi->phy[index])) {
+ 			ret = PTR_ERR(xhdmi->phy[index]);
+@@ -2206,14 +2214,17 @@ static int xhdmi_probe(struct platform_device *pdev)
+ 		else
+ 			xhdmi->isvphy = 0;
+ 
++		dev_info(xhdmi->dev, "[HDMIRX-DBG 3b] lane %d phy_init (isvphy=%d)...\n", index, xhdmi->isvphy);
+ 		ret = phy_init(xhdmi->phy[index]);
+ 		if (ret) {
+ 			dev_err(xhdmi->dev,
+ 				"failed to init phy lane %d\n", index);
+ 			goto error_phy;
+ 		}
++		dev_info(xhdmi->dev, "[HDMIRX-DBG 3c] lane %d phy_init done\n", index);
+ 	}
+ 
++	dev_info(xhdmi->dev, "[HDMIRX-DBG 4] all phy lanes initialized. Getting MEM resource...\n");
+ 	/* get ownership of the HDMI RXSS MMIO register space resource */
+ 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+ 	if (!res) {
+@@ -2230,6 +2241,9 @@ static int xhdmi_probe(struct platform_device *pdev)
+ 	xhdmi->config.BaseAddress = (uintptr_t)xhdmi->iomem;
+ 	xhdmi->config.HighAddress = (uintptr_t)xhdmi->iomem + resource_size(res) - 1;
+ 
++	dev_info(xhdmi->dev, "[HDMIRX-DBG 5] ioremap done: iomem=%p (res %pR). Computing subcore AbsAddr...\n",
++		xhdmi->iomem, res);
++
+ 	/* Compute AbsAddress for sub-cores */
+ 	ret = xhdmi_compute_subcore_AbsAddr(&xhdmi->config);
+ 	if (ret == -EFAULT) {
+@@ -2237,6 +2251,8 @@ static int xhdmi_probe(struct platform_device *pdev)
+ 	   return ret;
+ 	}
+ 
++	dev_info(xhdmi->dev, "[HDMIRX-DBG 6] subcore AbsAddr computed. Enabling video clk...\n");
++
+ 	/* video streaming bus clock */
+ 	xhdmi->clk = devm_clk_get(xhdmi->dev, "s_axis_video_aclk");
+ 	if (IS_ERR(xhdmi->clk)) {
+@@ -2254,6 +2270,8 @@ static int xhdmi_probe(struct platform_device *pdev)
+ 		return ret;
+ 	}
+ 
++	dev_info(xhdmi->dev, "[HDMIRX-DBG 7] video clk enabled. Enabling axi_lite_clk...\n");
++
+ 	/* AXI lite register bus clock */
+ 	xhdmi->axi_lite_clk = devm_clk_get(xhdmi->dev, "s_axi_cpu_aclk");
+ 	if (IS_ERR(xhdmi->axi_lite_clk)) {
+@@ -2272,7 +2290,7 @@ static int xhdmi_probe(struct platform_device *pdev)
+ 	}
+ 
+ 	axi_clk_rate = clk_get_rate(xhdmi->axi_lite_clk);
+-	dev_dbg(xhdmi->dev,"AXI Lite clock rate = %lu Hz\n", axi_clk_rate);
++	dev_info(xhdmi->dev, "[HDMIRX-DBG 8] axi_lite_clk enabled (rate=%lu Hz). Getting IRQs...\n", axi_clk_rate);
+ 
+ 	/* we now know the AXI clock rate */
+ 	XHdcp1x_ConfigTable[XPAR_XHDCP_NUM_INSTANCES/2 + instance].SysFrequency = axi_clk_rate;
+@@ -2320,6 +2338,8 @@ static int xhdmi_probe(struct platform_device *pdev)
+ 	  INIT_DELAYED_WORK(&xhdmi->delayed_work_hdcp_poll, hdcp_poll_work/*function*/);
+ 	}
+ 
++	dev_info(xhdmi->dev, "[HDMIRX-DBG 9] got irq=%d, creating sysfs group...\n", xhdmi->irq);
++
+ 	/* create sysfs group entry */
+ 	ret = sysfs_create_group(&xhdmi->dev->kobj, &attr_group);
+ 	if (ret) {
+@@ -2330,15 +2350,19 @@ static int xhdmi_probe(struct platform_device *pdev)
+ 	HdmiRxSsPtr = (XV_HdmiRxSs *)&xhdmi->xv_hdmirxss;
+ 	hdmi_mutex_lock(&xhdmi->xhdmi_mutex);
+ 
++	dev_info(xhdmi->dev, "[HDMIRX-DBG 10] requesting threaded IRQ %d...\n", xhdmi->irq);
++
+ 	ret = devm_request_threaded_irq(&pdev->dev, xhdmi->irq, hdmirx_irq_handler, hdmirx_irq_thread,
+ 		IRQF_TRIGGER_HIGH, "xilinx-hdmi-rx", xhdmi/*dev_id*/);
+ 
+ 	if (ret) {
+-		dev_err(&pdev->dev, "unable to request IRQ %d\n", xhdmi->irq);
++		dev_err(&pdev->dev, "[HDMIRX-DBG 10-ERR] unable to request IRQ %d: %d\n", xhdmi->irq, ret);
+ 		hdmi_mutex_unlock(&xhdmi->xhdmi_mutex);
+ 		goto error_phy;
+ 	}
+ 
++	dev_info(xhdmi->dev, "[HDMIRX-DBG 10a] threaded IRQ %d requested successfully\n", xhdmi->irq);
++
+ 	/* HDCP 1.4 Cipher interrupt */
+ 	if (xhdmi->hdcp1x_irq > 0) {
+ 		/* Request the HDCP14 interrupt */
+@@ -2394,18 +2418,21 @@ static int xhdmi_probe(struct platform_device *pdev)
+ 	/* sets pointer to the EDID used by XV_HdmiRxSs_LoadDefaultEdid() */
+ 	XV_HdmiRxSs_SetEdidParam(HdmiRxSsPtr, (u8 *)&xilinx_edid[0], sizeof(xilinx_edid));
+ 
++	dev_info(xhdmi->dev, "[HDMIRX-DBG 11] Calling XV_HdmiRxSs_CfgInitialize...\n");
+ 	/* Initialize top level and all included sub-cores */
+ 	Status = XV_HdmiRxSs_CfgInitialize(HdmiRxSsPtr, &xhdmi->config, (uintptr_t)xhdmi->iomem);
+ 	if (Status != XST_SUCCESS) {
+-		dev_err(xhdmi->dev, "initialization failed with error %d\n", Status);
++		dev_err(xhdmi->dev, "[HDMIRX-DBG 11-ERR] initialization failed with error %d\n", Status);
+ 		return -EINVAL;
+ 	}
+ 
++	dev_info(xhdmi->dev, "[HDMIRX-DBG 12] XV_HdmiRxSs_CfgInitialize done. Disabling interrupts...\n");
+ 	/* disable interrupts */
+ 	spin_lock_irqsave(&xhdmi->irq_lock, flags);
+ 	XV_HdmiRxSs_IntrDisable(HdmiRxSsPtr);
+ 	spin_unlock_irqrestore(&xhdmi->irq_lock, flags);
+ 
++	dev_info(xhdmi->dev, "[HDMIRX-DBG 13] XV_HdmiRxSs_IntrDisable done. Calling request_firmware(%s)...\n", fw_edid_name);
+ 	/* retrieve EDID */
+ 	if (request_firmware(&fw_edid, fw_edid_name, xhdmi->dev) == 0) {
+ 		int blocks = fw_edid->size / 128;
+@@ -2419,6 +2446,8 @@ static int xhdmi_probe(struct platform_device *pdev)
+ 	}
+ 	release_firmware(fw_edid);
+ 
++	dev_info(xhdmi->dev, "[HDMIRX-DBG 14] request_firmware returned. Loading EDID...\n");
++
+ 	if (xhdmi->edid_user_blocks) {
+ 		dev_info(xhdmi->dev, "Using %d EDID block%s (%d bytes) from '%s'.\n",
+ 			xhdmi->edid_user_blocks, xhdmi->edid_user_blocks > 1? "s":"",
+@@ -2430,6 +2459,8 @@ static int xhdmi_probe(struct platform_device *pdev)
+ 		XV_HdmiRxSs_LoadDefaultEdid(HdmiRxSsPtr);
+ 	}
+ 
++	dev_info(xhdmi->dev, "[HDMIRX-DBG 15] EDID loaded. Setting callbacks...\n");
++
+ 	/* RX SS callback setup (from xapp1287/xhdmi_example.c:2146) */
+ 	XV_HdmiRxSs_SetCallback(HdmiRxSsPtr, XV_HDMIRXSS_HANDLER_CONNECT,
+ 		RxConnectCallback, (void *)xhdmi);
+@@ -2446,6 +2477,8 @@ static int xhdmi_probe(struct platform_device *pdev)
+ 	XV_HdmiRxSs_SetCallback(HdmiRxSsPtr, XV_HDMIRXSS_HANDLER_AUX,
+ 		RxAuxCallback, (void *)xhdmi);
+ 
++	dev_info(xhdmi->dev, "[HDMIRX-DBG 16] callbacks set. Setting VPHY callbacks...\n");
++
+ 	/* get a reference to the XVphy/ XHdmiphy1 data structure */
+ 	if (xhdmi->isvphy)
+ 		xhdmi->xvphy = xvphy_get_xvphy(xhdmi->phy[0]);
+@@ -2471,6 +2504,8 @@ static int xhdmi_probe(struct platform_device *pdev)
+ 
+ 	platform_set_drvdata(pdev, xhdmi);
+ 
++	dev_info(xhdmi->dev, "[HDMIRX-DBG 17] Initializing V4L2 subdev & media entity...\n");
++
+ 	/* Initialize V4L2 subdevice */
+ 	subdev = &xhdmi->subdev;
+ 	v4l2_subdev_init(subdev, &xhdmi_ops);
+@@ -2490,6 +2525,8 @@ static int xhdmi_probe(struct platform_device *pdev)
+ 		goto error_irq;
+ 	}
+ 
++	dev_info(xhdmi->dev, "[HDMIRX-DBG 18] media_entity_pads_init done. Initializing ctrls...\n");
++
+ 	ret = v4l2_ctrl_handler_init(&xhdmi->ctrl_handler,
+ 				ARRAY_SIZE(xhdmi_ctrls)/*controls*/);
+ 	if (ret < 0) {
+@@ -2541,6 +2578,8 @@ static int xhdmi_probe(struct platform_device *pdev)
+ 	xhdmi->detected_format.ycbcr_enc = V4L2_YCBCR_ENC_DEFAULT;
+ 	xhdmi->detected_format.quantization = V4L2_QUANTIZATION_DEFAULT;
+ 
++	dev_info(xhdmi->dev, "[HDMIRX-DBG 19] registering subdev (v4l2_async_register_subdev)...\n");
++
+ 	ret = v4l2_async_register_subdev(subdev);
+ 	if (ret < 0) {
+ 		dev_err(&pdev->dev, "failed to register subdev\n");
+@@ -2550,6 +2589,8 @@ static int xhdmi_probe(struct platform_device *pdev)
+ 
+ 	hdmi_mutex_unlock(&xhdmi->xhdmi_mutex);
+ 
++	dev_info(xhdmi->dev, "[HDMIRX-DBG 20] v4l2 subdev registered. Enabling interrupts (XV_HdmiRxSs_IntrEnable)...\n");
++
+ 	/* enable interrupts */
+ 	spin_lock_irqsave(&xhdmi->irq_lock, flags);
+ 	XV_HdmiRxSs_IntrEnable(HdmiRxSsPtr);
+@@ -2559,6 +2600,7 @@ static int xhdmi_probe(struct platform_device *pdev)
+ 	instance++;
+ 
+ 	if (xhdmi->audio_enabled) {
++		dev_info(xhdmi->dev, "[HDMIRX-DBG 21] initializing audio...\n");
+ 		ret = hdmirx_register_aud_dev(xhdmi->dev);
+ 		if (ret < 0) {
+ 			xhdmi->audio_init = false;
+@@ -2570,7 +2612,7 @@ static int xhdmi_probe(struct platform_device *pdev)
+ 		}
+ 	}
+ 	/* return success */
+-	dev_info(xhdmi->dev, "probe successful\n");
++	dev_info(xhdmi->dev, "[HDMIRX-DBG 22-SUCCESS] xhdmi probe successful!\n");
+ 	return 0;
+ 
+ error:
