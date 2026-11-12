@@ -6,7 +6,7 @@ import gzip
 import os
 
 def exec_card(cmd):
-    p = subprocess.run(['ssh', 'rd@sc7f0-test.local', f'sudo /home/rd/sc7f0ctl exec {cmd!r}'],
+    p = subprocess.run(['ssh', 'rd@sc7f0-test.local', f'sudo /home/rd/sc7f0/bin/sc7f0ctl exec {cmd!r}'],
                        capture_output=True, text=True)
     if p.returncode != 0:
         print(f"ERR (exit {p.returncode}): {p.stderr}", file=sys.stderr)

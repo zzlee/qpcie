@@ -7,13 +7,19 @@
 set -u
 TAG=$1; HC=$2; HS=$3; CC=$4; CM=$5; CB=${6:-/tmp/sc7f0_pkt_dma_test}
 DEV=/sys/bus/pci/devices/0000:03:00.0
-CTL=/home/rd/sc7f0ctl
-HL=/tmp/host_${TAG}.log
-CL=/tmp/card_${TAG}.log
-DM0=/tmp/dmesg_before_${TAG}.log
-DM1=/tmp/dmesg_after_${TAG}.log
-PS0=/tmp/pktstats_before_${TAG}.txt
-PS1=/tmp/pktstats_after_${TAG}.txt
+CTL=/home/rd/sc7f0/bin/sc7f0ctl
+# Everything below is written by *this host* (the PCIe test machine), so it goes under
+# /home/rd/sc7f0/logs per AGENTS.md 測試機檔案放置規範 - no new files in that machine's
+# /tmp or $HOME.  $CB is the *PS board's* /tmp (executed through sc7f0ctl) and is
+# deliberately left alone.
+LOGDIR=/home/rd/sc7f0/logs
+mkdir -p "$LOGDIR"
+HL=$LOGDIR/host_${TAG}.log
+CL=$LOGDIR/card_${TAG}.log
+DM0=$LOGDIR/dmesg_before_${TAG}.log
+DM1=$LOGDIR/dmesg_after_${TAG}.log
+PS0=$LOGDIR/pktstats_before_${TAG}.txt
+PS1=$LOGDIR/pktstats_after_${TAG}.txt
 
 N0=$(dmesg | wc -l)
 dmesg > "$DM0"
@@ -21,7 +27,7 @@ cat "$DEV/packet_stats" > "$PS0" 2>/dev/null
 for f in ch0_frames ch0_drops ch0_status; do printf '%s=%s ' "$f" "$(cat $DEV/$f 2>/dev/null | head -1)"; done; echo
 
 # host receiver first, so credits are published before the card starts pushing
-/home/rd/host_pkt_dma_test /dev/video1 --buffers 16 --count "$HC" --seconds "$HS" \
+/home/rd/sc7f0/bin/host_pkt_dma_test /dev/video1 --buffers 16 --count "$HC" --seconds "$HS" \
     > "$HL" 2>&1 &
 HPID=$!
 sleep 0.5

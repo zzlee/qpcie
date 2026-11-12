@@ -10,7 +10,11 @@
 set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-OUT="${1:-/tmp/sc7f0-hdmi-acceptance-$(date +%Y%m%d-%H%M%S)}"
+# Default evidence directory is a validation session, so it belongs in
+# /home/rd/sc7f0/captures (AGENTS.md 測試機檔案放置規範); this script runs on the PCIe
+# test host and must not leave new files in /tmp or $HOME there.  mkdir -p below
+# creates the parents, and an explicit argument still overrides it.
+OUT="${1:-/home/rd/sc7f0/captures/sc7f0-hdmi-acceptance-$(date +%Y%m%d-%H%M%S)}"
 BDF="$(lspci -Dn -d 12ab:e380 2>/dev/null | awk '{print $1; exit}')"
 TOOLS="${SC7F0_TOOLS:-$HERE}"
 V4L2_APP="${V4L2_APP:-$TOOLS/v4l2_test_app}"

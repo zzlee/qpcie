@@ -30,15 +30,15 @@ if ((!VERIFY_ONLY && !YES)); then
     read -r -p "Write card eMMC and restart CARD PS only on $HOST (0x$VERSION)? Type YES: " answer
     [[ $answer == YES ]] || { echo 'Cancelled'; exit 1; }
 fi
-REMOTE=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$HOST" 'mktemp -d "$HOME/sc7f0-upgrade.XXXXXXXX"')
+REMOTE=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$HOST" 'mkdir -p "$HOME/sc7f0/tmp" && mktemp -d "$HOME/sc7f0/tmp/upgrade.XXXXXXXX"')
 [[ $REMOTE =~ ^/[a-zA-Z0-9_./-]+$ ]] || { echo 'Unexpected remote path' >&2; exit 1; }
 scp "$OUT/upgrade-$VERSION.tar" "$OUT/host-driver-src.tar.gz" "$OUT/host-tools-src.tar.gz" "$OUT/RELEASE.sha256" "$HOST:$REMOTE/"
 # All operations share one remote lock. A failed VERIFY never reaches COMMIT.
 ssh "$HOST" bash -s -- "$REMOTE" "$VERSION" "$VERIFY_ONLY" <<'REMOTE_SCRIPT' 2>&1 | tee "$OUT/logs/flash.log"
 set -euo pipefail
 DIR=$1 VERSION=$2 VERIFY_ONLY=$3
-CTL="$HOME/sc7f0ctl"
-exec 9>"$HOME/.sc7f0-upgrade.lock"
+CTL="$HOME/sc7f0/bin/sc7f0ctl"
+exec 9>"$HOME/sc7f0/tmp/.upgrade.lock"
 flock -n 9 || { echo 'Another upgrade is active'; exit 1; }
 cd "$DIR"
 echo "Remote logs/backups: $DIR"

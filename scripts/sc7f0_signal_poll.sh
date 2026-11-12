@@ -6,7 +6,7 @@
 #
 # 需要:
 #   - 本機可免密 ssh 到 rd@sc7f0-test.local
-#   - 卡片端有 /home/rd/sc7f0ctl (MCU I2C proxy)
+#   - 卡片端有 /home/rd/sc7f0/bin/sc7f0ctl (MCU I2C proxy)
 
 set -euo pipefail
 
@@ -30,7 +30,7 @@ while (( $(date +%s) < END_TS )); do
 
     # MCU raw 36-byte status block (format: 0xNN 0xNN ...)
     MCU_RAW=$(ssh $SSH_OPTS "$REMOTE" \
-        "sudo -n /home/rd/sc7f0ctl exec 'i2ctransfer -y 0 w1@0x32 0x00 r36'" \
+        "sudo -n /home/rd/sc7f0/bin/sc7f0ctl exec 'i2ctransfer -y 0 w1@0x32 0x00 r36'" \
         2>/dev/null || echo "i2c_fail")
 
     if [[ "$MCU_RAW" == "i2c_fail" || -z "$MCU_RAW" ]]; then
@@ -62,19 +62,19 @@ while (( $(date +%s) < END_TS )); do
 
     # IT6663 RXP0 bank0 r13/r14/r19 via MCU proxy (one read each, each returns one line)
     R13=$(ssh $SSH_OPTS "$REMOTE" \
-        "sudo -n /home/rd/sc7f0ctl exec 'i2ctransfer -y 0 w3@0x33 0x71 0x01 0x13 r1@0x33'" \
+        "sudo -n /home/rd/sc7f0/bin/sc7f0ctl exec 'i2ctransfer -y 0 w3@0x33 0x71 0x01 0x13 r1@0x33'" \
         2>/dev/null | sed 's/0x//g' || true)
     R14=$(ssh $SSH_OPTS "$REMOTE" \
-        "sudo -n /home/rd/sc7f0ctl exec 'i2ctransfer -y 0 w3@0x33 0x71 0x01 0x14 r1@0x33'" \
+        "sudo -n /home/rd/sc7f0/bin/sc7f0ctl exec 'i2ctransfer -y 0 w3@0x33 0x71 0x01 0x14 r1@0x33'" \
         2>/dev/null | sed 's/0x//g' || true)
     R19=$(ssh $SSH_OPTS "$REMOTE" \
-        "sudo -n /home/rd/sc7f0ctl exec 'i2ctransfer -y 0 w3@0x33 0x71 0x01 0x19 r1@0x33'" \
+        "sudo -n /home/rd/sc7f0/bin/sc7f0ctl exec 'i2ctransfer -y 0 w3@0x33 0x71 0x01 0x19 r1@0x33'" \
         2>/dev/null | sed 's/0x//g' || true)
     it6663_str="${R13:--} ${R14:--} ${R19:--}"
 
     # Xilinx official HDMI RX status
     XIL=$(ssh $SSH_OPTS "$REMOTE" \
-        "sudo -n /home/rd/sc7f0ctl exec 'cat /sys/devices/platform/amba_pl@0/b0010000.hdmi-rx/hdmi_info'" \
+        "sudo -n /home/rd/sc7f0/bin/sc7f0ctl exec 'cat /sys/devices/platform/amba_pl@0/b0010000.hdmi-rx/hdmi_info'" \
         2>/dev/null || echo "xil_fail")
 
     if [[ "$XIL" == "xil_fail" || -z "$XIL" ]]; then

@@ -50,7 +50,7 @@ def main():
     last_locked = None
 
     while time.time() < t_end:
-        cmd = f"sudo /home/rd/sc7f0ctl exec 'i2ctransfer -y 0 w1@0x32 0x00 r36; devmem 0xA0000600 32'"
+        cmd = f"sudo /home/rd/sc7f0/bin/sc7f0ctl exec 'i2ctransfer -y 0 w1@0x32 0x00 r36; devmem 0xA0000600 32'"
         ssh = ["ssh", "-o", "ConnectTimeout=5", args.remote, cmd]
         res = subprocess.run(ssh, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         if res.returncode == 0:

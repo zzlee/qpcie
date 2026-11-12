@@ -12,7 +12,7 @@ sha256sum -c "$OUT/SOURCE.sha256" > "$OUT/deployment/source-check.log"
 grep -q SC7F0_CAPTURE_IMAGE_AUDIT_PASS "$OUT/logs/capture-image-audit-after-package.log"
 [[ ! -e "$OUT/deployment/commit-issued" ]] || { echo 'COMMIT already issued: do not rerun' >&2; exit 1; }
 sha256sum "${BASH_SOURCE[0]}" > "$OUT/deployment/deployment-tool.sha256"
-REMOTE=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$HOST" 'mktemp -d "$HOME/sc7f0-capture-r6.XXXXXXXX"')
+REMOTE=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$HOST" 'mkdir -p "$HOME/sc7f0/tmp" && mktemp -d "$HOME/sc7f0/tmp/capture-r6.XXXXXXXX"')
 [[ $REMOTE =~ ^/[a-zA-Z0-9_./-]+$ ]]
 printf '%s\n' "$REMOTE" > "$OUT/deployment/remote-path"
 scp "$OUT/upgrade-26102804.tar" "$OUT/host-driver-src.tar.gz" "$OUT/host-tools-src.tar.gz" "$OUT/RELEASE.sha256" "$HOST:$REMOTE/"
@@ -24,7 +24,7 @@ ssh "$HOST" bash -s -- "$REMOTE" <<'REMOTE_SCRIPT' 2>&1 | tee "$OUT/deployment/d
 set -euo pipefail
 DIR=$1
 cd "$DIR"
-exec 9>"$HOME/.sc7f0-upgrade.lock"
+exec 9>"$HOME/sc7f0/tmp/.upgrade.lock"
 flock -n 9 || { echo 'Another upgrade active'; exit 1; }
 [[ $(uname -r) == 7.0.0-38-generic && $(uname -m) == x86_64 ]]
 HOST_BEFORE=$(</proc/sys/kernel/random/boot_id)

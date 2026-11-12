@@ -66,7 +66,7 @@ def read_snapshot(host, timeout):
         reg = 0x98 if name.startswith("timing_") else STATUS_REGS[name.split("_", 1)[1]]
         commands.append(f"printf '{name} '")
         commands.append(f"i2ctransfer -y 0 w3@0x33 0x71 {size} 0x{reg:02x} r{size+1}@0x33")
-    remote = "sudo -n /home/rd/sc7f0ctl exec " + shlex.quote("; ".join(commands))
+    remote = "sudo -n /home/rd/sc7f0/bin/sc7f0ctl exec " + shlex.quote("; ".join(commands))
     try:
         proc = subprocess.run(
             ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", host, remote],
