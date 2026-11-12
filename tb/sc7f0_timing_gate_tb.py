@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Synthetic pass/fail regression for the fail-closed Vivado release gate."""
+"""Synthetic pass/fail regression for the fail-closed Layer A correctness gate.
+
+Layer B (the itemised review ledger) is deliberately out of scope here: it needs
+a coverage manifest and the shipped policy, which keeps every open review item
+red. scripts/tests/test_sc7f0_two_layer_gates.py covers Layer B, and it covers
+these same Layer A mutations with the two-layer verdict.
+"""
 import importlib.util
 from pathlib import Path
 import tempfile
@@ -21,6 +27,9 @@ reports = {
         for i in range(40)),
     'methodology.rpt': 'REPORT SUMMARY\nViolations found: 2\n| LUTAR-1 | Warning | local async reset | 2 |\n',
     'bus-skew.rpt': ' Slow 8.000 0.500 7.500\n Fast 8.000 0.100 7.900\n',
+    'drc.rpt': ('| Design State : Fully Routed\n1. REPORT SUMMARY\n'
+                '             Violations found: 0\n\n2. REPORT DETAILS\n'
+                '-----------------\nReport DRC: Checked rule decks\n'),
 }
 
 with tempfile.TemporaryDirectory() as tmp:
@@ -30,7 +39,9 @@ with tempfile.TemporaryDirectory() as tmp:
         for name, content in (reports | (changes or {})).items():
             (directory / name).write_text(content)
         try:
-            result = gate.check(directory)['pass_gate']
+            # Layer A only: Layer B needs a per-round coverage manifest, and the
+            # shipped policy is intentionally red while the DDC/TX review is open.
+            result = gate.check(directory)['pass_layer_a']
         except ValueError:
             result = False
         assert result == passed, changes
@@ -64,10 +75,53 @@ with tempfile.TemporaryDirectory() as tmp:
     timing9 = 'REPORT SUMMARY\nViolations found: 1\n| TIMING-9 | Warning | aggregate CDC | 1 |\n'
     run({'methodology.rpt': timing9}, passed=True)
     run({'methodology.rpt': timing9, 'cdc.rpt': reports['cdc.rpt'].split('1 CDC-15')[0]})
-    run({'methodology.rpt': timing9, 'cdc.rpt': reports['cdc.rpt'].replace(gate.FIFO_ROOTS[0], 'u_custom_raw_bus')})
-    run({'methodology.rpt': timing9.replace('| 1 |', '| 2 |').replace('found: 1', 'found: 2')})
+    # A CDC-15 row on an unknown structure is no longer a Layer A fact: Layer A
+    # only grades correctness, and an unknown *Warning* is exactly what the Layer
+    # B ledger exists to classify. It must still be refused there, so prove the
+    # shipped ledger rejects a fabricated FIFO root and accepts the real one.
+    policy = gate.review.load_policy(
+        Path(__file__).resolve().parents[1] / 'scripts/gates/sc7f0_cdc_review.json')
+
+    def covered(rule, src, dest):
+        row = {'rule': rule, 'severity': 'Warning', 'exception': 'Max Delay Datapath Only',
+               'src': src, 'dest': dest}
+        _ledger, errs = gate.review.review_rows([row], policy['items'],
+                                                {'items': {}}, {}, {})
+        return not any('not covered by any review entry' in e for e in errs)
+
+    assert covered('CDC-15', gate.FIFO_ROOTS[0] + '/mem_reg[0]/CLK',
+                   gate.FIFO_ROOTS[0] + '/dout_reg[0]/D')
+    assert not covered('CDC-15', 'u_custom_raw_bus/mem_reg[0]/CLK',
+                       'u_custom_raw_bus/dout_reg[0]/D')
+    # TIMING-9 is an aggregate warning: it hides detail, so it is never a Layer A
+    # pass-or-fail fact. It must stay an *open* item in the shipped methodology
+    # ledger, whatever its count, otherwise a second aggregate warning would be
+    # waved through by the same entry that covered the first.
+    pair_policy = gate.review.load_policy(
+        Path(__file__).resolve().parents[1] / 'scripts/gates/sc7f0_clock_pair_review.json',
+        expect='clock_pair')
+
+    def methodology_reviewed(rule):
+        row = {'rule': rule, 'severity': 'Warning', 'exception': '', 'src': '', 'dest': ''}
+        _ledger, errs = gate.review.review_rows([row], pair_policy['methodology_items'],
+                                                {'items': {}}, {}, {})
+        return not errs
+
+    assert not methodology_reviewed('TIMING-9'), 'aggregate CDC must stay unreviewed'
+    assert not methodology_reviewed('TIMING-18'), 'overridden constraint must stay open'
+    assert not methodology_reviewed('TIMING-99'), 'an unseen rule must never be accepted'
     run({'cdc.rpt': reports['cdc.rpt'].replace('Warning 40', 'Warning 39')})
-    run({'methodology.rpt': 'REPORT SUMMARY\nViolations found: 1\n| TIMING-6 | Warning | unreviewed clock rule | 1 |\n'})
+    # TIMING-6 as a *Warning* is the clk_pl_0/pcie_user_clk methodology artefact:
+    # Layer A does not grade it, the clock-pair policy owns it, and it stays red
+    # there until both interaction directions and the named constraints are proven.
+    run({'methodology.rpt': 'REPORT SUMMARY\nViolations found: 1\n'
+                            '| TIMING-6 | Warning | unreviewed clock rule | 1 |\n'},
+        passed=True)
+    assert not methodology_reviewed('TIMING-6'), 'TIMING-6 must stay an open review item'
+    # The same rule filed Critical (round 26111103) is a Layer A failure and no
+    # ledger entry may erase it while structural CDC findings remain.
+    run({'methodology.rpt': 'REPORT SUMMARY\nViolations found: 1\n'
+                            '| TIMING-6 | Critical Warning | clk_pl_0 pcie_user_clk | 1 |\n'})
     flags = 'u_dma_top/u_zu4ev_upg_diag/'
     flags_src = flags + 'pcie_sticky_reg[12:0]/C'
     flags_dst = flags + 'u_levels/syncstages_ff_reg[0][12:0]/D'
@@ -87,4 +141,6 @@ with tempfile.TemporaryDirectory() as tmp:
     assert not gate.reviewed_crossing('CDC-15', cpll + '/testclk_cnt_reg[18]/C', cpll + '/freq_cnt_o_reg[18]/D')
     assert not gate.reviewed_crossing('CDC-15', cpll + '/testclk_cnt_reg[1]/C', cpll + '/freq_cnt_o_reg[2]/D')
     run({'bus-skew.rpt': reports['bus-skew.rpt'] + 'Slack (VIOLATED) : -0.000ns\n'})
-print('TB_PASS timing gate rejects negative setup/hold/pulse/skew, incomplete coverage and invalid CDC/clocks')
+print('TB_PASS Layer A rejects negative setup/hold/pulse/skew, incomplete coverage, '
+      'invalid/unknown CDC severities, DRC gaps and unclassifiable clock rules; '
+      'the shipped review ledgers still refuse unknown and aggregate findings')

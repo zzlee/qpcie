@@ -1,0 +1,509 @@
+{
+  "schema": "sc7f0-review-policy/1",
+  "kind": "clock_pair",
+  "id": "sc7f0-clock-pair-and-methodology-review",
+  "purpose": "Layer B for report_methodology. The 'items' list classifies TIMING-6/TIMING-7 clock-pair findings by named clock pair; the 'methodology_items' list classifies every remaining Warning/Advisory rule. Critical Warnings that are not reclassified here stay in Layer A unchanged.",
+  "notes": [
+    "This file does not create a set_clock_groups, a false path or a waiver. It records, per named pair, which evidence must be re-read from this round's reports before the finding may be called reviewed methodology.",
+    "UG903 (Using Constraints) Exceptions Priority: clock groups override false paths, max delays and multicycles, but set_bus_skew is never overridden by them; report_cdc still analyses ignored/max-delay paths. That is why declaring a pair asynchronous would still not hide a Critical CDC - and why this file refuses to declare one while Critical CDC exists.",
+    "optional: true means the rule may legitimately be absent in another design shape; absence is still printed in the ledger, presence must still be reviewed. It never weakens the check on a finding that IS present."
+  ],
+  "items": [
+    {
+      "id": "clk_pl_0__pcie_user_clk",
+      "rule": "TIMING-6",
+      "status": "REVIEWED_SAFE",
+      "clocks": [
+        "clk_pl_0",
+        "pcie_user_clk"
+      ],
+      "structure": "clk_pl_0 is the PS PL clock output (measured source pin zynq_ultra_ps_e_0/.../PS8_i/PLCLK[0], 10.000 ns, 63388 driven registers); pcie_user_clk is a generated clock from the GT quad (u_pcie_ip/.../gt_top_i/.../phy_clk_i/bufg_gt_userclk, 8.000 ns) whose ultimate reference is sys_clk through qpll0outclk_out[0] -> GTHE4_CHANNEL_TXOUTCLK[3]. Two independent physical sources, neither constrained against the other; there is no clock group anywhere in this build (report_exceptions: Clock Group rows = 0).",
+      "rationale": "TIMING-6/TIMING-7 say 'related but no common primary clock / no common node'. That is the signature of legitimate CDC structures tying two independent clocks together (AXI-Lite clock converter, XPM async FIFOs, the probe meter snapshot, the Gray timestamp), not of a missing constraint. The pair may be called reviewed only while all of the following are re-proved in the same round: no Critical CDC and no uncovered HIGH endpoint exists (checked in code, not asserted here), the named project exceptions that cross clock domains still resolve to non-empty object lists with their requirement values, and neither report_exceptions -ignored nor -scope_override lists them, and both interaction directions are present in report_clock_interaction.",
+      "evidence": [
+        "build/evidence-dcpio-26111106/query/s3-clock-pair.txt (source pins, periods, waveforms of both clocks)",
+        "build/evidence-dcpio-26111106/rpt/clock_interaction.rpt (clk_pl_0 -> pcie_user_clk WNS 0.07 / 876 endpoints, No Common Clock, Partial False Path (unsafe); pcie_user_clk -> clk_pl_0 WNS 5.44 / 1968 endpoints, Ignored, Max Delay Datapath Only)",
+        "build/evidence-dcpio-26111106/query/s3-named-exception-analysis.txt (570 exception rows, 0 clock groups; positions 152/202/217/219 neither ignored nor scope-overridden)",
+        "constraints/sc7f0_capture_gray.xdc, constraints/zu4ev_pcie_pinout.xdc:108 (the named exceptions)",
+        "AMD UG903 'Using Constraints': Asynchronous Clock Domain Crossings and XDC Precedence / Exceptions Priority"
+      ],
+      "requires": [
+        {
+          "kind": "clock_interaction",
+          "from": "clk_pl_0",
+          "to": "pcie_user_clk",
+          "classification_any": [
+            "No Common Clock",
+            "Ignored"
+          ],
+          "constraints_any": [
+            "Max Delay Datapath Only",
+            "False Path",
+            "Clock Group"
+          ]
+        },
+        {
+          "kind": "clock_interaction",
+          "from": "pcie_user_clk",
+          "to": "clk_pl_0",
+          "classification_any": [
+            "No Common Clock",
+            "Ignored"
+          ],
+          "constraints_any": [
+            "Max Delay Datapath Only",
+            "False Path",
+            "Clock Group"
+          ]
+        },
+        {
+          "kind": "named_constraint",
+          "id": "probe_meter_max_delay",
+          "min_objects": 1,
+          "max_delay_ns": 10.0
+        },
+        {
+          "kind": "named_constraint",
+          "id": "capture_gray_to_source_time",
+          "min_objects": 64,
+          "max_delay_ns": 6.0,
+          "bus_skew_ns": 6.0
+        },
+        {
+          "kind": "named_constraint",
+          "id": "capture_gray_to_csr_time",
+          "min_objects": 64,
+          "max_delay_ns": 6.0,
+          "bus_skew_ns": 6.0
+        },
+        {
+          "kind": "named_constraint",
+          "id": "rx_ss_dpram_max_delay",
+          "min_objects": 1,
+          "max_delay_ns": 15.0
+        },
+        {
+          "kind": "named_constraint",
+          "id": "xpm_async_fifo_ce_arcs",
+          "min_objects": 1
+        },
+        {
+          "kind": "manifest_metric",
+          "id": "clock_groups",
+          "field": "count",
+          "equals": 0
+        },
+        {
+          "kind": "report_nonempty",
+          "report": "clock-interaction.rpt"
+        },
+        {
+          "kind": "report_nonempty",
+          "report": "exceptions-ignored.rpt"
+        },
+        {
+          "kind": "report_nonempty",
+          "report": "exceptions-scope-override.rpt"
+        },
+        {
+          "kind": "report_nonempty",
+          "report": "bus-skew.rpt"
+        }
+      ]
+    },
+    {
+      "id": "clkout2__clk_pl_0",
+      "rule": "TIMING-6",
+      "status": "REVIEWED_SAFE",
+      "clocks": ["clkout2", "clk_pl_0"],
+      "structure": "clkout2 is the VPHY RX video clock: a child of the hdmi_rx_clk_p reference in the Clock Summary, 6.734 ns / 148.5 MHz, and the clock report_cdc names for the launch flops of the three u_hdmi_probe crossings declared here. clk_pl_0 is the PS PLCLK[0] output, 10.000 ns. Two independent physical sources; the only registered path from one to the other in this direction is the probe diagnostic level, which rtl/sc7f0_hdmi_probe.v now captures in clkout2 first and then synchronises with a 3-FF ASYNC_REG chain in clk_pl_0.",
+      "rationale": "TIMING-6/7/8 say 'related (timed together) but no common primary clock / no common node / no common expandable period' for this pair, and in round 26111202 the same pair also held that round's WNS (-2.760 ns at a 0.002 ns requirement) because the crossing was fed through the vendor's combinational output with no exception at all. That part is now a design fix, not a paperwork fix: a source-domain register, a first-stage chain that measures ASYNC_REG in the routed netlist, and one exception per signal written from that register to chain[0]. The pair may be called reviewed only while every one of those facts is re-measured in the same round: each of the three crossings resolves, carries ASYNC_REG, spans exactly two clock domains, keeps its internal chain stages analysed (an exception that grew to -from-clock would show up as zero analysed paths), keeps its feed-in timed at clkout2's own period rather than at a 0.002 ns async requirement, and is neither ignored nor scope-overridden; the probe meter / Gray / DPRAM max-delay and bus-skew constraints this design depends on are still in force with their measured values; no clock group may exist anywhere; and the harness refuses this reclassification at all while any Critical CDC row or uncovered HIGH endpoint is left in Layer A. report_clock_interaction's own aggregate string 'Partial False Path (unsafe)' is NOT the evidence - it is the reason this entry demands the per-crossing measurements above instead of trusting the table, because one exception per crossing is exactly what 'partial' means here. What this entry still cannot see is spelled out in missing-claim form: a NEW crossing between these two clocks that already arrives ASYNC_REG-synchronised is not counted by it; what closes that hole is report_cdc itself (an unsynchronised or combinational crossing comes back as Critical CDC-10/11/12/13 and Layer A refuses the round, and any new Warning row must be claimed by an entry in sc7f0_cdc_review.json or Layer B fails).",
+      "evidence": [
+        "build/vcu-release-26111202-r1/fpga/project/methodology.rpt:46-73 (TIMING-6#1 / TIMING-7#1 / TIMING-8#1 name clkout2 and clk_pl_0)",
+        "build/vcu-release-26111202-r1/fpga/project/timing_summary.rpt (Clock Summary: clkout2 under hdmi_rx_clk_p, 6.734 ns; clk_pl_0 10.000 ns; inter-clock row clkout2 -> clk_pl_0 WNS -2.760 / TNS -8.246 / 3 failing of 188 endpoints, requirement 0.002 ns)",
+        "build/vcu-release-26111202-r1/fpga/project/clock-interaction.rpt (clkout2 -> clk_pl_0 = No Common Clock, Partial False Path (unsafe); clk_pl_0 -> clkout2 = Ignored, Max Delay Datapath Only)",
+        "build/vcu-release-26111202-r1/fpga/project/cdc.rpt (three CDC-10 Critical rows, Exception = None, clkout2 -> clk_pl_0, into u_hdmi_probe/rxss_t{last,user,valid}_sync_reg[0])",
+        "rtl/sc7f0_hdmi_probe.v (source-domain capture on clk_rx_video, then the 3-FF ASYNC_REG chain on clk)",
+        "constraints/sc7f0_async_io.xdc (probe_rxss_t{last,user,valid}_src_to_probe: -from <source flop> -to <chain[0]> only)",
+        "tb/sc7f0_hdmi_probe_async_levels_tb.sv P9 (the capture moves only on its own clock and freezes when that clock stops; peer restart resumes it)",
+        "scripts/tests/test_sc7f0_reset_probe_structure.py::test_probe_source_crossings_are_named_end_to_end (RTL, XDC, hook and this file must name the same crossings)",
+        "AMD UG903 'Using Constraints': Asynchronous Clock Domain Crossings, and Exceptions Priority (clock groups override false paths and max delays; set_bus_skew is never overridden)"
+      ],
+      "requires": [
+        {
+          "kind": "clock_interaction",
+          "from": "clkout2",
+          "to": "clk_pl_0",
+          "classification_any": ["No Common Clock", "Ignored"],
+          "constraints_any": ["Max Delay Datapath Only", "False Path", "Partial False Path (unsafe)"]
+        },
+        {
+          "kind": "clock_interaction",
+          "from": "clk_pl_0",
+          "to": "clkout2",
+          "classification_any": ["No Common Clock", "Ignored"],
+          "constraints_any": ["Max Delay Datapath Only", "False Path", "Clock Group"]
+        },
+        {
+          "kind": "named_constraint",
+          "id": "probe_rxss_tlast_src_to_probe",
+          "min_objects": 1,
+          "min_first_stage_async_reg": 1,
+          "min_paths_analysed": 2,
+          "max_clock_domains": 2,
+          "max_exception_rows": 1
+        },
+        {
+          "kind": "named_constraint",
+          "id": "probe_rxss_tuser_src_to_probe",
+          "min_objects": 1,
+          "min_first_stage_async_reg": 1,
+          "min_paths_analysed": 2,
+          "max_clock_domains": 2,
+          "max_exception_rows": 1
+        },
+        {
+          "kind": "named_constraint",
+          "id": "probe_rxss_tvalid_src_to_probe",
+          "min_objects": 1,
+          "min_first_stage_async_reg": 1,
+          "min_paths_analysed": 2,
+          "max_clock_domains": 2,
+          "max_exception_rows": 1
+        },
+        {
+          "kind": "manifest_metric",
+          "id": "probe_rxss_tlast_src_to_probe",
+          "field": "clock_domain_count",
+          "equals": 2
+        },
+        {
+          "kind": "manifest_metric",
+          "id": "probe_rxss_tuser_src_to_probe",
+          "field": "clock_domain_count",
+          "equals": 2
+        },
+        {
+          "kind": "manifest_metric",
+          "id": "probe_rxss_tvalid_src_to_probe",
+          "field": "clock_domain_count",
+          "equals": 2
+        },
+        {
+          "kind": "manifest_metric",
+          "id": "probe_rxss_tlast_src_to_probe",
+          "field": "upstream_requirement",
+          "min": 6.734
+        },
+        {
+          "kind": "manifest_metric",
+          "id": "probe_rxss_tvalid_src_to_probe",
+          "field": "upstream_paths",
+          "min": 1
+        },
+        {
+          "kind": "named_constraint",
+          "id": "probe_meter_max_delay",
+          "min_objects": 1,
+          "max_delay_ns": 10.0
+        },
+        {
+          "kind": "named_constraint",
+          "id": "capture_gray_to_source_time",
+          "min_objects": 64,
+          "max_delay_ns": 6.0,
+          "bus_skew_ns": 6.0
+        },
+        {
+          "kind": "named_constraint",
+          "id": "capture_gray_to_csr_time",
+          "min_objects": 64,
+          "max_delay_ns": 6.0,
+          "bus_skew_ns": 6.0
+        },
+        {
+          "kind": "named_constraint",
+          "id": "rx_ss_dpram_max_delay",
+          "min_objects": 1,
+          "max_delay_ns": 15.0
+        },
+        {
+          "kind": "manifest_metric",
+          "id": "clock_groups",
+          "field": "count",
+          "equals": 0
+        },
+        {
+          "kind": "report_nonempty",
+          "report": "clock-interaction.rpt"
+        },
+        {
+          "kind": "report_nonempty",
+          "report": "exceptions-ignored.rpt"
+        },
+        {
+          "kind": "report_nonempty",
+          "report": "exceptions-scope-override.rpt"
+        },
+        {
+          "kind": "report_nonempty",
+          "report": "bus-skew.rpt"
+        }
+      ]
+    },
+    {
+      "id": "phy_rxoutclk__clk_pl_0",
+      "rule": "TIMING-6",
+      "status": "REVIEWED_SAFE",
+      "clocks": ["phy_rxoutclk", "clk_pl_0"],
+      "structure": "phy_rxoutclk is the GTH RX output clock of the vid_phy_controller (Clock Summary: a child of GTHE4_CHANNEL_RXOUTCLK[0], 6.734 ns); clk_pl_0 is the PS PLCLK[0], 10.000 ns. In this direction the design crosses (a) the probe's three channel-valid diagnostic levels, now source-registered on clk_rxout and then 3-FF synchronised, and (b) the frequency-meter request/acknowledge/toggle-ack crossings plus the 32-bit snapshot bus, which the project constraint probe_meter_max_delay times with set_max_delay -datapath_only 10.0.",
+      "rationale": "Same class of finding as clkout2__clk_pl_0 and the same reason it was red in round 26111202: three CDC-10 Critical rows with Exception = None (launch flop u_vid_phy_controller/inst/xpm_array_single_DRU_CTRL_in_sync_inst/syncstages_ff_reg[2][1]) and -1.631 ns at a 0.002 ns requirement, i.e. combinational logic in front of the pl_clk0 first stage. The fix is a register in phy_rxoutclk plus one exception per signal from that flop to chain[0]; the meter crossings keep their measured max delay. The pair is graded, not waived: ASYNC_REG, two domains, internal chain stages still analysed, feed-in timed at phy_rxoutclk's own period, no ignored or scope-overridden exception, no clock group, and no Critical CDC row anywhere in the round.",
+      "evidence": [
+        "build/vcu-release-26111202-r1/fpga/project/methodology.rpt:46-73 (TIMING-6#2 / TIMING-7#2 / TIMING-8#2 name phy_rxoutclk and clk_pl_0)",
+        "build/vcu-release-26111202-r1/fpga/project/timing_summary.rpt (phy_rxoutclk -> clk_pl_0 WNS -1.631 / TNS -4.540 / 3 failing of 284 endpoints, requirement 0.002 ns; phy_rxoutclk 6.734 ns)",
+        "build/vcu-release-26111202-r1/fpga/project/clock-interaction.rpt (phy_rxoutclk -> clk_pl_0 = No Common Clock, Partial False Path (unsafe); clk_pl_0 -> phy_rxoutclk = Ignored, Max Delay Datapath Only)",
+        "build/vcu-release-26111202-r1/fpga/project/cdc.rpt (three CDC-10 Critical rows, Exception = None, phy_rxoutclk -> clk_pl_0, into u_hdmi_probe/phy_ch{0,1,2}_tvalid_sync_reg[0])",
+        "rtl/sc7f0_hdmi_probe.v (source-domain capture on clk_rxout; the beat counters keep counting the raw signals in phy_rxoutclk, so no counted quantity moves)",
+        "constraints/sc7f0_async_io.xdc (probe_phy_ch{0,1,2}_tvalid_src_to_probe) and constraints/zu4ev_pcie_pinout.xdc:108 (probe meter max delay, re-measured as probe_meter_max_delay)",
+        "tb/sc7f0_hdmi_probe_async_levels_tb.sv P9",
+        "AMD UG903 'Using Constraints': Asynchronous Clock Domain Crossings / Exceptions Priority"
+      ],
+      "requires": [
+        {
+          "kind": "clock_interaction",
+          "from": "phy_rxoutclk",
+          "to": "clk_pl_0",
+          "classification_any": ["No Common Clock", "Ignored"],
+          "constraints_any": ["Max Delay Datapath Only", "False Path", "Partial False Path (unsafe)"]
+        },
+        {
+          "kind": "clock_interaction",
+          "from": "clk_pl_0",
+          "to": "phy_rxoutclk",
+          "classification_any": ["No Common Clock", "Ignored"],
+          "constraints_any": ["Max Delay Datapath Only", "False Path", "Clock Group"]
+        },
+        {
+          "kind": "named_constraint",
+          "id": "probe_phy_ch0_tvalid_src_to_probe",
+          "min_objects": 1,
+          "min_first_stage_async_reg": 1,
+          "min_paths_analysed": 2,
+          "max_clock_domains": 2,
+          "max_exception_rows": 1
+        },
+        {
+          "kind": "named_constraint",
+          "id": "probe_phy_ch1_tvalid_src_to_probe",
+          "min_objects": 1,
+          "min_first_stage_async_reg": 1,
+          "min_paths_analysed": 2,
+          "max_clock_domains": 2,
+          "max_exception_rows": 1
+        },
+        {
+          "kind": "named_constraint",
+          "id": "probe_phy_ch2_tvalid_src_to_probe",
+          "min_objects": 1,
+          "min_first_stage_async_reg": 1,
+          "min_paths_analysed": 2,
+          "max_clock_domains": 2,
+          "max_exception_rows": 1
+        },
+        {
+          "kind": "manifest_metric",
+          "id": "probe_phy_ch0_tvalid_src_to_probe",
+          "field": "clock_domain_count",
+          "equals": 2
+        },
+        {
+          "kind": "manifest_metric",
+          "id": "probe_phy_ch1_tvalid_src_to_probe",
+          "field": "clock_domain_count",
+          "equals": 2
+        },
+        {
+          "kind": "manifest_metric",
+          "id": "probe_phy_ch2_tvalid_src_to_probe",
+          "field": "clock_domain_count",
+          "equals": 2
+        },
+        {
+          "kind": "manifest_metric",
+          "id": "probe_phy_ch0_tvalid_src_to_probe",
+          "field": "upstream_requirement",
+          "min": 6.734
+        },
+        {
+          "kind": "manifest_metric",
+          "id": "probe_phy_ch2_tvalid_src_to_probe",
+          "field": "upstream_paths",
+          "min": 1
+        },
+        {
+          "kind": "named_constraint",
+          "id": "probe_meter_max_delay",
+          "min_objects": 1,
+          "max_delay_ns": 10.0
+        },
+        {
+          "kind": "named_constraint",
+          "id": "xpm_async_fifo_ce_arcs",
+          "min_objects": 1
+        },
+        {
+          "kind": "manifest_metric",
+          "id": "clock_groups",
+          "field": "count",
+          "equals": 0
+        },
+        {
+          "kind": "report_nonempty",
+          "report": "clock-interaction.rpt"
+        },
+        {
+          "kind": "report_nonempty",
+          "report": "exceptions-ignored.rpt"
+        },
+        {
+          "kind": "report_nonempty",
+          "report": "exceptions-scope-override.rpt"
+        },
+        {
+          "kind": "report_nonempty",
+          "report": "bus-skew.rpt"
+        }
+      ]
+    }
+  ],
+  "methodology_items": [
+    {
+      "id": "dpir2_dsp_async_reset_drivers",
+      "rule": "DPIR-2",
+      "status": "REVIEWED_SAFE",
+      "structure": "DSP48 input pins driven by registers that have an asynchronous reset, so the registers cannot be absorbed into the DSP pipeline registers.",
+      "rationale": "Pure area/performance advice on the DMA byte accumulators. It does not change function, and the fix (removing resets from counters) is a coding preference, not a correctness requirement. Layer A still owns any real timing failure on these paths.",
+      "evidence": [
+        "build/vcu-release-26111103-r1/fpga/project/methodology.rpt (DPIR-2 detail rows are all u_dma_top DSP48 inputs)",
+        "rtl/custom_pcie_dma_top.v"
+      ],
+      "requires": [
+        {
+          "kind": "report_nonempty",
+          "report": "methodology.rpt"
+        }
+      ],
+      "optional": true
+    },
+    {
+      "id": "lutar1_lut_drives_async_reset",
+      "rule": "LUTAR-1",
+      "status": "NEEDS_STRUCTURAL_REVIEW",
+      "structure": "LUT-derived logic feeding asynchronous set/reset pins of registers.",
+      "rationale": "This rule overlaps the open reset topology defect (B1 review P0-2: combinational logic and multi-clock fan-in in front of xpm_cdc_async_rst chains, the common root of CDC-12 and most CDC-10 rows). Until those rows are gone, accepting LUTAR-1 would pre-judge the outcome of that fix.",
+      "missing_evidence": "Re-run after the reset/probe RTL fix is implemented: LUTAR-1 count must be re-explained per instance and CDC-10/CDC-12 must be zero. The standalone simulation round proved the fixed RTL's behaviour but explicitly cannot prove metastability or netlist topology.",
+      "evidence": [
+        "build/vcu-release-26111103-r1/fpga/project/methodology.rpt (LUTAR-1 = 38)",
+        "docs/sc7f0_full_package_rebuild_20261111.md section 12 (reset/probe validation limits)"
+      ],
+      "optional": true
+    },
+    {
+      "id": "timing9_unknown_cdc_logic",
+      "rule": "TIMING-9",
+      "status": "NEEDS_STRUCTURAL_REVIEW",
+      "structure": "Aggregate 'Unknown CDC Logic' report for crossings that are not recognised synchroniser structures.",
+      "rationale": "In this design the aggregate covers the u_status multi-bit non-FD crossings (296 CDC-13) and the pre-synchroniser reset logic, i.e. exactly the open correctness defects. The old gate already refused to accept TIMING-9 without complete path-level accounting; this file keeps that refusal instead of inventing a waiver.",
+      "missing_evidence": "CDC-13/CDC-10/CDC-12 = 0 in cdc.rpt and an empty unreviewed list, then re-read TIMING-9.",
+      "evidence": [
+        "build/vcu-release-26111103-r1/fpga/project/methodology.rpt (TIMING-9 = 1)",
+        "build/vcu-release-26111103-r1/fpga/project/cdc.rpt (CDC-13 = 296, CDC-10 = 28, CDC-12 = 10)"
+      ],
+      "optional": true
+    },
+    {
+      "id": "timing18_missing_io_delays",
+      "rule": "TIMING-18",
+      "status": "NEEDS_STRUCTURAL_REVIEW",
+      "structure": "Missing input/output delay on asynchronous pads, as check_timing grouped them in round 26111202: 0 input ports at HIGH and 8 at MEDIUM (hdmi_rx_5v_det, hdmi_rx_ddc_scl/_sda, hdmi_tx_ddc_scl/_sda, hdmi_tx_hpd_in, hdmi_tx_refclk_rdy, sys_rst_n - all already covered by a named -from <port> exception); 6 output ports at HIGH of which 2 have no constraint at all (hdmi_rx_ddc_scl, hdmi_rx_ddc_sda) and 4 already sit at MEDIUM behind a named exception (hdmi_rx_hpd_out, hdmi_tx_tmds_clk_p, user_led_dma_active, user_led_pcie_link_up).",
+      "rationale": "Eleven of the thirteen ports are async or quasi-static levels where an invented delay number would be a fake constraint; each is itemised one port at a time in sc7f0_cdc_review.json io_items and written in constraints/sc7f0_async_io.xdc, restricted to the measured first-stage cells on the input side and ending at the pad on the output side. The two HIGH rows that remained were the RX DDC output direction, and they are now named per port (async_out_hdmi_rx_ddc_scl / _sda). The mechanism is not new: the four output ports already at MEDIUM are there because the same one-command-per-port shape moved them out of HIGH, so the next round either reproduces that for the DDC pair or the exception did not resolve - both outcomes are measured, not assumed. The TX TMDS clock pad stays unresolved because it is still driven by the VPHY (see tx_tmds_clock_pad).",
+      "missing_evidence": "Re-read TIMING-18 and check_timing on a round built with constraints/sc7f0_async_io.xdc as it now stands: no_input_delay HIGH must stay 0 and no_output_delay HIGH must fall from 6 to 4 with hdmi_rx_ddc_scl/_sda appearing in the MEDIUM false-path group instead. Then close io_items rx_ddc_scl, rx_ddc_sda and tx_tmds_clock_pad.",
+      "evidence": [
+        "constraints/sc7f0_async_io.xdc (input-side -from rows, four async_out_* pad rows, and the two new async_out_hdmi_rx_ddc_* rows)",
+        "build/vcu-release-26111202-r1/fpga/project/check-timing.rpt (section 5: 0 HIGH + 8 MEDIUM input ports; section 6: 2 HIGH + 4 MEDIUM output ports, the HIGH pair being hdmi_rx_ddc_scl/_sda)",
+        "build/evidence-dcpio-26111106/rpt/check_timing.rpt (7 HIGH input + 6 HIGH output ports in the earlier round, for the trend)"
+      ],
+      "optional": true
+    },
+    {
+      "id": "ulmtcs1_control_set_usage",
+      "rule": "ULMTCS-1",
+      "status": "REVIEWED_SAFE",
+      "structure": "Control-set usage above the recommended utilisation for the device.",
+      "rationale": "Implementation-quality advice: more control sets cost placement freedom, not correctness. The design closes setup/hold/WPWS (Layer A), so this is a congestion note. Recorded rather than whitelisted so a future round sees the count change.",
+      "evidence": [
+        "build/vcu-release-26111103-r1/fpga/project/methodology.rpt (ULMTCS-1 = 1)",
+        "build/vcu-release-26111103-r1/fpga/project/utilization_routed_hierarchical.rpt"
+      ],
+      "requires": [
+        {
+          "kind": "report_nonempty",
+          "report": "utilization_routed_hierarchical.rpt"
+        }
+      ],
+      "optional": true
+    },
+    {
+      "id": "clkc11_mmme4_divide_by_bufg_gt",
+      "rule": "CLKC-11",
+      "status": "REVIEWED_SAFE",
+      "structure": "MMCME4 output could be divided by a BUFG_GT instead.",
+      "rationale": "Clock-structure suggestion for the HDMI/VCU reference clocks produced by the Si5341 board clocking. Changing it is a re-clocking project, and the current structure meets timing; the advisory is not a defect.",
+      "evidence": [
+        "build/vcu-release-26111103-r1/fpga/project/methodology.rpt (CLKC-11 = 2)",
+        "constraints/zu4ev_pcie_pinout.xdc:96-104 (pl_clk_300m / capture_clk_300m declarations)"
+      ],
+      "requires": [
+        {
+          "kind": "report_nonempty",
+          "report": "methodology.rpt"
+        }
+      ],
+      "optional": true
+    },
+    {
+      "id": "clkc40_plle4_substitute",
+      "rule": "CLKC-40",
+      "status": "REVIEWED_SAFE",
+      "structure": "MMCME4 could be replaced by a PLLE4.",
+      "rationale": "Same clock-structure class as CLKC-11: a resource-usage suggestion for the board clock inputs, not a correctness warning.",
+      "evidence": [
+        "build/vcu-release-26111103-r1/fpga/project/methodology.rpt (CLKC-40 = 2)"
+      ],
+      "requires": [
+        {
+          "kind": "report_nonempty",
+          "report": "methodology.rpt"
+        }
+      ],
+      "optional": true
+    },
+    {
+      "id": "clkc56_mmme4_no_loc",
+      "rule": "CLKC-56",
+      "status": "REVIEWED_SAFE",
+      "structure": "MMCME4 driving a global clock has no LOC constraint.",
+      "rationale": "Placement suggestion. The clocks are functionally constrained (create_clock/create_generated_clock with the board reference), and pin-locating the MMCM is a floorlining decision that must not be taken as a side effect of a gate change.",
+      "evidence": [
+        "build/vcu-release-26111103-r1/fpga/project/methodology.rpt (CLKC-56 = 2)",
+        "constraints/zu4ev_pcie_pinout.xdc:96-104"
+      ],
+      "requires": [
+        {
+          "kind": "report_nonempty",
+          "report": "methodology.rpt"
+        }
+      ],
+      "optional": true
+    }
+  ]
+}

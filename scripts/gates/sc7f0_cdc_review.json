@@ -1,0 +1,844 @@
+{
+  "schema": "sc7f0-review-policy/1",
+  "kind": "cdc",
+  "id": "sc7f0-cdc-warning-review",
+  "purpose": "Layer B ledger for every report_cdc Warning. Each entry names the rule, the exact root instance family, the source/destination structure and the evidence that was reviewed. Entries are re-verified against the reports of the round being graded; nothing here is a waiver, a false path, or a blanket clock-group declaration.",
+  "notes": [
+    "Critical CDC (CDC-5/7/10/12/13 and any Critical detail) is Layer A and can never be cleared by this file.",
+    "Info rows (CDC-3, CDC-9) are not routed here; the Layer A parser still rejects any Info rule outside CDC-3/CDC-9.",
+    "Counts are never pinned to a past round: the ledger prints the count this round actually produced and fails if any Warning row is unmatched. Where a numeric expectation is needed it is expressed as a relation to this round's rows (require_row_endpoint_match, min_distinct_*), never as a number copied out of 26111103-r1.",
+    "Load-bearing CDC roots are deliberately NOT optional: if the XPM FIFO families, the probe meters, the Gray timestamp or the vendor DPRAM arcs disappear from cdc.rpt, that is a structural change and the review entry must be re-examined. Only the placeholder documenting the open DDC item is optional.",
+    "max_delay_ns in a requirement is compared against max_delay_measured_ns (get_property REQUIREMENT on the routed netlist), never against the value the generating script hoped for, and max_delay_effective must be 1.",
+    "from_coverage_pct is the share of the CONSTRAINT's own object list that the exception covers. 100% is demanded only where that object list is exactly the reviewed interface (the project's own Gray and meter constraints). The vendor DPRAM exception reports 84.90% because its -filter list is broader than the arcs that exist; that is NOT 'the 416 requested pairs are unresolved'. Per-row resolution is proved by row_exception, so the two concepts stay in separate requirements.",
+    "io_items that declare the same pair_group pass or fail together: SCL/SDA of a DDC pair, both halves of a differential pad, or one pad whose consumers are itemised separately.",
+    "ASYNC_REG is a placement / metastability-chain annotation. Where a requirement demands it the routed attribute is read; where a vendor cell does not carry it the entry is reviewed on measured topology and same-domain timing instead, and the absence of the attribute is never described as safer."
+  ],
+  "items": [
+    {
+      "id": "xpm_async_fifo_ce_internal",
+      "rule": "CDC-15",
+      "status": "REVIEWED_SAFE",
+      "root_regex": [
+        "^u_dma_top/u_axil_reg_space/.*/gnuram_async_fifo\\.",
+        "^u_dma_top/u_upg_cdc/.*/gnuram_async_fifo\\.",
+        "^u_dma_top/u_video_req_cdc/.*/gnuram_async_fifo\\.",
+        "^u_dualpath/u_packet_commands/.*/gnuram_async_fifo\\.",
+        "^u_dualpath/u_packet_completions/.*/gnuram_async_fifo\\.",
+        "^u_dualpath/u_tx_cdc/.*/gnuram_async_fifo\\.",
+        "^u_ps_capture/u_regs/.*/gnuram_async_fifo\\.",
+        "^u_ps_capture/u_tap/.*/gnuram_async_fifo\\."
+      ],
+      "structure": "XPM asynchronous FIFO internals: LUTRAM/BRAM write-clock pin to the read-side data register inside xpm_fifo_base_inst. Data is only consumed under Gray-coded, ASYNC_REG-synchronised read/write pointers with empty/full protection; the reported arc is the memory cell -> dout path, not a user bus.",
+      "rationale": "AMD's own xpm_fifo/xpm_memory constraint generators place a set_max_delay -datapath_only on exactly these arcs, and the same structure existed in every shipped generation. This is 8 FIFO families, each named above, not a root-name prefix wildcard.",
+      "evidence": [
+        "/opt/Xilinx/Vivado/2023.2/data/ip/xpm/xpm_memory/tcl/xpm_memory_xdc.tcl:52-61 (generator sets set_max_delay -datapath_only on LUTRAM/DRAM paths)",
+        "rtl/video_axis_async_fifo.v, rtl/sc7f0_packet_cdc.v, rtl/sc7f0_tap_regs.v, rtl/video_req_cdc.v (the eight instances)",
+        "routed report_exceptions coverage re-queried for these roots this round: named-constraint evidence item xpm_async_fifo_ce_arcs"
+      ],
+      "requires": [
+        {
+          "kind": "row_exception",
+          "type": "Max Delay Datapath Only"
+        },
+        {
+          "kind": "named_constraint",
+          "id": "xpm_async_fifo_ce_arcs",
+          "min_objects": 1,
+          "min_endpoints": 1
+        }
+      ]
+    },
+    {
+      "id": "probe_meter_held_snapshot",
+      "rule": "CDC-15",
+      "status": "REVIEWED_SAFE",
+      "root_regex": [
+        "^u_hdmi_probe/u_meter_[A-Za-z0-9_]+/(snapshot_test_reg|measured_freq_hz_reg|raw_cycle_count_reg)"
+      ],
+      "structure": "Seven frequency meters (rtl/sc7f0_hdmi_probe.v sc7f0_freq_meter). The 32-bit test-clock-domain snapshot is held constant for a full second while the reference domain latches it after a toggle handshake (xpm_cdc_single u_req_cdc), so the sampled value is stable for ~1e7 reference cycles.",
+      "rationale": "Held-value capture, not a coherent multi-bit bus crossing at an arbitrary instant. The path is explicitly constrained by the project, and the routed from-coverage of that constraint is re-checked this round.",
+      "evidence": [
+        "rtl/sc7f0_hdmi_probe.v:33-90 (sc7f0_freq_meter toggle handshake + held snapshot)",
+        "constraints/zu4ev_pcie_pinout.xdc:108 set_max_delay -datapath_only 10.0 -from *u_meter*/*snapshot_test_reg[*] -to *u_meter*/*measured_freq_hz_reg[*] | *raw_cycle_count_reg[*]",
+        "build/vcu-release-26111103-r1/fpga/project/exceptions-coverage.rpt position 152 (224 cells -> 448 endpoints, 100.00% from-coverage, not ignored)"
+      ],
+      "requires": [
+        {
+          "kind": "row_exception",
+          "type": "Max Delay Datapath Only"
+        },
+        {
+          "kind": "named_constraint",
+          "id": "probe_meter_max_delay",
+          "min_objects": 1,
+          "max_delay_ns": 10.0,
+          "min_from_coverage_pct": 100.0
+        }
+      ]
+    },
+    {
+      "id": "capture_gray_to_source_time",
+      "rule": "CDC-6",
+      "status": "REVIEWED_SAFE",
+      "src_regex": "^u_ps_capture/u_tap/gray_q_reg",
+      "dest_regex": "/u_source_time/stage0_reg",
+      "structure": "Source-registered 64-bit Gray timestamp (rtl/sc7f0_frame_tap.v gray_q <= next_tick ^ (next_tick >> 1), DONT_TOUCH) into a 4-stage ASYNC_REG/SHREG_EXTRACT=NO synchroniser (rtl/sc7f0_gray64_sync.v).",
+      "rationale": "Gray coding means at most one bit changes per source tick; the project adds both a 6 ns max_delay (below the 6.666 ns source period) and a 6 ns set_bus_skew, and bus skew is not overridable by clock groups or max delays (UG903). Both are re-read from this round's reports. The endpoint expectation is derived from the CDC rows classified here (require_row_endpoint_match) and the exception must be a single row (max_exception_rows), because this is one named project constraint over exactly the reviewed 64-bit interface - which is also why 100% from-coverage is the right demand for it.",
+      "evidence": [
+        "constraints/sc7f0_capture_gray.xdc:8-9 (set_max_delay -datapath_only 6.000 + set_bus_skew 6.000)",
+        "scripts/check_sc7f0_capture_gray.tcl (128 endpoints re-checked pre- and post-route)",
+        "scripts/tests/test_sc7f0_capture_gray_constraints.py"
+      ],
+      "requires": [
+        {
+          "kind": "row_exception",
+          "type": "Max Delay Datapath Only"
+        },
+        {
+          "kind": "named_constraint",
+          "id": "capture_gray_to_source_time",
+          "min_objects": 1,
+          "max_delay_ns": 6.0,
+          "bus_skew_ns": 6.0,
+          "min_bus_skew_slack_ns": 0.0,
+          "require_row_endpoint_match": true,
+          "max_exception_rows": 1,
+          "min_from_coverage_pct": 100.0
+        }
+      ]
+    },
+    {
+      "id": "capture_gray_to_csr_time",
+      "rule": "CDC-6",
+      "status": "REVIEWED_SAFE",
+      "src_regex": "^u_ps_capture/u_tap/gray_q_reg",
+      "dest_regex": "/u_regs/u_time/stage0_reg",
+      "structure": "Same source-registered Gray timestamp into the CSR-side 4-stage Gray synchroniser.",
+      "rationale": "Identical structure and identical project-supplied exception as capture_gray_to_source_time; listed separately because it is a separate constraint and a separate destination tree. The endpoint expectation is derived from the CDC rows classified here (require_row_endpoint_match) and the exception must be a single row (max_exception_rows), because this is one named project constraint over exactly the reviewed 64-bit interface - which is also why 100% from-coverage is the right demand for it.",
+      "evidence": [
+        "constraints/sc7f0_capture_gray.xdc:10-11 (set_max_delay -datapath_only 6.000 + set_bus_skew 6.000)",
+        "scripts/check_sc7f0_capture_gray.tcl",
+        "scripts/tests/test_sc7f0_capture_gray_constraints.py"
+      ],
+      "requires": [
+        {
+          "kind": "row_exception",
+          "type": "Max Delay Datapath Only"
+        },
+        {
+          "kind": "named_constraint",
+          "id": "capture_gray_to_csr_time",
+          "min_objects": 1,
+          "max_delay_ns": 6.0,
+          "bus_skew_ns": 6.0,
+          "min_bus_skew_slack_ns": 0.0,
+          "require_row_endpoint_match": true,
+          "max_exception_rows": 1,
+          "min_from_coverage_pct": 100.0
+        }
+      ]
+    },
+    {
+      "id": "upg_diag_sticky_levels",
+      "rule": "CDC-6",
+      "status": "REVIEWED_SAFE",
+      "src_regex": "^u_dma_top/u_zu4ev_upg_diag/pcie_sticky_reg",
+      "dest_regex": "/u_levels/syncstages_ff_reg\\[0\\]",
+      "structure": "Independent sticky status flags, each bit synchronised on its own by xpm_cdc_array_single; no cross-bit invariant is claimed and no bit is read as a number.",
+      "rationale": "Already reviewed in earlier generations; the multi-bit warning is the array-synchroniser shape, not an unsynchronised bus.",
+      "evidence": [
+        "rtl/zu4ev_pcie_card_top.v (u_zu4ev_upg_diag sticky set/clear, u_levels xpm_cdc_array_single)",
+        "build/vcu-release-26111103-r1/fpga/project/cdc.rpt row 1799 (exception: False Path declared by xpm_cdc_array_single)"
+      ],
+      "requires": [
+        {
+          "kind": "row_exception",
+          "any_of": [
+            "False Path"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ps_state_independent_levels",
+      "rule": "CDC-6",
+      "status": "REVIEWED_SAFE",
+      "src_regex": "^u_ps_capture/u_regs/u_state/src_ff_reg",
+      "dest_regex": "/u_state/syncstages_ff_reg\\[0\\]",
+      "structure": "Two independent status levels crossing into the CSR domain through xpm_cdc_array_single.",
+      "rationale": "rtl/sc7f0_tap_regs.v states 'Approximate independent status levels only. STOP ownership uses ACK.'; the handshake that does require atomicity uses its own ACK CDC, not these bits.",
+      "evidence": [
+        "rtl/sc7f0_tap_regs.v:55-63 (independent status level contract)",
+        "build/vcu-release-26111103-r1/fpga/project/cdc.rpt row 699 (exception: False Path)"
+      ],
+      "requires": [
+        {
+          "kind": "row_exception",
+          "any_of": [
+            "False Path"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "vendor_vid_phy_held_counter",
+      "rule": "CDC-15",
+      "status": "REVIEWED_SAFE",
+      "root_regex": [
+        "^u_vid_phy_controller/"
+      ],
+      "structure": "vid_phy_controller internals: RX-clock frequency counters held by the AXI4-Lite capture logic, plus AXI4-Lite register -> array synchroniser crossings inside the IP.",
+      "rationale": "Vendor IP structure; the exception is declared by the IP's own constraint file, not by this project, and the covered instance is inside the IP. Reviewed as vendor content, and the IP's waiver behaviour is NOT assumed (see the vid_phy waiver parse failures recorded in the B1 review).",
+      "evidence": [
+        "build/vcu-release-26111103-r1/fpga/project/exceptions-coverage.rpt (IP-declared False Path rows under u_vid_phy_controller)",
+        "qpcie_zu4ev_card.gen/sources_1/ip/vid_phy_controller_0/vid_phy_controller_0_clocks.xdc:92-130 (IP-declared exceptions/waivers)"
+      ],
+      "requires": [
+        {
+          "kind": "row_exception",
+          "any_of": [
+            "False Path",
+            "Max Delay Datapath Only"
+          ]
+        },
+        {
+          "kind": "report_nonempty",
+          "report": "exceptions-coverage.rpt"
+        }
+      ]
+    },
+    {
+      "id": "vendor_vid_phy_array_levels",
+      "rule": "CDC-6",
+      "status": "REVIEWED_SAFE",
+      "root_regex": [
+        "^u_vid_phy_controller/"
+      ],
+      "structure": "vid_phy_controller internals: the RX-clock frequency counters (clk_freq_cnt_reg -> RXCLK_FREQ_CAP_INST/syncstages_ff) and one AXI4-Lite register (slv_reg_0x300) crossing through an xpm_array_single synchroniser.",
+      "rationale": "Vendor IP. Each row is either a counter that the IP holds while it captures, or a single control register bit group; the exception is declared inside the IP. Kept separate from vendor_vid_phy_held_counter because the rule and the structure differ.",
+      "evidence": [
+        "build/vcu-release-26111103-r1/fpga/project/cdc.rpt rows 26, 66-68 (exception: False Path)",
+        "qpcie_zu4ev_card.gen/sources_1/ip/vid_phy_controller_0/vid_phy_controller_0_clocks.xdc"
+      ],
+      "requires": [
+        {
+          "kind": "row_exception",
+          "any_of": [
+            "False Path"
+          ]
+        },
+        {
+          "kind": "report_nonempty",
+          "report": "exceptions-coverage.rpt"
+        }
+      ]
+    },
+    {
+      "id": "vendor_cpll_held_counter",
+      "rule": "CDC-15",
+      "status": "REVIEWED_SAFE",
+      "root_regex": [
+        "^u_pcie_ip/.*/gtwizard_ultrascale_v1_7_17_gthe4_cpll_cal_tx_i/U_TXOUTCLK_FREQ_COUNTER"
+      ],
+      "structure": "GT Wizard 1.7.17 CPLL calibration: testclk_en is disabled through two synchronisers, then 16 reference-clock cycles elapse in HOLD before the 18-bit counter is latched.",
+      "rationale": "Vendor held-capture structure; the counter cannot be observed while it is toggling. Only bit indices 0..17 of that specific counter are claimed.",
+      "evidence": [
+        "build/vcu-release-26111103-r1/fpga/project/cdc.rpt (u_pcie_ip gtwizard CPLL rows)",
+        "scripts/check_sc7f0_timing.py reviewed_crossing() legacy narrow matcher, kept and cross-checked by scripts/tests/test_sc7f0_two_layer_gates.py"
+      ],
+      "requires": [
+        {
+          "kind": "row_exception",
+          "any_of": [
+            "False Path",
+            "Max Delay Datapath Only"
+          ]
+        },
+        {
+          "kind": "report_nonempty",
+          "report": "exceptions-coverage.rpt"
+        }
+      ]
+    },
+    {
+      "id": "vendor_rx_ss_lutram_collision",
+      "rule": "CDC-26",
+      "status": "REVIEWED_SAFE",
+      "root_regex": [
+        "^u_hdmi_rx_ss/inst/v_hdmi_rx/inst/SYS_INST/.*/P_FIFO_INST/",
+        "^u_hdmi_rx_ss/inst/v_hdmi_rx/inst/SYS_INST/.*/PIX_FIFO_INST/",
+        "^u_hdmi_rx_ss/inst/v_hdmi_rx/inst/SYS_INST/.*FIFO_INST/"
+      ],
+      "structure": "LUTRAM (RAMD32/RAMD64E) write-clock -> read-out arcs inside the four v_hdmi_rx_ss DPRAM FIFOs (P_FIFO_INST, PIX_FIFO_INST, DCS_FIFO_INST, FIFO_INST). The read address is generated from the Gray-synchronised write pointer in the destination clock, so a read only presents an address the write domain has already published.",
+      "rationale": "This is NOT claimed as 'officially waived': grep for CDC-26 in Vivado 2023.2 data/ and in every XDC of this build returns nothing, and the routed probe measured 416 CLK->O arcs with 0 disabled. The review rests on two facts that must be re-measured every round: the vendor declares set_max_delay 15 -datapath_only over exactly these pins and it is neither ignored nor scope-overridden, and the paths are actually analysed by the timing engine (sampled path per FIFO root). Zero of our own RTL rows are CDC-26. The endpoint expectation is no longer the literal 416/416 that 26111103-r1 happened to produce (that broke on any IP or FIFO-depth change and invited editing the expectation instead of reading the report): require_row_endpoint_match ties the measured endpoint count to the CDC rows classified here, min_distinct_dest_parents keeps the several-FIFO structure, and the instance floor moved to the record whose producer actually counts instances (rx_ss_dpram_sample_timing).",
+      "evidence": [
+        "build/evidence-dcpio-26111106/query/s2-lutram-arcs.txt (CLK->O 416 arcs, disabled 0)",
+        "build/evidence-dcpio-26111106/query/s2-exception-coverage-exact.txt (position 202, max_dpo=15, not ignored, not scope-overridden)",
+        "build/evidence-dcpio-26111106/query/s2-sample-timing.txt (5/5 sampled pairs PATH_ANALYSED=1)",
+        "qpcie_zu4ev_card.gen/sources_1/ip/v_hdmi_rx_ss_0/bd_0/ip/ip_0/bd_2422_v_hdmi_rx_0_core.xdc '### FIFO DPRAM' section (vendor constraint); the same file's only create_waiver is CDC-11, not CDC-26",
+        "require_row_endpoint_match compares the routed Endpoints column with the sum of this round's CDC-26 rows; halving either side fails (scripts/tests/test_sc7f0_two_layer_gates.py)"
+      ],
+      "requires": [
+        {
+          "kind": "row_exception",
+          "type": "Max Delay Datapath Only"
+        },
+        {
+          "kind": "named_constraint",
+          "id": "rx_ss_dpram_max_delay",
+          "max_delay_ns": 15.0,
+          "min_objects": 1,
+          "require_row_endpoint_match": true,
+          "max_exception_rows": 1,
+          "min_distinct_dest_parents": 4
+        },
+        {
+          "kind": "named_constraint",
+          "id": "rx_ss_dpram_sample_timing",
+          "min_objects": 1,
+          "min_instances": 4,
+          "min_paths_analysed": 1
+        }
+      ]
+    },
+    {
+      "id": "needs_review_ddc_and_unclassified",
+      "rule": "CDC-26",
+      "status": "NEEDS_STRUCTURAL_REVIEW",
+      "root_regex": [
+        "^__never_matches__$"
+      ],
+      "optional": true,
+      "structure": "Placeholder that documents the still-open RX-DDC item for readers of this file.",
+      "rationale": "The RX-DDC first-stage filter inside the RX SS is an IO-to-flops path, so it appears under io_items, not as a CDC row; this entry exists only so the open item is visible in the same file. It is declared optional and never matches.",
+      "missing_evidence": "see io_items rx_ddc_scl / rx_ddc_sda",
+      "evidence": [
+        "build/evidence-dcpio-26111106/query/s1-pad-first-stage.txt"
+      ]
+    }
+  ],
+  "io_items": [
+    {
+      "id": "async_in_5v_det_probe",
+      "manifest_id": "async_in_hdmi_rx_5v_det_probe",
+      "pair_group": "hdmi_rx_5v_det",
+      "port": "hdmi_rx_5v_det",
+      "status": "REVIEWED_SAFE",
+      "structure": "Async 5 V cable-detect level. Routed per-endpoint evidence lists three sequential first stages on the pad net, all ASYNC_REG=1: u_hdmi_probe/det5v_sync_reg[0] (clk_pl_0, probe), u_hdmi_rx_ss/inst/v_hdmi_rx/inst/SYS_INST/CD_INST/DET_SYNC_INST/XPM_INST/syncstages_ff_reg[0] (clk_pl_0, the RX SS cable_detect input) and sync_5v_det_q_reg[0] (pcie_user_clk). No endpoint sits on a clock or set/reset pin (measured 0).",
+      "rationale": "Every consumer of the pad is named by its own -to-first-stage exception and the pad-level closure item re-measures that no first stage is left unnamed, so a fourth consumer added later fails this entry instead of being covered silently. The third consumer, which the earlier review could not enumerate, is the RX SS's own xpm_cdc_single first stage in the routed netlist; that closes the structural question only - it does not claim the IP consumes the level glitch-free, which stays a functional-acceptance item.",
+      "evidence": [
+        "build/evidence-dcpio-26111106/query/s1-endpoints.csv (hdmi_rx_5v_det: 3 first-stage endpoints, ASYNC_REG=1 each)",
+        "build/evidence-dcpio-26111106/query/summary.json items.item1_rx_ddc.other_async_pads.hdmi_rx_5v_det (first_stage_cells=3, async_reg_set=3, consumers probe/rx_ss/other = 1/1/1, endpoints_whose_pin_carries_a_clock=0)",
+        "constraints/sc7f0_async_io.xdc (one -to exception per named first-stage chain)"
+      ],
+      "requires": [
+        {
+          "kind": "named_constraint",
+          "id": "async_in_hdmi_rx_5v_det_probe",
+          "min_objects": 1,
+          "min_first_stage_async_reg": 1,
+          "max_clock_domains": 1,
+          "max_clock_or_setreset_pin_loads": 0
+        },
+        {
+          "kind": "manifest_metric",
+          "id": "async_pad_hdmi_rx_5v_det",
+          "field": "unclaimed_first_stage_endpoints",
+          "equals": 0
+        },
+        {
+          "kind": "manifest_metric",
+          "id": "async_pad_hdmi_rx_5v_det",
+          "field": "first_stage_endpoints_missing_async_reg",
+          "equals": 0
+        },
+        {
+          "kind": "manifest_metric",
+          "id": "async_pad_hdmi_rx_5v_det",
+          "field": "clock_or_setreset_pin_loads",
+          "equals": 0
+        }
+      ]
+    },
+    {
+      "id": "async_in_5v_det_rxss_consumer",
+      "manifest_id": "async_in_hdmi_rx_5v_det_rxss",
+      "pair_group": "hdmi_rx_5v_det",
+      "port": "hdmi_rx_5v_det",
+      "status": "REVIEWED_SAFE",
+      "structure": "Second consumer of the same pad: the RX subsystem's own cable-detect synchroniser first stage CD_INST/DET_SYNC_INST/XPM_INST/syncstages_ff_reg[0] (FDRE, ASYNC_REG=1, clk_pl_0).",
+      "rationale": "This is the load that made the port un-closable in the previous review. It is now a named exception against a measured ASYNC_REG first stage, so the port never relies on a -from-port blanket exception. ASYNC_REG is a placement / metastability-chain annotation: this entry requires the routed attribute to be measured, and never treats its absence as evidence of safety.",
+      "evidence": [
+        "build/evidence-dcpio-26111106/query/s1-endpoints.csv (row 21: RX SS CD_INST/DET_SYNC_INST/XPM_INST/syncstages_ff_reg[0], ASYNC_REG=1, clk_pl_0 10.000 ns)",
+        "constraints/sc7f0_async_io.xdc"
+      ],
+      "requires": [
+        {
+          "kind": "named_constraint",
+          "id": "async_in_hdmi_rx_5v_det_rxss",
+          "min_objects": 1,
+          "min_first_stage_async_reg": 1,
+          "max_clock_domains": 1,
+          "max_clock_or_setreset_pin_loads": 0
+        }
+      ]
+    },
+    {
+      "id": "async_in_5v_det_pcie_chain",
+      "manifest_id": "async_in_hdmi_rx_5v_det_pcie",
+      "pair_group": "hdmi_rx_5v_det",
+      "port": "hdmi_rx_5v_det",
+      "status": "REVIEWED_SAFE",
+      "structure": "Third consumer: the 2FF status chain sync_5v_det_q_reg in the pcie_user_clk domain (rtl/zu4ev_pcie_card_top.v:1148-1157), ASYNC_REG=1 measured.",
+      "rationale": "Independent status level into its own domain, so a separate named exception. Fails together with the other members of pair_group hdmi_rx_5v_det: half a pad is not a reviewed pad.",
+      "evidence": [
+        "build/evidence-dcpio-26111106/query/s1-endpoints.csv (row 22: sync_5v_det_q_reg[0], ASYNC_REG=1, pcie_user_clk 8.000 ns)",
+        "rtl/zu4ev_pcie_card_top.v:1148-1157",
+        "constraints/sc7f0_async_io.xdc"
+      ],
+      "requires": [
+        {
+          "kind": "named_constraint",
+          "id": "async_in_hdmi_rx_5v_det_pcie",
+          "min_objects": 1,
+          "min_first_stage_async_reg": 1,
+          "max_clock_domains": 1,
+          "max_clock_or_setreset_pin_loads": 0
+        }
+      ]
+    },
+    {
+      "id": "async_in_tx_hpd",
+      "manifest_id": "async_in_hdmi_tx_hpd_in",
+      "pair_group": "hdmi_tx_hpd_in",
+      "port": "hdmi_tx_hpd_in",
+      "status": "REVIEWED_SAFE",
+      "structure": "Async HPD level sampled only by u_hdmi_probe/tx_hpd_sync_reg[0] (FDCE, ASYNC_REG=1, clk_pl_0); the pad closure item measures this as the only sequential first stage on the net, with 0 endpoints on a clock/set/reset pin.",
+      "rationale": "Level-only diagnostic input on a ms-scale protocol. Under the SC7F0_C2H_ONLY capture personality the TX SS is not instantiated (rtl/zu4ev_pcie_card_top.v:1287), and the closure metric re-measures that instead of asserting it.",
+      "evidence": [
+        "build/evidence-dcpio-26111106/query/s1-endpoints.csv (hdmi_tx_hpd_in: 1 first stage, ASYNC_REG=1)",
+        "build/evidence-dcpio-26111106/query/summary.json items.item1_rx_ddc",
+        "rtl/zu4ev_pcie_card_top.v:1287",
+        "constraints/sc7f0_async_io.xdc"
+      ],
+      "requires": [
+        {
+          "kind": "named_constraint",
+          "id": "async_in_hdmi_tx_hpd_in",
+          "min_objects": 1,
+          "min_first_stage_async_reg": 1,
+          "max_clock_or_setreset_pin_loads": 0
+        },
+        {
+          "kind": "manifest_metric",
+          "id": "async_pad_hdmi_tx_hpd_in",
+          "field": "unclaimed_first_stage_endpoints",
+          "equals": 0
+        }
+      ]
+    },
+    {
+      "id": "async_in_tx_refclk_rdy_probe",
+      "manifest_id": "async_in_hdmi_tx_refclk_rdy",
+      "pair_group": "hdmi_tx_refclk_rdy",
+      "port": "hdmi_tx_refclk_rdy",
+      "status": "REVIEWED_SAFE",
+      "structure": "G13 = X0_5319_LOL (active HIGH = PLL not locked), an asynchronous status. Measured first stages: u_hdmi_probe/tx_rdy_sync_reg[0] (FDCE, ASYNC_REG=1, clk_pl_0) and u_vid_phy_controller/inst/clock_detector_inst/TX_LOCK_CAP_INST/syncstages_ff_reg[0] (FDRE, ASYNC_REG=1, clk_pl_0).",
+      "rationale": "The VPHY-side consumer this entry used to call unproven is measured: it is the IP's own ASYNC_REG capture chain, no endpoint sits on a clock or set/reset pin (measured 0) and rtl/zu4ev_pcie_card_top.v:816-817 shows no reset is gated by the pin. What remains is functional - whether the IP needs a glitch-free lock indication - which is recorded on the acceptance list rather than used to keep a timing item blocked forever.",
+      "evidence": [
+        "build/evidence-dcpio-26111106/query/s1-endpoints.csv (hdmi_tx_refclk_rdy: 2 first stages, both ASYNC_REG=1, clk_pl_0)",
+        "build/evidence-dcpio-26111106/query/summary.json items.item1_rx_ddc.other_async_pads.hdmi_tx_refclk_rdy (async_reg_set=2 of 2, consumers vid_phy/probe = 1/1)",
+        "rtl/zu4ev_pcie_card_top.v:68 (G13 = X0_5319_LOL), :816-817",
+        "constraints/sc7f0_async_io.xdc"
+      ],
+      "requires": [
+        {
+          "kind": "named_constraint",
+          "id": "async_in_hdmi_tx_refclk_rdy",
+          "min_objects": 1,
+          "min_first_stage_async_reg": 1,
+          "max_clock_or_setreset_pin_loads": 0
+        },
+        {
+          "kind": "manifest_metric",
+          "id": "async_pad_hdmi_tx_refclk_rdy",
+          "field": "unclaimed_first_stage_endpoints",
+          "equals": 0
+        }
+      ]
+    },
+    {
+      "id": "async_in_tx_refclk_rdy_vphy",
+      "manifest_id": "async_in_hdmi_tx_refclk_rdy_vphy",
+      "pair_group": "hdmi_tx_refclk_rdy",
+      "port": "hdmi_tx_refclk_rdy",
+      "status": "REVIEWED_SAFE",
+      "structure": "vid_phy_controller clock-detector capture chain first stage inst/clock_detector_inst/TX_LOCK_CAP_INST/syncstages_ff_reg[0] (FDRE, ASYNC_REG=1, clk_pl_0).",
+      "rationale": "Named separately from the probe chain because it is a different consumer and a different exception row; the two fail together. Vendor content is not assumed safe because of its name - the attribute is measured.",
+      "evidence": [
+        "build/evidence-dcpio-26111106/query/s1-endpoints.csv (u_vid_phy_controller/.../TX_LOCK_CAP_INST/syncstages_ff_reg[0])",
+        "constraints/sc7f0_async_io.xdc"
+      ],
+      "requires": [
+        {
+          "kind": "named_constraint",
+          "id": "async_in_hdmi_tx_refclk_rdy_vphy",
+          "min_objects": 1,
+          "min_first_stage_async_reg": 1,
+          "max_clock_or_setreset_pin_loads": 0
+        }
+      ]
+    },
+    {
+      "id": "async_in_tx_ddc",
+      "manifest_id": "async_in_hdmi_tx_ddc_scl",
+      "pair_group": "hdmi_tx_ddc",
+      "port": "hdmi_tx_ddc_scl/hdmi_tx_ddc_sda",
+      "status": "REVIEWED_SAFE",
+      "structure": "TX DDC SCL: measured single sequential first stage u_hdmi_probe/tx_scl_sync_reg[0] (FDCE, ASYNC_REG=1, clk_pl_0). The TX DDC output drivers are tri-stated in this personality and the only user-disabled arcs in the design are these pads' OBUFT/O -> INBUF/PAD feedback arcs.",
+      "rationale": "Passive observation of a bus driven by the sink: no FPGA-side reference clock exists for this pair, so any set_input_delay number would be invented. The closure item re-measures that the probe chain is the only first stage.",
+      "evidence": [
+        "build/evidence-dcpio-26111106/rpt/disable_timing_user.rpt",
+        "build/evidence-dcpio-26111106/query/s1-endpoints.csv (hdmi_tx_ddc_scl: 1 first stage, ASYNC_REG=1)",
+        "rtl/zu4ev_pcie_card_top.v:758,1281-1292",
+        "constraints/sc7f0_async_io.xdc"
+      ],
+      "requires": [
+        {
+          "kind": "named_constraint",
+          "id": "async_in_hdmi_tx_ddc_scl",
+          "min_objects": 1,
+          "min_first_stage_async_reg": 1,
+          "max_clock_or_setreset_pin_loads": 0
+        },
+        {
+          "kind": "manifest_metric",
+          "id": "async_pad_hdmi_tx_ddc_scl",
+          "field": "unclaimed_first_stage_endpoints",
+          "equals": 0
+        }
+      ]
+    },
+    {
+      "id": "async_in_tx_ddc_sda",
+      "manifest_id": "async_in_hdmi_tx_ddc_sda",
+      "pair_group": "hdmi_tx_ddc",
+      "port": "hdmi_tx_ddc_sda",
+      "status": "REVIEWED_SAFE",
+      "structure": "Sibling of async_in_tx_ddc; measured single first stage u_hdmi_probe/tx_sda_sync_reg[0], ASYNC_REG=1, clk_pl_0.",
+      "rationale": "Same reasoning, one entry per pad because each carries its own named exception; the pair fails together.",
+      "evidence": [
+        "build/evidence-dcpio-26111106/rpt/disable_timing_user.rpt",
+        "build/evidence-dcpio-26111106/query/s1-endpoints.csv",
+        "constraints/sc7f0_async_io.xdc"
+      ],
+      "requires": [
+        {
+          "kind": "named_constraint",
+          "id": "async_in_hdmi_tx_ddc_sda",
+          "min_objects": 1,
+          "min_first_stage_async_reg": 1,
+          "max_clock_or_setreset_pin_loads": 0
+        },
+        {
+          "kind": "manifest_metric",
+          "id": "async_pad_hdmi_tx_ddc_sda",
+          "field": "unclaimed_first_stage_endpoints",
+          "equals": 0
+        }
+      ]
+    },
+    {
+      "id": "rx_ddc_scl_probe",
+      "manifest_id": "async_in_hdmi_rx_ddc_scl_probe",
+      "pair_group": "rx_ddc",
+      "port": "hdmi_rx_ddc_scl",
+      "status": "REVIEWED_SAFE",
+      "structure": "RX DDC/EDID clock. Measured first stages on the pad net: u_hdmi_probe/scl_sync_reg[0] (FDCE, ASYNC_REG=1, clk_pl_0 10.000 ns, diagnostic) and u_hdmi_rx_ss/inst/v_hdmi_rx/inst/SYS_INST/DDC_INST/clk_scl_flt_reg[0] (FDCE, ASYNC_REG not set, clk_pl_0). The exception is written pad -> first stage only; everything the first stage drives must stay in clk_pl_0 and stay analysed.",
+      "rationale": "The probe consumer is an ASYNC_REG chain and this entry reads the routed attribute instead of trusting the sentence: min_first_stage_async_reg fails if the routed cell no longer carries it. ASYNC_REG is a placement / metastability-chain annotation: this entry requires the routed attribute to be measured, and never treats its absence as evidence of safety. The pad is a <=400 kHz DDC level sampled by a 10 ns domain. The electrical and protocol questions (IT6663 DDC timing, EDID behaviour under hot-plug) stay on the functional acceptance list and are not answered by this timing entry.",
+      "evidence": [
+        "build/evidence-dcpio-26111106/query/s1-endpoints.csv (hdmi_rx_ddc_scl stage 1: u_hdmi_probe/scl_sync_reg[0] ASYNC_REG=1, DDC_INST/clk_scl_flt_reg[0] ASYNC_REG blank, both clk_pl_0)",
+        "build/evidence-dcpio-26111106/query/summary.json items.item1_rx_ddc.other_async_pads.hdmi_rx_ddc_scl (first_stage_cells=2, async_reg_set=1, async_reg_not_set=1, clocks clk_pl_0=2)",
+        "constraints/sc7f0_async_io.xdc (named -to first-stage exception for this chain)",
+        "docs/sc7f0_bringup_progress_20261111.md (RX DDC is the FPGA-as-sink side of IT6663 P1TX)"
+      ],
+      "requires": [
+        {
+          "kind": "named_constraint",
+          "id": "async_in_hdmi_rx_ddc_scl_probe",
+          "min_objects": 1,
+          "min_first_stage_async_reg": 1,
+          "require_same_domain_filter": true,
+          "min_paths_analysed": 1,
+          "max_clock_or_setreset_pin_loads": 0
+        },
+        {
+          "kind": "manifest_metric",
+          "id": "async_pad_hdmi_rx_ddc_scl",
+          "field": "unclaimed_first_stage_endpoints",
+          "equals": 0
+        },
+        {
+          "kind": "manifest_metric",
+          "id": "async_pad_hdmi_rx_ddc_scl",
+          "field": "clock_or_setreset_pin_loads",
+          "equals": 0
+        }
+      ]
+    },
+    {
+      "id": "rx_ddc_scl_vendor_filter",
+      "manifest_id": "async_in_hdmi_rx_ddc_scl_filter",
+      "pair_group": "rx_ddc",
+      "port": "hdmi_rx_ddc_scl",
+      "status": "REVIEWED_SAFE",
+      "structure": "Vendor first stage DDC_INST/clk_scl_flt_reg[0] and its measured internal loads DDC_INST/clk_scl_flt_reg[1] and DDC_INST/clk_scl_in_reg, every one clocked by clk_pl_0 (10.000 ns). Measured over-sampling ratio: DDC <=400 kHz against a 10 ns sample clock (>=250x).",
+      "rationale": "Classified as an asynchronous pad sampling entry rather than an unsynchronised bus, on measured structure: the first stage's loads are all in its own clock domain and the timing engine still analyses those internal paths, so the exception cuts only pad -> first FF and the internal filter keeps full-speed timing. require_same_domain_filter and min_paths_analysed are the machine-readable form of that claim - if the exception ever reached the filter flops the analysed-path count would fall to zero. ASYNC_REG is deliberately NOT demanded here (the vendor cell does not carry it): the vendor entry is reviewed on its measured filter topology and same-domain timing, the probe entry on its ASYNC_REG attribute, and neither is used to prove the other. No vendor IP is modified and no attribute is added to make a claim true.",
+      "evidence": [
+        "build/evidence-dcpio-26111106/query/s1-endpoints.csv (stage 1/2 rows: DDC_INST/clk_scl_flt_reg[0] -> clk_scl_flt_reg[1] and clk_scl_in_reg, all clk_pl_0)",
+        "build/evidence-dcpio-26111106/query/summary.json items.item1_rx_ddc.counts.endpoints_whose_pin_carries_a_clock = 0",
+        "constraints/sc7f0_async_io.xdc (separate named -to exception for the vendor first stage)"
+      ],
+      "requires": [
+        {
+          "kind": "named_constraint",
+          "id": "async_in_hdmi_rx_ddc_scl_filter",
+          "min_objects": 1,
+          "require_same_domain_filter": true,
+          "min_paths_analysed": 1,
+          "max_clock_domains": 1,
+          "max_clock_or_setreset_pin_loads": 0
+        }
+      ]
+    },
+    {
+      "id": "rx_ddc_sda_probe",
+      "manifest_id": "async_in_hdmi_rx_ddc_sda_probe",
+      "pair_group": "rx_ddc",
+      "port": "hdmi_rx_ddc_sda",
+      "status": "REVIEWED_SAFE",
+      "structure": "RX DDC/EDID data. Measured first stages on the pad net: u_hdmi_probe/sda_sync_reg[0] (FDCE, ASYNC_REG=1, clk_pl_0 10.000 ns, diagnostic) and u_hdmi_rx_ss/inst/v_hdmi_rx/inst/SYS_INST/DDC_INST/clk_sda_flt_reg[0] (FDCE, ASYNC_REG not set, clk_pl_0). The exception is written pad -> first stage only; everything the first stage drives must stay in clk_pl_0 and stay analysed.",
+      "rationale": "The probe consumer is an ASYNC_REG chain and this entry reads the routed attribute instead of trusting the sentence: min_first_stage_async_reg fails if the routed cell no longer carries it. ASYNC_REG is a placement / metastability-chain annotation: this entry requires the routed attribute to be measured, and never treats its absence as evidence of safety. The pad is a <=400 kHz DDC level sampled by a 10 ns domain. The electrical and protocol questions (IT6663 DDC timing, EDID behaviour under hot-plug) stay on the functional acceptance list and are not answered by this timing entry.",
+      "evidence": [
+        "build/evidence-dcpio-26111106/query/s1-endpoints.csv (hdmi_rx_ddc_sda stage 1: u_hdmi_probe/sda_sync_reg[0] ASYNC_REG=1, DDC_INST/clk_sda_flt_reg[0] ASYNC_REG blank, both clk_pl_0)",
+        "build/evidence-dcpio-26111106/query/summary.json items.item1_rx_ddc.other_async_pads.hdmi_rx_ddc_sda (first_stage_cells=2, async_reg_set=1, async_reg_not_set=1, clocks clk_pl_0=2)",
+        "constraints/sc7f0_async_io.xdc (named -to first-stage exception for this chain)",
+        "docs/sc7f0_bringup_progress_20261111.md (RX DDC is the FPGA-as-sink side of IT6663 P1TX)"
+      ],
+      "requires": [
+        {
+          "kind": "named_constraint",
+          "id": "async_in_hdmi_rx_ddc_sda_probe",
+          "min_objects": 1,
+          "min_first_stage_async_reg": 1,
+          "require_same_domain_filter": true,
+          "min_paths_analysed": 1,
+          "max_clock_or_setreset_pin_loads": 0
+        },
+        {
+          "kind": "manifest_metric",
+          "id": "async_pad_hdmi_rx_ddc_sda",
+          "field": "unclaimed_first_stage_endpoints",
+          "equals": 0
+        },
+        {
+          "kind": "manifest_metric",
+          "id": "async_pad_hdmi_rx_ddc_sda",
+          "field": "clock_or_setreset_pin_loads",
+          "equals": 0
+        }
+      ]
+    },
+    {
+      "id": "rx_ddc_sda_vendor_filter",
+      "manifest_id": "async_in_hdmi_rx_ddc_sda_filter",
+      "pair_group": "rx_ddc",
+      "port": "hdmi_rx_ddc_sda",
+      "status": "REVIEWED_SAFE",
+      "structure": "Vendor first stage DDC_INST/clk_sda_flt_reg[0] and its measured internal loads DDC_INST/clk_sda_flt_reg[1] and DDC_INST/clk_sda_in_reg, every one clocked by clk_pl_0 (10.000 ns). Measured over-sampling ratio: DDC <=400 kHz against a 10 ns sample clock (>=250x).",
+      "rationale": "Classified as an asynchronous pad sampling entry rather than an unsynchronised bus, on measured structure: the first stage's loads are all in its own clock domain and the timing engine still analyses those internal paths, so the exception cuts only pad -> first FF and the internal filter keeps full-speed timing. require_same_domain_filter and min_paths_analysed are the machine-readable form of that claim - if the exception ever reached the filter flops the analysed-path count would fall to zero. ASYNC_REG is deliberately NOT demanded here (the vendor cell does not carry it): the vendor entry is reviewed on its measured filter topology and same-domain timing, the probe entry on its ASYNC_REG attribute, and neither is used to prove the other. No vendor IP is modified and no attribute is added to make a claim true.",
+      "evidence": [
+        "build/evidence-dcpio-26111106/query/s1-endpoints.csv (stage 1/2 rows: DDC_INST/clk_sda_flt_reg[0] -> clk_sda_flt_reg[1] and clk_sda_in_reg, all clk_pl_0)",
+        "build/evidence-dcpio-26111106/query/summary.json items.item1_rx_ddc.counts.endpoints_whose_pin_carries_a_clock = 0",
+        "constraints/sc7f0_async_io.xdc (separate named -to exception for the vendor first stage)"
+      ],
+      "requires": [
+        {
+          "kind": "named_constraint",
+          "id": "async_in_hdmi_rx_ddc_sda_filter",
+          "min_objects": 1,
+          "require_same_domain_filter": true,
+          "min_paths_analysed": 1,
+          "max_clock_domains": 1,
+          "max_clock_or_setreset_pin_loads": 0
+        }
+      ]
+    },
+    {
+      "id": "rx_ddc_scl_output",
+      "manifest_id": "async_out_hdmi_rx_ddc_scl",
+      "pair_group": "rx_ddc",
+      "port": "hdmi_rx_ddc_scl",
+      "status": "REVIEWED_SAFE",
+      "structure": "OUTPUT direction of the same inout pad. The RX subsystem drives the DDC line open-drain (its scl/sda inout pins hang straight off the top-level pad, rtl/zu4ev_pcie_card_top.v:753, and the same o/t pair is reported at reg_probe_pins[5:4]); the hook measures the cell(s) attaching a pin to the pad net as pad_driver_cells / pad_driver_refs / pad_driver_clock_domains, plus port_count and the pad's own endpoint_count. check_timing of round 26111202 named exactly two HIGH output-delay ports and they are exactly this pair: \"There are 2 ports with no output delay specified. (HIGH)\" hdmi_rx_ddc_scl, hdmi_rx_ddc_sda.",
+      "rationale": "DDC/EDID is an asynchronous bidirectional protocol at <=400 kHz and here the FPGA is the slave to the IT6663 P1TX source: no FPGA-side clock exists from which an output delay could be taken, so a set_output_delay number would be an invented constraint and the pad takes part in no synchronous setup/hold closure. The exception is one named -to <port> command per port (no wildcard, no -from-clock blanket, no clock group); it ends paths AT the pad, which is complete for an output direction, and it does not touch the four input-side entries above - those keep require_same_domain_filter and min_paths_analysed, so the vendor filter's full-speed 10 ns timing is still re-measured. Declared in pair_group rx_ddc, so SCL is never reviewed without SDA. What this entry does NOT claim: the electrical and protocol questions (IT6663 DDC timing, EDID behaviour under hot plug) stay on the functional acceptance list, because a netlist cannot answer them. ASYNC_REG is deliberately not claimed here: an output direction ends at a pad, so there is no destination clock to attribute a synchroniser to - the attribute belongs to the input-side probe chain, which keeps its own measured entry and is not used to prove this one. Drift conditions that re-open it: pad_driver_cells falls to 0 (the pad has no measured driver), the exception is ignored or scope-overridden, or a third DDC-like pad appears without its own row.",
+      "evidence": [
+        "build/vcu-release-26111202-r1/fpga/project/check-timing.rpt (section 6: 2 ports with no output delay specified (HIGH) = hdmi_rx_ddc_scl, hdmi_rx_ddc_sda; the four excepted output ports are MEDIUM)",
+        "constraints/sc7f0_async_io.xdc (set_false_path -name async_out_hdmi_rx_ddc_scl -to [get_ports hdmi_rx_ddc_scl], one command per port)",
+        "rtl/zu4ev_pcie_card_top.v:63-64,753 (the RX SS owns the pad; open-drain scl/sda inout)",
+        "scripts/tests/test_sc7f0_reset_probe_structure.py::test_rx_ddc_output_direction_is_excepted_per_port (per-port row, input-side rows must survive, no invented set_output_delay, no set_clock_groups)"
+      ],
+      "requires": [
+        {
+          "kind": "named_constraint",
+          "id": "async_out_hdmi_rx_ddc_scl",
+          "min_objects": 1
+        },
+        {
+          "kind": "manifest_metric",
+          "id": "async_out_hdmi_rx_ddc_scl",
+          "field": "pad_driver_cells",
+          "min": 1
+        },
+        {
+          "kind": "manifest_metric",
+          "id": "async_out_hdmi_rx_ddc_scl",
+          "field": "port_count",
+          "equals": 1
+        }
+      ]
+    },
+    {
+      "id": "rx_ddc_sda_output",
+      "manifest_id": "async_out_hdmi_rx_ddc_sda",
+      "pair_group": "rx_ddc",
+      "port": "hdmi_rx_ddc_sda",
+      "status": "REVIEWED_SAFE",
+      "structure": "Sibling of rx_ddc_scl_output on the data line: the RX SS open-drain driver reaches hdmi_rx_ddc_sda through the pad buffer the hook measures (pad_driver_cells / pad_driver_refs), and the pad is the second of the two HIGH no-output-delay ports of round 26111202.",
+      "rationale": "Same reasoning, one entry and one exception per port, both inside pair_group rx_ddc so half a DDC pair is never called reviewed. Excepting the output direction says nothing about the input direction: the four input-side entries keep their own measured requirements (including ASYNC_REG on the probe first stage, which this entry neither claims nor borrows), and this entry is graded on the driver actually being present on the pad net and on the exception not being ignored or scope-overridden.",
+      "evidence": [
+        "build/vcu-release-26111202-r1/fpga/project/check-timing.rpt (hdmi_rx_ddc_sda in the HIGH no-output-delay list)",
+        "constraints/sc7f0_async_io.xdc (set_false_path -name async_out_hdmi_rx_ddc_sda -to [get_ports hdmi_rx_ddc_sda])",
+        "rtl/zu4ev_pcie_card_top.v:64,753",
+        "scripts/tests/test_sc7f0_reset_probe_structure.py::test_rx_ddc_output_direction_is_excepted_per_port"
+      ],
+      "requires": [
+        {
+          "kind": "named_constraint",
+          "id": "async_out_hdmi_rx_ddc_sda",
+          "min_objects": 1
+        },
+        {
+          "kind": "manifest_metric",
+          "id": "async_out_hdmi_rx_ddc_sda",
+          "field": "pad_driver_cells",
+          "min": 1
+        },
+        {
+          "kind": "manifest_metric",
+          "id": "async_out_hdmi_rx_ddc_sda",
+          "field": "port_count",
+          "equals": 1
+        }
+      ]
+    },
+    {
+      "id": "async_out_hpd",
+      "manifest_id": "async_out_hdmi_rx_hpd_out",
+      "pair_group": "hdmi_rx_hpd_out",
+      "port": "hdmi_rx_hpd_out",
+      "status": "REVIEWED_SAFE",
+      "structure": "HPD assert level driven out through an OBUF whose driver cell the hook re-measures from the pad net (pad_driver_cells / pad_driver_refs), read back into the ASYNC_REG 2FF sync_hpd_out_q in the pcie_user_clk domain (rtl/zu4ev_pcie_card_top.v:1149-1156).",
+      "rationale": "A top-level output port has no other load, so -to the port is complete, and HPD has no FPGA-side reference clock from which an output delay could be taken. It is a non-periodic protocol level, so it takes part in no synchronous setup/hold closure - that is a timing statement only. HPD assert/deassert pulse widths against IT6663 remain on the functional acceptance list (they cannot be answered from a netlist) and are recorded there instead of keeping a timing item blocked forever.",
+      "evidence": [
+        "rtl/zu4ev_pcie_card_top.v:960,1149-1161",
+        "build/evidence-dcpio-26111106/rpt/check_timing.rpt (no_output_delay HIGH list)",
+        "constraints/sc7f0_async_io.xdc"
+      ],
+      "requires": [
+        {
+          "kind": "named_constraint",
+          "id": "async_out_hdmi_rx_hpd_out",
+          "min_objects": 1
+        },
+        {
+          "kind": "manifest_metric",
+          "id": "async_out_hdmi_rx_hpd_out",
+          "field": "pad_driver_cells",
+          "min": 1
+        }
+      ]
+    },
+    {
+      "id": "async_out_leds",
+      "manifest_id": "async_out_leds",
+      "pair_group": "user_leds",
+      "port": "user_led_dma_active/user_led_pcie_link_up",
+      "status": "REVIEWED_SAFE",
+      "structure": "Two human-visible LEDs, each driven by one register (rtl/zu4ev_pcie_card_top.v:88, :1871) through an OBUF; the hook re-measures the pad driver cells.",
+      "rationale": "An LED has no setup/hold relationship to any clock and a top-level output port can have no other load, so excepting it cannot mask a real interface. The exception is written -to the port only.",
+      "evidence": [
+        "rtl/zu4ev_pcie_card_top.v:88,1871 and constraints/zu4ev_pcie_pinout.xdc LED pin assignments",
+        "constraints/sc7f0_async_io.xdc"
+      ],
+      "requires": [
+        {
+          "kind": "named_constraint",
+          "id": "async_out_leds",
+          "min_objects": 1
+        },
+        {
+          "kind": "manifest_metric",
+          "id": "async_out_leds",
+          "field": "pad_driver_cells",
+          "min": 1
+        }
+      ]
+    },
+    {
+      "id": "tx_tmds_clock_pad",
+      "manifest_id": "async_out_hdmi_tx_tmds_clk",
+      "pair_group": "tx_tmds_clock",
+      "port": "hdmi_tx_tmds_clk_p/hdmi_tx_tmds_clk_n",
+      "status": "REVIEWED_SAFE",
+      "personality": "capture_only_sc7f0_c2h",
+      "structure": "Both pads are still driven by u_vid_phy_controller (vid_phy_controller_0) through one OBUFTDS each, serialised by OSERDESE3 on clkout1_1 from the declared hdmi_tx_clk_p reference (3.367 ns). report_timing -to <pad> showed Path Group (none) with no requirement, which is why the pads sat in the check_timing HIGH list; the hook re-measures the pad driver cells, their REF_NAME and the OSERDESE3 population.",
+      "rationale": "The scope decision is already made and is not re-asked here: this is the capture-only personality (video0 capture plus the on-card VCU H264 MP4 path); HDMI TX is approved but NOT accepted, so the pad keeps its VPHY driver and only the missing output-delay question is excepted, per port, by name. Nothing here claims the pad is undriven or has no external load. Two measured drift conditions re-open this entry automatically: the driver is no longer the VPHY or no OSERDESE3 exists (a different TX implementation), or the exception is ignored / scope-overridden. Any TX personality must delete this entry and re-review the pad with output-delay evidence against hdmi_tx_clk_p.",
+      "evidence": [
+        "build/evidence-dcpio-26111106/query/s4-tx-tmds-driver.txt (driver cell u_vid_phy_controller, bank 65 diff pair, Path Group (none), requirement '-')",
+        "build/vcu-release-26111103-r1/fpga/project/methodology.rpt:1520-1522 (Vivado names hdmi_tx_clk_p as the relative clock for hdmi_tx_tmds_clk_p)",
+        "build/evidence-dcpio-26111106/rpt/io.rpt",
+        "rtl/zu4ev_pcie_card_top.v:846-847 (TX TMDS pads owned by u_vid_phy_controller)"
+      ],
+      "requires": [
+        {
+          "kind": "named_constraint",
+          "id": "async_out_hdmi_tx_tmds_clk",
+          "min_objects": 2
+        },
+        {
+          "kind": "manifest_metric",
+          "id": "async_out_hdmi_tx_tmds_clk",
+          "field": "driver_is_vphy",
+          "equals": 1
+        },
+        {
+          "kind": "manifest_metric",
+          "id": "async_out_hdmi_tx_tmds_clk",
+          "field": "oserdes_cells",
+          "min": 1
+        },
+        {
+          "kind": "manifest_metric",
+          "id": "async_out_hdmi_tx_tmds_clk",
+          "field": "port_count",
+          "equals": 2
+        },
+        {
+          "kind": "report_nonempty",
+          "report": "io.rpt"
+        }
+      ]
+    }
+  ]
+}
