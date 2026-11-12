@@ -31,6 +31,7 @@ module sc7f0_ps_packet_reader(
     reg [31:0] remaining,transferred,error;
     reg [8:0] chunk_bytes;
     reg [4:0] read_beats,read_index;
+    reg last_chunk;
     reg sending_record;
     wire [63:0] csrc=cmd_data[63:0],cdst=cmd_data[127:64],ccomp=cmd_data[255:192];
     wire [31:0] clen=cmd_data[159:128],ccap=cmd_data[191:160];
@@ -50,13 +51,50 @@ module sc7f0_ps_packet_reader(
     assign arvalid=state==AR;
     assign rready=state==READ;
     assign tx_valid=state==SEND;
-    reg [31:0] next_chunk;
-    always @* begin
-        next_chunk=remaining;
-        if(next_chunk>256)next_chunk=256;
-        if(next_chunk>(4096-{20'd0,source[11:0]}))next_chunk=4096-{20'd0,source[11:0]};
-        if(next_chunk>(4096-{20'd0,destination[11:0]}))next_chunk=4096-{20'd0,destination[11:0]};
-    end
+    // -----------------------------------------------------------------------
+    // Chunk geometry.  300 MHz critical cone: the routed WNS holder of round
+    // 26111202 was remaining_reg[10] -> tx_last_be_reg[2] (-0.225 ns, 12 logic
+    // levels, 2 CARRY8), i.e. three serial 32-bit clamp compares feeding a set
+    // of derived fields, all in one cycle.
+    //
+    // Contract is UNCHANGED: chunk = min(remaining, 256, 4096-source[11:0],
+    //                                    4096-destination[11:0]).
+    // Equivalent rewrite only:
+    //  * the result is always <= 256, so clamping each 4 KiB room to 256 is
+    //    lossless, and min() is associative/commutative -> three independent
+    //    9-bit clamps plus a balanced min replace the serial 32-bit chain;
+    //  * a room >= 256 is detected from the page offset without a subtract
+    //    (4096-off >= 256  <=>  off[7:0]==0 || off[11:8]!=F), and the exact
+    //    room for off in 0xF01..0xFFF is the 9-bit two's complement of
+    //    off[8:0] because (4096-off) mod 512 == off[8:0] negated;
+    //  * beat counts use the same identity in 16 byte units:
+    //    ceil(min(x,y,z)/16)-1 == min(ceil(x/16)-1, ceil(y/16)-1, ...).
+    //    A non-final chunk is always a multiple of 16 (all three caps are, and
+    //    a non-multiple can only come from the `remaining` cap, which then ends
+    //    the job), so source[3:0]==destination[3:0]==0 - already required by
+    //    cmd_ok - is preserved for every cycle that reaches PREP/AR.
+    // No state, no latency and no interface/protocol change is introduced.
+    // -----------------------------------------------------------------------
+    wire src_room_cap=!(|source[7:0])||(|(~source[11:8]));
+    wire dst_room_cap=!(|destination[7:0])||(|(~destination[11:8]));
+    wire [8:0] src_room=src_room_cap?9'd256:~source[8:0]+9'd1;
+    wire [8:0] dst_room=dst_room_cap?9'd256:~destination[8:0]+9'd1;
+    wire [8:0] rem_cap=|remaining[31:8]?9'd256:remaining[8:0];
+    wire [8:0] room_min=src_room<dst_room?src_room:dst_room;
+    wire [8:0] next_chunk=rem_cap<room_min?rem_cap:room_min;
+    // beats-1 per clamp (ceil(c/16)-1); the room terms are saturated at 15,
+    // which the outer min makes exact because the 256 byte cap is 16 beats.
+    wire [4:0] rem_beats_m1=|remaining[31:9]?5'd15:
+        remaining[8:4]-{4'd0,~(|remaining[3:0])};
+    wire [7:0] src_k_inv=~source[11:4],dst_k_inv=~destination[11:4];
+    // ceil(room/16)-1 = 255-k for page index k; saturate at 15 (the 256 byte
+    // cap) whenever k <= 0xEF, i.e. whenever 255-k would exceed 15.
+    wire [4:0] src_beats_m1=(|(~source[11:8]))?5'd15:{1'b0,src_k_inv[3:0]};
+    wire [4:0] dst_beats_m1=(|(~destination[11:8]))?5'd15:{1'b0,dst_k_inv[3:0]};
+    wire [4:0] room_beats_m1=src_beats_m1<dst_beats_m1?src_beats_m1:dst_beats_m1;
+    wire [4:0] next_beats_m1=rem_beats_m1<room_beats_m1?rem_beats_m1:room_beats_m1;
+    // ceil(chunk/4) as a carry-free sum: (cb+3)>>2 == cb[8:2] + |cb[1:0]
+    wire [10:0] chunk_dw={2'd0,chunk_bytes[8:2]}+{10'd0,(|chunk_bytes[1:0])};
     wire [511:0] completion={job[671:640],job[639:608],job[607:576],job[575:544],
         job[543:512],transferred,job[383:320],job[319:256],job[511:448],job[447:384],
         error,32'h44504331}; // DPC1
@@ -64,7 +102,7 @@ module sc7f0_ps_packet_reader(
         if(!rst_n)begin
             state<=IDLE;job<=0;source<=0;destination<=0;remaining<=0;
             transferred<=0;error<=0;chunk_bytes<=0;read_beats<=0;read_index<=0;
-            sending_record<=0;araddr<=0;arlen<=0;tx_addr<=0;tx_dw_len<=0;
+            last_chunk<=0;sending_record<=0;araddr<=0;arlen<=0;tx_addr<=0;tx_dw_len<=0;
             tx_first_be<=0;tx_last_be<=0;tx_payload<=0;done_data<=0;done_valid<=0;
         end else begin
             if(done_valid&&done_ready)done_valid<=0;
@@ -76,15 +114,32 @@ module sc7f0_ps_packet_reader(
                     state<=cmd_ok?(clen==0?RECORD:PREP):REPORT;
                 end
                 PREP:begin
-                    chunk_bytes<=next_chunk[8:0];read_beats<=(next_chunk+15)>>4;
-                    read_index<=0;tx_payload<=0;
-                    araddr<=source[39:0];arlen<=((next_chunk+15)>>4)-1;
-                    tx_addr<=destination;tx_dw_len<=(next_chunk+3)>>2;
-                    tx_first_be<=next_chunk<4?((1<<next_chunk)-1):4'hf;
-                    tx_last_be<=next_chunk<=4?0:next_chunk[1:0]==0?4'hf:((1<<next_chunk[1:0])-1);
+                    // PREP now produces only the chunk size and the AXI burst
+                    // length, both straight off the parallel min.
+                    chunk_bytes<=next_chunk;read_index<=0;tx_payload<=0;
+                    araddr<=source[39:0];arlen<=next_beats_m1;
                     state<=AR;
                 end
-                AR:if(arready)state<=READ;
+                AR:if(arready)begin
+                    // Retimed, not redefined.  tx_* and read_beats are consumed
+                    // no earlier than SEND (tx_valid=state==SEND, and READ needs
+                    // at least one rvalid cycle), so they are registered one
+                    // cycle later than before, from the *registered* chunk size
+                    // instead of the combinational min chain.  The expressions
+                    // are the previous ones, verbatim, with chunk_bytes/arlen in
+                    // place of next_chunk: identical values, ~3 logic levels
+                    // instead of 12.
+                    read_beats<={1'b0,arlen[3:0]}+5'd1;
+                    tx_addr<=destination;tx_dw_len<=chunk_dw;
+                    tx_first_be<=chunk_bytes<4?((1<<chunk_bytes[1:0])-1):4'hf;
+                    tx_last_be<=chunk_bytes<=4?0:chunk_bytes[1:0]==0?4'hf:((1<<chunk_bytes[1:0])-1);
+                    // chunk_bytes == remaining, i.e. this packet ends the job.
+                    // Captured while remaining/chunk_bytes are still untouched
+                    // (both only change in WAIT), so it replaces the 32-bit
+                    // compare that used to sit on the WAIT -> state decode.
+                    last_chunk<=!(|remaining[31:9])&&remaining[8:0]==chunk_bytes;
+                    state<=READ;
+                end
                 READ:if(rvalid)begin
                     if(read_index<16)tx_payload[read_index*128+:128]<=rdata;
                     if(rresp!=0)error<=error|2;
@@ -103,7 +158,7 @@ module sc7f0_ps_packet_reader(
                         transferred<=transferred+chunk_bytes;
                         remaining<=remaining-chunk_bytes;
                         source<=source+chunk_bytes;destination<=destination+chunk_bytes;
-                        state<=remaining==chunk_bytes?RECORD:PREP;
+                        state<=last_chunk?RECORD:PREP;
                     end
                 end
                 RECORD:begin

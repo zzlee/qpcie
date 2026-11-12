@@ -31,8 +31,13 @@ module sc7f0_packet_cdc(
         .wclk(s_clk),.wrst_n(s_rst_n),.wdata(header),.wvalid(s_state==2),
         .wready(hf_ready),.rclk(m_clk),.rrst_n(m_rst_n),.rdata(hf_data),
         .rvalid(hf_valid),.rready(hf_pop));
-    xpm_cdc_async_rst #(.DEST_SYNC_FF(4),.RST_ACTIVE_HIGH(1)) u_reset(
-        .src_arst(!s_rst_n||!m_rst_n),.dest_clk(s_clk),.dest_arst(reset));
+    // Two unrelated reset sources (source side and master side).  Each one is
+    // synchronised into s_clk on its own and only then combined; OR-ing them
+    // ahead of the synchronizer was CDC-10 (rtl/sc7f0_reset_cdc.v).
+    wire s_all_rst_n;
+    sc7f0_reset_sync #(.SOURCES(2)) u_reset(
+        .dest_clk(s_clk),.src_rst_n({m_rst_n,s_rst_n}),.dest_rst_n(s_all_rst_n));
+    assign reset=!s_all_rst_n;
     assign df_ready=!reset&&!wb&&!data_full;
     xpm_fifo_async #(.FIFO_MEMORY_TYPE("block"),.FIFO_WRITE_DEPTH(64),
         .WRITE_DATA_WIDTH(256),.READ_DATA_WIDTH(256),.READ_MODE("fwft"),
