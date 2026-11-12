@@ -95,7 +95,18 @@ def audit(build, project, ps_build, base_version=DEFAULT_BASE_VERSION):
             assert entries[matches[0]][2]==base[matches[0]][2],'stale/replaced HDMI module'
         release=resolve(entries,'etc/sc7f0-recovery-release')[2]
         assert b'PL_BASE_VERSION=' + base_version.encode() + b'\n' in release, base_version
-        assert 'etc/systemd/system/multi-user.target.wants/sc7f0-vcud.service' not in entries
+        # This assertion used to read `... not in entries`, back when sc7f0_vcud was a
+        # loose file on the BOOT partition and an enabled unit in the rootfs would have
+        # promised something the image could not deliver. That changed when
+        # recipes-apps/sc7f0-vcud landed and petalinux-image-minimal.bbappend put the
+        # daemon in the image: scripts/build_sc7f0_matching_ps_vcu.sh Stage 4 now
+        # REQUIRES the enabled symlink, so leaving the old negative here would make the
+        # package stage reject every future PS build that is actually correct. Asserted
+        # positively instead, against the same bytes this audit already unpacks.
+        vcud_want='etc/systemd/system/multi-user.target.wants/sc7f0-vcud.service'
+        assert vcud_want in entries, ('sc7f0-vcud is not enabled in the image rootfs: the '
+                                      'hardware encoder path would not come back after a reboot')
+        assert stat.S_ISLNK(entries[vcud_want][0]), (vcud_want, oct(entries[vcud_want][0]))
     print('SC7F0_CAPTURE_IMAGE_AUDIT_PASS: actual kernel symbols/source, single media owner, IRQ/format/GPIO graph, matching FIT components/capture tools/modules, watchdog R2, PL base ' + base_version + '; not runtime/VCU acceptance')
     print('FIT SHA256:',hashlib.sha256((build/'images/image.ub').read_bytes()).hexdigest())
 

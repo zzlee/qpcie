@@ -1,0 +1,15 @@
+	Active width: 3840
+	Active height: 2160
+	Total width: 4400
+	Total height: 2250
+	Frame format: progressive
+	Polarities: +vsync +hsync
+	Pixelclock: 594000000 Hz (60.00 frames per second)
+	Horizontal frontporch: 176
+	Horizontal sync: 88
+	Horizontal backporch: 296
+	Vertical frontporch: 8
+	Vertical sync: 10
+	Vertical backporch: 72
+	Standards: CTA-861
+	Flags: CE-video

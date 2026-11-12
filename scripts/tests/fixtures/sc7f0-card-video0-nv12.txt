@@ -1,0 +1,7 @@
+Format Video Capture Multiplanar:
+	Width/Height      : 3840/2160
+	Pixel Format      : 'NV12' (Y/UV 4:20)
+	Field             : None
+	Number of planes  : 0
+	Flags             : 
+	Colorspace        : sRGB

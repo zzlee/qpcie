@@ -1,0 +1,44 @@
+# Real `media-ctl -p` output from the SC7F0 card PS, captured read-only 2026-11-12T08:59:49Z
+# through /home/rd/sc7f0ctl exec, immediately after release-26111204-r2 booted.
+# The capture node entity name is the multi-word "video-capture output 0", which is
+# what the first r2 initialiser failed to resolve. Tabs are preserved verbatim.
+model           Xilinx Video Composite Device
+serial          
+bus info        platform:video-capture
+hw revision     0x0
+driver version  6.1.30
+
+Device topology
+- entity 1: video-capture output 0 (1 pad, 1 link)
+            type Node subtype V4L flags 0
+            device node name /dev/video0
+	pad0: Sink
+		<- "b0060000.vpss-csc":1 [ENABLED]
+
+- entity 5: b0070000.frame-tap (2 pads, 2 links)
+            type V4L2 subdev subtype Unknown flags 0
+            device node name /dev/v4l-subdev0
+	pad0: Sink
+		[fmt:RBG888_1X24/3840x2160 field:none]
+		<- "b0010000.hdmi-rx":0 [ENABLED]
+	pad1: Source
+		[fmt:RBG888_1X24/3840x2160 field:none]
+		-> "b0060000.vpss-csc":0 [ENABLED]
+
+- entity 8: b0060000.vpss-csc (2 pads, 2 links)
+            type V4L2 subdev subtype Unknown flags 0
+            device node name /dev/v4l-subdev1
+	pad0: Sink
+		[fmt:RBG888_1X24/1280x720 field:none colorspace:rec709]
+		<- "b0070000.frame-tap":1 [ENABLED]
+	pad1: Source
+		[fmt:VYYUYY8_1X24/1280x720 field:none colorspace:rec709]
+		-> "video-capture output 0":0 [ENABLED]
+
+- entity 11: b0010000.hdmi-rx (1 pad, 1 link)
+             type V4L2 subdev subtype Unknown flags 0
+             device node name /dev/v4l-subdev2
+	pad0: Source
+		[fmt:RBG888_1X24/3840x2160 field:none]
+		[dv.caps:BT.656/1120 min:0x0@25000000 max:4096x2160@297000000 stds:CEA-861,DMT,CVT,GTF caps:progressive,reduced-blanking,custom]
+		[dv.detect:BT.656/1120 3840x2160p60 (4400x2250) stds:CEA-861 flags:CE-video]
