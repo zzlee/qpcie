@@ -135,7 +135,7 @@ SC7F0_IMPL_DIR="$OUT/fpga" SC7F0_IMG_DIR="$OUT/images" bash scripts/package_zu4e
 sha256sum -c RELEASE.sha256
 
 # 驗證 PS 服務運行狀態 (需要 sc7f0ctl 狀態)
-sudo /home/rd/sc7f0ctl status
+sudo /home/rd/sc7f0/bin/sc7f0ctl status
 ```
 
 ### 第二步：執行驗證階段
@@ -147,7 +147,7 @@ sudo /home/rd/sc7f0ctl status
 grep -E '  (upgrade-[0-9]+\.tar|host-driver-src\.tar\.gz|host-tools-src\.tar\.gz)$' RELEASE.sha256 | sha256sum -c -
 
 # 備份現有 eMMC 鏡像
-sudo /home/rd/sc7f0ctl exec "b=/run/media/BOOT-mmcblk0p1; test -s \$b/BOOT.BIN; d=\$b/.backup_cli_$STAMP; mkdir \$d; for n in BOOT.BIN image.ub boot.scr; do cp \$b/\$n \$d/\$n; done"
+sudo /home/rd/sc7f0/bin/sc7f0ctl exec "b=/run/media/BOOT-mmcblk0p1; test -s \$b/BOOT.BIN; d=\$b/.backup_cli_$STAMP; mkdir \$d; for n in BOOT.BIN image.ub boot.scr; do cp \$b/\$n \$d/\$n; done"
 ```
 
 ### 第三步：執行提交與重啟階段
@@ -159,14 +159,42 @@ sudo -n insmod driver/qpcie.ko
 ./qpcie_upgrade --commit
 
 # 檢查 eMMC 鏡像驗證 (SHA256)
-sudo /home/rd/sc7f0ctl exec 'sha256sum /run/media/BOOT-mmcblk0p1/BOOT.BIN /run/media/BOOT-mmcblk0p1/image.ub /run/media/BOOT-mmcblk0p1/boot.scr'
+sudo /home/rd/sc7f0/bin/sc7f0ctl exec 'sha256sum /run/media/BOOT-mmcblk0p1/BOOT.BIN /run/media/BOOT-mmcblk0p1/image.ub /run/media/BOOT-mmcblk0p1/boot.scr'
 
 # 進行卡端重啟
 ./qpcie_upgrade --reboot
 
 # 確認 PS 回復與版本驗證
-sudo /home/rd/sc7f0ctl status
+sudo /home/rd/sc7f0/bin/sc7f0ctl status
 ```
+
+## 📁 測試機檔案放置規範（強制）
+
+測試機 `rd@sc7f0-test.local`（192.168.190.247）上所有 SC7F0 相關的工具、腳本、原始碼、
+升級包、錄影、log 與暫存檔**一律放 `/home/rd/sc7f0/` 下**；**不得再往 `/home/rd` 根目錄
+新增任何檔案**。既有非 SC7F0 專案與私人檔案不屬本規範，不得變動也不得搬移。
+
+| 目錄 | 用途 |
+|---|---|
+| `bin/` | 預設 executable；`bin/sc7f0ctl` 為 matching 0x800 版 |
+| `bin/legacy/` | 舊 0x400 daemon 專用（`sc7f0ctl_compat400`），**不得當預設** |
+| `scripts/` | host 端腳本；`scripts/legacy/` 為 0x400 時代 |
+| `src/` | `driver/`、`test_app/`、`include/`（名字保留，`make -C driver` 仍可用） |
+| `packages/` | 升級包；`packages/26111204-r3/` 為當行完整 r3 |
+| `captures/` | 錄影與 validation session（整組保留，不拆） |
+| `logs/` | 執行 log 與 `mcu-restart-history` |
+| `docs/` | README 與 move/deletion manifest |
+| `backups/` | 部署前備份（**內容不得修改**） |
+| `tmp/` | mktemp staging 與共用的 `.upgrade.lock`／`.upgrade.mutex` |
+| `archive/review/` | 已被取代或用途待判定的舊檔，未刪，待審 |
+
+固定路徑約定（現行入口已照此同步）：
+
+- 升級 staging 前綴：`/home/rd/sc7f0/tmp/upgrade.XXXXXXXX`（舊 `/home/rd/sc7f0-upgrade.*` 停用）。
+- 跨入口共用鎖：`/home/rd/sc7f0/tmp/.upgrade.lock`（upgrade / flash / capture-deploy 互斥，不可拆）。
+- 舊路徑只能改程式碼修正；**不得**用改 `PATH`、`~/.bashrc` 或新增 compat symlink 掩蓋。
+  （僅存的 `/home/rd/sc7f0ctl`、`/home/rd/qpcie_upgrade` 是既有指向 `/usr/local/bin` 的系統安裝
+  symlink，非新樹 compat symlink，原因已在測試機 README 註明。）
 
 ## 📊 測試機相關資訊
 
@@ -179,6 +207,8 @@ SC7F0 測試環境包含：
 ### 推薦測試命令:
 ```bash
 # 驗證視訊功能
+# 注：2026-11-12 整理實測顯示測試機已無 /home/rd/sc7f0-nv-formats/（本整理前就不存在）；
+# 以下只作歷史例子，重建此類工具一律放 /home/rd/sc7f0/bin/ 下。
 /home/rd/sc7f0-nv-formats/capture_verify /dev/video0 NV12 hdmi 1800
 /home/rd/sc7f0-nv-formats/capture_verify /dev/video0 NV16 hdmi 1800
 
