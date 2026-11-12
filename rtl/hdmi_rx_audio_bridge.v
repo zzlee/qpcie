@@ -47,9 +47,12 @@ module hdmi_rx_audio_bridge #(
     assign m_axis_audio_tvalid = !fifo_empty && !rd_rst_busy && pcie_user_rst_n;
     assign m_axis_audio_tlast  = 1'b0; // Audio stream is continuous
 
-    xpm_cdc_async_rst #(.DEST_SYNC_FF(4), .RST_ACTIVE_HIGH(1)) u_fifo_reset (
-        .src_arst(!rx_audio_rst_n || !pcie_user_rst_n),
-        .dest_clk(rx_audio_clk), .dest_arst(fifo_rst));
+    wire rx_fifo_all_n;
+    sc7f0_reset_sync #(.SOURCES(2)) u_fifo_reset (
+        .dest_clk(rx_audio_clk),
+        .src_rst_n({pcie_user_rst_n, rx_audio_rst_n}),
+        .dest_rst_n(rx_fifo_all_n));
+    assign fifo_rst = !rx_fifo_all_n;
 
     xpm_fifo_async #(
         .CDC_SYNC_STAGES     (4),

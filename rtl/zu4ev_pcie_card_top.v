@@ -221,10 +221,18 @@ module zu4ev_pcie_card_top #(
     assign dp_packet_first_be=0;assign dp_packet_last_be=0;assign dp_packet_data=0;
 `else
     wire dp_mem_reset,dp_mem_rst_n,dp_irq,capture_irq;
-    xpm_cdc_async_rst #(.DEST_SYNC_FF(4),.RST_ACTIVE_HIGH(1)) u_dp_mem_reset(
-        .src_arst(!sys_100m_rst_n||!sys_300m_rst_n),
-        .dest_clk(capture_clk),.dest_arst(dp_mem_reset));
-    assign dp_mem_rst_n=!dp_mem_reset;
+    // sys_100m_rst_n (PS 100 MHz proc_sys_reset) and sys_300m_rst_n (300 MHz
+    // Si5341 domain) are independent asynchronous sources.  They must never be
+    // OR-ed in front of a synchronizer's async preset: that is the CDC-10/CDC-12
+    // root cause this file used to carry.  sc7f0_reset_sync gives each source its
+    // own crossing into capture_clk and combines them only afterwards.
+    wire dp_mem_all_n;
+    sc7f0_reset_sync #(.SOURCES(2)) u_dp_mem_reset(
+        .dest_clk(capture_clk),
+        .src_rst_n({sys_300m_rst_n, sys_100m_rst_n}),
+        .dest_rst_n(dp_mem_all_n));
+    assign dp_mem_reset =!dp_mem_all_n;
+    assign dp_mem_rst_n=dp_mem_all_n;
     wire [48:0] dp_awaddr,dp_araddr;
     wire [7:0] dp_awlen,dp_arlen;
     wire [2:0] dp_awsize,dp_arsize;
@@ -242,10 +250,14 @@ module zu4ev_pcie_card_top #(
         .I(pl_clk_300m_ibufg), .CE(1'b1), .CLR(!sys_300m_rst_n),
         .O(capture_clk));
     wire capture_reset;
-    xpm_cdc_async_rst #(.DEST_SYNC_FF(4), .RST_ACTIVE_HIGH(1)) u_capture_reset (
-        .src_arst(!sys_100m_rst_n || !sys_300m_rst_n),
-        .dest_clk(capture_clk), .dest_arst(capture_reset));
-    assign capture_rst_n = !capture_reset;
+    // Same rule as u_dp_mem_reset: one crossing per source, combine in-domain.
+    wire capture_all_n;
+    sc7f0_reset_sync #(.SOURCES(2)) u_capture_reset (
+        .dest_clk(capture_clk),
+        .src_rst_n({sys_300m_rst_n, sys_100m_rst_n}),
+        .dest_rst_n(capture_all_n));
+    assign capture_reset = !capture_all_n;
+    assign capture_rst_n = capture_all_n;
 `endif
 
     // =========================================================================
@@ -815,8 +827,13 @@ module zu4ev_pcie_card_top #(
         .src_arst(!sys_100m_rst_n), .dest_clk(phy_rxoutclk), .dest_arst(rx_link_rst));
     xpm_cdc_async_rst #(.DEST_SYNC_FF(4), .RST_ACTIVE_HIGH(1)) u_tx_link_reset (
         .src_arst(!sys_100m_rst_n), .dest_clk(phy_txoutclk), .dest_arst(tx_link_rst));
-    xpm_cdc_async_rst #(.DEST_SYNC_FF(4), .RST_ACTIVE_HIGH(1)) u_rx_video_reset (
-        .src_arst(!sys_100m_rst_n||!sys_300m_rst_n), .dest_clk(phy_rx_video_clk), .dest_arst(rx_video_rst));
+    // rx_video domain: two independent sources, two crossings, then combine.
+    wire rx_video_all_n;
+    sc7f0_reset_sync #(.SOURCES(2)) u_rx_video_reset (
+        .dest_clk(phy_rx_video_clk),
+        .src_rst_n({sys_300m_rst_n, sys_100m_rst_n}),
+        .dest_rst_n(rx_video_all_n));
+    assign rx_video_rst = !rx_video_all_n;
     xpm_cdc_async_rst #(.DEST_SYNC_FF(4), .RST_ACTIVE_HIGH(1)) u_tx_video_reset (
         .src_arst(!sys_100m_rst_n), .dest_clk(phy_tx_video_clk), .dest_arst(tx_video_rst));
 

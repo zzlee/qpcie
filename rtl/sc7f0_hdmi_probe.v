@@ -292,6 +292,115 @@ module sc7f0_hdmi_probe (
     (* ASYNC_REG = "TRUE" *) reg [2:0] tx_scl_sync = 3'b000;
     (* ASYNC_REG = "TRUE" *) reg [2:0] tx_sda_sync = 3'b000;
 
+    // Diagnostic *levels* that are genuinely produced in another clock domain:
+    //   [31:28] v_hdmi_rx_ss VIDEO_OUT stream qualifiers (video/link domain)
+    //   [27:25] vid_phy_controller RX AXI4-Stream channel tvalid (phy_rxoutclk)
+    // They were previously fed straight into the single xpm_cdc_array_single that
+    // also carries the pl_clk0 bits, with .src_clk(clk) declared.  That declared a
+    // source clock that is not their source clock and, with SRC_INPUT_REG(0), did
+    // not register them at all, so a foreign-domain level reached a pl_clk0 flop
+    // with no synchronizer.  report_cdc proved it (CDC-10, six rows):
+    //   u_hdmi_rx_ss/.../gen_fwft.empty_fwft_i_reg/C
+    //     -> u_hdmi_probe/u_pin_levels_cdc/syncstages_ff_reg[0][28..31]/D
+    //   u_vid_phy_controller/.../syncstages_ff_reg[2][1]/C
+    //     -> u_hdmi_probe/u_pin_levels_cdc/syncstages_ff_reg[0][25..27]/D
+    // Each one is now sampled by its own ASYNC_REG chain clocked by pl_clk0.
+    // The chain shifts the new sample in at [0] (`chain <= {chain[1:0], src}`),
+    // so [0] is the FIRST stage and [2] is the THIRD; the reported level is taken
+    // from [2].  An earlier revision of this WIP tapped [0] while its comment
+    // claimed "third stage": [1]/[2] then had no fan-out and would be swept by
+    // synthesis, the ASYNC_REG chain would collapse to a single flop that report_cdc
+    // cannot pair with the XPM input register, and the netlist would not contain
+    // the three stages the comment described.  The same "[2] is the older sample"
+    // convention is already used by the edge detectors below
+    // (`if (scl_sync[2] && !scl_sync[1])`) and by det5v_sync[1] in this register.
+    // The tap position is now a behavioural obligation, checked against an
+    // independent expected model and a cycle-exact delay in
+    // tb/sc7f0_hdmi_probe_async_levels_tb.sv (P4/P6/P7/P8); it is not checked by
+    // comparing a chain with the register it drives, which any tap satisfies.
+    // What the chain is NOT: a three-flop synchroniser is not a pulse filter.  A
+    // one-cycle change at the source is only delayed by three pl_clk0 cycles, it
+    // still reaches [2]; the third stage buys resolution time, not suppression.
+    // The slow physical pins below keep the file's existing two-stage convention
+    // (det5v_sync/hpd_sync/scl_sync/[1]) unchanged.
+    // They stay *independent* levels: the register is a diagnostic snapshot, never
+    // an atomic multi-signal view, and no cross-bit invariant is claimed (same
+    // contract as the rest of this register).  Simulation cannot show
+    // metastability; the claim is structural (one first-stage flop per signal,
+    // clocked by pl_clk0, ASYNC_REG on the chain) and is closed by report_cdc.
+    //
+    // ROUND 26111202 SAID THE CHAIN ALONE IS NOT ENOUGH (six CDC-10 rows, still
+    // Critical, Exception = None, and the six worst endpoints of that round):
+    //   clkout2 -> clk_pl_0, depth 7, combinational logic before a synchronizer
+    //     u_hdmi_rx_ss/inst/v_vid_in_axi4s/inst/generate_drop_module.DROP_INST/
+    //         CDC_SINGLE_INST/aclk_line_phase_si_i_2_psbram/C -> rxss_tlast_sync_reg[0]
+    //     .../COUPLER_INST/.../gen_fwft.empty_fwft_i_reg_replica/C             -> rxss_tvalid_sync_reg[0]
+    //     .../DROP_INST/CDC_SINGLE_INST/FSM_onehot_aclk_state[0]_i_1_psbram_replica/C -> rxss_tuser_sync_reg[0]
+    //   phy_rxoutclk -> clk_pl_0, depth 7
+    //     u_vid_phy_controller/inst/xpm_array_single_DRU_CTRL_in_sync_inst/
+    //         syncstages_ff_reg[2][1]/C -> phy_ch0/1/2_tvalid_sync_reg[0]
+    // The destination side was (and is) a correct 3FF ASYNC_REG chain; what was
+    // missing is a register in the SOURCE domain.  Both launch points are vendor
+    // IP content whose last element before the pad-to-pad net is combinational, so
+    // the level arrived at a pl_clk0 flop through combinational logic - which is
+    // exactly what CDC-10 names, and it is why the same paths were timed with a
+    // 0.002 ns requirement (WNS -2.760 / -1.631 ns in that round).
+    //
+    // FIX: capture each foreign level in its OWN source clock first, then let the
+    // pl_clk0 chain synchronise that flop.  The source clock used here is the clock
+    // report_cdc itself named for that launch flop - clk_rx_video IS clkout2 (the
+    // VPHY rx_video_clk net, 6.734 ns) and clk_rxout IS phy_rxoutclk (6.734 ns);
+    // neither name is invented here, see the Clock Summary tree and
+    // report_cdc's Source Clock column in build/vcu-release-26111202-r1.
+    // After this the crossing is one flop driving one first-stage flop with no
+    // combinational logic in between, so the exception
+    // constraints/sc7f0_async_io.xdc writes is `-from <source flop> -to <chain[0]>`
+    // and the internal chain stays in domain and fully analysed.
+    //
+    // Cost, stated instead of hidden:
+    //   * ONE extra source-domain cycle of latency on reg_probe_pins[31:28] and
+    //     [27:25] (<= 6.734 ns + one 10 ns chain capture).  Nothing else in this
+    //     file moves: the SOF/EOL/pixel counters and the ch0..ch2 beat counters
+    //     still count the RAW signals in their own domains (lines below), so no
+    //     counted quantity changes - only the instantaneous level snapshot.
+    //   * The source flops deliberately have NO reset.  A reset for these two
+    //     domains would itself have to be that domain's already-synchronised reset
+    //     (rx_video_rst / rx_link_rst at the top level), and feeding a pl_clk0 reset
+    //     into a clkout2 / phy_rxoutclk flop is precisely the mixed-domain reset
+    //     this project already had to unwind (rtl/sc7f0_reset_cdc.v).  They are
+    //     initialised to 0, which is what the rest of this module does for its
+    //     foreign-domain counters (vid_*_cnt, beat_ch*_cnt, the frequency meters).
+    //   * rx_ss_video_tready keeps no stage here on purpose: at the top level it is
+    //     `assign rx_ss_video_tready = 1'b1` (rtl/zu4ev_pcie_card_top.v:1053), a
+    //     constant, so a source register would be dead logic; report_cdc produced no
+    //     row for it, which is the measurement that says so.
+    reg rxss_tlast_src  = 1'b0;      // clkout2 (clk_rx_video) source capture
+    reg rxss_tuser_src  = 1'b0;
+    reg rxss_tvalid_src = 1'b0;
+    reg phy_ch0_tvalid_src = 1'b0;   // phy_rxoutclk (clk_rxout) source capture
+    reg phy_ch1_tvalid_src = 1'b0;
+    reg phy_ch2_tvalid_src = 1'b0;
+
+    always @(posedge clk_rx_video) begin
+        rxss_tlast_src  <= rx_ss_video_tlast;
+        rxss_tuser_src  <= rx_ss_video_tuser;
+        rxss_tvalid_src <= rx_ss_video_tvalid;
+    end
+
+    always @(posedge clk_rxout) begin
+        phy_ch0_tvalid_src <= phy_rx_axi4s_ch0_tvalid;
+        phy_ch1_tvalid_src <= phy_rx_axi4s_ch1_tvalid;
+        phy_ch2_tvalid_src <= phy_rx_axi4s_ch2_tvalid;
+    end
+
+    (* ASYNC_REG = "TRUE" *) reg [2:0] rxss_tlast_sync = 3'b000;
+    (* ASYNC_REG = "TRUE" *) reg [2:0] rxss_tuser_sync = 3'b000;
+    (* ASYNC_REG = "TRUE" *) reg [2:0] rxss_tready_sync = 3'b000;
+    (* ASYNC_REG = "TRUE" *) reg [2:0] rxss_tvalid_sync = 3'b000;
+    (* ASYNC_REG = "TRUE" *) reg [2:0] phy_ch2_tvalid_sync = 3'b000;
+    (* ASYNC_REG = "TRUE" *) reg [2:0] phy_ch1_tvalid_sync = 3'b000;
+    (* ASYNC_REG = "TRUE" *) reg [2:0] phy_ch0_tvalid_sync = 3'b000;
+
     reg [1:0] phy_irq_sync = 2'b00;
     reg [1:0] rx_irq_sync  = 2'b00;
 
@@ -315,6 +424,13 @@ module sc7f0_hdmi_probe (
             tx_rdy_sync <= 3'b000;
             tx_scl_sync <= 3'b000;
             tx_sda_sync <= 3'b000;
+            rxss_tlast_sync     <= 3'b000;
+            rxss_tuser_sync     <= 3'b000;
+            rxss_tready_sync    <= 3'b000;
+            rxss_tvalid_sync    <= 3'b000;
+            phy_ch2_tvalid_sync <= 3'b000;
+            phy_ch1_tvalid_sync <= 3'b000;
+            phy_ch0_tvalid_sync <= 3'b000;
             phy_irq_sync <= 2'b00;
             rx_irq_sync  <= 2'b00;
             det5v_edge_cnt <= 16'd0;
@@ -334,6 +450,16 @@ module sc7f0_hdmi_probe (
             tx_rdy_sync <= {tx_rdy_sync[1:0], hdmi_tx_refclk_rdy};
             tx_scl_sync <= {tx_scl_sync[1:0], tx_ddc_scl_i};
             tx_sda_sync <= {tx_sda_sync[1:0], tx_ddc_sda_i};
+            // Foreign-domain diagnostic levels: one independent 3FF chain each,
+            // and each chain samples its own SOURCE-DOMAIN register (above), never
+            // the foreign net directly.  This is what removes the six CDC-10 rows.
+            rxss_tlast_sync     <= {rxss_tlast_sync[1:0],     rxss_tlast_src};
+            rxss_tuser_sync     <= {rxss_tuser_sync[1:0],     rxss_tuser_src};
+            rxss_tready_sync    <= {rxss_tready_sync[1:0],    rx_ss_video_tready};
+            rxss_tvalid_sync    <= {rxss_tvalid_sync[1:0],    rxss_tvalid_src};
+            phy_ch2_tvalid_sync <= {phy_ch2_tvalid_sync[1:0], phy_ch2_tvalid_src};
+            phy_ch1_tvalid_sync <= {phy_ch1_tvalid_sync[1:0], phy_ch1_tvalid_src};
+            phy_ch0_tvalid_sync <= {phy_ch0_tvalid_sync[1:0], phy_ch0_tvalid_src};
             phy_irq_sync <= {phy_irq_sync[0], hdmi_phy_irq};
             rx_irq_sync  <= {rx_irq_sync[0], hdmi_rx_irq};
 
@@ -362,14 +488,20 @@ module sc7f0_hdmi_probe (
 
     // Pin Level Register mapping
     // Independent diagnostic levels, not an atomic multi-signal snapshot.
+    // Bits [31:25] are sampled by the dedicated ASYNC_REG chains above, so every
+    // member of this vector is now a pl_clk0 (`clk`) signal.  Bits [24:16] are
+    // produced by the clk-domain always block in this file (latched_sb_rx_*);
+    // report_cdc for build/vcu-release-26111103-r1 produced no CDC row for them,
+    // which is the evidence that they are in-domain - re-check after each round
+    // instead of assuming it.
     wire [31:0] raw_probe_pins = {
-        rx_ss_video_tlast,          // [31]
-        rx_ss_video_tuser,          // [30]
-        rx_ss_video_tready,         // [29]
-        rx_ss_video_tvalid,         // [28]
-        phy_rx_axi4s_ch2_tvalid,    // [27]
-        phy_rx_axi4s_ch1_tvalid,    // [26]
-        phy_rx_axi4s_ch0_tvalid,    // [25]
+        rxss_tlast_sync[2],         // [31] rx_ss_video_tlast, [2] = 3rd stage of its ASYNC_REG chain
+        rxss_tuser_sync[2],         // [30] rx_ss_video_tuser, [2] = 3rd stage of its ASYNC_REG chain
+        rxss_tready_sync[2],        // [29] rx_ss_video_tready, [2] = 3rd stage of its ASYNC_REG chain
+        rxss_tvalid_sync[2],        // [28] rx_ss_video_tvalid, [2] = 3rd stage of its ASYNC_REG chain
+        phy_ch2_tvalid_sync[2],     // [27] phy_rx_axi4s_ch2_tvalid, [2] = 3rd stage, phy_rxoutclk
+        phy_ch1_tvalid_sync[2],     // [26] phy_rx_axi4s_ch1_tvalid, [2] = 3rd stage, phy_rxoutclk
+        phy_ch0_tvalid_sync[2],     // [25] phy_rx_axi4s_ch0_tvalid, [2] = 3rd stage, phy_rxoutclk
         latched_sb_rx_valid,        // [24]
         latched_sb_rx_data,         // [23:16]
         dru_clk_alive,              // [15]
@@ -390,7 +522,9 @@ module sc7f0_hdmi_probe (
         det5v_sync[1]               // [0]
     };
 
-    xpm_cdc_array_single #(.WIDTH(32), .DEST_SYNC_FF(3), .SRC_INPUT_REG(0),
+    // src_clk == dest_clk == clk: this now only re-registers values that are
+    // already in this domain, which is what the declared src_clk always claimed.
+    xpm_cdc_array_single #(.WIDTH(32), .DEST_SYNC_FF(3), .SRC_INPUT_REG(1),
                            .INIT_SYNC_FF(1)) u_pin_levels_cdc (
         .src_clk(clk), .src_in(raw_probe_pins),
         .dest_clk(clk), .dest_out(reg_probe_pins));

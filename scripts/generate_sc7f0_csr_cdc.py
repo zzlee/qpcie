@@ -18,12 +18,46 @@ out_irq_top_status_w1c out_vch0_irq_status_w1c out_vch1_irq_status_w1c
 out_adev0_irq_status_w1c out_adev0_xrun_inject out_global_reset_pulse'''.split())
 LOCAL_OUTPUTS = set('''out_hdmi_ipc_cmd out_hdmi_ipc_arg out_hdmi_ipc_status
 out_hdmi_ipc_doorbell out_ddr_read_request out_ddr_read_offset out_probe_ctrl'''.split())
+# LOCAL_* means: this port is already produced in / consumed by the wrapper's
+# `clk` domain, which is the PS AXI-Lite clock (pl_clk0 at board level: in
+# rtl/custom_pcie_dma_top.v, u_axil_reg_space is instantiated with .clk(pl_clk0)).
+# LOCAL ports are wired straight to the authoritative bank and MUST NOT be packed
+# into src_level/src_status, because qpcie_csr_cdc / qpcie_status_cdc put their
+# source side on `pcie_clk` (pcie_user_clk).
+#
+# Adding a name here is a claim about hardware, not a convenience: you must be
+# able to point at the always block that produces it and show it is clocked by
+# the same net as the bank's `clk`.  A wrong entry silently turns a real
+# cross-domain path into an unconstrained in-domain read; that is exactly how the
+# 296 CDC-13 criticals in build/vcu-release-26111103-r1 appeared.  A missing entry
+# silently routes a same-domain word through the async FIFO, which per-bit
+# synchronizes a multi-bit counter and makes a 64-bit BAR0 pair torn across two
+# FIFO snapshots.
+#
+# in_pkt_* (Packet DMA telemetry): produced by `always @(posedge csr_clk)` in
+# rtl/sc7f0_dualpath.v, and rtl/zu4ev_pcie_card_top.v drives .csr_clk(pl_clk0) --
+# the very same clock as this bank's `clk`.  Same domain, so a read is inherently
+# word-coherent and no synchronizer is needed or wanted.  They were briefly
+# misclassified as PCIe-domain telemetry; that regression is what CDC-13 counted.
+#
+# Deliberate semantic consequence, recorded so it is not an unexplained drift:
+# LOCAL inputs are NOT gated by `csr_online`.  With the PCIe link down, BAR0
+# 0xC0..0xE4 now return the real Packet DMA counters instead of reading 0, so the
+# host can see whether packets were submitted before the mailbox is up.  Every
+# non-LOCAL input keeps reading 0 while offline, exactly as before.
+LOCAL_INPUT_DOMAIN = {
+    'in_probe_*': 'PS probe registers (sc7f0_hdmi_probe), clocked by clk/pl_clk0',
+    'in_pkt_*': 'Packet DMA counters, always @(posedge csr_clk) with csr_clk == pl_clk0 == bank clk',
+}
 LOCAL_INPUTS = set('''in_probe_version in_probe_rx_clk_freq in_probe_dru_clk_freq in_probe_rxoutclk_freq
 in_probe_rx_video_clk_freq in_probe_tx_clk_freq in_probe_txoutclk_freq in_probe_tx_video_clk_freq
 in_probe_pins in_probe_pulse_cnt1 in_probe_ddc_cnt in_probe_irq_cnt
 in_probe_ch0_beats in_probe_ch1_beats in_probe_ch2_beats in_probe_rx_video_sof
 in_probe_rx_video_eol in_probe_rx_video_pix in_probe_raw_rx_clk in_probe_raw_dru_clk
-in_probe_raw_rxoutclk in_probe_raw_rx_video_clk in_probe_raw_refclk100'''.split())
+in_probe_raw_rxoutclk in_probe_raw_rx_video_clk in_probe_raw_refclk100
+in_pkt_submit_cnt in_pkt_done_cnt in_pkt_err_cnt in_pkt_msi_cnt
+in_pkt_bytes_lo in_pkt_bytes_hi in_pkt_fsm_state in_pkt_last_len
+in_pkt_last_pts_lo in_pkt_last_pts_hi'''.split())
 UPGRADE = {'out_dma_upg_ctrl': 'pcie_upg_ctrl',
            'out_dma_upg_size': 'pcie_upg_size',
            'out_dma_upg_host_addr': 'pcie_upg_host_addr'}
@@ -52,6 +86,19 @@ def generate():
             name = item
         ports.append((direction, width, name))
     assert len({p[2] for p in ports}) == len(ports)
+    directions = {name: direction for direction, _, name in ports}
+    # A classification list that no longer matches the bank is worse than no
+    # list: an unrecognised name silently falls back into the default bucket.
+    # Fail loudly instead, and never let a LOCAL claim attach to a port that is
+    # not an input of the authoritative bank.
+    for name in sorted(LOCAL_INPUTS):
+        assert directions.get(name) == 'input', \
+            f'LOCAL_INPUTS entry {name!r} is not an input of axil_reg_space'
+    for name in sorted(LOCAL_OUTPUTS | set(UPGRADE)):
+        assert directions.get(name) == 'output', \
+            f'LOCAL/UPGRADE output {name!r} is not an output of axil_reg_space'
+    assert EVENTS <= set(directions), \
+        'EVENTS contains a name that is not a register-bank port'
     widths = {name: (int(width[1:-1].split(':')[0]) + 1 if width else 1)
               for _, width, name in ports}
     levels, events, statuses = [], [], []

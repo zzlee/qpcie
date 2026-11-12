@@ -436,13 +436,53 @@ module custom_pcie_dma_top #(
 
     wire [31:0] reg_dma_ctrl, reg_dma_status, reg_irq_ctrl, reg_irq_status;
     wire        global_reset_pulse_w; // From axil_reg_space BAR0[0x14] — flushes DMA-domain FIFOs
-    wire        dma_rst_n = rst_n && !reg_dma_ctrl[1] && !global_reset_pulse_w;
+
+    // BAR0[0x14] is transported as a one-cycle *event* in `clk` (pcie_user_clk).
+    // It used to be ANDed straight into dma_rst_n, which made a single-cycle
+    // cross-domain event the asynchronous preset of the whole DMA domain and of
+    // every xpm_cdc_async_rst fed by dma_rst_n.  report_cdc proved the failure
+    // mode: CDC-10 row
+    //   u_axil_reg_space/u_controls/dest_event_reg[0]/C
+    //     -> u_dma_top/u_video_req_cdc/u_wr_reset/arststages_ff_reg[0]/PRE
+    // Whether a destination clock saw that one cycle was undefined.
+    //
+    // Now the event becomes a controlled in-domain reset *level*: asserted for
+    // at least GLOBAL_RESET_HOLD cycles of clk, which is how the flush stays
+    // provable for any slower destination clock, and how it can never be lost
+    // (the event is captured by an ordinary same-domain flop, not synchronised).
+    localparam GLOBAL_RESET_HOLD = 64;
+    wire global_reset_hold_n;
+    (* MARK_DEBUG = "TRUE" *) wire global_reset_busy; // flush in progress, probe-only
+    sc7f0_event_reset #(.WIDTH(1), .HOLD_CYCLES(GLOBAL_RESET_HOLD)) u_global_reset_hold (
+        .evt_clk   (clk),
+        .evt_rst_n (rst_n),
+        .evt       (global_reset_pulse_w),
+        .rst_n     (global_reset_hold_n),
+        .pending   (global_reset_busy)
+    );
+
+    // dma_rst_n is now a level built only from terms that have each crossed into
+    // `clk` through their own synchronizer (rtl/sc7f0_reset_cdc.v).  It is safe
+    // as the async preset of the DMA-domain flops and as one source for the
+    // video FIFO reset below.
+    wire dma_rst_n;
+    sc7f0_reset_sync #(.SOURCES(3)) u_dma_reset (
+        .dest_clk   (clk),
+        .src_rst_n  ({global_reset_hold_n, !reg_dma_ctrl[1], rst_n}),
+        .dest_rst_n (dma_rst_n)
+    );
 
     // XPM async FIFOs require reset release synchronous to their write clock.
+    // dma_rst_n (clk domain) and video_rst_n (video_clk domain) are separate
+    // sources; they are never OR-ed in front of a synchronizer any more.
     wire video_cdc_reset_pcie;
-    xpm_cdc_async_rst #(.DEST_SYNC_FF(4), .RST_ACTIVE_HIGH(1)) u_video_fifo_reset (
-        .src_arst(!dma_rst_n || !video_rst_n),
-        .dest_clk(clk), .dest_arst(video_cdc_reset_pcie));
+    wire video_cdc_reset_n;
+    sc7f0_reset_sync #(.SOURCES(2)) u_video_fifo_reset (
+        .dest_clk   (clk),
+        .src_rst_n  ({video_rst_n, dma_rst_n}),
+        .dest_rst_n (video_cdc_reset_n)
+    );
+    assign video_cdc_reset_pcie = !video_cdc_reset_n;
 
     wire [31:0] reg_irq_status_w1c;
     wire [31:0] reg_slice_height;

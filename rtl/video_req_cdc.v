@@ -56,11 +56,17 @@ module video_req_cdc #(
     localparam integer WR_COUNT_WIDTH  = $clog2(FIFO_DEPTH) + 1;
 
     // Assert for either domain's reset; release only on that domain's clock.
+    // Each source crosses into the destination clock through its own
+    // synchronizer (rtl/sc7f0_reset_cdc.v); the previous OR of two cross-domain
+    // resets in front of xpm_cdc_async_rst was CDC-10/CDC-12.
     wire wr_reset, rd_reset;
-    xpm_cdc_async_rst #(.DEST_SYNC_FF(4), .RST_ACTIVE_HIGH(1)) u_wr_reset (
-        .src_arst(!wr_rst_n || !rd_rst_n), .dest_clk(wr_clk), .dest_arst(wr_reset));
-    xpm_cdc_async_rst #(.DEST_SYNC_FF(4), .RST_ACTIVE_HIGH(1)) u_rd_reset (
-        .src_arst(!wr_rst_n || !rd_rst_n), .dest_clk(rd_clk), .dest_arst(rd_reset));
+    wire wr_all_n, rd_all_n;
+    sc7f0_reset_sync #(.SOURCES(2)) u_wr_reset (
+        .dest_clk(wr_clk), .src_rst_n({rd_rst_n, wr_rst_n}), .dest_rst_n(wr_all_n));
+    sc7f0_reset_sync #(.SOURCES(2)) u_rd_reset (
+        .dest_clk(rd_clk), .src_rst_n({wr_rst_n, rd_rst_n}), .dest_rst_n(rd_all_n));
+    assign wr_reset = !wr_all_n;
+    assign rd_reset = !rd_all_n;
 
     // ---------------------------------------------------------------------
     // Header FIFO: carries {eof, dw_len[10:0], addr[63:0]} (76 bits)

@@ -13,10 +13,14 @@ module video_axis_async_fifo #(
     output wire m_valid, m_sof, m_eol,
     input wire m_ready
 );
-    wire fifo_rst, full, empty, wr_busy, rd_busy;
+    wire fifo_rst, full, empty, wr_busy, rd_busy, all_rst_n, rd_all_rst_n;
     wire [129:0] dout;
-    xpm_cdc_async_rst #(.DEST_SYNC_FF(4), .RST_ACTIVE_HIGH(1)) u_reset (
-        .src_arst(!s_rst_n || !m_rst_n), .dest_clk(s_clk), .dest_arst(fifo_rst));
+    // s_rst_n and m_rst_n belong to unrelated clocks.  Each is synchronised into
+    // s_clk on its own and only combined afterwards; the read side keeps its own
+    // already-in-domain release so no cross-domain gate ever reaches a preset.
+    sc7f0_reset_sync #(.SOURCES(2)) u_reset (
+        .dest_clk(s_clk), .src_rst_n({m_rst_n, s_rst_n}), .dest_rst_n(all_rst_n));
+    assign fifo_rst = !all_rst_n;
     assign s_ready = !full && !wr_busy && !fifo_rst;
     assign m_valid = !empty && !rd_busy && m_rst_n;
     assign {m_sof, m_eol, m_data} = dout;

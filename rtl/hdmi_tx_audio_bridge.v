@@ -44,12 +44,19 @@ module hdmi_tx_audio_bridge #(
 
     assign s_axis_audio_tready = !fifo_full && !wr_rst_busy && !fifo_rst;
     assign fifo_rd_en          = m_axis_audio_tready && m_axis_audio_tvalid;
-    assign m_axis_audio_tvalid = !fifo_empty && !rd_rst_busy && tx_audio_rst_n;
     assign m_axis_audio_tlast  = 1'b0;
 
-    xpm_cdc_async_rst #(.DEST_SYNC_FF(4), .RST_ACTIVE_HIGH(1)) u_fifo_reset (
-        .src_arst(!pcie_user_rst_n || !tx_audio_rst_n || !tx_ctrl_reg[1]),
-        .dest_clk(pcie_user_clk), .dest_arst(fifo_rst));
+    // See rtl/sc7f0_reset_cdc.v: one synchronizer per asynchronous source, then
+    // combine inside pcie_user_clk.  m_axis_audio is consumed in pcie_user_clk,
+    // so its valid gate uses the synchronized level rather than the raw
+    // TX-audio-domain reset.
+    wire tx_fifo_all_n;
+    sc7f0_reset_sync #(.SOURCES(3)) u_fifo_reset (
+        .dest_clk(pcie_user_clk),
+        .src_rst_n({tx_ctrl_reg[1], tx_audio_rst_n, pcie_user_rst_n}),
+        .dest_rst_n(tx_fifo_all_n));
+    assign fifo_rst = !tx_fifo_all_n;
+    assign m_axis_audio_tvalid = !fifo_empty && !rd_rst_busy && tx_fifo_all_n;
 
     xpm_fifo_async #(
         .CDC_SYNC_STAGES     (4),

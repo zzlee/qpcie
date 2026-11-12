@@ -344,14 +344,19 @@ module sc7f0_display_pipeline (
     wire [VIDEO_FIFO_WIDTH-1:0] fifo_dout;
     wire fifo_full, fifo_empty, wr_rst_busy, rd_rst_busy, fifo_rst;
 
-    xpm_cdc_async_rst #(
-        .DEST_SYNC_FF   (4),
-        .RST_ACTIVE_HIGH(1)
-    ) u_video_fifo_rst (
-        .src_arst (!mem_rst_n || !tx_rst_n),
+    // mem_rst_n (mem_clk / PS HP) and tx_rst_n (tx_clk) are unrelated sources.
+    // `!mem_rst_n || !tx_rst_n` in front of xpm_cdc_async_rst is precisely the
+    // CDC-10/CDC-12 shape this tree was flagged for: an unanalysable function of
+    // two asynchronous flops on an asynchronous preset, which can release the
+    // destination chain for a sub-cycle window.  Each source now crosses into
+    // mem_clk on its own and the AND is formed only afterwards on mem_clk-domain
+    // flops (rtl/sc7f0_reset_cdc.v).  Assertion still flushes both FIFO ends.
+    wire video_fifo_all_n;
+    sc7f0_reset_sync #(.SOURCES(2)) u_video_fifo_rst (
         .dest_clk (mem_clk),
-        .dest_arst(fifo_rst)
-    );
+        .src_rst_n({tx_rst_n, mem_rst_n}),
+        .dest_rst_n(video_fifo_all_n));
+    assign fifo_rst = !video_fifo_all_n;
 
     // mem_clk producer side
     wire fb_accept = fb_tvalid && fb_tready;

@@ -43,6 +43,11 @@ hw_platform/*.html
 hw_platform/*.tcl
 hw_platform/psu_init_gpl.*
 scripts/archive_debug/
+# Scratch output of the post-route evidence hook scripts/check_sc7f0_named_constraints.tcl
+# (named-constraint-evidence.json plus the per-item .tmp-exceptions-*.rpt it dumps).
+# It is regenerated for every implementation round and is derived evidence, not a
+# gate input; scripts/gates/*.json stays tracked.
+/tmp-named-evidence-check/
 
 # ------------------------------------------------------------------------------
 # 2. Simulation Artifacts (Icarus Verilog, ModelSim, Verilator)
@@ -50,6 +55,17 @@ scripts/archive_debug/
 tb/sim_*
 sim_*
 !scripts/sim_sc7f0_csr_cdc.tcl
+# scripts/sim_sc7f0_reset_cdc.tcl is a required gate input (it is the XSim gate
+# that scripts/run_sc7f0_reset_probe_validation.sh executes), so it is excepted
+# from the sim_* rule instead of being committed with `git add -f`.  The reset
+# proof is worthless if the runner disappears with the worktree, and
+# scripts/sc7f0_release_id.py cannot fingerprint a file gitignore hides.
+!scripts/sim_sc7f0_reset_cdc.tcl
+# scripts/sim_sc7f0_probe_tap.tcl is the same kind of thing: it is the runner that
+# scripts/check_sc7f0_probe_tap_mutation.sh uses to show a [0]/[1] tap on the probe
+# chains is actually rejected.  A negative control nobody can re-run is not evidence,
+# so it gets the same single narrow exception (nothing else under sim_* is relaxed).
+!scripts/sim_sc7f0_probe_tap.tcl
 !scripts/sim_sc7f0_hdmi_bridges.tcl
 !scripts/sim_sc7f0_hdmi_control.tcl
 !scripts/sim_sc7f0_dualpath.tcl

@@ -16,12 +16,15 @@ module sc7f0_tap_regs(
     output wire writer_rst_n,csc_rst_n
 );
     reg [1:0] reset_n;
-    wire wr_reset,csc_reset;
-    xpm_cdc_async_rst #(.DEST_SYNC_FF(4),.RST_ACTIVE_HIGH(1)) u_writer_reset(
-        .src_arst(!m_rst_n||!reset_n[0]),.dest_clk(m_clk),.dest_arst(wr_reset));
-    xpm_cdc_async_rst #(.DEST_SYNC_FF(4),.RST_ACTIVE_HIGH(1)) u_csc_reset(
-        .src_arst(!m_rst_n||!reset_n[1]),.dest_clk(m_clk),.dest_arst(csc_reset));
-    assign writer_rst_n=!wr_reset;assign csc_rst_n=!csc_reset;
+    // m_rst_n (memory clock domain) and the CSR-written reset_n bits (CSR clock
+    // domain) are independent sources: each gets its own synchronizer into m_clk
+    // before they are combined (rtl/sc7f0_reset_cdc.v, CDC-10 root cause).
+    wire writer_all_n, csc_all_n;
+    sc7f0_reset_sync #(.SOURCES(2)) u_writer_reset(
+        .dest_clk(m_clk),.src_rst_n({reset_n[0],m_rst_n}),.dest_rst_n(writer_all_n));
+    sc7f0_reset_sync #(.SOURCES(2)) u_csc_reset(
+        .dest_clk(m_clk),.src_rst_n({reset_n[1],m_rst_n}),.dest_rst_n(csc_all_n));
+    assign writer_rst_n=writer_all_n;assign csc_rst_n=csc_all_n;
     reg [15:0] staged_w,staged_h;
     reg [81:0] command;reg push,pop;
     reg [31:0] stop_requested,stop_target,stop_ack_m,retired_count;

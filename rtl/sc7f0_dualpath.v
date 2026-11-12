@@ -34,10 +34,12 @@ module sc7f0_dualpath #(parameter LEGACY_CAPTURE=1)(
     output wire [31:0] probe_pkt_last_pts_lo,
     output wire [31:0] probe_pkt_last_pts_hi
 );
-    wire packet_reset;
-    xpm_cdc_async_rst #(.DEST_SYNC_FF(4),.RST_ACTIVE_HIGH(1)) u_packet_reset(
-        .src_arst(!mem_rst_n||!pcie_rst_n),.dest_clk(mem_clk),.dest_arst(packet_reset));
-    wire packet_rst_n=!packet_reset;
+    wire packet_rst_n;
+    // mem_rst_n (capture clock domain) and pcie_rst_n (PCIe IP user reset) are
+    // unrelated sources; sc7f0_reset_sync gives each its own synchronizer into
+    // mem_clk, so no gate sits in front of a synchronizer's async preset.
+    sc7f0_reset_sync #(.SOURCES(2)) u_packet_reset(
+        .dest_clk(mem_clk),.src_rst_n({pcie_rst_n,mem_rst_n}),.dest_rst_n(packet_rst_n));
     wire [255:0] fcw,fcr,fdw,fdr;
     wire fpush,fwr,fvalid,ftake,fdvalid,fdready,frvalid,frpop;
     wire [767:0] pcw,pcr;
@@ -149,12 +151,16 @@ module sc7f0_dualpath #(parameter LEGACY_CAPTURE=1)(
     end else begin:no_frame_queues
         assign fwr=0;assign fcr=0;assign fvalid=0;assign fdready=0;assign fdr=0;assign frvalid=0;
     end endgenerate
-    sc7f0_dp_fifo #(.WIDTH(768)) u_packet_commands(
-        .wclk(csr_clk),.wrst_n(csr_rst_n&&pcie_rst_n),.wdata(pcw),.wvalid(ppush),.wready(pwr),
+    // Reset sources are passed as vectors, never pre-ANDed here: see
+    // rtl/sc7f0_reset_cdc.v.  csr_rst_n is a PS-clock (clk_pl_0) reset and
+    // pcie_rst_n is the PCIe IP user reset; sc7f0_dp_fifo synchronises each of
+    // them into the clock that actually consumes them.
+    sc7f0_dp_fifo #(.WIDTH(768),.W_SOURCES(2)) u_packet_commands(
+        .wclk(csr_clk),.wrst_n({pcie_rst_n,csr_rst_n}),.wdata(pcw),.wvalid(ppush),.wready(pwr),
         .rclk(mem_clk),.rrst_n(packet_rst_n),.rdata(pcr),.rvalid(pvalid),.rready(ptake));
-    sc7f0_dp_fifo #(.WIDTH(512)) u_packet_completions(
+    sc7f0_dp_fifo #(.WIDTH(512),.R_SOURCES(2)) u_packet_completions(
         .wclk(mem_clk),.wrst_n(packet_rst_n),.wdata(pdw),.wvalid(pdvalid),.wready(pdready),
-        .rclk(csr_clk),.rrst_n(csr_rst_n&&pcie_rst_n),.rdata(pdr),.rvalid(prvalid),.rready(prpop));
+        .rclk(csr_clk),.rrst_n({pcie_rst_n,csr_rst_n}),.rdata(pdr),.rvalid(prvalid),.rready(prpop));
     xpm_cdc_array_single #(.WIDTH(2),.DEST_SYNC_FF(4),.SRC_INPUT_REG(1)) u_busy(
         .src_clk(mem_clk),.src_in({pbusy,cbusy}),.dest_clk(csr_clk),.dest_out(busy_csr));
     xpm_cdc_gray #(.WIDTH(32),.DEST_SYNC_FF(4),.REG_OUTPUT(1)) u_drops(

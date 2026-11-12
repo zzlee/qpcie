@@ -54,9 +54,16 @@ module hdmi_tx_video_bridge #(
     assign s_axis_video_tready = !fifo_full && !wr_rst_busy && !fifo_rst;
     assign fifo_rd_en          = m_axis_video_tready && m_axis_video_tvalid;
 
-    xpm_cdc_async_rst #(.DEST_SYNC_FF(4), .RST_ACTIVE_HIGH(1)) u_fifo_reset (
-        .src_arst(!pcie_user_rst_n || !tx_video_rst_n || !tx_ctrl_reg[0]),
-        .dest_clk(pcie_user_clk), .dest_arst(fifo_rst));
+    // Three reset/enable sources reach this FIFO: the PCIe user reset, the TX
+    // video-domain reset and a CSR control bit.  They are not all in
+    // pcie_user_clk, so each crosses through its own synchronizer and only the
+    // synchronized outputs are combined (rtl/sc7f0_reset_cdc.v).
+    wire tx_fifo_all_n;
+    sc7f0_reset_sync #(.SOURCES(3)) u_fifo_reset (
+        .dest_clk(pcie_user_clk),
+        .src_rst_n({tx_ctrl_reg[0], tx_video_rst_n, pcie_user_rst_n}),
+        .dest_rst_n(tx_fifo_all_n));
+    assign fifo_rst = !tx_fifo_all_n;
 
     // Write packed 128-bit stream + tlast + tuser into async FIFO
     xpm_fifo_async #(
@@ -117,7 +124,9 @@ module hdmi_tx_video_bridge #(
         raw_packed[55:32],
         raw_packed[23:0]
     };
-    assign m_axis_video_tvalid = !fifo_empty && !rd_rst_busy && tx_video_rst_n;
+    // Read side is consumed in pcie_user_clk: use the synchronized reset level,
+    // not the raw TX-video-domain reset (rtl/sc7f0_reset_cdc.v).
+    assign m_axis_video_tvalid = !fifo_empty && !rd_rst_busy && tx_fifo_all_n;
     assign m_axis_video_tlast  = fifo_dout[128];
     assign m_axis_video_tuser  = fifo_dout[129];
 
