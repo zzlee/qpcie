@@ -6,6 +6,29 @@
 #include <sys/prctl.h>
 #include "sc7f0_health.h"
 
+/* Mailbox ABI banner - the only thing that can prove, from the bytes that will
+ * actually run, that this qpcie_debugd was compiled against the 0x800 H2C window.
+ *
+ * Why a string and not a byte comparison: the shipped image was measured to carry a
+ * pre-0x800 debugd, and "the file exists in the rootfs" cannot tell the 0x400 layout
+ * (which wrote command text over ring slots 7..15 on every exec/tail) from the 0x800
+ * one. scripts/package_sc7f0_rootfs.py verify --expect-string therefore looks for
+ * this literal inside usr/bin/qpcie_debugd in image.ub, and the build fails if it is
+ * absent. The #error below keeps the claim honest: the banner and the header cannot
+ * drift apart, and the header is the one that must be edited if the layout ever
+ * changes. `used` keeps the literal in .rodata even though no printf consumes it. */
+#define QPCIE_STR2(x) #x
+#define QPCIE_STR(x) QPCIE_STR2(x)
+#if DB_H2C_DATA != 0x800 || DB_C2H_DATA != 0x1000
+#error "include/qpcie_debug.h no longer describes H2C 0x800 / C2H 0x1000: fix the header or fix this banner, and rebuild the release from the corrected source - never loosen this check"
+#endif
+/* DB_H2C_DATA already spells itself "0x800", so the banner must not add a second
+ * "0x"; and DB_PAYLOAD stringifies to "2048U", which a grep for a fix would never
+ * find, so it is left out rather than rewritten by hand. */
+static const char qpcie_debugd_abi_banner[] __attribute__((used)) =
+    "qpcie_debugd mailbox ABI h2c=" QPCIE_STR(DB_H2C_DATA)
+    " c2h=" QPCIE_STR(DB_C2H_DATA);
+
 static volatile sig_atomic_t stopping;
 static void stop_handler(int sig) { (void)sig; stopping = 1; }
 struct job {
@@ -97,7 +120,7 @@ int main(int argc, char **argv)
     db_wr(&io,DB_CARD_EPOCH,epoch);
     db_wr(&io,DB_CARD_BEAT,(uint32_t)db_now());
     db_wr(&io,DB_READY,1);
-    fprintf(stderr,"Debug mailbox ready (exec %s, shell %s)\n",allow_exec?"enabled":"disabled",shell);
+    fprintf(stderr,"Debug mailbox ready (exec %s, shell %s) [%s]\n",allow_exec?"enabled":"disabled",shell,qpcie_debugd_abi_banner);
     sc7f0_health_ready();
     while (!stopping && !io.failed) {
         sc7f0_health_progress();

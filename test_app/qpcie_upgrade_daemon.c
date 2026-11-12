@@ -33,6 +33,7 @@
 #include "qpcie_commit_helpers.h"
 #include "qpcie_archive_verify.h"
 #include "qpcie_file_transaction.h"
+#include "qpcie_backup_retention.h"
 
 #define DAEMON_NAME "qpcie_upgrade_daemon"
 
@@ -411,27 +412,104 @@ static void do_commit(volatile uint32_t *pl_regs,
         return;
     }
 
-    char backup_dir[1024];
-    if (qtx_path(backup_dir, sizeof(backup_dir), EMMC_MOUNT_DIR, ".backup_upgrade") != 0) {
+    /* Backup policy: never delete a previous generation to make room for this one.
+     * See test_app/qpcie_backup_retention.h for the failure this replaces - the old
+     * code ran "rm -rf .backup_upgrade" and then wrote whatever was on the card into
+     * that name, so a same-version retry or a second COMMIT replaced the only
+     * prior-generation image with the current one, and an interrupted transaction
+     * lost its unique recovery set before anything could be restored. */
+    char backup_root[1024], txn_dir[1024], why[1400] = {0};
+    if (qtx_path(backup_root, sizeof(backup_root), EMMC_MOUNT_DIR, QBR_ROOT_NAME) != 0) {
         umount(EMMC_MOUNT_DIR);
         finish_cmd(pl_regs, STATUS_UPG_ERR_FLASH);
         return;
     }
-    /* Clean up any old completed backup before creating new one */
-    char rm_cmd[2048];
-    snprintf(rm_cmd, sizeof(rm_cmd), "rm -rf %s", backup_dir);
-    run_best_effort(rm_cmd);
+    if (qbr_recover_all(EMMC_MOUNT_DIR, backup_root, why, sizeof(why)) != 0) {
+        syslog(LOG_ERR, "COMMIT: refused, backup retention root is not safe: %s", why);
+        sync();
+        umount(EMMC_MOUNT_DIR);
+        finish_cmd(pl_regs, STATUS_UPG_ERR_STATE);
+        return;
+    }
+    /* Room is checked before anything is copied, and it is checked against the
+     * bytes this COMMIT really copies: the live trio on the card, not the incoming
+     * package (see qbr_commit_need_bytes). The BOOT partition is vfat and reserves
+     * nothing: a generation that runs out of space half-written is a truncated
+     * BOOT.BIN presented as a recovery set. Nothing is staged, nothing is deleted,
+     * and the host is told why. */
+    if (qbr_room(EMMC_MOUNT_DIR, qbr_commit_need_bytes(STAGING_DIR, EMMC_MOUNT_DIR),
+                 why, sizeof(why)) != 0) {
+        syslog(LOG_ERR, "COMMIT: refused, no room for a backup generation: %s", why);
+        umount(EMMC_MOUNT_DIR);
+        finish_cmd(pl_regs, STATUS_UPG_ERR_FLASH);
+        return;
+    }
+    if (qbr_begin(EMMC_MOUNT_DIR, backup_root, txn_dir, sizeof(txn_dir),
+                  why, sizeof(why)) != 0) {
+        syslog(LOG_ERR, "COMMIT: cannot open a transaction directory: %s", why);
+        umount(EMMC_MOUNT_DIR);
+        finish_cmd(pl_regs, STATUS_UPG_ERR_FLASH);
+        return;
+    }
+    /* Say what recovery exists *before* the card is written, not after. A first
+     * COMMIT by this daemon still cannot undo the write that this very COMMIT
+     * performs, and a card upgraded from the previous installer had that first
+     * COMMIT executed by the previous daemon (destructive rm -rf); the host-side
+     * snapshot in docs/sc7f0_release_deploy_acceptance_runbook.md is what covers
+     * that attempt, not anything compiled into this package. */
+    unsigned gens_before = qbr_generation_count(backup_root);
+    syslog(LOG_NOTICE, "COMMIT: %u backup generation(s) recoverable before this write%s",
+           gens_before,
+           gens_before ? "" : " - NONE: this card has no prior image to roll back to; "
+                             "the host must still hold the matching release tar");
+    syslog(LOG_NOTICE, "COMMIT: backup transaction %s", txn_dir);
 
     pl_regs[REG_DMA_UPG_PROGRESS / 4] = 80;
-    int rc = qtx_apply(EMMC_MOUNT_DIR, STAGING_DIR, backup_dir, NULL, NULL);
+    int rc = qtx_apply(EMMC_MOUNT_DIR, STAGING_DIR, txn_dir, NULL, NULL);
     if (rc != 0) {
+        /* The journal is deliberately left at PREPARED/APPLYING with its backups
+         * intact: qtx_recover is idempotent and the next boot's recovery pass is
+         * what resolves it. Nothing here removes the transaction directory. */
         syslog(LOG_ERR, "COMMIT: qtx_apply failed (rc=%d); attempting rollback", rc);
-        int rec = qtx_recover(EMMC_MOUNT_DIR, backup_dir);
-        syslog(LOG_NOTICE, "COMMIT: rollback result: %d", rec);
+        int rec = qtx_recover(EMMC_MOUNT_DIR, txn_dir);
+        syslog(LOG_NOTICE, "COMMIT: rollback result: %d (transaction %s retained)", rec, txn_dir);
         sync();
         umount(EMMC_MOUNT_DIR);
         finish_cmd(pl_regs, STATUS_UPG_ERR_FLASH);
         return;
+    }
+    pl_regs[REG_DMA_UPG_PROGRESS / 4] = 90;
+    if (qbr_promote(backup_root, txn_dir, why, sizeof(why)) != 0) {
+        /* The new bytes are already on the card and verified; only the retention
+         * bookkeeping failed. Say so loudly instead of pretending the rollback
+         * journal vanished or deleting it. */
+        syslog(LOG_WARNING, "COMMIT: eMMC committed but the backup could not be "
+                            "promoted to a generation: %s", why);
+    } else {
+        /* Retention runs against the generation that was just promoted, so a
+         * same-version retry can only ever evict a byte-identical duplicate of it -
+         * never the older generation that actually differs and is the thing a
+         * rollback needs. Passing NULL here used to be "keep the newest two" with
+         * no notion of content, which is exactly how one retry could push the last
+         * distinct image out of the retention window. */
+        char reference[1024];
+        const char *keep_reference =
+            qbr_newest_generation(backup_root, reference, sizeof(reference)) == 0
+                ? reference : NULL;
+        int kept = qbr_prune(backup_root, keep_reference);
+        if (kept > 0)
+            syslog(LOG_NOTICE, "COMMIT: retention pruned %d superseded generation(s), "
+                               "keeping %u newest (reference %s)", kept,
+                   QBR_MAX_GENERATIONS, keep_reference ? keep_reference : "none");
+        /* The generation just written may itself be what pushed the partition over.
+         * Shrink the kept count (never below one generation) until there is room
+         * again; if even that is impossible, say so - the new image is installed and
+         * must not be disturbed to reclaim space. */
+        if (qbr_prune_for_space(backup_root, EMMC_MOUNT_DIR) != 0)
+            syslog(LOG_WARNING, "COMMIT: BOOT partition still has less than %llu bytes "
+                                "free after pruning to the minimum generation count; "
+                                "clean it before the next upgrade",
+                   (unsigned long long)QBR_MIN_FREE_BYTES);
     }
 
     pl_regs[REG_DMA_UPG_PROGRESS / 4] = 95;
@@ -490,21 +568,23 @@ int main(int argc, char **argv) {
 
     syslog(LOG_NOTICE, "Daemon initialized. Ready for Host PCIe DMA (Buffer @ 0x%08lX)", DEFAULT_DDR4_DMA_PHYS);
 
-    // Startup recovery check: if previous update was interrupted, recover from backup
+    // Startup recovery check: resolve any interrupted transaction, adopt the legacy
+    // single-directory backup layout, and never delete anything on the way. A
+    // recovery failure is logged loudly and left exactly as it is; the operator
+    // decides, because those bytes may be the only bootable image on the card.
     {
         char mnt_cmd[2048];
         snprintf(mnt_cmd, sizeof(mnt_cmd), "mkdir -p %s", EMMC_MOUNT_DIR);
         run_best_effort(mnt_cmd);
         umount(EMMC_MOUNT_DIR);
         if (mount(EMMC_BOOT_PART, EMMC_MOUNT_DIR, "vfat", 0, NULL) == 0) {
-            char backup_dir[1024];
-            if (qtx_path(backup_dir, sizeof(backup_dir), EMMC_MOUNT_DIR, ".backup_upgrade") == 0 &&
-                access(backup_dir, F_OK) == 0) {
-                int rec = qtx_recover(EMMC_MOUNT_DIR, backup_dir);
+            char backup_root[1024], why[1400] = {0};
+            if (qtx_path(backup_root, sizeof(backup_root), EMMC_MOUNT_DIR, QBR_ROOT_NAME) == 0) {
+                int rec = qbr_recover_all(EMMC_MOUNT_DIR, backup_root, why, sizeof(why));
                 if (rec == 0) {
                     syslog(LOG_NOTICE, "Startup recovery check completed successfully");
                 } else {
-                    syslog(LOG_WARNING, "Startup recovery returned %d", rec);
+                    syslog(LOG_ERR, "Startup recovery refused to continue: %s", why);
                 }
                 sync();
             }

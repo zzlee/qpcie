@@ -3,6 +3,8 @@
  * before Linux can run this recovery routine. Caller owns an exclusive mount. */
 #ifndef QPCIE_FILE_TRANSACTION_H
 #define QPCIE_FILE_TRANSACTION_H
+#include <errno.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include "qpcie_commit_helpers.h"
 
@@ -68,8 +70,16 @@ static inline int qtx_apply(const char *mount_dir, const char *staging,
                      const char *backup, qtx_checkpoint checkpoint, void *context) {
     char src[512], dst[512];
     struct stat m, b;
-    if (mkdir(backup, 0700) || stat(mount_dir, &m) || stat(backup, &b) || m.st_dev != b.st_dev)
-        return -1;
+    /* The caller may reserve the transaction directory up front (see
+     * qpcie_backup_retention.h), so EEXIST is fine - but only for a directory that
+     * holds no journal and no payload. Applying a transaction over an existing
+     * recovery set is exactly the data loss this whole path exists to prevent. */
+    if (mkdir(backup, 0700) != 0 && errno != EEXIST) return -1;
+    for (unsigned i = 0; i < 4; ++i) {
+        const char *probe_name = i == 3 ? "state" : qtx_names[i];
+        if (qtx_path(src, sizeof src, backup, probe_name) || access(src, F_OK) == 0) return -1;
+    }
+    if (stat(mount_dir, &m) || stat(backup, &b) || m.st_dev != b.st_dev) return -1;
     if (qtx_sync_dir(mount_dir)) return -1;
     for (unsigned i = 0; i < 3; ++i) {
         if (qtx_path(src, sizeof src, mount_dir, qtx_names[i]) || !qtx_regular(src) ||

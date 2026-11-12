@@ -37,6 +37,14 @@ static int write_file(const char *path, const char *content) {
     return fclose(f);
 }
 
+static int count_dirs(const char *dir, const char *prefix) {
+    char names[QBR_MAX_ENTRIES][300];
+    char full[1024];
+    if (snprintf(full, sizeof full, "%s/%s", dir, ".backup_upgrade") >= (int)sizeof full) return -1;
+    (void)prefix;
+    return (int)qbr_list(full, "txn-", names);
+}
+
 int main(void) {
     char root[] = "/tmp/opencode/commit_tb_XXXXXX";
     CHECK(mkdtemp(root));
@@ -102,20 +110,23 @@ int main(void) {
     CHECK(qch_files_equal(p_img, s_img) == 1);
     CHECK(qch_files_equal(p_scr, s_scr) == 1);
 
-    // Verify backup journal was written and marked COMMITTED
-    char bak_dir[1024], state_file[1024];
-    CHECK(qtx_path(bak_dir, sizeof(bak_dir), mnt_dir, ".backup_upgrade") == 0);
-    CHECK(qtx_path(state_file, sizeof(state_file), bak_dir, "state") == 0);
-    FILE *fs = fopen(state_file, "r");
-    CHECK(fs != NULL);
-    char sbuf[32] = {0};
-    CHECK(fgets(sbuf, sizeof(sbuf), fs) != NULL);
-    fclose(fs);
-    CHECK(strcmp(sbuf, "COMMITTED\n") == 0);
+    // Backup layout since the generation-retention change: .backup_upgrade is a
+    // retention root, one transaction directory per COMMIT, promoted to gen-* when
+    // finished. The journal is therefore inside the generation, never at the root.
+    char bak_dir[1024], gen_state[1024];
+    CHECK(qtx_path(bak_dir, sizeof(bak_dir), mnt_dir, QBR_ROOT_NAME) == 0);
+    char names[QBR_MAX_ENTRIES][300];
+    unsigned n = qbr_list(bak_dir, QBR_GEN_PREFIX, names);
+    CHECK(n == 1);
+    CHECK(qtx_path(gen_state, sizeof(gen_state), bak_dir, names[0]) == 0);
+    CHECK(qbr_read_state(gen_state) == QBR_COMMITTED);
+    CHECK(count_dirs(mnt_dir, ".backup_upgrade/txn-") == 0);   // promoted, not left over
 
-    // Verify backup contains the original files
-    char bak_boot[1024];
-    CHECK(qtx_path(bak_boot, sizeof(bak_boot), bak_dir, "BOOT.BIN") == 0);
+    // Verify the generation contains the files the card had before the COMMIT, i.e.
+    // a genuinely older image, not a copy of the new one.
+    char bak_boot[1024], full_gen[1024];
+    CHECK(qtx_path(full_gen, sizeof(full_gen), bak_dir, names[0]) == 0);
+    CHECK(qtx_path(bak_boot, sizeof(bak_boot), full_gen, "BOOT.BIN") == 0);
     FILE *fb = fopen(bak_boot, "rb");
     CHECK(fb != NULL);
     char bdata[64] = {0};
@@ -123,6 +134,32 @@ int main(void) {
     fclose(fb);
     CHECK(strcmp(bdata, "OLD_BOOT_BIN_DATA_12345") == 0);
 
-    puts("TB_PASS: full transactional COMMIT with persistent journal and backup verified");
+    // A second COMMIT of the same staged package (the retry case) must not turn
+    // that generation into the current image.
+    verified = true;
+    regs[REG_DMA_UPG_STATUS / 4] = STATUS_UPG_VERIFIED;
+    regs[REG_DMA_UPG_SIZE / 4] = size;
+    regs[REG_DMA_UPG_CRC32 / 4] = crc;
+    do_commit(regs, &size, &crc, &verified);
+    CHECK(regs[REG_DMA_UPG_STATUS / 4] == STATUS_UPG_SUCCESS);
+    CHECK(qbr_list(bak_dir, QBR_GEN_PREFIX, names) >= 1);
+    int older_kept = 0;
+    unsigned g = qbr_list(bak_dir, QBR_GEN_PREFIX, names);
+    for (unsigned i = 0; i < g; i++) {
+        char gpath[1024], bpath[1024];
+        CHECK(qtx_path(gpath, sizeof(gpath), bak_dir, names[i]) == 0);
+        CHECK(qtx_path(bpath, sizeof(bpath), gpath, "BOOT.BIN") == 0);
+        FILE *f2 = fopen(bpath, "rb");
+        if (!f2) continue;
+        char d[64] = {0};
+        size_t rd = fread(d, 1, sizeof(d)-1, f2);
+        fclose(f2);
+        if (rd == strlen("OLD_BOOT_BIN_DATA_12345") &&
+            !strcmp(d, "OLD_BOOT_BIN_DATA_12345")) older_kept = 1;
+    }
+    CHECK(older_kept);
+
+    puts("TB_PASS: transactional COMMIT with generation-retaining backup verified "
+         "(retry keeps a genuinely older image recoverable)");
     return 0;
 }
