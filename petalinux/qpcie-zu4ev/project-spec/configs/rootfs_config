@@ -4084,6 +4084,7 @@ CONFIG_Init-manager-systemd=y
 CONFIG_qpcie-debugd=y
 CONFIG_qpcie-v4l2-bridge=y
 CONFIG_sc7f0-ps-capture=y
+CONFIG_sc7f0-vcud=y
 
 #
 # PetaLinux RootFS Settings

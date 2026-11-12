@@ -1,0 +1,40 @@
+[Unit]
+Description=SC7F0 VCU H.264 encoder to Packet DMA bridge
+Documentation=file:docs/sc7f0_vcu_daemon_plan.md
+# The daemon maps the PL mailbox at 0xA0002000 and opens the VIPP capture node,
+# so it needs the mount table and the device nodes, and nothing more. It is
+# deliberately NOT ordered behind any qpcie daemon: the upgrade daemon must stay
+# independent of encoder failures.
+After=local-fs.target systemd-udevd.service
+Wants=local-fs.target
+
+[Service]
+Type=simple
+# Card-side capture initialisation: wait (bounded) for a locked RX timing, then set the
+# vpss-csc pads and the VIPP capture-node format in the one order that lets the daemon
+# queue buffers.  While the source is not presenting 3840x2160p60 this pre-exec fails,
+# ExecStart is skipped, and Restart=always/RestartSec=5 runs it again - which is what
+# keeps a cold boot from turning into the "Initial VIDIOC_QBUF: Invalid argument" loop
+# the daemon used to fall into.  It performs no I2C and no MCU restart; that stays a
+# single, host-owned action per upgrade.
+ExecStartPre=/usr/lib/sc7f0/sc7f0-capture-init.sh
+# Live mode in the foreground. --daemon would fork and detach, which takes the
+# process out of systemd's supervision - the deployed loose-file copy on the BOOT
+# partition was started that way and nobody could tell whether it was alive.
+ExecStart=/usr/bin/sc7f0_vcud --live
+Restart=always
+RestartSec=5
+# A card that boots before the host has configured the encoder must keep retrying
+# instead of dropping out of the boot transaction forever.
+StartLimitIntervalSec=0
+TimeoutStartSec=60
+# Encoder faults must never reset the card, so the watchdog unit that can bite is
+# deliberately not attached here; sc7f0-ps-watchdog monitors the upgrade/debug/HDMI
+# daemons only. Keep it that way unless a hardware reset policy is agreed.
+WatchdogSec=0
+StandardOutput=journal+console
+StandardError=journal+console
+Nice=-5
+
+[Install]
+WantedBy=multi-user.target

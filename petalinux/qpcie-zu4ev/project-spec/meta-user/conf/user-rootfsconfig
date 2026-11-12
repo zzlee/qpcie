@@ -6,3 +6,4 @@ CONFIG_peekpoke
 CONFIG_qpcie-v4l2-bridge
 CONFIG_qpcie-debugd
 CONFIG_sc7f0-ps-capture
+CONFIG_sc7f0-vcud

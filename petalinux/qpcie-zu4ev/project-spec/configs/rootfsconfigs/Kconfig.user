@@ -19,4 +19,8 @@ config sc7f0-ps-capture
 	 bool "sc7f0-ps-capture"
 	 help
 	
+config sc7f0-vcud  
+	 bool "sc7f0-vcud"
+	 help
+	
 endmenu

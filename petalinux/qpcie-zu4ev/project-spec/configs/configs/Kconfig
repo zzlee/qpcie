@@ -9,7 +9,7 @@ config SYSTEM_ZYNQMP
         bool "ZYNQMP Configuration"
         help
           ZYNQMP Configuration for petalinux project.
-          All these config options will be in /home/zzlee/vibecoding/sc7f0-dual-video/petalinux/qpcie-zu4ev/project-spec/configs/config
+          All these config options will be in /home/zzlee/qpcie/petalinux/qpcie-zu4ev/project-spec/configs/config
 
 
 config SUBSYSTEM_VARIANT_ZYNQMPEV
@@ -432,7 +432,7 @@ config SUBSYSTEM_AUTOCONFIG_U__BOOT
 endif
 endmenu
 
-source /home/zzlee/vibecoding/sc7f0-dual-video/petalinux/qpcie-zu4ev/project-spec/configs/configs/Kconfig.syshw
+source /home/zzlee/qpcie/petalinux/qpcie-zu4ev/project-spec/configs/configs/Kconfig.syshw
 
 choice
 	prompt "Subsystem Architecture"
