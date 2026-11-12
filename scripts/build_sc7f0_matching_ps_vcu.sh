@@ -31,11 +31,16 @@ OUT=$(realpath -m "${2:?ACCEPTANCE_DIRECTORY NEW_LOG_DIRECTORY}")
 # acceptance directory handed in below has to record exactly this version, so the
 # pair (acceptance dir, PL base) can never be mixed.
 PL_BASE=${SC7F0_PL_BASE_VERSION:-0x26102902}
-case "$PL_BASE" in
-    0x26102902|0x26110301) ;;
-    *) echo "Refusing to inject an unsupported PL base version: $PL_BASE "\
-           "(accepted VCU bases: 0x26102902, 0x26110301)" >&2; exit 1 ;;
-esac
+# The pair list used to be hard-coded (0x26102902, 0x26110301), which made every
+# later VCU revision unbuildable by this script - including 0x26111101, the number
+# of the package that really was flashed on 2026-11-11, and 0x26111102. What has to
+# be guaranteed is not membership of a list but that the acceptance directory handed
+# in below records exactly this version and passed the scoped hardware review for it,
+# which the python gate right below enforces. Only the format is checked here.
+if [[ ! $PL_BASE =~ ^0x[0-9A-Fa-f]{8}$ ]]; then
+    echo "Refusing an invalid PL base version: $PL_BASE (expected 0x + 8 hex digits)" >&2
+    exit 1
+fi
 IMG_DIR="$ROOT/petalinux/qpcie-zu4ev/images/linux"
 PROJECT="$ROOT/petalinux/qpcie-zu4ev"
 R7REL=build/sc7f0-capture-26102901-r1
@@ -144,6 +149,12 @@ set -eo pipefail
 source /opt/Xilinx/petalinux/2023.2/settings.sh
 set -u
 petalinux-config --get-hw-description="$SC7F0_ACCEPTED_XSA" --silentconfig
+# Runtime packages for the VCU card path. The meta-user image-recipe bbappend is
+# what really installs them; this keeps the PetaLinux rootfs menu consistent with
+# the image, so a later petalinux-config cannot silently drop the user package.
+python3 "$SC7F0_REPO_ROOT/scripts/package_sc7f0_rootfs.py" enable \
+    --rootfs-config project-spec/configs/rootfs_config \
+    --package sc7f0-vcud --json "$SC7F0_PS_BUILD_LOGS/rootfs-packages.json"
 # A hardware-description import owns CONFIG_SUBSYSTEM_BOOTARGS_GENERATED, and the
 # encoder-VCU import added a global "cma=1000M" to it.  This card's low DDR bank
 # is already committed (dau_fpga 256 MB no-map + 992 MB reusable shared-dma-pool
@@ -288,6 +299,42 @@ python3 scripts/check_sc7f0_vcu_devicetree.py "$IMG_DIR/system.dtb" \
     > "$OUT/vcu-devicetree-build.log" 2>&1
 tail -2 "$OUT/vcu-devicetree-build.log"
 
+# Stage 1b.2: the release's capture-graph audit reads the *built* kernel's .config
+# and System.map (CONFIG_VIDEO_SC7F0_FRAME_TAP=y and the sc7f0_tap_* symbols are
+# claims about the image, not about the source tree). They lived in $OUT/images only
+# for the old watchdog build, so the VCU release flow ran the audit against files
+# nothing ever wrote. Copy them out of this build's own kernel work directory and
+# hash them, and fail when the build left no single unambiguous pair behind.
+python3 - "$PROJECT" "$OUT" <<'PY'
+import hashlib, re, shutil, sys
+from pathlib import Path
+project, out = Path(sys.argv[1]), Path(sys.argv[2])
+kbuild = sorted((project / 'build/tmp/work').glob('*/linux-xlnx/*/linux-*-standard-build'))
+kbuild = [d for d in kbuild if (d / '.config').is_file() and (d / 'System.map').is_file()]
+assert kbuild, ('no kernel build directory with .config + System.map under '
+                + str(project / 'build/tmp/work') + '; the capture audit cannot be run '
+                'against a kernel nobody built')
+configs = {hashlib.sha256((d / '.config').read_bytes()).hexdigest(): d for d in kbuild}
+maps = {hashlib.sha256((d / 'System.map').read_bytes()).hexdigest(): d for d in kbuild}
+assert len(configs) == 1, ('this project has %d different kernel .config files; refusing to '
+                           'pick one for the audit' % len(configs))
+assert len(maps) == 1, ('this project has %d different kernel System.map files; refusing to '
+                        'pick one for the audit' % len(maps))
+src = kbuild[0]
+for name, dst in (('.config', 'kernel.config'), ('System.map', 'kernel.System.map')):
+    shutil.copyfile(src / name, out / dst)
+    # The release's package stage copies these into $RELEASE/images/, which is where
+    # scripts/check_sc7f0_capture_image.py reads them. They are deliberately not left
+    # in petalinux/.../images/linux, which PetaLinux owns and rewrites.
+rows = ''.join('%s  %s\n' % (hashlib.sha256((out / n).read_bytes()).hexdigest(), n)
+               for n in ('kernel.config', 'kernel.System.map'))
+(out / 'kernel-evidence.sha256').write_text(rows)
+taps = [l for l in (out / 'kernel.System.map').read_text().splitlines()
+        if re.search(r' T sc7f0_tap_', l)]
+print('KERNEL_EVIDENCE %s (%d sc7f0_tap_ symbols: %s)' %
+      (src.name, len(taps), ', '.join(l.split()[-1] for l in sorted(taps))))
+PY
+
 # Stage 1b.1: the PS memory layout must still be the one that boots on the card.
 # The 26102902 first boot proved that a regenerated bootarg can kill userspace
 # while every other artifact stays byte-identical, so this is a hard gate on the
@@ -361,16 +408,41 @@ with tempfile.TemporaryDirectory(prefix='sc7f0-vcu-fit-') as t:
     entries = cpio(gzip.decompress((t/'rootfs.gz').read_bytes()))
     release = resolve(entries, 'etc/sc7f0-recovery-release')[2]
     assert b'PL_BASE_VERSION=' + base + b'\n' in release, release[:120]
-    assert 'etc/systemd/system/multi-user.target.wants/sc7f0-vcud.service' not in entries, \
-        'an optional VCU daemon must not enter the board-required health set'
+    # The VCU daemon is product runtime now. This assertion used to be the exact
+    # opposite, because the only copy that existed was a loose file on the BOOT
+    # partition and an enabled unit would have promised what the image could not
+    # deliver. Both the binary and the libraries it loads are in the rootfs now.
+    assert 'usr/bin/sc7f0_vcud' in entries, 'sc7f0_vcud is not in the image rootfs'
+    assert 'lib/systemd/system/sc7f0-vcud.service' in entries, 'sc7f0-vcud.service is not installed'
+    assert 'etc/systemd/system/multi-user.target.wants/sc7f0-vcud.service' in entries, \
+        'sc7f0-vcud must start on boot; a reboot has to restore the encoder path by itself'
+    for runtime in ('usr/lib/libOMX.allegro.core.so',
+                    'usr/lib/libOMX.allegro.video_encoder.so',
+                    'usr/lib/liballegro_encode.so.0',
+                    'lib/firmware/al5e.fw'):
+        assert runtime in entries, runtime + ' missing: sc7f0_vcud cannot load without it'
+    if 'etc/systemd/system/sc7f0-vcud.service' in entries:
+        assert entries['etc/systemd/system/sc7f0-vcud.service'][2] != b'/dev/null', \
+            'sc7f0-vcud must not be masked'
+    # Proof required of each daemon inside the image. Byte-comparing to
+    # test_app/<binary> would only prove that two builds happened to use the same
+    # flags, and a stale local build would make it worse evidence, not better: what
+    # matters is that the bytes that will run are a root-owned executable ARM64 ELF
+    # and carry the behaviour this release claims. The upgrade daemon's backup
+    # policy is proved by a literal only the new code writes into syslog.
+    retention_literal = b'no room for a backup generation'
     for binary, unit in (('qpcie_upgrade_daemon', 'qpcie-upgrade-daemon.service'),
                          ('qpcie_debugd', 'qpcie-debugd.service'),
                          ('qpcie_hdmi_daemon', 'qpcie-hdmi-daemon.service'),
                          ('sc7f0_ps_watchdog', 'sc7f0-ps-watchdog.service')):
         mode, uid, data = resolve(entries, 'usr/bin/' + binary)
-        assert data == (Path('test_app')/binary).read_bytes(), binary + ' is stale in image.ub'
+        assert data[:4] == b'\x7fELF' and data[4] == 2, binary + ' is not a 64-bit ELF'
         assert struct.unpack_from('<H', data, 18)[0] == 183, binary + ' is not ARM64'
         assert uid == 0 and stat.S_ISREG(mode) and mode & 0o111, binary
+        if binary == 'qpcie_upgrade_daemon':
+            assert retention_literal in data, (
+                'the image still carries a pre-retention upgrade daemon: a same-version '
+                'retry could overwrite the only older backup generation')
         unit_key = 'lib/systemd/system/' + unit
         assert unit_key in entries and stat.S_ISREG(entries[unit_key][0]), unit
         enabled = 'etc/systemd/system/multi-user.target.wants/' + unit
@@ -382,8 +454,76 @@ with tempfile.TemporaryDirectory(prefix='sc7f0-vcu-fit-') as t:
     manager = 'etc/systemd/system.conf.d/90-sc7f0-watchdog.conf'
     assert manager in entries and b'RuntimeWatchdogSec=0' in entries[manager][2], manager
 print('SC7F0_VCU_INJECTED_FIT_PASS: VCU PL base declared, hardware VCU dtb intact, four ARM64 '
-      'daemons byte-exact, units enabled with watchdog drop-ins, kernel/dtb unchanged, no vcud unit')
+      'daemons present as root-executable ELFs with the upgrade daemon carrying the '
+      'backup-retention policy, units enabled with watchdog drop-ins, kernel/dtb unchanged, '
+      'sc7f0_vcud + OpenMAX libraries + VCU firmware inside the image')
 PY
+# Independent re-read of the same FIT against the release runtime checklist. It also
+# checks every unit's ExecStart, so a service pointing at a BOOT-partition or /tmp
+# loose file fails here instead of booting into a half-populated card.
+#
+# Each runtime gets a *named byte source*, decided by scripts
+# /resolve_recipe_install_output.py and recorded in rootfs-binary-sources.json:
+#
+#   * qpcie_upgrade_daemon, qpcie_debugd, qpcie_hdmi_daemon and sc7f0_ps_watchdog are
+#     installed by this repository's own injection scripts out of test_app/, from the
+#     `make -B` ARM64 build a few stages above (production-daemons.sha256). Their byte
+#     source is that file, so they are compared byte for byte.
+#   * sc7f0_vcud is installed by its recipe. OE deletes $D after packaging, so the
+#     durable install record is OE's packagedata FILES_INFO (path + size), and the
+#     in-binary literal below is the behavioural proof.
+# The previous code ran `find tmp/work -name <binary> | head -1` and fell back to
+# `@present` when it found nothing - which was always, because OE cleans $D. So no
+# runtime was ever actually compared, and a stale qpcie_debugd (the pre-0x800 mailbox
+# one) passed. There is no presence-only fallback here: an unresolved byte source is
+# a build failure.
+ROOTFS_SOURCES_JSON="$OUT/rootfs-binary-sources.json"
+ROOTFS_SOURCES_SH="$OUT/rootfs-binary-sources.sh"
+python3 scripts/resolve_recipe_install_output.py --project "$PROJECT" \
+    --cross-build qpcie_upgrade_daemon=test_app/qpcie_upgrade_daemon \
+    --cross-build qpcie_debugd=test_app/qpcie_debugd \
+    --cross-build qpcie_hdmi_daemon=test_app/qpcie_hdmi_daemon \
+    --cross-build sc7f0_ps_watchdog=test_app/sc7f0_ps_watchdog \
+    --recipe sc7f0_vcud=sc7f0-vcud \
+    --json "$ROOTFS_SOURCES_JSON" --shell "$ROOTFS_SOURCES_SH"
+# The byte source must be the very file whose sha256 this build recorded; otherwise
+# "byte-identical to the build" would compare the image against whatever happens to
+# be in test_app/ right now.
+python3 - "$OUT" "$ROOTFS_SOURCES_JSON" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+out, src = Path(sys.argv[1]), Path(sys.argv[2])
+recorded = {}
+for line in (out / 'production-daemons.sha256').read_text().splitlines():
+    digest, _, name = line.partition('  ')
+    recorded[Path(name.strip()).name] = digest.strip()
+report = json.loads(src.read_text())
+for rec in report['binaries']:
+    if rec['kind'] != 'cross-build' or rec['status'] != 'RESOLVED':
+        continue
+    want = recorded.get(Path(rec['source']).name)
+    assert want == rec['sha256'], (rec['binary'], recorded.get(rec['binary']), rec['sha256'])
+print('DAEMON_BYTE_SOURCES_MATCH_RECORDED_SHA ' + ' '.join(
+    r['binary'] for r in report['binaries'] if r['kind'] == 'cross-build'))
+PY
+# shellcheck disable=SC1090
+source "$ROOTFS_SOURCES_SH"
+python3 scripts/package_sc7f0_rootfs.py verify --image-ub "$IMG_DIR/image.ub" \
+    "${ROOTFS_EXPECT[@]}" \
+    --expect-string 'usr/bin/qpcie_upgrade_daemon=COMMIT: refused, no room for a backup generation' \
+    --expect-string 'usr/bin/qpcie_debugd=qpcie_debugd mailbox ABI h2c=0x800' \
+    --expect-string 'usr/bin/sc7f0_vcud=[VCUD ERROR] OMX_GetHandle failed' \
+    --expect-unit sc7f0-vcud.service --expect-unit qpcie-debugd.service \
+    --expect-unit qpcie-upgrade-daemon.service --expect-unit qpcie-hdmi-daemon.service \
+    --expect-unit sc7f0-ps-watchdog.service \
+    --enabled-unit sc7f0-vcud.service --enabled-unit qpcie-debugd.service \
+    --enabled-unit qpcie-upgrade-daemon.service --enabled-unit qpcie-hdmi-daemon.service \
+    --enabled-unit sc7f0-ps-watchdog.service \
+    --expect-file usr/lib/libOMX.allegro.core.so \
+    --expect-file usr/lib/libOMX.allegro.video_encoder.so \
+    --expect-file usr/lib/liballegro_encode.so.0 \
+    --expect-file lib/firmware/al5e.fw \
+    --json "$OUT/rootfs-runtime-content.json" > "$OUT/rootfs-runtime-content.log"
 sha256sum "$IMG_DIR/image.ub" > "$OUT/image-ub-final.sha256"
 # Record the PS artifacts AFTER injection: image.ub is the injected FIT, the other
 # components are the ones this build produced, which is exactly what a release must

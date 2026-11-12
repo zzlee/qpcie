@@ -24,7 +24,7 @@ changed*. This script is that fail-closed delta gate:
 This is engineering evidence, NOT publication signoff: it does not authorize
 deployment, PS image reuse, packaging or a flash.
 
-    cd /home/zzlee/vibecoding/sc7f0-dual-video
+    cd "$(git rev-parse --show-toplevel)"   # any checkout; no fixed worktree path
     python3 scripts/check_sc7f0_vcu_delta.py \
         --candidate build/dual-video-26102902-vcu-r1 \
         --baseline  build/dual-video-26102901-r7 \

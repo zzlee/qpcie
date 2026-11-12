@@ -3,7 +3,8 @@
 #   ./scripts/run_vcu_ooc.sh <tag> <tclargs...>
 set -u
 tag="$1"; shift
-root=/home/zzlee/vibecoding/sc7f0-dual-video
+# Derived, so the script survives the deletion of the original worktree.
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 logdir=/tmp/opencode/sc7f0-vcu/logs
 mkdir -p "$logdir"
 source /opt/Xilinx/Vivado/2023.2/settings64.sh >/dev/null 2>&1

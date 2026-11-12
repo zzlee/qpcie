@@ -55,12 +55,35 @@ set_property target_language Verilog [current_project]
 set_property default_lib work [current_project]
 
 # 1. Add RTL Sources & Dynamic Git Hash
-set git_raw [string toupper [exec git rev-parse --short=8 HEAD]]
-set date_raw [clock format [clock seconds] -format "%Y%m%d"]
+# The identity may be pinned by the caller (scripts/build_sc7f0_dual_video_hw.sh
+# and the release entry point always pin it) so the project-creation stage and
+# the re-synthesis stage in scripts/impl_sc7f0_dual_video.tcl cannot disagree.
+# All three overrides arrive together, or none of them and the historical
+# create-time behaviour is kept for archived builds.
+set pinned 0
+if {[info exists ::env(SC7F0_GIT_HASH)] || [info exists ::env(SC7F0_BUILD_DATE)]} {
+    foreach e {SC7F0_VERSION SC7F0_GIT_HASH SC7F0_BUILD_DATE} {
+        if {![info exists ::env($e)] || [string trim $::env($e)] eq ""} {
+            error "pinned build identity needs $e together with SC7F0_GIT_HASH/SC7F0_BUILD_DATE"
+        }
+    }
+    set pinned 1
+}
+if {$pinned} {
+    set git_raw [string toupper [string trim $::env(SC7F0_GIT_HASH)]]
+    set date_raw [string trim $::env(SC7F0_BUILD_DATE)]
+    if {![regexp {^[0-9A-F]{8}$} $git_raw]} {error "SC7F0_GIT_HASH must be 8 hex digits, got '$git_raw'"}
+    if {![regexp {^20[0-9]{2}(0[1-9]|1[0-2])(0[1-9]|[12][0-9]|3[01])$} $date_raw]} {
+        error "SC7F0_BUILD_DATE must be YYYYMMDD, got '$date_raw'"
+    }
+    puts "   (GIT PINNED-BY-CALLER) Commit Hash: 0x$git_raw, Build Date: $date_raw"
+} else {
+    set git_raw [string toupper [exec git rev-parse --short=8 HEAD]]
+    set date_raw [clock format [clock seconds] -format "%Y%m%d"]
+    puts "   (GIT AUTO-INJECT) Commit Hash: 0x$git_raw, Build Date: $date_raw"
+}
 set git_commit_hex "32'h$git_raw"
 set build_date_hex "32'h$date_raw"
-
-puts "   (GIT AUTO-INJECT) Commit Hash: 0x$git_raw, Build Date: $date_raw"
 
 add_files [glob ./rtl/*.v]
 set_property top zu4ev_pcie_card_top [current_fileset]
@@ -70,6 +93,13 @@ if {!$debug_profile} {
     if {[info exists ::env(SC7F0_VERSION)]} {set hw_version $::env(SC7F0_VERSION)}
     if {![regexp {^[0-9A-Fa-f]{8}$} $hw_version]} {error "Invalid SC7F0_VERSION"}
     set_property generic "C_VERSION=32'h$hw_version" [current_fileset]
+    # The identity pin is honoured in both stages; SC7F0_ENABLE_VCU is refused
+    # above for the debug profile, so a pinned identity can never be dropped.
+    if {$pinned && [string toupper $hw_version] ne $git_raw} {
+        # Not an error: C_VERSION and the GIT hash are different numbers. This
+        # line only records that both came from the same pinned caller.
+        puts " SC7F0 pinned identity: C_VERSION=32'h$hw_version GIT=32'h$git_raw DATE=32'h$date_raw"
+    }
 }
 
 set verilog_defs [list GIT_COMMIT_HASH_DEF=$git_commit_hex BUILD_TIMESTAMP_DEF=$build_date_hex]
@@ -90,6 +120,12 @@ if {$debug_profile} {
     add_files -fileset constrs_1 ./constraints/sc7f0_capture_gray.xdc
     set_property USED_IN_SYNTHESIS false [get_files sc7f0_capture_gray.xdc]
     set_property PROCESSING_ORDER LATE [get_files sc7f0_capture_gray.xdc]
+    # Named async IO exceptions, one port and one first-stage chain at a time
+    # (see the file header). LATE + implementation-only, like the Gray file, so
+    # the exception cannot be mistaken for a synthesis-time structural change.
+    add_files -fileset constrs_1 ./constraints/sc7f0_async_io.xdc
+    set_property USED_IN_SYNTHESIS false [get_files sc7f0_async_io.xdc]
+    set_property PROCESSING_ORDER LATE [get_files sc7f0_async_io.xdc]
     # Full Tcl belongs in a run hook, not XDC (where if/foreach are ignored).
     set_property STEPS.OPT_DESIGN.TCL.PRE [file normalize scripts/check_sc7f0_capture_gray.tcl] [get_runs impl_1]
 }

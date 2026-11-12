@@ -4,7 +4,9 @@
 # pair. Only a difference between the two columns is attributable to a change;
 # both-FAIL rows are testbenches that need XPM/Vivado BD IP iverilog lacks.
 set -uo pipefail
-ROOT=/home/zzlee/vibecoding/sc7f0-dual-video
+# ROOT used to be a hard-coded worktree path (/home/zzlee/vibecoding/
+# sc7f0-dual-video) that no longer exists; derive it from the script.
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
 OUT="$ROOT/build/ab-iverilog"; rm -rf "$OUT"; mkdir -p "$OUT/pre"
 # The pre-fix pair comes straight from HEAD, so this stays runnable later.

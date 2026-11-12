@@ -1,37 +1,28 @@
 #!/usr/bin/env bash
+# Retired 2026-11-11. This script was the 2026-11-03/09/10/11 rebuild wrapper.
+# It is kept only as a signpost, because two of its properties made the last
+# releases unattributable and it can no longer run at all:
+#
+#   * ROOT was hard-coded to /home/zzlee/vibecoding/sc7f0-dual-video, a worktree
+#     deleted on 2026-11-11, so every path it wrote (including the timing/CDC
+#     reports for the 11-11 build) is gone;
+#   * it exported SC7F0_TIMING_GATE="record", i.e. the shipped whole-design
+#     timing/CDC gate was recorded instead of enforced, while
+#     scripts/build_sc7f0_dual_video_hw.sh defaults to "strict";
+#   * it never set C_VERSION / GIT_COMMIT_HASH_DEF / BUILD_TIMESTAMP_DEF, so the
+#     identity taken when the project was first created was reused verbatim by
+#     three later rebuilds (Hardware Version 0x26110301, GIT 0x2BCE1D81 = a
+#     2026-10-27 commit, reported by all of them).
+#
+# Use the reproducible entry point instead; it pins one identity per attempt,
+# stamps it at re-synthesis, and refuses anything but the strict gate:
+#
+#   scripts/build_sc7f0_vcu_release.sh --out build/vcu-release-<version>-r1
 set -euo pipefail
-
-ROOT="/home/zzlee/vibecoding/sc7f0-dual-video"
-cd "$ROOT"
-
-export XILINXD_LICENSE_FILE="2101@192.168.200.112"
-export SC7F0_PROJECT_DIR="$ROOT/build/dual-video-26110301-vcu-r1"
-export SC7F0_ENABLE_VCU=1
-export SC7F0_TIMING_GATE="record"
-
-# Timing closure knobs (consumed by scripts/impl_sc7f0_dual_video.tcl).
-# The 2026-11-11 rebuild missed capture_clk_300m by -0.116 ns / TNS -4.956 ns on
-# 79 endpoints with every other clock group positive; the worst path was 77%
-# route delay across 9 logic levels, so it is closed with implementation effort
-# (explorational place, aggressive phys-opt, timing-driven explore route plus
-# post-route phys-opt) instead of rewriting the 300 MHz capture RTL.
-export SC7F0_PLACE_DIRECTIVE="Explore"
-export SC7F0_PHYS_OPT_DIRECTIVE="AggressiveExplore"
-export SC7F0_ROUTE_DIRECTIVE="Explore"
-export SC7F0_POST_ROUTE_PHYS_OPT="AggressiveExplore"
-export SC7F0_RESET_IMPL=1
-
-LOG_DIR="$SC7F0_PROJECT_DIR/rebuild_logs"
-mkdir -p "$LOG_DIR"
-
-source /opt/Xilinx/Vivado/2023.2/settings64.sh
-
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting Vivado synthesis & implementation for dual-video-26110301-vcu-r1..." | tee "$LOG_DIR/rebuild.log"
-
-vivado -mode batch -notrace -nojournal \
-    -log "$LOG_DIR/vivado.log" \
-    -source scripts/impl_sc7f0_dual_video.tcl >> "$LOG_DIR/rebuild.log" 2>&1
-
-EXIT_CODE=$?
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] Vivado finished with exit code $EXIT_CODE" | tee -a "$LOG_DIR/rebuild.log"
-exit $EXIT_CODE
+cat >&2 <<'MSG'
+scripts/run_rebuild_26110301_vcu.sh is retired (deleted ROOT path, SC7F0_TIMING_GATE=record,
+no build-identity injection). Use:
+  scripts/build_sc7f0_vcu_release.sh --out build/vcu-release-<version>-r1 [--stage fpga|ps|package]
+See docs/sc7f0_full_package_rebuild_20261111.md for the reason and the gate policy.
+MSG
+exit 64

@@ -10,11 +10,38 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-XCI = Path(os.environ.get("SC7F0_TEST_XCI_DIR", ROOT / "build/dual-video-26102802-r4/qpcie_zu4ev_card.srcs/sources_1/ip"))
+# These checks compare the device tree against the *generated IP configuration*
+# of a real Vivado build, so they are only evaluable when such a build exists.
+# The default used to be one hard-coded build directory
+# (dual-video-26102802-r4), which was deleted with its worktree: the suite then
+# died with FileNotFoundError instead of saying what it needs. Auto-discovering
+# some older project is worse - it produced a FAIL against IP that belongs to no
+# current design. So the inputs must be named, and the absence of a matching
+# build is reported as an actionable skip. scripts/build_sc7f0_vcu_release.sh
+# exports both variables after the FPGA/PS stages, so a real release never skips
+# them (see scripts/sc7f0_release_tests.py --require-run).
+
+
+def ip_dir() -> Path | None:
+    override = os.environ.get("SC7F0_TEST_XCI_DIR")
+    if not override:
+        return None
+    p = Path(override)
+    return p if p.is_dir() else None
 
 
 class HDMIConsistencyTest(unittest.TestCase):
+    def setUp(self):
+        self.xci_root = ip_dir()
+        if self.xci_root is None:
+            self.skipTest(
+                "needs the generated IP of the build under review: set "
+                "SC7F0_TEST_XCI_DIR=<project>.srcs/sources_1/ip (the FPGA stage of "
+                "scripts/build_sc7f0_vcu_release.sh exports it). Guessing an older "
+                "build directory would compare against IP that is not in this design.")
+
     def check_parameters(self, mutation=None, disabled=False, capture=False):
+        XCI = self.xci_root
         with tempfile.TemporaryDirectory(prefix="sc7f0-dt-test-") as temp:
             xci = Path(temp) / "ip"
             modules = ["vid_phy_controller_0", "v_hdmi_rx_ss_0"]
