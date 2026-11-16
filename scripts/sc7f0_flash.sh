@@ -1,6 +1,48 @@
 #!/usr/bin/env bash
-# 3/3: host-driver build + PS backup + VERIFY -> COMMIT -> card-only POR.
-# The SSH target is x86. All card Linux commands use sc7f0ctl exec.
+# THE ONE SUPPORTED SC7F0 FLASH ENTRY POINT (3/3 of build -> package -> flash).
+#
+#   ./scripts/sc7f0_flash.sh --build <BUILD_DIR> [--host rd@sc7f0-test.local]
+#                            [--yes | --verify-only] [--dry-run]
+#
+# The SSH target is x86; every card Linux command goes through `sc7f0ctl exec`.
+# Fixed order, every step a hard gate (docs/sc7f0_build_package_flash.md):
+#   1 release-sha     RELEASE.sha256 of the build dir + package.ok from sc7f0_package.sh
+#   2 transfer        one staging dir under ~/sc7f0/tmp, one shared remote lock
+#   3 card identity   aarch64 + qpcie-debugd/qpcie-hdmi-daemon/qpcie-upgrade-daemon active
+#   4 host-tool       qpcie_upgrade compiled from THIS release's host-tools-src.tar.gz
+#   5 host-driver     built against the running x86 kernel; a busy /dev/video0 aborts
+#   6 verify          --package; a failed VERIFY never reaches COMMIT
+#   7 backup          current eMMC BOOT.BIN / image.ub / boot.scr copied on-card
+#   8 commit          exactly ONE --commit; if the new module is rejected the old one is
+#                     restored and nothing is committed
+#   9 emmc-readback   independent eMMC SHA-256 over the PS mailbox, before any reset
+#  10 warm-reboot    --reboot (PS warm reset + PCIe rescan); the x86 host is never
+#                     rebooted here; then wait for the mailbox daemon ready=1
+#  11 version+svcs   PL version equals this build, PS transport services answering
+#  12 mcu-runtime-restart
+#                     UNCONDITIONAL and EXACTLY ONCE, never skipped because "RX looks
+#                     locked" or "there is no signal":
+#                       sudo sc7f0ctl --timeout 5 exec 'i2ctransfer -y 0 w2@0x32 0x06 0x01'
+#                     A NUC1262 runtime restart, not an MCU reflash.  Nothing else in
+#                     the system does this: the packaged sc7f0-vcud ExecStartPre
+#                     initialiser contains no I2C at all, so no second reset exists.
+#                     One bounded transaction, never a second one (a per-staging
+#                     mcu-restart.done marker refuses a repeat in the same staging dir).
+#  13 capture-advisory
+#                     NOT a gate and NOT a wait: hdmi_status and the sc7f0-vcud unit
+#                     state are sampled once, best effort, for the log only.  A flash
+#                     does not require an HDMI source, so RX lock, 3840x2160p timing,
+#                     SC7F0_CAPTURE_INIT, sc7f0-vcud "active", a VIPP capture probe and
+#                     the raw DMA frame counter must never decide the outcome here.
+#  14 final          eMMC digests still correct after the reboot, PS boot id CHANGED
+#                     (the PS really restarted), host boot id UNCHANGED.
+#
+# This file absorbed the post-flash stages (10-14) of the former scripts/upgrade.sh,
+# which is removed: there is no second flash path to choose between.  Exit status is 0
+# only when every gating stage above genuinely passed, and a green exit means "this
+# exact build was written to eMMC, read back independently, booted as the card's new
+# image, and the MCU runtime restart was issued exactly once".  It makes no claim about
+# HDMI source presence, capture, overlay or encoder acceptance.
 set -euo pipefail
 OUT= HOST=rd@sc7f0-test.local YES=0 VERIFY_ONLY=0 DRY=0
 usage() { echo "Usage: $0 --build BUILD_DIR [--host rd@sc7f0-test.local] [--yes | --verify-only] [--dry-run]"; }
@@ -19,7 +61,7 @@ done
 OUT=$(realpath -m "$OUT")
 if ((DRY)); then
     printf 'FLASH build=%s host=%s verify_only=%s\nCheck release SHA; check real PS services via sc7f0ctl exec; compile matched host driver; board VERIFY.\n' "$OUT" "$HOST" "$VERIFY_ONLY"
-    ((VERIFY_ONLY)) || echo 'Then back up eMMC/host module; install driver; COMMIT; read back SHA; card-only POR/rescan; assert version and unchanged x86 boot ID.'
+    ((VERIFY_ONLY)) || echo 'Then back up eMMC/host module; install driver; COMMIT; read back SHA; warm reboot + PCIe rescan (never the x86); assert version and PS services; ONE unconditional MCU runtime restart (i2ctransfer -y 0 w2@0x32 0x06 0x01); one advisory capture sample; assert PS boot id changed and x86 boot id unchanged.'
     exit 0
 fi
 [[ -f $OUT/package.ok && $(<"$OUT/package.ok") == SC7F0_PACKAGE_PASS ]] || { echo 'Missing successful package gate' >&2; exit 1; }
@@ -67,7 +109,30 @@ if ((VERIFY_ONLY)); then
 fi
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 sudo -n "$CTL" exec "set -eu; b=/run/media/BOOT-mmcblk0p1; test -s \$b/BOOT.BIN; d=\$b/.backup_cli_$STAMP; mkdir \$d; for n in BOOT.BIN image.ub boot.scr; do cp \$b/\$n \$d/\$n; done; sync; sha256sum \$d/*"
-INSTALLED=$(modinfo -n qpcie)
+# Resolve the file that is actually loaded, so the rollback copy is the code the
+# card is talking to.  `modinfo -n qpcie` only works for a module that has a
+# modules.dep entry: on the 7.0.0-43 test host the running module was insmod'ed
+# and /lib/modules/$(uname -r)/extra/ does not exist, so the plain lookup fails
+# ("modinfo: ERROR: Module qpcie not found") and aborts the flash before any
+# COMMIT - the fallback picks the candidate whose srcversion equals the running
+# module's, which is the same object, not merely some file with the right name.
+RUNNING_SRCVERSION=$(cat /sys/module/qpcie/srcversion 2>/dev/null || true)
+INSTALLED=$(modinfo -n qpcie 2>/dev/null || true)
+if [[ -z $INSTALLED ]]; then
+    for candidate in "/lib/modules/$(uname -r)/extra/qpcie.ko" "$HOME/qpcie.ko"; do
+        [[ -f $candidate ]] || continue
+        sv=$(modinfo -F srcversion "$candidate" 2>/dev/null || true)
+        if [[ -n $RUNNING_SRCVERSION && $sv == "$RUNNING_SRCVERSION" ]]; then
+            INSTALLED=$candidate
+            echo "RUNNING_MODULE_RESOLVED $candidate srcversion=$sv"
+            break
+        fi
+    done
+fi
+[[ -n $INSTALLED ]] || {
+    echo 'REFUSE_UNKNOWN_RUNNING_MODULE: cannot find the file that backs the loaded qpcie' >&2
+    echo "  modinfo -n failed and no candidate matches srcversion=${RUNNING_SRCVERSION:-unknown}" >&2
+    exit 1; }
 cp "$INSTALLED" module-before.ko
 [[ ! -f $HOME/qpcie.ko ]] || cp "$HOME/qpcie.ko" home-module-before.ko
 # rmmod, NOT modprobe -r: keep the vb2 dependencies loaded. Restore on failure.
@@ -94,17 +159,77 @@ actual={Path(n).name:h for h,n in (line.split() for line in Path('readback.sha25
 assert actual==expected, (actual,expected)
 print('EMMC_READBACK_SHA_PASS')
 PY
+# The PS boot id before the reset is the only proof later that the card really
+# restarted; a stale eMMC readback plus an unchanged boot id is "nothing happened".
+PS_BOOT_BEFORE=$( { sudo -n "$CTL" exec 'cat /proc/sys/kernel/random/boot_id' | grep -Eo '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | tail -1; } || true )
+[[ -n $PS_BOOT_BEFORE ]] || { echo 'REFUSE_UNKNOWN_PS_BOOT_ID: the PS boot id could not be read before the reset, so "the PS restarted" could never be proved.' >&2; exit 1; }
 sudo -n ./qpcie_upgrade --reboot | tee reboot.log
 ready=0
 for attempt in $(seq 1 45); do
-    if sudo -n "$CTL" status > ps-status.log 2>&1 && grep -q 'ready=1' ps-status.log; then ready=1; break; fi
+    if sudo -n "$CTL" --timeout 5 status > ps-status.log 2>&1 && grep -q 'ready=1' ps-status.log; then ready=1; break; fi
     sleep 2
 done
 [[ $ready == 1 ]] || { echo 'PS did not resume; inspect PCIe/card boot. Do NOT reboot the x86 host automatically.' >&2; exit 1; }
 sudo -n ./qpcie_upgrade --status | tee active-version.log
 grep -qi "Hardware Version.*0x$VERSION" active-version.log
 sudo -n "$CTL" exec 'uname -a; for s in qpcie-debugd qpcie-hdmi-daemon qpcie-upgrade-daemon; do systemctl is-active --quiet "$s" || exit 1; done; ps -ef | grep qpcie'
-[[ $(</proc/sys/kernel/random/boot_id) == "$BOOT_BEFORE" ]]
-echo "FLASH_PASS: active=0x$VERSION; eMMC hashes verified; x86 boot ID unchanged."
-echo 'Capture/display acceptance is a separate test; a successful flash alone is not image success.'
+
+# ------------------------------------------------------------------ stage 12
+# NUC1262 runtime restart: unconditional, exactly once, after the version check.
+# There is deliberately no test of hdmi_status, RX lock, cable presence or IT6663 here:
+# reading a stale "Signal Locked" is exactly how this step used to get skipped, and
+# skipping it is how the RX stays frozen after a PS restart (docs/
+# sc7f0_261116_refclk_char4_and_c2h_zero_payload_20261116.md got char/4 back this way).
+# It is a runtime restart, not an MCU reflash: no PL, no eMMC, no PS/host change.
+# One bounded transaction; a failure is reported, never retried here.
+if [[ -e mcu-restart.done ]]; then
+    echo 'REFUSE_MCU_RESTART_SECOND: this staging directory already holds an MCU restart record.' >&2
+    exit 1
+fi
+MCU_LOG=mcu-restart.log
+echo "MCU_RESTART_UNCONDITIONAL_START $(date -u +%FT%TZ)" > "$MCU_LOG"
+T0=$(date +%s%N)
+if sudo -n "$CTL" --timeout 5 exec 'i2ctransfer -y 0 w2@0x32 0x06 0x01' >>"$MCU_LOG" 2>&1; then MCU_RC=0; else MCU_RC=$?; fi
+T1=$(date +%s%N)
+echo "MCU_RESTART_RC=$MCU_RC elapsed_ms=$(( (T1 - T0 ) / 1000000 )) UTC=$(date -u +%FT%TZ)" >> "$MCU_LOG"
+if ((MCU_RC == 0)); then
+    date -u +%FT%TZ > mcu-restart.done
+    mkdir -p "$HOME/sc7f0/logs"
+    echo "$(date -u +%FT%TZ) staging=$PWD version=0x$VERSION" >> "$HOME/sc7f0/logs/mcu-restart-history"
+    echo MCU_RESTART_RECORDED >> "$MCU_LOG"
+fi
+cat "$MCU_LOG"
+((MCU_RC == 0)) || { echo "The single MCU runtime restart transaction failed (rc=$MCU_RC); do NOT retry it here, report it. The eMMC is already committed and the card boots the new image." >&2; exit 1; }
+
+# ------------------------------------------------------------------ stage 13
+# Capture state: advisory only, one best-effort read, never a wait and never a gate.
+# Whether an HDMI source is attached while the firmware is flashed says nothing about
+# the flash.  Nothing here may be turned back into a gate: the evidence for "the flash
+# was written correctly" is stages 1-12 plus 14.
+{ echo "CAPTURE_ADVISORY_START $(date -u +%FT%TZ)"
+  echo '--- host sysfs hdmi_status (best effort, not judged) ---'
+  sudo -n cat /sys/bus/pci/devices/0000:03:00.0/hdmi_status 2>&1 | sed -n '1,4p'
+  echo '--- card capture/encoder unit state (best effort, not judged) ---'
+  sudo -n "$CTL" --timeout 20 exec 'for u in sc7f0-vcud sc7f0-rgb-overlay; do printf "%s=%s\n" "$u" "$(systemctl is-active "$u" 2>/dev/null || true)"; done' 2>&1
+  echo "CAPTURE_ADVISORY_DONE $(date -u +%FT%TZ)"; } > capture-advisory.txt 2>&1 || true
+cat capture-advisory.txt || true
+echo 'CAPTURE_ADVISORY verdict=NOT_EVALUATED (a flash never requires an HDMI source)'
+
+# ------------------------------------------------------------------ stage 14
+# The committed image must still be the one in eMMC after the reboot, the PS must
+# provably have restarted, and the x86 host must provably NOT have restarted.
+sudo -n "$CTL" exec 'sha256sum /run/media/BOOT-mmcblk0p1/BOOT.BIN /run/media/BOOT-mmcblk0p1/image.ub /run/media/BOOT-mmcblk0p1/boot.scr' > readback-after-reboot.sha256
+python3 - <<'PY'
+from pathlib import Path
+expected={Path(n).name:h for h,n in (line.split() for line in Path('RELEASE.sha256').read_text().splitlines()) if n.startswith('images/')}
+actual={Path(n).name:h for h,n in (line.split() for line in Path('readback-after-reboot.sha256').read_text().splitlines())}
+assert actual and actual==expected, (actual,expected)
+print('EMMC_PERSISTED_ACROSS_REBOOT')
+PY
+PS_BOOT_AFTER=$( { sudo -n "$CTL" exec 'cat /proc/sys/kernel/random/boot_id' | grep -Eo '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | tail -1; } || true )
+[[ -n $PS_BOOT_AFTER && $PS_BOOT_AFTER != "$PS_BOOT_BEFORE" ]] || { echo "PS boot id is unchanged (${PS_BOOT_AFTER:-unreadable}); the warm reset did not actually happen." >&2; exit 1; }
+echo "PS_BOOT_ID $PS_BOOT_BEFORE -> $PS_BOOT_AFTER (the PS restarted)"
+[[ $(</proc/sys/kernel/random/boot_id) == "$BOOT_BEFORE" ]] || { echo 'The x86 host boot id changed; this script must never reboot the host.' >&2; exit 1; }
+echo "FLASH_PASS: active=0x$VERSION; eMMC hashes verified before and after the reboot; exactly one MCU runtime restart; PS boot id changed; x86 boot ID unchanged."
+echo 'FIRMWARE FLASH PASSED / 升級完成，擷取功能未驗證。Capture/overlay/display acceptance is a separate test; a successful flash alone is not image success.'
 REMOTE_SCRIPT

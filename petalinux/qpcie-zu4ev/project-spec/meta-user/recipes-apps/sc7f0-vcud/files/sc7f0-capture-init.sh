@@ -16,8 +16,8 @@
 # Deliberately NOT done here:
 #   * no I2C / no NUC1262 MCU runtime restart.  The MCU runtime restart (bus 0,
 #     0x32, reg 0x06=0x01) is a host-side, exactly-once, post-boot action owned by the
-#     host upgrade entry point (scripts/upgrade.sh).  Repeating it from here would make
-#     "exactly one reset per upgrade" unverifiable.
+#     single host flash entry point (scripts/sc7f0_flash.sh, stage 12).  Repeating it
+#     from here would make "exactly one reset per flash" unverifiable.
 #   * no guessed geometry.  This round is explicitly 3840x2160p60 only; a different
 #     locked timing is reported and refused rather than silently fitted, because a
 #     silently wrong graph is exactly the failure this script exists to remove.

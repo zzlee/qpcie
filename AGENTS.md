@@ -127,46 +127,54 @@ SC7F0_IMPL_DIR="$OUT/fpga" SC7F0_IMG_DIR="$OUT/images" bash scripts/package_zu4e
 
 ## 🔥 燒錄專案步驟
 
-根據 `scripts/sc7f0_flash.sh` 腳本，完整燒錄流程如下:
+> **唯一標準燒錄入口（2026-11-16 起，強制）**：
+> `./scripts/sc7f0_flash.sh --build <BUILD_DIR> [--host rd@sc7f0-test.local] [--yes | --verify-only] [--dry-run]`。
+> 一條指令完成全流程。原本的第二條 host 端燒錄路徑（`upgrade.sh`）已**移除**，其燒錄後步驟
+> （warm reboot、PL 版號覆核、**無條件恰一次的 MCU runtime restart**、advisory 擷取參考、
+> 開機後 eMMC SHA／boot-id 覆核）已整併進本腳本。
+> **不得**再新增第二條燒錄入口、不得把本腳本某段複製成獨立 script、也不得手動補跑那個 reset
+> （剛燒完的卡已經有那一次；看 `logs/flash.log` 裡的 `MCU_RESTART_RC`）。
+> 入口存在性、順序與「恰一次」由 `scripts/tests/test_sc7f0_flash_entry.py` 守住。
 
-### 第一步：準備與驗證
+### 標準流程
+
 ```bash
-# 檢查建置結果與完整性 (verify SHA256)
-sha256sum -c RELEASE.sha256
+# 0) 前置：build 已完成（build.ok）且 package 閘已通過（package.ok）
+cd /home/zzlee/qpcie
 
-# 驗證 PS 服務運行狀態 (需要 sc7f0ctl 狀態)
-sudo /home/rd/sc7f0/bin/sc7f0ctl status
+# 1) 不碰硬體的預演（列完整步驟，包含 MCU runtime restart）
+./scripts/sc7f0_flash.sh --build build/<DIR> --dry-run
+
+# 2) 只 VERIFY（不寫 eMMC、不換驅動、不重啟）
+./scripts/sc7f0_flash.sh --build build/<DIR> --verify-only
+
+# 3) 正式燒錄（唯一入口；內含 VERIFY -> 備份 -> COMMIT -> 讀回 -> 重啟 -> MCU restart -> 覆核）
+./scripts/sc7f0_flash.sh --build build/<DIR>
+# 或者確定要燒錄時直接略過確認：... --yes
 ```
+### 腳本內固定順序（每一步都是硬閘）
 
-### 第二步：執行驗證階段
-```bash 
-# 在 x86 上進行 VERIFY 操作
-./qpcie_upgrade --package "upgrade-$VERSION.tar"
+1. 核對 `RELEASE.sha256` 與 `package.ok`；傳到 `/home/rd/sc7f0/tmp/upgrade.XXXXXXXX`（共用 `.upgrade.lock`）。
+2. `sc7f0ctl exec` 確認卡端 aarch64 與 `qpcie-debugd`/`qpcie-hdmi-daemon`/`qpcie-upgrade-daemon` 皆 active。
+3. 在 x86 編譯 matching host driver；`/dev/video0` 被佔用則中止。
+4. `qpcie_upgrade --package` VERIFY（恰一次）；VERIFY 失敗**絕對不會**走到 COMMIT。
+5. 備份 eMMC 三個 boot file + 依 srcversion 解析並備份「實際載入的 `qpcie.ko`」（解析不到就 `REFUSE_UNKNOWN_RUNNING_MODULE`）。
+6. 安裝新 driver；被拒则回裝舊 module 並停止（此時 eMMC 未動）。
+7. `--commit`（恰一次）+ mailbox 獨立讀回 eMMC 三個 SHA。
+8. 讀重啟前 PS boot id。
+9. `--reboot`（卡端 warm reset + PCIe rescan；**絕不重啟 x86**）→ 輪詢 `ready=1`。
+10. 確認 PL version = 本次 build 且三個 daemon active。
+11. **無條件且恰好一次** `sudo sc7f0ctl --timeout 5 exec 'i2ctransfer -y 0 w2@0x32 0x06 0x01'`
+   （NUC1262 runtime restart，非重燒 MCU／非 IP reset／非 cold reboot）；不看訊號、不看 unit 狀態；
+   per-staging `mcu-restart.done` 擋第二次，成功後寫 `/home/rd/sc7f0/logs/mcu-restart-history`；
+   失敗**只回報不重試**。
+12. 擷取狀態 advisory 讀一次（`verdict=NOT_EVALUATED`）：燒錄不要求接 HDMI 來源。
+13. 開機後再讀 eMMC 三個 SHA（`EMMC_PERSISTED_ACROSS_REBOOT`）、**PS boot id 已變**、**x86 boot id 未變** → `FLASH_PASS`。
 
-# 驗證檔案 SHA 檔案完整性
-grep -E '  (upgrade-[0-9]+\.tar|host-driver-src\.tar\.gz|host-tools-src\.tar\.gz)$' RELEASE.sha256 | sha256sum -c -
-
-# 備份現有 eMMC 鏡像
-sudo /home/rd/sc7f0/bin/sc7f0ctl exec "b=/run/media/BOOT-mmcblk0p1; test -s \$b/BOOT.BIN; d=\$b/.backup_cli_$STAMP; mkdir \$d; for n in BOOT.BIN image.ub boot.scr; do cp \$b/\$n \$d/\$n; done"
-```
-
-### 第三步：執行提交與重啟階段
-```bash
-# 安裝新的驅動程式並進行提交
-sudo -n insmod driver/qpcie.ko
-
-# 使用提交命令更新 eMMC
-./qpcie_upgrade --commit
-
-# 檢查 eMMC 鏡像驗證 (SHA256)
-sudo /home/rd/sc7f0/bin/sc7f0ctl exec 'sha256sum /run/media/BOOT-mmcblk0p1/BOOT.BIN /run/media/BOOT-mmcblk0p1/image.ub /run/media/BOOT-mmcblk0p1/boot.scr'
-
-# 進行卡端重啟
-./qpcie_upgrade --reboot
-
-# 確認 PS 回復與版本驗證
-sudo /home/rd/sc7f0/bin/sc7f0ctl status
-```
+> 若必須手動重現單一階段（除錯用，不是燒錄路徑）：`sha256sum -c RELEASE.sha256`、
+> `sudo /home/rd/sc7f0/bin/sc7f0ctl status`、`sudo -n ./qpcie_upgrade --package|--commit|--reboot|--status`
+> 與 eMMC `sha256sum` 讀回都是腳本內部已包含的動作。**手動序列不等於入口腳本**，也不保證那個
+> MCU runtime restart 已執行。
 
 ## 📁 測試機檔案放置規範（強制）
 

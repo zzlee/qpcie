@@ -47,20 +47,43 @@ PS FIT 是實驗室版本，保留 PCIe root debug exec；不要視為未授權�
 - 產物：`upgrade-<version>.tar`、`release.json`、`RELEASE.sha256`、`package.ok`。
 - 無硬體操作；不覆蓋已封存的 package。
 
-## 3. `scripts/sc7f0_flash.sh`
+## 3. `scripts/sc7f0_flash.sh` — 唯一標準燒錄入口
+
+> **唯一入口**：SC7F0 的 PS/PL 燒錄**只**有 `./scripts/sc7f0_flash.sh --build <BUILD_DIR>`
+> 這一條。原本的第二條 host 端燒錄路徑（`upgrade.sh`）已於 2026-11-16 移除，其燒錄後
+> 步驟（warm reboot、版號確認、**無條件恰一次的 MCU runtime restart**、advisory 擷取
+> 參考、開機後覆核）已整併進本腳本，所以**一條指令即可完成全流程**，不再需要「燒完再去
+> 手動補一個 reset」。不得再新增第二條燒錄入口，也不得把本腳本某段複製成獨立 script。
 
 測試機需要 SSH、免密 `sudo -n`、gcc/make/kernel headers，及既有
 `/home/rd/sc7f0/bin/sc7f0ctl`。本版是針對目前 x86 測試機／aarch64 SC7F0 PetaLinux，
 eMMC boot mount 為 `/run/media/BOOT-mmcblk0p1`。其他部署配置應先確認，不能猜測。
 
-1. 核對 release SHA，將包與 matched source 傳到測試機。
-2. **透過 sc7f0ctl exec** 檢查真正 PS 的架構及三個 daemon。
+固定順序（每一步都是硬閘；`scripts/tests/test_sc7f0_flash_entry.py` 逐條守住）：
+
+1. 核對 release SHA（`RELEASE.sha256`）與 `package.ok`，將包與 matched source 傳到測試機
+   （staging 一律 `/home/rd/sc7f0/tmp/upgrade.XXXXXXXX`，共用 `.upgrade.lock`）。
+2. **透過 sc7f0ctl exec** 檢查真正 PS 的架構及三個 daemon 皆 `active`。
 3. 在 x86 上針對該機 kernel 編譯 matched driver；拒絕正在使用 `/dev/video0` 的情況。
-4. PCIe push／PS VERIFY；不接受 E1，不會忽略錯誤強行 COMMIT。
-5. 備份 PS eMMC 三個 boot files 與 host module；載入及安裝 matched driver。
-6. COMMIT；經 PS mailbox 獨立讀回三個檔案的 SHA。
-7. 請求卡端 warm system reset／PCIe rescan（依賴活著的 PS upgrade daemon，**不是外部 POR**），等待 PS 回復，確認 active version 與三個 daemon；新流程還需比對 PS kernel boot_id。
-8. 比對 x86 boot ID 未變。保留 remote logs／backups 的目錄路徑。
+4. PCIe push／PS VERIFY；不接受 E1，VERIFY 失敗**絕對不會**走到 COMMIT。
+5. 備份 PS eMMC 三個 boot files 與 host module（host 端依 srcversion 解析「實際載入的那個
+   `qpcie.ko`」，解析不出來就 `REFUSE_UNKNOWN_RUNNING_MODULE` 停止）。
+6. 安裝 matched driver；新 module 被拒時立刻回裝舊 module，**此時尚未動 eMMC**。
+7. COMMIT（恰一次）；經 PS mailbox 獨立讀回三個檔案的 SHA（`EMMC_READBACK_SHA_PASS`）。
+8. 讀取重啟前的 **PS boot id**（讀不到就停止，之後就無法證明卡端真的重啟過）。
+9. `--reboot`：卡端 warm system reset／PCIe rescan（依賴活著的 PS upgrade daemon，
+   **不是外部 POR**，**絕不重啟 x86**），輪詢等待 mailbox `ready=1`。
+10. 確認 active PL version = 本次 build、三個 PS daemon 仍 `active`。
+11. **無條件、且恰好一次**的 NUC1262 runtime restart：
+    `sudo sc7f0ctl --timeout 5 exec 'i2ctransfer -y 0 w2@0x32 0x06 0x01'`。
+    不看 `hdmi_status`、不看 RX lock、不看 unit 狀態（讀到過期的 "Signal Locked" 正是這步
+    過去被跳過的原因，而跳過它就是 PS 重啟後 RX 維持凍結的原因）。每個 staging 目錄以
+    `mcu-restart.done` 記錄，第二次同 staging 直接 `REFUSE_MCU_RESTART_SECOND`；成功後寫
+    `/home/rd/sc7f0/logs/mcu-restart-history`。失敗**只回報、不重試**。
+12. 擷取狀態**僅供參考**（`CAPTURE_ADVISORY`，best-effort 讀一次，`|| true`，
+    `verdict=NOT_EVALUATED`）：燒錄不要求接 HDMI 來源。
+13. 開機後再次讀回 eMMC 三個 SHA（`EMMC_PERSISTED_ACROSS_REBOOT`）、比對 **PS boot id 已改變**
+    （卡端真的重啟）與 **x86 boot id 未變**。輸出 `FLASH_PASS`。
 
 只有 VERIFY、不寫 eMMC、不換驅動、不重啟：
 
@@ -70,7 +93,8 @@ eMMC boot mount 為 `/run/media/BOOT-mmcblk0p1`。其他部署配置應先確認
 
 省略確認提示（確定要燒錄才使用）：`--yes`。
 三支都支援 `--help`／`--dry-run`；dry-run 不接觸硬體。
-`logs/flash.log` 保存燒錄紀錄。燒錄成功不等於視訊成功，下面仍需驗收。
+`logs/flash.log` 保存燒錄紀錄（含 `mcu-restart.log`、`capture-advisory.txt`、兩次 eMMC
+readback）。燒錄成功不等於視訊成功，下面仍需驗收。
 
 ## H2C mailbox 位址與前後端匹配（燒錄前必查）
 
@@ -156,15 +180,22 @@ python3 /home/rd/sc7f0-nv-formats/sc7f0_hdmi_preview.py --format NV12 --sink way
 > 這是**燒錄/重啟後的功能初始化與驗收清單**，不是可選除錯手段；但也**不是**無條件每次都做的動作。
 > 目前 ② 與 ③ 仍需**手動**執行，尚未固化成開機 script/service；本文件不宣稱整包已全自動。
 
-> **與 `scripts/upgrade.sh` 的界線（2026-11-12 修正）**：本清單是**影像功能**驗收，**不是**燒錄成功條件。
-> 燒錄時**不要求**接 HDMI 來源，因此 `scripts/upgrade.sh` 不再等待或判定 RX lock、`3840x2160p` 時序、
+> **與影像驗收的界線（2026-11-12 確立，2026-11-16 對齊唯一入口）**：本清單是**影像功能**
+> 驗收，**不是**燒錄成功條件。
+> 燒錄時**不要求**接 HDMI 來源，因此 `scripts/sc7f0_flash.sh` 不等待也不判定 RX lock、`3840x2160p` 時序、
 > 包內 `SC7F0_CAPTURE_INIT`、`sc7f0-vcud` 是否 `active`、VIPP capture probe 或 `ch0_frames` 計數；
-> 它只在結尾**讀一次**擷取狀態當參考（不輪詢、不判成敗），綠燈語意為「本套件已寫入 eMMC、獨立讀回、
+> 它只在結尾**讀一次**擷取狀態當參考（不輪詢、不判成敗，`verdict=NOT_EVALUATED`），綠燈語意為「本套件已寫入 eMMC、獨立讀回、
 > 並作為新映像啟動，且 MCU runtime reset 已恰一次執行」，**不得**宣稱 4K60／擷取／編碼驗收通過。
-> 上表「已 lock 就跳過 reset」只適用於**人工**除錯路徑；`upgrade.sh` 內的 reset 是**無條件恰一次**，
-> 不以訊號或 unit 狀態跳過。①②②b③ 屬後續 host driver／GStreamer 階段，接上來源後另驗。
+> 下表「已 lock 就跳過 reset」只適用於**燒錄之後**的**人工**除錯路徑；燒錄當時 `sc7f0_flash.sh`
+> 的 reset 是**無條件恰一次**，不以訊號或 unit 狀態跳過。②②b③ 屬後續 host driver／GStreamer 階段，接上來源後另驗。
 
-### ① 必查兩層鎖；只在「上游已鎖、下游未鎖」時做一次 runtime reset
+### ① 燒錄當下由入口腳本無條件做一次；本節是「非當次燒錄」的人工除錯判定
+
+> **先讀这句**：`./scripts/sc7f0_flash.sh` 在 `--reboot` 與 version 確認之後，**一定**已經
+> 執行過**恰一次** runtime reset（並寫 `mcu-restart.log` 與 `/home/rd/sc7f0/logs/mcu-restart-history`）。
+> 所以下表的「跳過／執行」判定只用於**距上次燒錄很久之後**的現場除錯（來源重新插拔、
+> 長時間運行後 RX 凍結等），**不適用於剛燒完的卡**；剛燒完就看不到訊號時，先看當次
+> `logs/flash.log` 裡的 `MCU_RESTART_RC`，而不是又補一次。
 
 先讀兩邊（皆唯讀）：
 
@@ -199,7 +230,9 @@ watch -n3 'sudo -n cat /sys/bus/pci/devices/0000:03:00.0/hdmi_status'
 `/dev/v4l-subdev2 --query-dv-timings` 3840×2160 total 4400×2250 60.00 fps，
 `xilinx-hdmi-rx` 中斷 2→2473（真的重跑交握），而 **PS boot-ID、host boot-ID、`card_epoch` 全未變**
 ⇒ 證明不是整卡/PS reset，**不需要 cold reboot**。
-三支 script 不會暗中執行這一步；失敗就不要重試，先回報。
+**當次燒錄**已由 `scripts/sc7f0_flash.sh` 無條件執行恰一次（§3 步驟 11）；除此之外沒有任何
+自動化路徑會暗中執行這一步（包內 `sc7f0-capture-init.sh` 完全不碰 I2C，由
+`scripts/tests/test_sc7f0_flash_entry.py` 守住），手動執行時失敗就不要重試，先回報。
 
 ### ② 必查 media graph 各 pad 的尺寸／code／field 是否匹配當前輸入，**並接著顯式設定 VIPP 節點格式，順序固定**
 
