@@ -48,6 +48,11 @@ scripts/archive_debug/
 # It is regenerated for every implementation round and is derived evidence, not a
 # gate input; scripts/gates/*.json stays tracked.
 /tmp-named-evidence-check/
+# Staging copy of the x86 test host's /etc/default/grub (GRUB_CMDLINE_LINUX="cma=256M",
+# the host-side coherent/DMA-BUF sizing the C2H RGB888 path was accepted with).  It is a
+# scratch staging file for a change applied on the test host, not a file this repository
+# builds or ships, so it stays out of git while the local copy is kept as provenance.
+/W-staging-cma/
 
 # ------------------------------------------------------------------------------
 # 2. Simulation Artifacts (Icarus Verilog, ModelSim, Verilator)
@@ -156,6 +161,14 @@ test_app/sc7f0_ps_capture
 test_app/sc7f0_pkt_dma_test
 test_app/host_pkt_dma_test
 test_app/sc7f0ctl_compat400
+# SC7F0-RGB-COMPOSITOR-2PPC host/card binaries (test_app/Makefile + the
+# sc7f0-rgb-overlay recipe).  Same rule as sc7f0_ps_capture above: the ELF is a build
+# product of a tracked .c file, and an aarch64 static binary in the tree is never
+# evidence of which source produced it - the release manifests and PROVENANCE json are.
+test_app/sc7f0_rgb_overlay
+test_app/sc7f0_fill_oracle
+test_app/host_rgb_compositor
+test_app/sc7f0_ovl_verify
 prj/
 runhls.tcl
 
