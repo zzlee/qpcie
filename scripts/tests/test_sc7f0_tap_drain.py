@@ -83,6 +83,18 @@ class TapDrainTest(unittest.TestCase):
             "/home/zzlee/qpcie/petalinux/qpcie-zu4ev/build/tmp/work-shared/"
             "zynqmp-generic-xczu4ev/kernel-source"))
         patch = TAP.parent / "0001-sc7f0-vipp-frame-tap.patch"
+        if not kernel.is_dir():
+            self.skipTest("no kernel source at %s (SC7F0_TEST_KERNEL_SOURCE)" % kernel)
+        # patch --batch does not ask, it force-applies - and a tree that already carries
+        # the tap makes it apply the patch BACKWARDS, which is how this test used to
+        # report "substring not found" on a machine whose PetaLinux build tree had
+        # already been patched.  An already-patched source cannot answer a question about
+        # patch ORDERING, so it is refused loudly instead of being tested backwards.
+        staged_source = kernel / "drivers/media/platform/xilinx/xilinx-dma.c"
+        if "sc7f0_tap_quiesce" in staged_source.read_text():
+            self.skipTest("%s already carries the frame tap; point "
+                          "SC7F0_TEST_KERNEL_SOURCE at a pristine kernel-source to test "
+                          "the patch itself" % kernel)
         with tempfile.TemporaryDirectory(prefix="sc7f0-patch-drain-") as tmp:
             stage = Path(tmp)
             for name in ("xilinx-dma.c", "xilinx-dma.h", "Kconfig", "Makefile"):
@@ -93,6 +105,9 @@ class TapDrainTest(unittest.TestCase):
                 subprocess.run(["patch", "--batch", "-p1", "-d", tmp], stdin=source,
                                check=True, capture_output=True, text=True)
             text = (stage / "drivers/media/platform/xilinx/xilinx-dma.c").read_text()
+            self.assertIn("sc7f0_tap_quiesce", text,
+                          "the patch added no tap at all (silently reversed or skipped), "
+                          "so no ordering claim below could mean anything")
             begin = text.index("static void xvip_dma_stop_streaming(")
             end = text.index("\nstatic ", begin + 5)
             stop = text[begin:end]

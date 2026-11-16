@@ -1177,13 +1177,16 @@ class LegacyMatcherPolicyTests(unittest.TestCase):
 
 
 class ConstraintFileTests(unittest.TestCase):
-    """constraints/sc7f0_async_io.xdc must stay per-port and per-first-stage."""
+    """constraints/sc7f0_async_io.xdc must stay per-port, per-first-stage and
+    profile-neutral; the capture-only-only exception file stays exactly two rows."""
 
     xdc = (REPO / "constraints" / "sc7f0_async_io.xdc").read_text()
+    xdc_legacy_tx = (REPO / "constraints" / "sc7f0_tx_tmds_clk_capture_only.xdc").read_text()
 
-    def active(self):
+    @staticmethod
+    def parse(text):
         # join backslash continuations, then drop comments
-        joined = self.xdc.replace("\\\n", " ")
+        joined = text.replace("\\\n", " ")
         lines, buffer = [], ""
         for line in joined.splitlines():
             line = line.strip()
@@ -1195,6 +1198,14 @@ class ConstraintFileTests(unittest.TestCase):
             lines.append(buffer)
             buffer = ""
         return lines
+
+    def active(self):
+        return self.parse(self.xdc)
+
+    def legacy_tx(self):
+        """Commands of the file scripts/build_zu4ev.tcl mounts for the capture-only
+        personality only (never for a TX-live profile)."""
+        return self.parse(self.xdc_legacy_tx)
 
     def test_no_broad_clock_group_or_blanket_delays(self):
         text = " ".join(self.active())
@@ -1224,15 +1235,40 @@ class ConstraintFileTests(unittest.TestCase):
         self.assertNotIn("set_max_delay", text)
 
     def test_tx_tmds_and_rx_ddc_exceptions_are_written_per_port_per_consumer(self):
-        """Scope is decided: capture-only, TX approved-not-accepted.
+        """Scope is decided per personality: capture-only, TX approved-not-accepted.
 
-        The TX TMDS pads are excepted one command per port (never a clock group,
-        never an invented output delay), and each RX DDC pad has one exception per
-        measured consumer, all of them restricted to a first stage.
+        The two `set_false_path -to [get_ports hdmi_tx_tmds_clk_*]` rows were MOVED out
+        of the always-mounted constraints/sc7f0_async_io.xdc into
+        constraints/sc7f0_tx_tmds_clk_capture_only.xdc, which scripts/build_zu4ev.tcl
+        mounts for the capture-only personality alone.  A TX-live personality
+        (SC7F0_RGB_COMPOSITOR / SC7F0_DISPLAY_TX) models those pads with a forwarded
+        clock instead (scripts/apply_sc7f0_tx_tmds_clock_forward.tcl); an -to pad false
+        path would also suppress the missing-output-delay check on a pad, turning "no
+        model" into a green report.  Each fact is asserted separately so re-merging the
+        rows back into the common file fails instead of silently inheriting the
+        capture-only approval.  Each RX DDC pad keeps one exception per measured
+        consumer, all restricted to a first stage.
         """
         text = " ".join(self.active())
-        self.assertIn("set_false_path -to [get_ports hdmi_tx_tmds_clk_p]", text)
-        self.assertIn("set_false_path -to [get_ports hdmi_tx_tmds_clk_n]", text)
+        for port in ("hdmi_tx_tmds_clk_p", "hdmi_tx_tmds_clk_n"):
+            self.assertNotIn(f"-to [get_ports {port}]", text,
+                             f"{port}: the always-mounted async-io file must stay "
+                             "profile-neutral (a capture-only exception must not be "
+                             "inherited by a TX personality)")
+        self.assertEqual(
+            ["set_false_path -to [get_ports hdmi_tx_tmds_clk_p]",
+             "set_false_path -to [get_ports hdmi_tx_tmds_clk_n]"],
+            self.legacy_tx(),
+            "the capture-only file must hold exactly the two moved rows, nothing more "
+            "(no clock, no clock group, no output delay, no RX row)")
+        mount = (REPO / "scripts" / "build_zu4ev.tcl").read_text()
+        self.assertIn("add_files -fileset constrs_1 ./constraints/sc7f0_tx_tmds_clk_capture_only.xdc",
+                      mount, "the capture-only file is no longer mounted by the build")
+        self.assertIn("SC7F0_TX_TMDS_CLK_TX_PERSONALITY_UNREVIEWED", mount,
+                      "the mount lost its guard: a TX personality could inherit it")
+        forward = (REPO / "scripts" / "apply_sc7f0_tx_tmds_clock_forward.tcl").read_text()
+        self.assertIn("SC7F0_TX_TMDSCLOCK_LEGACY_EXCEPTION", forward,
+                      "the TX-live clock model no longer refuses a lingering false path")
         for port in ("hdmi_rx_ddc_scl", "hdmi_rx_ddc_sda"):
             rows = [c for c in self.active()
                     if c.startswith(f"set_false_path -from [get_ports {port}]")]

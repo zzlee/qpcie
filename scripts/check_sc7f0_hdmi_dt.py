@@ -26,12 +26,20 @@ def check(args, output):
     user = PLNX / "project-spec/meta-user/recipes-bsp/device-tree/files"
     preprocessed = output / "system-top.dts.pp"
     dtb = output / "sc7f0-hdmi-rx-test.dtb"
-    capture = getattr(args, "capture", False)
+    capture = getattr(args, "capture", False) or getattr(args, "rgb", False)
     if capture and args.disabled:
         raise ValueError("Capture cannot be enabled on the disabled/debug profile")
     profile_flags = [] if args.disabled else ["-DSC7F0_HDMI_RX_ENABLE=1"]
     if capture:
         profile_flags.append("-DSC7F0_PS_CAPTURE_ENABLE=1")
+    # SC7F0-RGB-COMPOSITOR-2PPC is a personality of the display tree, and the
+    # bbappend refuses the combination unless both stages are enabled, so the
+    # RGB profile preprocesses with all four flags.
+    rgb = getattr(args, "rgb", False)
+    if rgb:
+        profile_flags += ["-DSC7F0_PS_CAPTURE_ENABLE=1",
+                          "-DSC7F0_HDMI_TX_ENABLE=1",
+                          "-DSC7F0_RGB_COMPOSITOR_ENABLE=1"]
     with preprocessed.open("w") as stream:
         subprocess.run([
             "gcc", "-E", "-nostdinc", "-undef", "-D__DTS__",
@@ -92,7 +100,16 @@ def check(args, output):
             "RX clock names")
     require(strings(rx, "phy-names"), ["hdmi-phy0", "hdmi-phy1", "hdmi-phy2"],
             "RX PHY names")
-    phy_params = xci("vid_phy_controller_0")
+    # The RGB personality builds separate IP modules (scripts/
+    # create_sc7f0_rgb_compositor_ip.tcl freezes the legacy 4PPC names), and the
+    # whole point of comparing against the XCI is to catch the tree describing
+    # the *other* geometry - which is exactly how 0x26111503 shipped with
+    # xlnx,transceiver-width = <4> while vid_phy_controller_rgb carries
+    # Transceiver_Width = 2 / C_INPUT_PIXELS_PER_CLOCK = 2 and the generated GT
+    # channel wrapper carries GTHE4_CHANNEL_RX_DATA_WIDTH = 20.
+    phy_mod = "vid_phy_controller_rgb" if rgb else "vid_phy_controller_0"
+    rx_mod = "v_hdmi_rx_ss_rgb" if rgb else "v_hdmi_rx_ss_0"
+    phy_params = xci(phy_mod)
     for prop, param in {
         "input-pixels-per-clock": "C_INPUT_PIXELS_PER_CLOCK",
         "transceiver-width": "Transceiver_Width",
@@ -112,7 +129,7 @@ def check(args, output):
     for direction in ("rx", "tx"):
         require(phy_params[f"C_{direction.capitalize()}_Protocol"], "HDMI", "PHY protocol")
         require(cells(phy, f"xlnx,{direction}-protocol"), [1], "HDMI protocol enum")
-    rx_params = xci("v_hdmi_rx_ss_0")
+    rx_params = xci(rx_mod)
     for prop, param in {"input-pixels-per-clock": "C_INPUT_PIXELS_PER_CLOCK",
                         "max-bits-per-component": "C_MAX_BITS_PER_COMPONENT",
                         "edid-ram-size": "C_EDID_RAM_SIZE"}.items():
@@ -121,7 +138,13 @@ def check(args, output):
         require(rx_params[feature], "false", "HDCP disabled")
     require(cells("/qpcie_v4l2_bridge", "hdmirx"), cells(rx, "phandle"), "bridge phandle")
     require(strings("/qpcie_v4l2_bridge", "status"), ["disabled" if capture else "okay"], "bridge ownership")
-    require(run([fdtget, "-l", dtb, phy]).split(), ["lane0", "lane1", "lane2"], "PHY order")
+    # phy-vphy numbers the VPHY's children in declaration order and
+    # sc7f0-hdmi-tx.dtsi appends the three TX lanes after the three RX lanes, so
+    # a display personality carries lane0..lane5 while a capture-only tree stops
+    # at lane2.  The RX SS must still reference only the first three.
+    lanes = 6 if rgb else 3
+    require(run([fdtget, "-l", dtb, phy]).split(),
+            [f"lane{i}" for i in range(lanes)], "PHY order")
     expected_phys = []
     for i in range(3):
         lane = phy + f"/lane{i}"
@@ -167,8 +190,16 @@ def check(args, output):
         require(cells(csc, "xlnx,max-width"), [int(cp["C_MAX_COLS"])], "CSC max width")
         require(cells(csc, "xlnx,max-height"), [int(cp["C_MAX_ROWS"])], "CSC max height")
         cross = xci("axi_crossbar_hdmi")
-        require(int(cross["NUM_MI"]), 7, "control destinations")
-        for index, base, width in [(4, 0xb0050000, 12), (5, 0xb0060000, 16), (6, 0xb0070000, 12)]:
+        # scripts/build_zu4ev.tcl builds the HDMI crossbar with two extra
+        # masters when the RGB compositor is present, and sc7f0-rgb-compositor.dtsi
+        # names M07/M08/M09 as the Reader-A / Reader-B / overlay windows, so the
+        # destination count and those three windows are personality facts.
+        require(int(cross["NUM_MI"]), 10 if rgb else 7, "control destinations")
+        windows = [(4, 0xb0050000, 12), (5, 0xb0060000, 16), (6, 0xb0070000, 12)]
+        if rgb:
+            windows += [(7, 0xb0080000, 16), (8, 0xb0090000, 12),
+                        (9, 0xb00a0000, 12)]
+        for index, base, width in windows:
             require(int(cross[f"M{index:02}_A00_BASE_ADDR"], 16), base, "control base")
             require(int(cross[f"M{index:02}_A00_ADDR_WIDTH"]), width, "control window")
         links = [(rx + "/ports/port@0/endpoint", tap + "/ports/port@0/endpoint"),
@@ -178,6 +209,35 @@ def check(args, output):
             require(cells(a, "remote-endpoint"), cells(b, "phandle"), "graph forward")
             require(cells(b, "remote-endpoint"), cells(a, "phandle"), "graph reverse")
         print("SC7F0_CAPTURE_DT_PASS: board graph/control/IRQ/reset/format match XCI; runtime/XSA import not proven")
+    if rgb:
+        # Plane A (the compositor's Reader-A) and the HDMI TX subsystem, both
+        # read out of their own generated IP rather than from a remembered
+        # number: the reader geometry decides xlnx,dma-align and the format list
+        # the DRM side is handed, and the TX subsystem's PPC decides the width of
+        # VIDEO_IN the compositor must drive.
+        tx = "/amba_pl@0/hdmi-tx@b0020000"
+        plane_a = "/amba_pl@0/framebuffer@b0080000"
+        tx_params = xci("v_hdmi_tx_ss_rgb")
+        for prop, param in {"input-pixels-per-clock": "C_INPUT_PIXELS_PER_CLOCK",
+                            "max-bits-per-component": "C_MAX_BITS_PER_COMPONENT"}.items():
+            require(cells(tx, "xlnx," + prop), [int(tx_params[param])], "tx " + param)
+        rd = xci("sc7f0_frmbuf_rd_rgb")
+        require(int(rd["SAMPLES_PER_CLOCK"]), 2, "reader samples per clock")
+        for prop, param in {"pixels-per-clock": "SAMPLES_PER_CLOCK",
+                            "dma-addr-width": "AXIMM_ADDR_WIDTH",
+                            "max-width": "MAX_COLS", "max-height": "MAX_ROWS"}.items():
+            require(cells(plane_a, "xlnx," + prop), [int(rd[param])], "reader " + param)
+        # The DTG publishes dma-align as the reader's native AXIMM byte width; a
+        # 2 PPC reader is natively 128 bit, i.e. the PS HP width, so no width
+        # converter sits in front of it.
+        require(cells(plane_a, "xlnx,dma-align"),
+                [int(rd["AXIMM_DATA_WIDTH"]) // 8], "reader dma-align")
+        formats = strings(plane_a, "xlnx,vid-formats")
+        want = [f for f, on in (("abgr8888", rd["HAS_RGBA8"]),
+                               ("argb8888", rd["HAS_BGRA8"])) if on == "1"]
+        require(formats, want, "reader formats")
+        print("SC7F0_RGB_GEOMETRY_DT_PASS: VPHY/RX/TX/plane-A cells match the *_rgb "
+              "XCI (transceiver-width, pixels-per-clock, dma-align, formats)")
     print("HDMI_DT_PASS: complete board DTS compiled; RX/PHY parameters match XCI")
 
 
@@ -192,6 +252,10 @@ def main():
     parser.add_argument("--dtc", type=Path, default=Path(dtc))
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--capture", action="store_true", help="Check the official framebuffer capture graph (26102801+ only)")
+    parser.add_argument("--rgb", action="store_true",
+                        help="Check the SC7F0-RGB-COMPOSITOR-2PPC personality against the "
+                             "vid_phy_controller_rgb / v_hdmi_rx_ss_rgb / v_hdmi_tx_ss_rgb / "
+                             "sc7f0_frmbuf_rd_rgb XCI instead of the legacy 4PPC modules")
     parser.add_argument("--disabled", action="store_true",
                         help="Check the safe, non-opt-in/default DTS instead of HDMI06")
     args = parser.parse_args()

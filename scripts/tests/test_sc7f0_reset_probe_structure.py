@@ -502,8 +502,19 @@ class ResetProbeStructure(unittest.TestCase):
         xdc_cmds = tcl_commands(read(ROOT / "constraints" / "sc7f0_async_io.xdc"))
         for port, exc in (("hdmi_rx_ddc_scl", "async_out_hdmi_rx_ddc_scl"),
                           ("hdmi_rx_ddc_sda", "async_out_hdmi_rx_ddc_sda")):
-            self.assertIn(f"set_false_path -name {exc} -to [get_ports {port}]", xdc_cmds,
-                          f"{port} needs its own named output-direction exception")
+            # Measured: Vivado 2023.2 rejects `-name` on set_false_path
+            # ([Common 17-170] "Unknown option '-name'",
+            # rgb-fullimpl-26111333-20261113T204036Z logs/build_full26111333.log:3792-3793),
+            # and a rejected exception is silently no exception at all.  The id is
+            # therefore a checker lookup key (documented in the XDC and resolved by
+            # from/to objects in scripts/check_sc7f0_named_constraints.tcl), not a
+            # Vivado object name.  What this test still requires is unchanged: ONE
+            # output-direction command per port, with its own get_ports object.
+            self.assertIn(f"set_false_path -to [get_ports {port}]", xdc_cmds,
+                          f"{port} needs its own output-direction exception")
+            raw = read(ROOT / "constraints" / "sc7f0_async_io.xdc")
+            self.assertIn(f"# {exc}\n", raw,
+                          f"{port} must record which checker id its exception carries")
             self.assertIn(f"set_false_path -from [get_ports {port}]", xdc_cmds,
                           f"{port} must keep its input-side first-stage exception")
         self.assertNotIn("set_output_delay", xdc_cmds,

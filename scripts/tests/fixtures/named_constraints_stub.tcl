@@ -74,7 +74,7 @@ set coverage_row_pad {248       False Path               false            false 
 write exceptions-coverage.rpt "$coverage_header\n$coverage_row\n$coverage_row_blank_from\n"
 write exceptions-ignored.rpt "Positions fully ignored: 0\n"
 write exceptions-scope-override.rpt "Positions overridden: 0\n"
-write clock_networks.rpt "aclk_dpram 0\n"
+write clock-networks.rpt "aclk_dpram 0\n"
 write io.rpt "Port  Direction  Site\nhdmi_tx_hpd_in  IN  IOB_X0Y180\n"
 set state {Physopt postRoute}
 if {$scenario eq {empty_design_state}} {set state {}}
@@ -248,6 +248,28 @@ proc get_cells {args} {
         foreach s [split $stages {}] {lappend out "u_hdmi_probe/${stem}_reg\[$s\]"}
         return $out
     }
+    # The three hand-rolled overlay synchronisers named by
+    # constraints/sc7f0_overlay_sync.xdc: answer with names that keep the stem, so
+    # the REQUIREMENT mock below can answer one destination period (3.333 ns) for
+    # those pairs and the hook measures it instead of inheriting the 6.000 default.
+    if {[string match *user_reset_reg* $pattern]} {
+        return [list {u_pcie_ip/inst/user_reset_reg}]
+    }
+    if {[string match *debt_poison_epoch_reg* $pattern]} {
+        return [list {u_dma_top/u_overlay_writer/debt_poison_epoch_reg}]
+    }
+    if {[string match *arm_toggle_reg* $pattern]} {
+        return [list {u_dma_top/u_overlay_ingress/arm_toggle_reg}]
+    }
+    if {[string match *epoch_sync_l_reg* $pattern]} {
+        return [list {u_dma_top/u_overlay_writer/epoch_sync_l_reg[0]}]
+    }
+    if {[string match *poison_sync_reg* $pattern]} {
+        return [list {u_dma_top/u_overlay_writer/poison_sync_reg[0]}]
+    }
+    if {[string match *sync0_reg* $pattern]} {
+        return [list {u_dma_top/u_overlay_ingress/sync0_reg}]
+    }
     return $::mock_first_stage
 }
 proc get_pins {args} {
@@ -306,6 +328,13 @@ proc get_timing_paths {args} {
     if {[string match *snapshot_test_reg* $text]} {set ::mock_requirement 10.000}
     if {[string match *aclk_dpram_reg* $text]} {set ::mock_requirement 15.000}
     if {[string match *_src_reg* $text]} {set ::mock_requirement 6.734}
+    # The three hand-rolled overlay synchronisers named by
+    # constraints/sc7f0_overlay_sync.xdc are bounded by one destination period
+    # (set_max_delay -datapath_only 3.333 -to <first stage FF>), so the mock
+    # answers 3.333 for those pairs and max_delay_effective stays a measurement
+    # of the mock engine rather than a copy of the table's hope.
+    if {[string match *epoch_sync_l_reg* $text] || [string match *poison_sync_reg* $text]
+        || [string match *u_overlay_ingress/sync0_reg* $text]} {set ::mock_requirement 3.333}
     # The internal chain stages [0] -> [1]/[2] stay analysed unless the exception
     # grew past the named entry (probe_chain_excepted stands for -from <clock>,
     # the drift this measurement exists to catch), and the feed-in of a source

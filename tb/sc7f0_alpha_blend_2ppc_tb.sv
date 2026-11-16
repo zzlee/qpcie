@@ -1,0 +1,435 @@
+`timescale 1ns/1ps
+// ============================================================================
+// tb/sc7f0_alpha_blend_2ppc_tb.sv - SC7F0-RGB-COMPOSITOR-2PPC compositor maths
+//
+//   T1 endpoints   : A=0 reproduces the base pixel exactly, A=255 reproduces the
+//                    overlay pixel exactly, for every component and pixel.
+//   T2 rounding    : random (A, FG, BG) triples are compared against the
+//                    reference out = BG + round(A*(FG-BG)/255) within the
+//                    half-LSB bound the 257/65536 + 32767 form guarantees, and
+//                    every result stays inside [0,255] (sat_watchdog stays 0).
+//   T3 blend_enable=0 : the base plane passes through untouched (the overlay is
+//                    still consumed, so the two readers cannot drift).
+//   T4 flow control: randomised downstream stalls must neither duplicate nor drop
+//                    a beat; beats_blended must equal the number of consumed beat
+//                    pairs, and the output sequence must equal the reference.
+//   T5 frame lock  : nothing is emitted before the two planes present TUSER on the
+//                    same beat; a pair whose sideband disagrees (one plane ends a
+//                    line without the other) is discarded, unlocks the compositor
+//                    and is counted in lock_lost_count.  A *matched* TLAST pair is
+//                    end-of-line and must NOT lose the lock, otherwise a multi-line
+//                    frame stops being composited after its first line.
+//   T6 re-lock     : after such an unlock the compositor discards everything until
+//                    both planes present a frame start again, and the first beat
+//                    out of the re-lock is the first beat of the new frame.
+//
+// Scoring rules used here (the first revision broke all three and that is how the
+// gate lost 31 errors and then hung an xsimk):
+//   * stimulus is changed on a clock edge with non-blocking assignments, and a
+//     beat is held until the DUT actually pops it - tready only says the input
+//     queue has room, it does not say the beat was composited;
+//   * the scoreboard books an output on the clock edge where tvalid && tready are
+//     both true;
+//   * every wait is bounded, and a global watchdog turns any unreachable wait
+//     into a reported FAIL instead of a runaway simulator process.
+// ============================================================================
+module sc7f0_alpha_blend_2ppc_tb;
+    localparam integer PPC = 2;
+
+    reg clk = 0, rst_n = 0;
+    always #3.3 clk = ~clk;              // ~150 MHz model of the 300 MHz domain
+
+    reg  [PPC*32-1:0] bd = 0, od = 0;
+    reg               bv = 0, ov = 0, bl = 0, ol = 0, bu = 0, ou = 0;
+    wire              bready, oready;
+    wire [PPC*24-1:0] mtdata;
+    wire              mtvalid, mtlast, mtuser;
+    reg               mready = 1;
+    reg               blend_en = 1, force_opaque = 0, unlock = 0;
+    wire              locked, busy;
+    wire [31:0]       lock_lost, sat_cnt, beats;
+
+    integer errors = 0;
+    reg gate_pass = 1'b0;
+
+    sc7f0_alpha_blend_2ppc #(.PPC(PPC), .QUEUE_DEPTH(16)) dut (
+        .clk(clk), .rst_n(rst_n),
+        .blend_enable(blend_en), .alpha_force_opaque(force_opaque), .unlock(unlock),
+        .s_b_axis_tdata(bd), .s_b_axis_tvalid(bv), .s_b_axis_tready(bready),
+        .s_b_axis_tlast(bl), .s_b_axis_tuser(bu),
+        .s_o_axis_tdata(od), .s_o_axis_tvalid(ov), .s_o_axis_tready(oready),
+        .s_o_axis_tlast(ol), .s_o_axis_tuser(ou),
+        .m_axis_tdata(mtdata), .m_axis_tvalid(mtvalid), .m_axis_tready(mready),
+        .m_axis_tlast(mtlast), .m_axis_tuser(mtuser),
+        .locked(locked), .pipeline_busy(busy),
+        .lock_lost_count(lock_lost), .sat_watchdog_count(sat_cnt),
+        .beats_blended(beats)
+    );
+
+    // reference model -------------------------------------------------------
+    function [7:0] ref_comp;
+        input [7:0] a, fg, bg;
+        integer d, p, r;
+        begin
+            d = fg - bg;
+            p = a * d;
+            r = bg + ((257*p + 32767) >> 16);
+            ref_comp = r[7:0];
+        end
+    endfunction
+
+    // expected output queue --------------------------------------------------
+    reg [PPC*24-1:0] exp_q [0:4095];
+    reg [PPC*32-1:0] exp_b [0:4095], exp_o [0:4095];   // the beat that produced it
+    integer eq_tail = 0, eq_head = 0;
+
+    // Watchdog: an unreachable wait must fail loudly, not spin the simulator.
+    initial begin : watchdog
+        #300_000;                        // ~90k cycles; the suite needs a few hundred
+        $display("TB_WATCHDOG_TIMEOUT sc7f0_alpha_blend_2ppc_tb: no $finish within 300 us (errors=%0d beats=%0d expected=%0d)",
+                 errors, beats, eq_tail);
+        gate_pass = 1'b0;
+        $display("ALPHA_BLEND_TB_FAIL");
+        $finish;
+    end
+
+    // Actual pop accounting, taken from the DUT: `consume` is the beat the
+    // compositor really blended, b_pop/o_pop also include the re-alignment
+    // purge and the re-lock drain.  They are only read by the display lines
+    // below; the stimulus waits on dut.consume / dut.o_pop directly (see
+    // wait_pop) so that a beat is never offered for one cycle too many.
+    integer pop_cnt = 0, bpop_cnt = 0, opop_cnt = 0;
+    always @(posedge clk) begin
+        if (rst_n) begin
+            if (dut.consume) pop_cnt  = pop_cnt  + 1;
+            if (dut.b_pop)   bpop_cnt = bpop_cnt + 1;
+            if (dut.o_pop)   opop_cnt = opop_cnt + 1;
+        end
+    end
+
+    task automatic wait_accept(input integer limit);
+        integer k;
+        begin
+            // AXI-Stream master rule: hold the beat, unchanged, until the edge
+            // where tvalid && tready are both sampled true, and change/deassert
+            // on the very next edge.  `tready` here is the compositor's input
+            // queue (rtl/sc7f0_alpha_blend_2ppc.v: tready = !queue_full), NOT the
+            // blend pop: waiting for the pop instead keeps tvalid asserted for a
+            // cycle that was already accounted for, the queue then takes the same
+            // beat a second time and every later beat is duplicated (that is how
+            // T1 produced 6 beats for 3 pixel pairs).
+            //
+            // bready/oready are read on the clock edge itself, so they are the
+            // value the DUT sampled: the registers behind them only change later,
+            // in the non-blocking region of the same edge.
+            k = 0;
+            @(posedge clk);
+            while (!(bready && oready) && k < limit) begin @(posedge clk); k = k + 1; end
+            if (!(bready && oready)) begin
+                errors = errors + 1;
+                $display("TB FAIL queues never accepted the beat within %0d cycles (locked=%b bfull=%b ofull=%b drain=%b mvalid=%b mready=%b)",
+                         limit, locked, dut.b_full, dut.o_full, dut.drain_now,
+                         mtvalid, mready);
+            end
+        end
+    endtask
+
+    // One protocol-legal beat on each plane while the compositor is unlocked:
+    // both planes must have it discarded, and nothing may reach the output.
+    task automatic drive_ignored_pair(input [PPC*32-1:0] b, input [PPC*32-1:0] o);
+        integer b0, o0, bt;
+        begin
+            b0 = bpop_cnt; o0 = opop_cnt; bt = beats;
+            bd <= b; od <= o; bv <= 1'b1; ov <= 1'b1;
+            bl <= 1'b0; ol <= 1'b0; bu <= 1'b0; ou <= 1'b0;
+            wait_accept(20000);
+            bv <= 0; ov <= 0;
+            repeat (20) @(posedge clk);
+            if (bpop_cnt == b0 || opop_cnt == o0) begin
+                errors = errors + 1;
+                $display("TB FAIL an unlocked mid-frame beat was neither blended nor discarded (locked=%b bfull=%b ofull=%b drain=%b pops %0d->%0d / %0d->%0d)",
+                         locked, dut.b_full, dut.o_full, dut.drain_now,
+                         b0, bpop_cnt, o0, opop_cnt);
+            end
+            if (beats != bt) begin
+                errors = errors + 1;
+                $display("TB FAIL compositor emitted a beat while it was not frame-locked");
+            end
+        end
+    endtask
+
+    integer oi;
+    always @(posedge clk) begin
+        if (rst_n && mtvalid && mready) begin
+            if (eq_head >= eq_tail) begin
+                errors = errors + 1;
+                $display("T4 FAIL output beat with nothing expected");
+            end else begin
+                if (mtdata !== exp_q[eq_head]) begin
+                    errors = errors + 1;
+                    $display("T1/T2/T4 FAIL beat %0d got %h want %h  (base=%h overlay=%h)",
+                             eq_head, mtdata, exp_q[eq_head],
+                             exp_b[eq_head], exp_o[eq_head]);
+                    for (oi = 0; oi < PPC; oi = oi + 1)
+                        $display("   pix%0d got R=%02h B=%02h G=%02h | want R=%02h B=%02h G=%02h | A=%02h FG=%h BG=%h",
+                            oi, mtdata[oi*24+23-:8], mtdata[oi*24+15-:8], mtdata[oi*24+7-:8],
+                            exp_q[eq_head][oi*24+23-:8], exp_q[eq_head][oi*24+15-:8],
+                            exp_q[eq_head][oi*24+7-:8],
+                            exp_o[eq_head][oi*32+31 -: 8],
+                            exp_o[eq_head][oi*32+23 -: 24],
+                            exp_b[eq_head][oi*32+23 -: 24]);
+                end
+                eq_head = eq_head + 1;
+            end
+        end
+    end
+
+    // drive one beat pair ---------------------------------------------------
+    task automatic drive_pair(input [PPC*32-1:0] b, input [PPC*32-1:0] o,
+                              input integer eol, input integer sof,
+                              input integer en);
+        integer p;
+        reg [PPC*24-1:0] exp;
+        reg [7:0] a, fr, fb, fg, br, bb, bg;
+        begin
+            exp = {PPC*24{1'b0}};
+            for (p = 0; p < PPC; p = p + 1) begin
+                a  = o[p*32+31 -: 8]; fr = o[p*32+23 -: 8];
+                fb = o[p*32+15 -: 8]; fg = o[p*32+7  -: 8];
+                br = b[p*32+23 -: 8]; bb = b[p*32+15 -: 8];
+                bg = b[p*32+7  -: 8];
+                if (!en) begin
+                    exp[p*24+23 -: 8] = br;
+                    exp[p*24+15 -: 8] = bb;
+                    exp[p*24+7  -: 8] = bg;
+                end else begin
+                    exp[p*24+23 -: 8] = ref_comp(a, fr, br);
+                    exp[p*24+15 -: 8] = ref_comp(a, fb, bb);
+                    exp[p*24+7  -: 8] = ref_comp(a, fg, bg);
+                end
+            end
+            exp_q[eq_tail] = exp; exp_b[eq_tail] = b; exp_o[eq_tail] = o;
+            eq_tail = eq_tail + 1;
+            // Hold the pair, unchanged, until the queues accept it, then drop it
+            // on the next edge (exactly one take per beat).
+            bd <= b; od <= o; bv <= 1'b1; ov <= 1'b1;
+            bl <= eol[0]; ol <= eol[0]; bu <= sof[0]; ou <= sof[0];
+            wait_accept(20000);
+            bd <= 0; od <= 0; bv <= 1'b0; ov <= 1'b0;
+            bl <= 0; ol <= 0; bu <= 0; ou <= 0;
+        end
+    endtask
+
+    integer l, p, seed, k;
+    integer beats0, lost0;
+    reg [PPC*32-1:0] b, o;
+    initial begin
+        integer i;
+        #100; rst_n = 1;
+        repeat (10) @(posedge clk);
+
+        // ---- T1 endpoints -------------------------------------------------
+        // alpha = 0 -> base, alpha = 255 -> overlay
+        for (l = 0; l < 2; l = l + 1) begin
+            seed = l ? 8'hff : 8'h00;         // alpha fill
+            for (p = 0; p < PPC; p = p + 1) begin
+                b[p*32+31 -: 8] = 8'h00;
+                b[p*32+23 -: 8] = 8'h20 + p*8 + (l*3);
+                b[p*32+15 -: 8] = 8'h40 + p*8 + (l*5);
+                b[p*32+7  -: 8] = 8'h60 + p*8 + (l*7);
+                o[p*32+31 -: 8] = seed;
+                o[p*32+23 -: 8] = 8'hc0 + p*4 + (l*2);
+                o[p*32+15 -: 8] = 8'hd0 + p*4 + (l*6);
+                o[p*32+7  -: 8] = 8'he0 + p*4 + (l*9);
+            end
+            drive_pair(b, o, 0, (l==0) ? 1 : 0, 1);
+        end
+        // a closing EOL pair so the frame can close cleanly
+        drive_pair(b, o, 1, 0, 1);
+        repeat (30) @(posedge clk);
+        $display("SC7F0_BLEND T1 done errors=%0d locked=%b beats=%0d", errors, locked, beats);
+
+        // ---- T2 random maths + T4 random stalls ---------------------------
+        // re-acquire the lock with a fresh simultaneous frame start
+        unlock <= 1; repeat (4) @(posedge clk); unlock <= 0; repeat (4) @(posedge clk);
+        mready = 1;
+        for (l = 0; l < 24; l = l + 1) begin
+            for (p = 0; p < PPC; p = p + 1) begin
+                b[p*32+31 -: 8] = 8'hff;                       // base alpha unused
+                b[p*32+23 -: 8] = $random;
+                b[p*32+15 -: 8] = $random;
+                b[p*32+7  -: 8] = $random;
+                o[p*32+31 -: 8] = $random;                     // random alpha
+                o[p*32+23 -: 8] = $random;
+                o[p*32+15 -: 8] = $random;
+                o[p*32+7  -: 8] = $random;
+            end
+            fork begin : drv drive_pair(b, o, (l==23) ? 1 : 0, (l==0) ? 1 : 0, 1); end
+                 begin repeat (($random & 32'h7fff) % 7) @(posedge clk);
+                      mready <= ($random & 1);      // non-blocking: no sampling race
+                      repeat (($random & 32'h7fff) % 3) @(posedge clk);
+                      mready <= 1; end join
+        end
+        k = 0;
+        while (eq_head < eq_tail && k < 6000) begin @(posedge clk); k = k + 1; end
+        if (sat_cnt != 0) begin
+            errors = errors + 1;
+            $display("T2 FAIL sat_watchdog_count=%0d; the blend maths left [0,255]", sat_cnt);
+        end
+        $display("SC7F0_BLEND T2/T4 random maths with stalls done errors=%0d beats=%0d expected=%0d", errors, beats, eq_tail);
+
+        // ---- T3 blend_enable = 0 ------------------------------------------
+        unlock <= 1; repeat (4) @(posedge clk); unlock <= 0; repeat (4) @(posedge clk);
+        blend_en = 0;
+        for (l = 0; l < 4; l = l + 1) begin
+            for (p = 0; p < PPC; p = p + 1) begin
+                b[p*32+31 -: 8] = 8'h00;
+                b[p*32+23 -: 8] = 8'h11 + l + p;
+                b[p*32+15 -: 8] = 8'h22 + l + p;
+                b[p*32+7  -: 8] = 8'h33 + l + p;
+                o[p*32+31 -: 8] = 8'hff;                       // opaque overlay
+                o[p*32+23 -: 8] = 8'ha0;
+                o[p*32+15 -: 8] = 8'hb0;
+                o[p*32+7  -: 8] = 8'hc0;
+            end
+            drive_pair(b, o, (l==3) ? 1 : 0, (l==0) ? 1 : 0, 0);
+        end
+        repeat (40) @(posedge clk);
+        blend_en = 1;
+        $display("SC7F0_BLEND T3 passthrough done errors=%0d", errors);
+
+        // ---- T5a frame lock: an unpaired frame start must composite nothing --
+        unlock <= 1; repeat (4) @(posedge clk); unlock <= 0; repeat (4) @(posedge clk);
+        beats0 = beats;
+        bd <= 32'h1234_5678; bv <= 1'b1; bu <= 1'b1; bl <= 1'b0;
+        od <= 32'h9abc_def0; ov <= 1'b1; ou <= 1'b0; ol <= 1'b0;
+        wait_accept(20000);                     // one take per plane, then drop
+        bv <= 1'b0; ov <= 1'b0; bu <= 1'b0; ou <= 1'b0;
+        repeat (20) @(posedge clk);             // the stale overlay beat is purged
+        repeat (30) @(posedge clk);
+        if (locked) begin
+            errors = errors + 1;
+            $display("T5 FAIL compositor locked without an aligned frame start on both planes");
+        end
+        if (beats != beats0) begin
+            errors = errors + 1;
+            $display("T5 FAIL %0d beat(s) emitted without an aligned frame start", beats - beats0);
+        end
+        if (dut.purge_o_count == 0) begin
+            errors = errors + 1;
+            $display("T5 FAIL the unpaired overlay beat was not discarded (purge_o_count=0)");
+        end else
+            $display("SC7F0_BLEND T5a unpaired_sof ignored, purge o=%0d b=%0d",
+                     dut.purge_o_count, dut.purge_b_count);
+
+        // ---- T5b matched TLAST is end of LINE: the lock must survive ---------
+        // 3 lines of 3 beats; TLAST on the last beat of every line, on BOTH
+        // planes. A frame must be composited line after line, not only up to the
+        // first TLAST pair.
+        unlock <= 1; repeat (4) @(posedge clk); unlock <= 0; repeat (4) @(posedge clk);
+        beats0 = beats;
+        for (l = 0; l < 9; l = l + 1) begin
+            for (p = 0; p < PPC; p = p + 1) begin
+                b[p*32+31 -: 8] = 8'h00;
+                b[p*32+23 -: 8] = 8'h30 + l*7 + p;
+                b[p*32+15 -: 8] = 8'h40 + l*5 + p;
+                b[p*32+7  -: 8] = 8'h50 + l*3 + p;
+                o[p*32+31 -: 8] = 8'h80 + l;                 // mid-range alpha
+                o[p*32+23 -: 8] = 8'h90 + l*2 + p;
+                o[p*32+15 -: 8] = 8'ha0 + l*2 + p;
+                o[p*32+7  -: 8] = 8'hb0 + l*2 + p;
+            end
+            drive_pair(b, o, (l % 3 == 2) ? 1 : 0, (l == 0) ? 1 : 0, 1);
+        end
+        k = 0;
+        while (eq_head < eq_tail && k < 2000) begin @(posedge clk); k = k + 1; end
+        if (beats != beats0 + 9) begin
+            errors = errors + 1;
+            $display("T5b FAIL composited %0d beats over 3 lines of 3 beats, want 9 (locked=%b)",
+                     beats - beats0, locked);
+        end
+        if (!locked) begin
+            errors = errors + 1;
+            $display("T5b FAIL lock dropped on a matched TLAST; TLAST is end-of-LINE, not end-of-frame");
+        end else
+            $display("SC7F0_BLEND T5b three_lines_composited=%0d lock_held_across_matched_tlast=1",
+                     beats - beats0);
+
+        // ---- T5c one plane closes a line alone: discard pair, unlock, count ---
+        lost0 = lock_lost;
+        beats0 = beats;
+        bd <= 64'h1122_3344_5566_7788; bv <= 1'b1; bl <= 1'b1; bu <= 1'b0;
+        od <= 64'h99aa_bbcc_ddee_ff00; ov <= 1'b1; ol <= 1'b0; ou <= 1'b0;
+        wait_accept(20000);                     // both queues take the pair
+        bv <= 1'b0; ov <= 1'b0; bl <= 1'b0; ol <= 1'b0;
+        repeat (20) @(posedge clk);
+        if (locked) begin
+            errors = errors + 1;
+            $display("T5c FAIL compositor stayed locked after a one-sided line end");
+        end
+        if (lock_lost <= lost0) begin
+            errors = errors + 1;
+            $display("T5c FAIL lock_lost_count did not advance (%0d -> %0d)", lost0, lock_lost);
+        end
+        if (beats != beats0) begin
+            errors = errors + 1;
+            $display("T5c FAIL the sideband-mismatched pair was composited (%0d -> %0d)",
+                     beats0, beats);
+        end else
+            $display("SC7F0_BLEND T5c lock_lost %0d -> %0d, mismatched pair discarded", lost0, lock_lost);
+
+        // ---- T6 re-lock: skip everything until both planes start together -----
+        drive_ignored_pair(64'h0f0f_0f0f_1111_2222, 64'h3333_4444_5555_6666);
+        drive_ignored_pair(64'h0e0e_0e0e_1212_2323, 64'h3434_4545_5656_6767);
+        beats0 = beats;
+        for (p = 0; p < PPC; p = p + 1) begin
+            b[p*32+31 -: 8] = 8'h00;
+            b[p*32+23 -: 8] = 8'h11 + p;
+            b[p*32+15 -: 8] = 8'h22 + p;
+            b[p*32+7  -: 8] = 8'h33 + p;
+            o[p*32+31 -: 8] = 8'h00;                       // A=0 -> pure base
+            o[p*32+23 -: 8] = 8'hee;
+            o[p*32+15 -: 8] = 8'hdd;
+            o[p*32+7  -: 8] = 8'hcc;
+        end
+        drive_pair(b, o, 0, 1, 1);           // fresh simultaneous frame start
+        k = 0;
+        while (eq_head < eq_tail && k < 2000) begin @(posedge clk); k = k + 1; end
+        if (beats != beats0 + 1 || !locked) begin
+            errors = errors + 1;
+            $display("T6 FAIL re-lock did not produce exactly one composited beat (beats %0d -> %0d, locked=%b)",
+                     beats0, beats, locked);
+        end else begin
+            // A=0 must reproduce the base pixel, in native R,B,G field order:
+            // pixel0 = R 0x11, B 0x22, G 0x33 and pixel1 = R 0x12, B 0x23, G 0x34.
+            if (mtdata !== {8'h12, 8'h23, 8'h34, 8'h11, 8'h22, 8'h33}) begin
+                errors = errors + 1;
+                $display("T6 FAIL A=0 passthrough after re-lock got %h want 12_23_34_11_22_33", mtdata);
+            end else
+                $display("SC7F0_BLEND T6 relock_ok=1 first_beat=%h (A=0 -> base)", mtdata);
+        end
+
+        // ---- closing accounting ------------------------------------------
+        repeat (40) @(posedge clk);
+        if (eq_head != eq_tail) begin
+            errors = errors + 1;
+            $display("T4 FAIL %0d expected beat(s) never came out (emitted %0d of %0d)",
+                     eq_tail - eq_head, eq_head, eq_tail);
+        end
+        if (beats != eq_tail) begin
+            errors = errors + 1;
+            $display("T4 FAIL beats_blended=%0d but %0d beat(s) were offered to the compositor",
+                     beats, eq_tail);
+        end
+        $display("SC7F0_ALPHA_BLEND_STATS errors=%0d blended=%0d offered=%0d lock_lost=%0d sat=%0d purge_b=%0d purge_o=%0d",
+                 errors, beats, eq_tail, lock_lost, sat_cnt,
+                 dut.purge_b_count, dut.purge_o_count);
+
+        gate_pass = (errors == 0);
+        $display("SC7F0_ALPHA_BLEND_TB errors=%0d beats=%0d sat=%0d gate_pass=%b",
+                 errors, beats, sat_cnt, gate_pass);
+        if (errors == 0) $display("ALPHA_BLEND_TB_PASS");
+        else             $display("ALPHA_BLEND_TB_FAIL");
+        $finish;
+    end
+endmodule

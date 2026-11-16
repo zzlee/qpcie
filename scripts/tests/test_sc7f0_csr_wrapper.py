@@ -58,13 +58,20 @@ class CsrWrapperTest(unittest.TestCase):
 
     def test_status_width_matches_the_domain_audit(self):
         # 320 bits of Packet DMA telemetry are LOCAL, so the transported status
-        # word is 1743 bits (2063 was the misclassified width).
+        # word was 1743 bits (2063 was the misclassified width).  It is 1935
+        # since the Defect 3 diagnosis taps: reg_rgb_c2h_dbg0..5, 6 x 32 bits
+        # (BAR0 GLOBAL 0x0E0..0x0F4), formed in the capture domain and delivered
+        # in the PCIe user clock by xpm_cdc_array_single / xpm_cdc_gray inside
+        # rtl/custom_pcie_dma_top.v, which is that bank's src_status domain.
         text = WRAPPER.read_text()
         match = re.search(r'qpcie_status_cdc #\(\.WIDTH\((\d+)\)\) u_status', text)
         self.assertIsNotNone(match)
-        self.assertEqual(int(match.group(1)), 1743,
+        self.assertEqual(int(match.group(1)), 1743 + 6 * 32,
                          'WIDTH moved; re-audit every src_status member domain first')
         self.assertNotIn('2063', text)
+        for i in range(6):
+            with self.subTest(port=f'reg_rgb_c2h_dbg{i}'):
+                self.assertIn(f'reg_rgb_c2h_dbg{i}', text)
 
     def test_domain_claim_is_backed_by_the_producing_always_block(self):
         # LOCAL means "same clock as the bank clk".  Re-prove it from RTL rather
