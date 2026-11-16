@@ -13,3 +13,50 @@
 # FIT. qpcie-debugd and sc7f0-ps-capture are already pulled in through
 # meta-user/conf/user-rootfsconfig.
 IMAGE_INSTALL:append = " sc7f0-vcud libomxil-xlnx libvcu-xlnx vcu-firmware"
+
+# HDMI output bring-up needs a KMS userspace, and the only one this project uses is
+# upstream libdrm's own modetest.  libdrm is not currently in this image at all
+# (project-spec/configs/rootfs_config read "# CONFIG_libdrm is not set" before this
+# line existed), so without it there is no way to enumerate the xlnx,pl-disp ->
+# v-hdmi-tx-ss DRM card or drive a fixed pattern from the card itself.
+#
+# modetest is not a private tool: it is upstream libdrm's tests/modetest, and the
+# libdrm recipe's default PACKAGECONFIG already carries "tests install-test-programs"
+# with FILES:${PN}-tests = "${bindir}/*", so libdrm-tests is what ships
+# /usr/bin/modetest.  The meta-petalinux libdrm bbappend only patches modetest for
+# Xilinx fourcc formats; it does not add a display daemon.
+#
+# A separate IMAGE_INSTALL line keeps the existing sc7f0-vcud line byte-identical,
+# which scripts/build_sc7f0_matching_ps_vcu.sh and the 26111204 r3 runner match
+# exactly.  Presence is proven out of the built FIT afterwards with
+# scripts/package_sc7f0_rootfs.py verify (--expect-file usr/lib/libdrm.so.1 and
+# --expect-binary modetest=@present), not from this line.
+IMAGE_INSTALL:append = " libdrm libdrm-tests"
+
+# The RGB-compositor personality has no VCU in the fabric (scripts/
+# create_zu4ev_ps_bd.tcl refuses VCU and SC7F0_RGB_COMPOSITOR on one design).
+# sc7f0-vcud is a systemd service that opens the encoder/decoder registers and
+# libvcu-xlnx/libomxil-xlnx only make sense next to it, so shipping them on
+# this image means a service that can never be satisfied on every boot.  The
+# sc7f0-vcud IMAGE_INSTALL line above is deliberately left byte-identical,
+# because scripts/build_sc7f0_matching_ps_vcu.sh and the 26111204 r3 runner
+# match it as text; ':remove' is applied when IMAGE_INSTALL is finally read,
+# which is after every :append in this file, so it wins without editing that
+# line.  For every other personality SC7F0_RGB_COMPOSITOR_VCU_REMOVE stays
+# empty and IMAGE_INSTALL is unchanged.
+SC7F0_RGB_COMPOSITOR_VCU_REMOVE ?= ""
+python __anonymous() {
+    if d.getVar('SC7F0_RGB_COMPOSITOR_ENABLE') == '1':
+        d.setVar('SC7F0_RGB_COMPOSITOR_VCU_REMOVE',
+                 'sc7f0-vcud libomxil-xlnx libvcu-xlnx vcu-firmware')
+}
+IMAGE_INSTALL:remove = "${SC7F0_RGB_COMPOSITOR_VCU_REMOVE}"
+
+# The 0x26111405 personality has no VCU service to replace, but it does need a
+# way to talk to the blocks that no kernel driver owns: the overlay controller at
+# 0xB00A0000, Reader-B at 0xB0090000, and the blend/alpha controls.  The card has
+# no network (&gem0 is disabled in system-user.dtsi) and its BusyBox has no
+# base64/uudecode, so a diagnostic binary cannot be pushed onto a running card;
+# the only way it can be present when it is needed is to ship in the image.
+# Kept on its own IMAGE_INSTALL line so every line above stays byte-identical.
+IMAGE_INSTALL:append = " sc7f0-rgb-overlay"

@@ -1,0 +1,293 @@
+/*
+ * SC7F0 HDMI OUTPUT (PS DDR -> HDMI connector) on the DISPLAY_TX personality,
+ * hardware 0x26111208+.  Every register described here is owned by an
+ * AMD/Xilinx driver; nothing in this file is driven by a private kernel
+ * module, a daemon or bare MMIO:
+ *
+ *   xlnx,v-hdmi-tx-ss-3.1   hdmi-modules xlnx_rel_v2023.2 (SRCREV 82209b00)
+ *                           module xilinx-hdmi-tx.ko, hdmi/xilinx_drm_hdmi.c
+ *   xlnx,vid-phy-controller-2.2  same recipe, module xilinx-vphy.ko
+ *   xlnx,pl-disp            in-kernel drivers/gpu/drm/xlnx/xlnx_pl_disp.c
+ *                           (CONFIG_DRM_XLNX_PL_DISP)
+ *   xlnx,axi-frmbuf-rd-v2.2 in-kernel drivers/dma/xilinx/xilinx_frmbuf.c
+ *                           (CONFIG_XILINX_FRMBUF)
+ *
+ * Do NOT enable CONFIG_DRM_XLNX_HDMITX for this board.  In
+ * 6.1.30-xilinx-v2023.2 that symbol builds the in-tree drivers/gpu/drm/xlnx/
+ * xlnx_hdmi.c, whose only compatibles are "xlnx,v-hdmi-txss1-1.1"/"-1.2"
+ * (HDMI 2.1 TX SS); it cannot bind v_hdmi_tx_ss 3.2.  The HDMI 2.0 TX driver
+ * this design needs is the out-of-tree xilinx-hdmi-tx.ko.
+ *
+ * Addresses are axi_crossbar_hdmi apertures (scripts/create_sc7f0_hdmi_crossbar
+ * .tcl): M02 = 0xB0020000 address-width 17 -> 0x20000, M07 = 0xB0080000
+ * address-width 16 -> 0x10000.
+ *
+ * Interrupts are proved from the exported BD netlist, not guessed:
+ * zu4ev_ps_bd.hwh xlconcat disp_irq_cat has In0 = pl_ps_irq0[4:0],
+ * In1 = vcu_0_vcu_host_interrupt, In2 = pl_ps_irq_disp[1:0] and its 8-bit dout
+ * feeds zynq_ultra_ps_e_0.pl_ps_irq0, i.e. dout[n] -> GIC SPI 89+n.
+ * rtl/zu4ev_pcie_card_top.v drives pl_ps_irq_disp = {display_frmbuf_irq,
+ * hdmi_tx_irq}, so hdmi_tx_irq -> SPI 95 and display_frmbuf_irq -> SPI 96.
+ * SPI 89..94 (VPHY, HDMI RX, capture, VPSS CSC, frame tap, VCU) are untouched.
+ */
+
+#include <dt-bindings/gpio/gpio.h>
+
+/ {
+	/*
+	 * Board TX GT reference clock: MGTREFCLK0 of quad 226, package pin
+	 * D10/D9.  Three independent proofs of 297 MHz, not a guessed sample:
+	 *   constraints/zu4ev_pcie_pinout.xdc "create_clock -period 3.367 -name
+	 *   hdmi_tx_clk_p" + PACKAGE_PIN D10/D9;
+	 *   routed fpga/reports/io.rpt: hdmi_tx_clk_p -> MGTREFCLK0P_226;
+	 *   vid_phy_controller_0.xci C...Tx_GT_Ref_Clock_Freq = 297
+	 *   (and Tx_GT_Line_Rate / Tx_Max_GT_Line_Rate = 5.94 Gbps).
+	 * The official encoder only uses this clock to ask for a TMDS rate
+	 * (clk_set_rate(tmds_clk, TxLineRate)) and to report the audio TMDS
+	 * clock; the GT itself is reprogrammed by xvphy from this fixed
+	 * reference.  A fixed-clock therefore reflects the real, unswitchable
+	 * board oscillator rather than standing in for a missing clock.
+	 */
+	sc7f0_tx_ref_clk: hdmi-tx-ref-clock {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <297000000>;
+	};
+
+	/*
+	 * TX video/streaming clock = vid_phy_controller_0 phy_tx_video_clk
+	 * (= phy_txoutclk domain, 148.5 MHz at 3840x2160p60 with 4 pixels per
+	 * clock; proved by the routed clock summary of the matching bitstream).
+	 * The PHY owns this variable-rate clock outside the common clock
+	 * framework, exactly like the already-deployed sc7f0_rx_video_clk:
+	 * xlnx_drm_hdmi only does clk_prepare_enable() on it and never reads its
+	 * rate.  Zero states "unknown" instead of claiming a fixed rate.
+	 */
+	sc7f0_tx_video_clk: hdmi-tx-video-clock {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <0>;
+	};
+};
+
+/*
+ * RX and TX share the same three GTHE4 channels of quad 226.  The routed io.rpt
+ * of the matching bitstream shows hdmi_rx_p[i] -> MGTHRXP{i}_226 and
+ * hdmi_tx_p[i] -> MGTHTXP{i}_226 for i = 0..2, i.e. one transceiver per lane
+ * used in both directions; vid_phy_controller_0.xci publishes
+ * C_Rx_No_Of_Channels = 3 and C_Tx_No_Of_Channels = 3 on CHANNEL_ENABLE
+ * X0Y12..X0Y14, and xlnx_drm_hdmi programs quad 0 / XVPHY_CHANNEL_ID_CHA.
+ *
+ * phy-vphy.c numbers its lanes by device-tree child order
+ * (for_each_child_of_node, XVPHY_MAX_LANES = 6), and the official 2023.2
+ * generator (device-tree-xlnx vid_phy_ctrl.tcl) emits the RX children first and
+ * the TX children after them, which is why these three follow
+ * sc7f0_rxphy0..2 in sc7f0-hdmi-rx.dtsi.
+ */
+&sc7f0_vphy {
+	sc7f0_txphy0: lane3 {
+		#phy-cells = <4>;
+	};
+	sc7f0_txphy1: lane4 {
+		#phy-cells = <4>;
+	};
+	sc7f0_txphy2: lane5 {
+		#phy-cells = <4>;
+	};
+};
+
+&amba_pl {
+	sc7f0_hdmitx: hdmi-tx@b0020000 {
+		/*
+		 * v_hdmi_tx_ss 3.2; the official 2023.2 module only matches
+		 * "xlnx,v-hdmi-tx-ss-3.1", which the generator appends to the
+		 * IP-version string, so both are listed exactly as the RX node
+		 * does.
+		 */
+		compatible = "xlnx,v-hdmi-tx-ss-3.2", "xlnx,v-hdmi-tx-ss-3.1";
+		/*
+		 * Single aperture covering the TX core at +0x0 and the VTC at
+		 * +0x10000.  The VTC needs no DT node of its own here:
+		 * xlnx_drm_hdmi.c defines TXSS_VTC_OFFSET 0x10000 and sets
+		 * config->Vtc.IsPresent for C_VID_INTERFACE = AXI-Stream, and
+		 * xhdmi_drm_compute_subcore_AbsAddr() rejects an aperture that
+		 * does not contain that offset.
+		 */
+		reg = <0x0 0xb0020000 0x0 0x20000>;
+		reg-names = "hdmi-txss";
+		interrupt-parent = <&gic>;
+		/* pl_ps_irq_disp[0] -> disp_irq_cat dout[6] -> SPI 95. */
+		interrupts = <0 95 4>;
+		interrupt-names = "irq";
+		/*
+		 * s_axi_cpu_aclk is pl_clk0 (rtl/zu4ev_pcie_card_top.v
+		 * .s_axi_cpu_aclk(pl_clk0); routed clk_pl_0 = 100.000 MHz) and
+		 * uses the same &zynqmp_clk 71 = PL0_REF phrasing as the rest of
+		 * this project's PL AXI-Lite clocks.
+	 *
+		 * "retimer-clk" is deliberately ABSENT, which is what the
+		 * contract for this board requires.  The binding shipped in the
+		 * same SRCREV as the driver
+		 * (hdmi-modules Documentation/devicetree/bindings/
+		 * xlnx,v-hdmi-tx-ss.txt, clock-names section) states:
+		 *     "txref-clk" is always required for tmds clock
+		 *     "retimer-clk" is required only when retimer is being used
+		 * and that both are derived by an external clock so they must be
+		 * added by hand.  SC7F0's HDMI output has no retimer/redriver IC
+		 * between v_hdmi_tx_ss_0, the GTs and the connector (schematic
+		 * check plus the fact that the TX lane pairs go straight from
+		 * MGTHTXP/MGTHRXN of quad 226 to the connector), so naming some
+		 * other clock "retimer-clk" would only be a dummy to satisfy a
+		 * probe and would misrepresent the board.  It is not done here.
+		 *
+		 * The consequence is recorded rather than hidden: this driver
+		 * branch contradicts its own binding.  hdmi/xilinx_drm_hdmi.c
+		 * (xlnx_rel_v2023.2 = master @ 82209b00, and unchanged on master
+		 * today at lines 3013-3021) does
+		 *     xhdmi->retimer_clk = devm_clk_get(&pdev->dev, "retimer-clk");
+		 *     if (IS_ERR(xhdmi->retimer_clk)) {
+		 *             ret = PTR_ERR(xhdmi->retimer_clk);
+		 *             xhdmi->retimer_clk = NULL;
+		 *             if (ret == -EPROBE_DEFER) dev_info(...);
+		 *             if (ret != -EPROBE_DEFER)
+		 *                     dev_err("Did not find a retimer-clk, not driving an external retimer device driver.\n");
+		 *             return ret;              <- unconditional
+		 *     } else if (xhdmi->retimer_clk) { ... } else {
+		 *             dev_dbg("no retimer clk specified, assuming no
+		 *                      redriver/retimer is used.");   <- unreachable
+		 *     }
+		 * devm_clk_get() returns ERR_PTR(-ENOENT), never NULL, so the
+		 * "assuming no redriver/retimer is used" branch the driver itself
+		 * documents cannot be reached and probe returns -ENOENT.  The only
+		 * use of the clock is (void)clk_set_rate(retimer_clk, TxLineRate)
+		 * at lines 753-757, guarded by `if (xhdmi->retimer_clk)`.
+		 *
+		 * "link_clk"/"video_clk" are absent for a different reason: the
+		 * driver never requests them and both are internal VPHY clocks with
+		 * no CCF provider on this board.
+		 */
+		clock-names = "s_axi_cpu_aclk", "s_axis_video_aclk", "txref-clk";
+		clocks = <&zynqmp_clk 71>, <&sc7f0_tx_video_clk>,
+			 <&sc7f0_tx_ref_clk>;
+		/*
+		 * Lane arguments are the official 2023.2 generator's values for
+		 * a VPHY-driven TX: <controller instance share_laneclk
+		 * direction_tx> = 0 1 1 1 (hdmi_tx_ss.tcl).  direction_tx = 1
+		 * is what makes phy-vphy treat this lane as transmit.
+		 */
+		phy-names = "hdmi-phy0", "hdmi-phy1", "hdmi-phy2";
+		phys = <&sc7f0_txphy0 0 1 1 1>,
+		       <&sc7f0_txphy1 0 1 1 1>,
+		       <&sc7f0_txphy2 0 1 1 1>;
+		/*
+		 * v_hdmi_tx_ss_0.xci: C_INPUT_PIXELS_PER_CLOCK = 4,
+		 * C_MAX_BITS_PER_COMPONENT = 8, C_VID_INTERFACE = 0 (AXI-Stream,
+		 * which is also what turns the internal VTC on),
+		 * C_INCLUDE_HDCP_1_4/2_2 = false, so no xlnx,include-hdcp-* and
+		 * no hdcp1x-keymngmt reg window; AUDIO_IN is not connected, so
+		 * no xlnx,audio-enabled / snd-pcm / acr-ctrl either.
+		 */
+		xlnx,input-pixels-per-clock = <4>;
+		xlnx,max-bits-per-component = <8>;
+		xlnx,vid-interface = <0>;
+		status = "okay";
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			sc7f0_hdmitx_port: port@0 {
+				reg = <0>;
+				sc7f0_hdmitx_in: endpoint {
+					remote-endpoint = <&sc7f0_disp_out>;
+				};
+			};
+		};
+	};
+
+	sc7f0_disp_frmbuf: framebuffer@b0080000 {
+		compatible = "xlnx,axi-frmbuf-rd-v2.2";
+		reg = <0x0 0xb0080000 0x0 0x10000>;
+		#dma-cells = <1>;
+		interrupt-parent = <&gic>;
+		/* pl_ps_irq_disp[1] -> disp_irq_cat dout[7] -> SPI 96. */
+		interrupts = <0 96 4>;
+		/*
+		 * ap_clk is the AXI-MM/video clock of the reader: BUFGCE_DIV 1
+		 * on pl_clk_300m (rtl/zu4ev_pcie_card_top.v assigns
+		 * capture_clk that way, sc7f0_display_pipeline.v .mem_clk) and
+		 * the routed clock summary calls it capture_clk_300m = 300.030
+		 * MHz.  It is the same physical net the capture branch already
+		 * describes as sc7f0_capture_clk, so that node is reused rather
+		 * than duplicating a second 300 MHz clock.
+		 */
+		clocks = <&sc7f0_capture_clk>;
+		clock-names = "ap_clk";
+		/*
+		 * Frame-tap CSR reset bit 2 (rtl/sc7f0_tap_regs.v reset_n[2:0],
+		 * CSR 0x30/0x34/0x38; driver sc7f0-frame-tap.c ngpio = 3).
+		 * xilinx_frmbuf.c:1700-1712 makes `reset-gpios` mandatory, so
+		 * this bit exists precisely so the reader is held in reset until
+		 * its own official driver releases it.  It resets the reader
+		 * only; the width converter, the video CDC and the shared HP1
+		 * read arbiter stay on the fabric reset, so asserting it cannot
+		 * truncate a burst the interconnect is still tracking, and it
+		 * cannot touch capture bit 0 or VPSS CSC bit 1.
+		 */
+		reset-gpios = <&sc7f0_frame_tap 2 GPIO_ACTIVE_LOW>;
+		/*
+		 * sc7f0_frmbuf_rd.xci (v_frmbuf_rd 2.5, alpha disabled because
+		 * an alpha format would force a 128-bit AXIS stream into the
+		 * 96-bit VIDEO_IN of v_hdmi_tx_ss_0).
+		 */
+		xlnx,s-axi-ctrl-addr-width = <32>;
+		xlnx,s-axi-ctrl-data-width = <32>;
+		xlnx,dma-addr-width = <64>;
+		xlnx,pixels-per-clock = <4>;
+		xlnx,dma-align = <32>;
+		xlnx,video-width = <8>;
+		xlnx,max-width = <4096>;
+		xlnx,max-height = <2160>;
+		/*
+		 * Names are the official 2023.2 mapping (device-tree-xlnx
+		 * framebuf_rd.tcl cross-checked against
+		 * drivers/dma/xilinx/xilinx_frmbuf.c), where the IP switch names
+		 * and the DT strings are deliberately not spelled the same:
+		 *   HAS_BGR8 -> "rgb888" -> DRM_FORMAT_RGB888 ("RG24")
+		 *   HAS_RGB8 -> "bgr888" -> DRM_FORMAT_BGR888 ("BG23")
+		 *   HAS_Y_UV8_420 -> "nv12" -> DRM_FORMAT_NV12
+		 * All three are enabled in silicon; the CRTC selects exactly one
+		 * of them through xlnx,vformat below.
+		 */
+		xlnx,vid-formats = "rgb888", "bgr888", "nv12";
+		status = "okay";
+	};
+};
+
+/*
+ * CRTC + single plane for this pipeline, at the root like the official
+ * xlnx,v-hdmi-tx-ss binding example (it takes no MMIO resource, only a dma
+ * channel and a graph link).
+ */
+/ {
+	sc7f0_pl_disp: drm-pl-disp-drv {
+		compatible = "xlnx,pl-disp";
+		dmas = <&sc7f0_disp_frmbuf 0>;
+		dma-names = "dma0";
+		/*
+		 * DRM_FORMAT_RGB888, the fourcc the official modetest can name
+		 * ("RG24") and create a framebuffer for; it is the "rgb888"
+		 * entry above (IP HAS_BGR8).  xlnx_pl_disp.c copies exactly four
+		 * characters into a u32 and looks the format up, so this string
+		 * must be a fourcc, not a V4L2 name.
+		 */
+		xlnx,vformat = "RG24";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		sc7f0_disp_port: port@0 {
+			reg = <0>;
+			sc7f0_disp_out: endpoint {
+				remote-endpoint = <&sc7f0_hdmitx_in>;
+			};
+		};
+	};
+};

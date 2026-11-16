@@ -3569,8 +3569,8 @@ CONFIG_u-boot-tools=y
 #
 # libdrm 
 #
-# CONFIG_libdrm is not set
-# CONFIG_libdrm-tests is not set
+CONFIG_libdrm=y
+CONFIG_libdrm-tests=y
 # CONFIG_libdrm-drivers is not set
 # CONFIG_libdrm-amdgpu is not set
 # CONFIG_libdrm-nouveau is not set
@@ -4080,7 +4080,12 @@ CONFIG_Init-manager-systemd=y
 # user packages 
 #
 # CONFIG_gpio-demo is not set
-# CONFIG_peekpoke is not set
+# CONFIG_peekpoke was left off here, but every accepted bring-up/R6/R7/VCU and
+# 0x26111503 image ships /usr/bin/peek and /usr/bin/poke, the bring-up register
+# reads in AGENTS.md are issued with peek, and
+# scripts/audit_sc7f0_rgb_compositor_image.sh requires both in the rootfs - so a
+# tree that left it off could not reproduce any image the flow accepts.
+CONFIG_peekpoke=y
 CONFIG_qpcie-debugd=y
 CONFIG_qpcie-v4l2-bridge=y
 CONFIG_sc7f0-ps-capture=y

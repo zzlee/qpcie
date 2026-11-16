@@ -355,7 +355,22 @@ static int tap_probe(struct platform_device *pdev)
 	mutex_init(&t->lock);
 	spin_lock_init(&t->reg_lock);
 	t->gpio.label = dev_name(dev); t->gpio.parent = dev; t->gpio.owner = THIS_MODULE;
-	t->gpio.base = -1; t->gpio.ngpio = 2; t->gpio.of_node = dev->of_node;
+	/* Three reset lines exist in the frame-tap CSR (rtl/sc7f0_tap_regs.v
+	 * reset_n[2:0], CSR 0x30/0x34/0x38 bit-bang): 0 = capture frmbuf_wr,
+	 * 1 = VPSS CSC, 2 = the SC7F0_DISPLAY_TX framebuffer reader
+	 * (sc7f0_frmbuf_rd ap_rst_n), which the official in-tree xilinx_frmbuf
+	 * driver requires as `reset-gpios`.  gpio_get()/gpio_set() address a line
+	 * purely through BIT(bit) on 0x30/0x34/0x38, so widening the chip is all
+	 * that is needed.  gpiolib only bounds the *offset* against ngpio, so this
+	 * does not by itself detect a new driver bound to an older 2-line
+	 * bitstream: bit 2 of the old write-mask is simply not wired, the write is
+	 * dropped and the reader would silently never be held in reset.  Which
+	 * hardware this driver really matches is decided by the release, not here
+	 * - a package pairs this ngpio=3 driver with the 0x26111208 bit, XSA and
+	 * device tree, and scripts/check_sc7f0_bootbin_payload.py plus the package
+	 * manifest verify that pairing byte for byte.
+	 */
+	t->gpio.base = -1; t->gpio.ngpio = 3; t->gpio.of_node = dev->of_node;
 	t->gpio.get = gpio_get; t->gpio.set = gpio_set; t->gpio.direction_output = gpio_output;
 	ret = devm_gpiochip_add_data(dev, &t->gpio, t);
 	if (ret)

@@ -1,0 +1,418 @@
+/*
+ * SC7F0 RGB COMPOSITOR personality (SC7F0-RGB-COMPOSITOR-2PPC, PL base
+ * 0x26111405): two independent plane readers + alpha blend + official HDMI TX,
+ * plus the PCIe->PS-DDR overlay plane writer.
+ *
+ * This file MUST be included after sc7f0-ps-capture.dtsi and
+ * sc7f0-hdmi-tx.dtsi: it re-uses sc7f0_capture_clk, sc7f0_frame_tap and the
+ * sc7f0_hdmitx / sc7f0_disp_frmbuf / sc7f0_pl_disp nodes those files create,
+ * and overrides the plane-A reader properties that changed with this
+ * personality.
+ *
+ * Addresses are axi_crossbar_hdmi apertures read out of
+ * rtl/zu4ev_pcie_card_top.v (the PS .hwh does not export anything that lives
+ * outside the BD, so these three windows are a software contract, not a
+ * generated fact):
+ *
+ *   M07 0xB0080000  compositor Reader-A  (v_frmbuf_rd, sc7f0_frmbuf_rd_rgb)
+ *   M08 0xB0090000  compositor Reader-B  (second instance of the same module)
+ *   M09 0xB00A0000  sc7f0_rgb_overlay_ctrl (PCIe H2C overlay ingress + plane
+ *                   writer: arm/abort/consume, blend_enable, Reader-B reset)
+ *   M02 0xB0020000  v_hdmi_tx_ss (+ VTC at +0x10000)          [hdmi-tx.dtsi]
+ *
+ * Interrupts are read out of two authoritative local sources, not extrapolated
+ * from each other.  The vectors come from the exported BD (zu4ev_ps_bd.hwh
+ * declares pl_ps_irq0 LEFT=4 i.e. 5 bits, and - in this fabric - pl_ps_irq1
+ * LEFT=3 i.e. 4 bits, both LEVEL_HIGH) and rtl/zu4ev_pcie_card_top.v drives
+ *     pl_ps_irq0 = {capture_irq, dp_irq, hdmi_rx_irq, hdmi_phy_irq, ps_irq}
+ *     pl_ps_irq1 = {hdmi_tx_irq, ovl_wr_irq_pulse, comp_irq_b, comp_irq_a}
+ * The NUMBERS come from
+ *   1. the Vitis 2023.2 standalone BSP, arm/ARMv8/64bit/platform/ZynqMP/
+ *      xparameters_ps.h:
+ *        XPS_FPGA0..7_INT_ID  = 121..128   (pl_ps_irq0, GIC INTID)
+ *        XPS_FPGA8..15_INT_ID = 136..143   (pl_ps_irq1, GIC INTID)
+ *   2. the PetaLinux 2023.2 device-tree generator, device_tree/data/
+ *      common_proc.tcl:  IRQ0_F2P -> 89 + bit  |  IRQ1_F2P -> 104 + bit
+ *      (that function returns the DT SPI index, not the GIC INTID)
+ * Both agree, and both say the two banks are NOT contiguous: INTID = SPI + 32,
+ * IRQ0[n] = SPI 89+n (INTID 121+n) while IRQ1[n] = SPI 104+n (INTID 136+n).
+ * The 97..100 this file used to carry assumed the banks were adjacent, so every
+ * driver that used them waited on an interrupt this design never raises:
+ *     Reader-A  frame/underflow  -> pl_ps_irq1[0] -> DT <0 104 4>  INTID 136
+ *     Reader-B  frame/underflow  -> pl_ps_irq1[1] -> DT <0 105 4>  INTID 137
+ *     overlay plane writer frame -> pl_ps_irq1[2] -> DT <0 106 4>  INTID 138
+ *     HDMI TX subsystem          -> pl_ps_irq1[3] -> DT <0 107 4>  INTID 139
+ *
+ * One gap of the 0x26111405 image is CLOSED in this fabric, one is recorded:
+ *
+ * 1. CLOSED: hdmi_tx_irq had no destination at all in the
+ *    SC7F0_RGB_COMPOSITOR branch of rtl/zu4ev_pcie_card_top.v (only the
+ *    SC7F0_DISPLAY_TX branch routes it, through pl_ps_irq_disp, which this
+ *    bitstream does not have).  The 0x26111405 device tree then handed the TX
+ *    driver a tied-off pl_ps_irq1[3] so that it would BIND: the driver could
+ *    drive video but never saw an HPD / cable / alarm event.  The vector is now
+ *    four bits wide and bit 3 IS hdmi_tx_irq, so SPI 107 below is a real source
+ *    and not a placeholder that keeps a driver happy.
+ *
+ * 2. rtl/sc7f0_rgb_overlay_ctrl.v implements a "reader_b_reset" bit that also
+ *    exists as PS EMIO GPIO bit 3 (frmbuf_rd_b_resetn on the PS cell).  Plane B
+ *    below names that GPIO so the information is not lost; nothing in the
+ *    in-tree tree binds the plane-B compatible, so the reset is operated from
+ *    userspace (/sys/class/gpio) until a real driver exists.
+ */
+
+#include <dt-bindings/gpio/gpio.h>
+
+/ {
+	/*
+	 * The VCU encoder's 672 MiB pool is still declared by common.dtsi, which
+	 * every personality shares.  On this fabric there is no encoder, and the
+	 * pool sits exactly where the overlay landing buffer has to be:
+	 * cma,vcu@54000000 and overlay-pool@54000000 would be two
+	 * /reserved-memory children with the same base, which the kernel resolves
+	 * by refusing one of them - i.e. an image that boots with either no
+	 * overlay buffer or no CMA at all.  Deleting the label is the narrow fix;
+	 * common.dtsi itself stays byte-identical for the VCU personalities, and
+	 * nothing in this tree can reference cma_vcu because vcu.dtsi (which sets
+	 * &encoder memory-region = <&cma_vcu>) is not included here.  The name form
+	 * of /delete-node/ is used rather than the label form because the dtc in
+	 * 2023.2 accepts both but only the name form is unambiguous here.
+	 */
+	reserved-memory {
+		/delete-node/ cma,vcu@54000000;
+	};
+
+	/*
+	 * Plane buffers the PL masters touch directly.
+	 *
+	 * sc7f0_overlay_pool is the PS-DDR landing area for the PCIe H2C overlay
+	 * planes: rtl/sc7f0_rgb_overlay_ctrl.v's wr_dst_base points here and the
+	 * plane writer is an AXI master on S_AXI_HP3_FPD (49-bit address, 128-bit
+	 * at 300 MHz).  4 slots x 3840*2160*4 B = 132710400 B, so 128 MiB is the
+	 * smallest power-of-two that still holds a full 4-slot rotation.  It is
+	 * no-map: the CPU must not keep cached lines for memory a PL master
+	 * writes behind its back.
+	 *
+	 * cma_display backs the DRM framebuffers that plane A scans out
+	 * (xlnx,pl-disp allocates through the DMA-mapping layer, so it needs a
+	 * CMA pool reachable by the PL reader on S_AXI_HP1_FPD).  The card's
+	 * global "cma=" bootarg stays deleted (see sc7f0-memory-layout.dtsi):
+	 * this is a named pool, not a second global CMA.
+	 *
+	 * Both regions reuse the address range the removed VCU encoder pool
+	 * (cma,vcu@54000000, 672 MiB) occupied; that pool is gone because this
+	 * personality has no VCU in the fabric.  Nothing here moves or overlaps
+	 * dau_fpga@30000000 (PCIe upgrade/programming staging, no-map),
+	 * cma,video@40000000 or cma,qdmabuf@50000000.
+	 */
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		sc7f0_overlay_pool: overlay-pool@54000000 {
+			compatible = "shared-dma-pool";
+			no-map;
+			reg = <0x0 0x54000000 0x0 0x08000000>;
+			label = "sc7f0_overlay";
+		};
+
+		cma_display: cma,display@5c000000 {
+			compatible = "shared-dma-pool";
+			reusable;
+			reg = <0x0 0x5c000000 0x0 0x08000000>;
+			label = "cma,display";
+		};
+	};
+};
+
+/*
+ * HDMI-side geometry of THIS personality.
+ *
+ * sc7f0-hdmi-rx.dtsi and sc7f0-hdmi-tx.dtsi carry the LEGACY 4PPC profile's
+ * numbers - their own comments cite vid_phy_controller_0 and v_hdmi_tx_ss_0 -
+ * and this personality builds three different modules at 2 PPC:
+ *
+ *   v_hdmi_rx_ss_rgb        CONFIG.C_INPUT_PIXELS_PER_CLOCK {2}, guarded by
+ *                           SC7F0_RGB_RX_BAD_GEOMETRY ("sc7f0_rgb24_axis_pack.v
+ *                           is instantiated at 2 PPC")
+ *   v_hdmi_tx_ss_rgb        CONFIG.C_INPUT_PIXELS_PER_CLOCK {2},
+ *                           CONFIG.C_MAX_BITS_PER_COMPONENT {8}, guarded by
+ *                           SC7F0_RGB_TX_BAD_GEOMETRY (48-bit VIDEO_IN)
+ *   vid_phy_controller_rgb  CONFIG.C_INPUT_PIXELS_PER_CLOCK {2}, guarded by
+ *                           SC7F0_RGB_VPHY_BAD_PPC
+ *
+ * Both subsystems' own HWH members of this round's XSA confirm it at the level
+ * the DT generator actually reads: v_hdmi_rx_ss_rgb.hwh and v_hdmi_tx_ss_rgb.hwh
+ * each export C_PIXELS_PER_CLOCK="2" and C_BITS_PER_COMPONENT="8".  The VPHY
+ * has no HWH member in any SC7F0 XSA - it is instantiated in RTL, not in the BD
+ * - which is precisely why its xlnx,* cells exist only because this tree writes
+ * them by hand, and why they can keep describing an older bitstream unnoticed.
+ *
+ * These two cells are not cosmetic, contrary to what this file claimed until
+ * 2026-11-16.  hdmi-modules 82209b0 (the module this image binds) consumes both:
+ *
+ *   phy-vphy.c:408/504      xlnx,input-pixels-per-clock -> XVphy_Config.Ppc,
+ *                           xlnx,transceiver-width      -> XVphy_Config.TransceiverWidth
+ *   xvphy_hdmi.c:1838       (TransceiverWidth == 2 || GTPE2) -> RxDataWidth 20,
+ *                           RxIntDataWidth 2;  anything else -> 40 / 4
+ *   xvphy_gthe4.c:602-617   those two are written over DRP into the GT primitive:
+ *                           RX_INT_DATAWIDTH (DRP 0x66[1:0]) and RX_DATA_WIDTH
+ *                           (DRP 0x03[8:5])
+ *   xvphy_hdmi.c:1170-1320  Ppc decides the RX MMCM CLKFBOUT rounding (multiple of
+ *                           4 vs 2) and the Clk0Div/Clk1Div pick, i.e. the RX user
+ *                           and video clock the fabric is handed
+ *
+ * So xlnx,transceiver-width is literally the GT datapath width the driver
+ * programs, and this fabric is 20 bit: the generated channel wrapper of this
+ * round carries GTHE4_CHANNEL_RX_DATA_WIDTH = GTHE4_CHANNEL_TX_DATA_WIDTH = 20
+ * (vid_phy_controller_rgb/ip_0/synth/*_gthe4_channel_wrapper.v) and
+ * rtl/zu4ev_pcie_card_top.v carries 24-bit link lanes under SC7F0_RGB_COMPOSITOR.
+ * A tree that says 4 therefore drives RX_DATA_WIDTH = 40 into a GT whose parallel
+ * side is read by 20-bit wires.  That is a real defect and it was observed: with
+ * the 4/4 tree, while the source was proven present (IT6663 bank0 r13=0xbf
+ * r14=0xff r19=0xb0, 3840x2160 stable; RXSS PIO_IN 0x187 = cable+LNK_RDY+
+ * VID_RDY+SCDC; VPHY PLL_LOCK 0x18 = 0x7, RX_INIT_STATUS 0x28 = 0x00070707,
+ * CLKDET_FREQ_RX 0x210 = 148467456) TDLOCK read 0x00000000, the RX error counter
+ * 0xB00101D4 saturated at 0xFFFF and the VTD saw no timing at all - a locked GT
+ * delivering characters the fabric could not consume.  What it is NOT, as of
+ * 2026-11-16, is a demonstrated sufficient condition: the width-correct images
+ * have never yet been measured against a GT that could lock (see the reference
+ * clock note below).  Two gates refuse the wrong width instead of leaving it for
+ * the card to find: scripts/audit_sc7f0_rgb_compositor_image.sh (audits the built
+ * DTB; it fails the 0x26111503 r1 and r3 images and passes r2 and r4) and
+ * scripts/check_sc7f0_hdmi_dt.py --rgb (compares the compiled tree against the
+ * *_rgb XCI, which says C_INPUT_PIXELS_PER_CLOCK=2, Transceiver_Width=2).
+ *
+ * What the 2/2 boots on 2026-11-15 (r2) and 2026-11-16 (r4) actually measured,
+ * because "2/2 did not fix it" is not the finding either: in all three of those
+ * boots RX_SS PIO_IN read 0x00000001 - cable detect only, no LNK_RDY, no VID_RDY -
+ * VPHY PLL_LOCK read 0x00000000 and CLKDET_FREQ_RX read 0x03670000.  The GT was
+ * never offered a stream, so none of those boots is evidence about the datapath
+ * width at all.  They are evidence about the reference clock.
+ *
+ * One earlier exclusion in this file was wrong, and it is the live blocker.  The
+ * RX GT reference clock is neither a fixed 297 MHz nor char/4 right now:
+ *   - the PL clock probe (BAR0 0x0684, read through sc7f0ctl exec devmem
+ *     0xA0000684) measures the TMDS clock the IT6663 sees on the connector at
+ *     593,948,427 Hz, i.e. a 4K60 stream is present at the connector;
+ *   - the VPHY clock detector (0xB0000210) measures the clock actually present at
+ *     the GT reference input at 57,081,856 Hz;
+ *   - that detector's scale is verified in the same boot, because it reads
+ *     156,237,824 Hz on the NI-DRU input against the probe's 156,234,866 Hz for
+ *     the fixed sc7f0_dru_clk oscillator (0.002 %), so 57.08 MHz is a measurement
+ *     and not a scaled artefact;
+ *   - the driver feeds that measured value into every RX PLL decision
+ *     (xvphy_hdmi_intr.c:776 stores CLKDET_FREQ_RX as HdmiRxRefClkHz, and
+ *     xvphy_hdmi.c:1818-1825 programs lineRate = refclk x 40 in the 1/40 branch
+ *     because the stream is scrambled/HDMI2), so the CPLL is aimed at
+ *     2.283 Gb/s against a stream of 5.939 Gb/s - 0.384x - and cannot lock.
+ * The 1/40 branch is correct only when the board presents char/4 (= TMDS/4 =
+ * 148.49 MHz here, which is exactly what 0x210 read in the earlier r1 window, and
+ * exactly why the CPLL locked then).  The ratio now measured is 10.41 instead of
+ * 4.00, so the IT6663 TX-port clock output - configured by the MCU, not by this
+ * device tree, this RTL or this driver - is back on the list of suspects that an
+ * earlier revision of this file had wrongly cleared.  Nothing in PL source can
+ * substitute for it: with the wrong ratio the GT has no valid line rate to lock
+ * to, TDLOCK cannot assert, and the datapath-width question this node used to
+ * answer stays unmeasured.  scripts/sc7f0_rx_tdlock_acceptance.sh re-derives all
+ * of that arithmetic on every run instead of trusting this paragraph.
+ *
+ * The IP's build-time Rx_GT_Ref_Clock_Freq {297} is likewise not the clock the
+ * board presents; it decides the generated create_clock on gtrefclk1_i
+ * (3.367 ns) and the reset-default CPLL dividers, but not the runtime line rate,
+ * which the driver re-derives from the measurement above.  It stays recorded
+ * here rather than being quietly edited.  At 2 PPC a correct char/4 clock leaves a
+ * thin margin worth knowing about: 5.94 Gb/s over a 20-bit datapath is a 297 MHz
+ * user clock, and the driver's own guard (xvphy_hdmi.c:1986,
+ * lineRate / (TransceiverWidth * 10) <= 298495000) leaves about 0.5 %, which is
+ * the same order as the source's own clock tolerance.
+ *
+ * One earlier suspect does stay excluded by evidence:
+ *   * xlnx,transceiver-type = <5> (GTHE4) matches the netlist, which
+ *     instantiates GTHE4_COMMON_PRIM_INST / gen_gtwizard_gthe4_top, and is
+ *     accepted by the vendor PHY driver.
+ *
+ * Everything else keeps its selected-config value, deliberately untouched:
+ * rx/tx-no-of-channels = 3 (CHANNEL_ENABLE {X0Y12 X0Y13 X0Y14}), nidru = 1 and
+ * nidru-refclk-sel = 3 (C_NIDRU {true}, C_NIDRU_REFCLK_SEL {3}), rx-refclk-sel
+ * = 1 and tx-refclk-sel = 0 (C_RX_REFCLK_SEL {1}, C_TX_REFCLK_SEL {0}),
+ * rx/tx-pll-selection = 0/6 (C_RX_PLL_SELECTION {0}, C_TX_PLL_SELECTION {6}),
+ * rx/tx-protocol = 1 (C_Rx_Protocol/C_Tx_Protocol {HDMI}), hdmi-fast-switch = 1
+ * (C_HDMI_FAST_SWITCH {true} on the RX SS), use-gt-ch4-hdmi = 0
+ * (C_Use_GT_CH4_HDMI is 0: no GT lane carries the clock).
+ *
+ * The PS capture branch is NOT part of this override and stays 4PPC:
+ * sc7f0_frmbuf_wr is generated with SAMPLES_PER_CLOCK {4}, so
+ * xlnx,pixels-per-clock = <4> at framebuffer@b0050000 is correct as written;
+ * Reader-A and Reader-B keep their own 2PPC blocks below and above, and the
+ * 2->4 adapter between the compositor side and the writer is unchanged.
+ */
+&sc7f0_vphy {
+	xlnx,input-pixels-per-clock = <2>;
+	/* The GT datapath width the driver programs over DRP (see the chain above).
+	 * This fabric is 20 bit, so 4 here is not a stale comment but a wrong
+	 * hardware setting.  It is a necessary condition for RX character lock; on
+	 * its own it is not sufficient, and the reference-clock note above records
+	 * what currently prevents the GT from locking at all. */
+	xlnx,transceiver-width = <2>;
+};
+
+&sc7f0_hdmirx {
+	xlnx,input-pixels-per-clock = <2>;
+	xlnx,max-bits-per-component = <8>;
+};
+
+/*
+ * Plane A = the compositor's Reader-A.  Same aperture and same frame-tap CSR
+ * reset bit as the 0x26111208 single-plane display reader, but the IP behind it
+ * is now sc7f0_frmbuf_rd_rgb: 2 pixels/clock, native 128-bit AXIMM, alpha
+ * enabled and ONLY the RGBA formats exist (scripts/
+ * create_sc7f0_rgb_compositor_ip.tcl: HAS_ALPHA=1, HAS_RGBA8=1, HAS_BGRA8=1,
+ * HAS_RGB8=HAS_BGR8=HAS_Y_UV8_420=0, SAMPLES_PER_CLOCK=2).  The 2023.2 DT
+ * generator maps HAS_RGBA8 -> "abgr8888" (DRM_FORMAT_ABGR8888, fourcc "AB24")
+ * and HAS_BGRA8 -> "argb8888", and computes xlnx,dma-align as
+ * samples_per_clock * 8 = 16, so every property below that changes is a
+ * property of the IP, not a guess.  xlnx,vid-formats keeps exactly the two
+ * strings that IP answers for.
+ */
+&sc7f0_disp_frmbuf {
+	interrupts = <0 104 4>;   /* pl_ps_irq1[0], INTID 136 */
+	xlnx,pixels-per-clock = <2>;
+	xlnx,dma-align = <16>;
+	xlnx,vid-formats = "abgr8888", "argb8888";
+};
+
+/*
+ * The CRTC plane now carries 32-bit RGBA, so the fourcc xlnx,pl-disp hands to
+ * xilinx_xdma_drm_config() has to be the ABGR8888 one; "RG24" (RGB888) is no
+ * longer a format this reader implements.
+ */
+&sc7f0_pl_disp {
+	xlnx,vformat = "AB24";
+	/* DRM GEM CMA allocations for this CRTC come from the named pool. */
+	memory-region = <&cma_display>;
+};
+
+&amba_pl {
+	/*
+	 * Plane B = Reader-B.  Deliberately NOT compatible with
+	 * "xlnx,axi-frmbuf-rd-v2.2": xilinx_frmbuf.c would claim the channel and
+	 * then nothing would ever program its frame address, stride and format,
+	 * because the only consumer of the blended stream is the fixed-function
+	 * sc7f0_alpha_blend_2ppc in front of the TX, not a DMA-engine client.
+	 * The node exists so (a) the aperture is reserved in the tree, (b)
+	 * userspace has one authoritative address/GPIO/IRQ description to read,
+	 * and (c) the frame buffer region is described.  Until a real driver
+	 * lands, the control program pokes this window through /dev/mem and
+	 * drives the EMIO reset line through sysfs; nothing else may touch it.
+	 */
+	sc7f0_plane_b: plane-b@b0090000 {
+		compatible = "yuan,sc7f0-rgb-plane-b";
+		reg = <0x0 0xb0090000 0x0 0x10000>;
+		interrupt-parent = <&gic>;
+		/* comp_irq_b -> pl_ps_irq1[1], INTID 137. */
+		interrupts = <0 105 4>;
+		clocks = <&sc7f0_capture_clk>;
+		clock-names = "ap_clk";
+		/*
+		 * Reader-B reset: PS EMIO GPIO bit 3.  zynqmpgpio numbers MIO
+		 * 0..77 first, so EMIO[n] = 78 + n; the removed VCU reset used
+		 * <&gpio 78 0> = EMIO[0] from the same bank.  The RTL note in
+		 * rtl/zu4ev_pcie_card_top.v ("Reader-B reset, PS EMIO GPIO
+		 * output bit 3") is what fixes the index; GPIO0/1/2 stay
+		 * assigned to whatever the psu_init configuration uses.
+		 */
+		reset-gpios = <&gpio 81 GPIO_ACTIVE_LOW>;
+		/* 4K RGBA32 plane = 33177600 B; slot rotation lives in the pool. */
+		memory-region = <&sc7f0_overlay_pool>;
+		status = "okay";
+	};
+
+	/*
+	 * Overlay ingress + plane writer control (rtl/sc7f0_rgb_overlay_ctrl.v).
+	 * Register map, 4 KiB window, byte offsets, straight from that file's own
+	 * header comment:
+	 *   0x00 CTRL        [0] ovl_enable   [1] ovl_go (arm on 0->1)
+	 *                    [2] quiesce_req  [3] discard_pending
+	 *                    [4] wr_enable    [5] wr_auto_advance
+	 *                    [7:6] wr_force_slot  [10:8] wr_slot_count (1..4)
+	 *   0x04/0x08 src_addr_lo/hi   (host IOVA of the plane)
+	 *   0x0C xfer_bytes            0x10 max_bytes_per_req (0 = IP clamp)
+	 *   0x14/0x18 wr_dst_base_lo/hi (PS DDR, bits [48:0] used)
+	 *   0x1C wr_slot_bytes         0x20 wr_frame_bytes (4K RGBA32 = 33177600)
+	 *   0x24 consume                (one pulse per set bit releases a slot)
+	 *   0x30 COMP_CTRL   [0] blend_enable [1] alpha_force_opaque
+	 *                    [2] blend_unlock [3] reader_b_reset
+	 *   0x40 STATUS      busy, quiesced, tag_quarantined, ext_tag_blocked,
+	 *                    wr_busy, wr_slot_ready[3:0], blend_locked,
+	 *                    blend_busy, wr_irq_sticky, ovl_irq_sticky,
+	 *                    axis_ovf_sticky
+	 *   0x44 STATUS2     outstanding, active_slot, sticky error bits
+	 *   0x48/0x4C/0x50 bytes_issued/staged/drained
+	 *   0x54/0x58/0x5C wr_frames_done, wr_bytes_written, blend_beats
+	 *   0x60/0x64 blend_lock_lost, blend_sat_watchdog
+	 *   0x6C ABORT_STATUS  [0] ovl_abort_req pending  [1] wr_abort_busy
+	 *   0x78 ID = 0x52474231 "RGB1"  <- software must read this before
+	 *                                   trusting any other register here
+	 *        (0x6C carried ID as well in the 0x26111405 fabric, which cannot
+	 *         work: a case statement cannot answer one label twice, the FIRST
+	 *         item won and ID read 0 - indistinguishable from an absent
+	 *         aperture.  ID is at 0x78 now; 0x6C keeps the abort status it had.)
+	 * No kernel driver is bound: the reset state of every control bit is 0,
+	 * so a board that never writes this window keeps the overlay path
+	 * disabled and the upgrade/programming H2C path unaffected.
+	 */
+	sc7f0_overlay_ctrl: overlay-ctrl@b00a0000 {
+		compatible = "yuan,sc7f0-rgb-overlay-ctrl";
+		reg = <0x0 0xb00a0000 0x0 0x1000>;
+		interrupt-parent = <&gic>;
+		/* ovl_wr_irq_pulse -> pl_ps_irq1[2], INTID 138 (frame complete). */
+		interrupts = <0 106 4>;
+		clocks = <&zynqmp_clk 71>;
+		clock-names = "s_axi_aclk";
+		memory-region = <&sc7f0_overlay_pool>;
+		status = "okay";
+	};
+};
+
+/*
+ * HDMI TX SS on this personality.  Two overrides of sc7f0-hdmi-tx.dtsi, both
+ * forced by this bitstream rather than chosen:
+ *
+ * - interrupts: 0x26111405 exported the four fabric interrupts as INTID
+ *   129..136, so SPI 100 (hdmi-tx) sat on a tied-off PL input and the driver
+ *   bound but saw no TX events.  0x26111501 routes pl_ps_irq1[3] = hdmi_tx_irq
+ *   for real (INTID 139 / SPI 107 below), which is why the number moved.
+ * - retimer-clk: hdmi/xilinx_drm_hdmi.c (hdmi-modules xlnx_rel_v2023.2) does
+ *   devm_clk_get("retimer-clk") and returns the error unconditionally, even
+ *   though its own binding says the clock is only required with a retimer and
+ *   its own "no retimer clk specified" branch says the absence is fine.  SC7F0
+ *   has no retimer/redriver, so this adds a named fixed-clock that stands for
+ *   "nothing external to program": the driver's only use is
+ *   (void)clk_set_rate(retimer_clk, TxLineRate) guarded by if (retimer_clk),
+ *   and a fixed-clock rejects that call.  The frequency written here is the
+ *   5.94 Gbps TMDS line rate the driver would ask for, so nothing pretends to
+ *   be a board oscillator; the honest fix is a driver patch to
+ *   devm_clk_get_optional(), which is deliberately NOT applied in this image
+ *   so that the first boot exercises the unmodified official module.
+ */
+/ {
+	sc7f0_tx_retimer_clk: hdmi-tx-retimer-clock {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <594000000>;
+	};
+};
+
+&sc7f0_hdmitx {
+	/* pl_ps_irq1[3] = hdmi_tx_irq, a real source in this fabric (INTID 139). */
+	interrupts = <0 107 4>;
+	/* v_hdmi_tx_ss_rgb, not v_hdmi_tx_ss_0: 2PPC/8bpc per its own HWH. */
+	xlnx,input-pixels-per-clock = <2>;
+	xlnx,max-bits-per-component = <8>;
+	clock-names = "s_axi_cpu_aclk", "s_axis_video_aclk", "txref-clk",
+		      "retimer-clk";
+	clocks = <&zynqmp_clk 71>, <&sc7f0_tx_video_clk>, <&sc7f0_tx_ref_clk>,
+		 <&sc7f0_tx_retimer_clk>;
+};

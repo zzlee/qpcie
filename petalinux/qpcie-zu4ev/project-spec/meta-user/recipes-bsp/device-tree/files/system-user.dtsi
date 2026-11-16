@@ -21,7 +21,17 @@
 ////////////////////////////////////////////////////////////////////////////
 // qcap modules
 
+/* SC7F0-RGB-COMPOSITOR-2PPC (0x26111405+) has no VCU in the fabric: scripts/
+ * create_zu4ev_ps_bd.tcl refuses VCU and the RGB compositor on one design
+ * because both claim S_AXI_HP2_FPD/S_AXI_HP3_FPD and the encoder IRQ slot.  The
+ * encoder node labels vcu.dtsi overrides (&vcu_0, &encoder) are therefore not
+ * emitted by the hardware import at all, and a reference to a missing label is
+ * a dtc error, so the include has to be conditional rather than "harmless".
+ * Every other personality keeps the encoder description byte-identical.
+ */
+#if !defined(SC7F0_RGB_COMPOSITOR_ENABLE) || !SC7F0_RGB_COMPOSITOR_ENABLE
 #include "vcu.dtsi"
+#endif
 
 #include "sc6f0-mcu.dtsi"
 
@@ -30,6 +40,20 @@
 #include "sc7f0-hdmi-rx.dtsi"
 #if defined(SC7F0_PS_CAPTURE_ENABLE) && SC7F0_PS_CAPTURE_ENABLE
 #include "sc7f0-ps-capture.dtsi"
+#if defined(SC7F0_HDMI_TX_ENABLE) && SC7F0_HDMI_TX_ENABLE
+/* Must follow both files above: phy-vphy numbers VPHY lanes by child order, so
+ * the three TX lanes have to be appended after the three RX lanes, and the
+ * display reader reuses sc7f0_capture_clk and the sc7f0_frame_tap reset
+ * controller that sc7f0-ps-capture.dtsi provides. */
+#include "sc7f0-hdmi-tx.dtsi"
+#if defined(SC7F0_RGB_COMPOSITOR_ENABLE) && SC7F0_RGB_COMPOSITOR_ENABLE
+/* Must follow sc7f0-hdmi-tx.dtsi: it re-declares plane-A reader properties
+ * (2 PPC + RGBA8 + SPI 97), the plane format the CRTC requests, the HDMI TX
+ * interrupt/clock set, and it adds the plane-B reader and the overlay
+ * ingress/plane-writer windows that only this personality has. */
+#include "sc7f0-rgb-compositor.dtsi"
+#endif
+#endif
 #endif
 #else
 /* Never probe HDMI register apertures on the debug-only hardware. */
