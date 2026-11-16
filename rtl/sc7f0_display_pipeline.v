@@ -43,6 +43,17 @@ module sc7f0_display_pipeline (
     input  wire csr_rst_n,
     input  wire mem_clk,
     input  wire mem_rst_n,
+    // Frame-tap CSR reset bit 2, already synchronised into mem_clk by
+    // sc7f0_tap_regs (same idiom as the capture writer/CSC resets).  This is the
+    // only controllable reset input sc7f0_frmbuf_rd has, and the official
+    // in-tree xilinx_frmbuf driver requires it as `reset-gpios`.  It resets the
+    // reader only: the width converter, the video CDC and the shared HP1 read
+    // arbiter stay on mem_rst_n, so asserting it can never truncate a burst the
+    // converter or the HP1 interconnect is still tracking.  The official driver
+    // asserts and immediately releases it at probe, before any dmaengine
+    // descriptor is issued, so no reader transaction is in flight; software must
+    // not toggle it while a frame read is running.
+    input  wire reader_rst_n,
     input  wire tx_clk,
     input  wire tx_rst_n,
 
@@ -173,7 +184,7 @@ module sc7f0_display_pipeline (
 
     sc7f0_frmbuf_rd u_frmbuf_rd (
         .ap_clk                   (mem_clk),
-        .ap_rst_n                 (mem_rst_n),
+        .ap_rst_n                 (reader_rst_n),
         .interrupt                (irq),
 
         .m_axis_video_TDATA       (fb_tdata),

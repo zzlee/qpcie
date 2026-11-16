@@ -86,9 +86,24 @@ module sc7f0_frame_tap #(
     wire future_word=pvalid&&(id_delta>0||(id_delta==0&&pixel_index>expected));
     wire source_advanced=$signed(current_source-frame_id)>0;
     wire force_fill=filling||!enable||source_reset||future_word||gap>=GAP_CYCLES||(!pvalid&&source_advanced);
+    // One named decode shared by ppop's third term and by `mismatch`, so the two
+    // can never diverge.  Under `real_word` both remaining force_fill terms are
+    // constants 0: real_word requires id_delta==0 && pixel_index==expected, which
+    // is mutually exclusive with future_word (id_delta>0, or id_delta==0 and
+    // pixel_index>expected), and real_word implies pvalid, which kills
+    // (!pvalid && source_advanced).  Therefore, in every reachable state,
+    //     real_word && !force_fill  ==  use_real
+    // exactly (filling, !enable, source_reset and gap>=GAP_CYCLES are kept
+    // verbatim).  This removes one 32-bit sign/zero decode and one 22-bit
+    // `pixel_index > expected` compare from the pdata -> ppop -> rd_en ->
+    // ENARDEN cone without changing any cycle, width, handshake, header, credit,
+    // started/dropped counter, ticks/gray value or FIFO depth.  force_fill,
+    // generate_word, next_flags and the 32-bit modular ID/retired comparators
+    // are untouched.
+    wire use_real=real_word&&!filling&&enable&&!source_reset&&(gap<GAP_CYCLES);
     wire generate_word=active&&!all_queued&&(real_word||force_fill);
     wire expected_eol=xword==(frame_width>>2)-1;
-    wire mismatch=real_word&&!force_fill&&(pdata[96]!=expected_eol);
+    wire mismatch=use_real&&(pdata[96]!=expected_eol);
     wire [31:0] next_flags=flags|(force_fill?32'd1:32'd0)|(mismatch?32'd2:32'd0)|(!enable?32'd4:32'd0)|(source_reset?32'd8:32'd0);
     assign busy=active||m_valid;
     assign hpop=((!enable||credits==0)&&!active&&!m_valid)||
@@ -96,7 +111,7 @@ module sc7f0_frame_tap #(
          width>=64&&width<=4096&&height>=64&&height<=2160&&width[1:0]==0);
     assign ppop=((!enable||credits==0)&&!active&&!m_valid)||
         (!active&&!m_valid&&retired_valid&&$signed(pixel_id-retired_id)<=0)||
-        (active&&!all_queued&&slot&&(stale||(real_word&&!force_fill)));
+        (active&&!all_queued&&slot&&(stale||use_real));
     always @(posedge m_clk)begin
         if(!m_rst_n)begin
             active<=0;all_queued<=0;filling<=0;out_last<=0;frame_id<=0;flags<=0;out_flags<=0;

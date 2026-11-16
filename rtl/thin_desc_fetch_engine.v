@@ -17,6 +17,23 @@
 `timescale 1ns / 1ps
 
 module thin_desc_fetch_engine #(
+    // Review H2 units fix: what the WIDTH field of the launch bus MEANS.
+    //   legacy (default 0): for RGB24 the walker historically put BYTES PER ROW
+    //     (effective_width = stride0 or width*3) in the bus width field, and the
+    //     consumer papersed over it with rgb_line_bytes(w) = (w <= MAX_WIDTH) ? w*3
+    //     : w (rtl/sc7f0_rgb24_c2h_engine.v:123).  That shim is ambiguous: it is
+    //     right for a 4K row (11520 > 4096, read as bytes) and WRONG for any row of
+    //     4096 B or less (e.g. 640x480 RGB24, stride 1920 -> the engine emits
+    //     1920*3 = 5760 B per row, a 3x row overrun of the descriptor's own image).
+    //   RGB personality (1): the bus carries PIXELS, exactly like the ordinary
+    //     descriptor path (c2h_line_width), so the engine takes its w*3 branch for
+    //     every size and the format guard's pixel-unit MAX_WIDTH bound means what it
+    //     says.  Only the WIDTH FIELD changes.  Row-byte maths (effective_stride0,
+    //     target_y, launch_stride) and the SGL byte accounting are untouched, so a
+    //     padded stride stays padding: 3840 px with stride 12288 stays 3840 active
+    //     pixels at a 12288 B pitch; the active width is never reverse-derived from
+    //     a stride.
+    parameter        WIDTH_FIELD_PIXELS = 0,
     parameter integer DATA_WIDTH = 128
 )(
     input  wire        clk,
@@ -45,6 +62,15 @@ module thin_desc_fetch_engine #(
 
     // Status & Diagnostics
     input  wire        frame_done_in,      // pcie_frame_done pulse
+    // Review H2: retire an in-flight frame WITHOUT launching it.  The frame guard
+    // (rtl/sc7f0_video_format_guard.v, instantiated by custom_pcie_dma_top.v) uses
+    // this when the profile that is armed is not the packed RGB24 single-plane
+    // format this build's channel-0 engine implements.  The walker requested the
+    // launch before it fetched any descriptor for that frame, so nothing has been
+    // pushed into the SGL streams yet and there is no residue to drain: retiring
+    // frame_active here is what stops the walker from waiting forever on a
+    // frame_done_in that a refused engine will never send.
+    input  wire        frame_abort,
     output reg  [31:0] frame_count,
     output reg  [31:0] drop_count,
     output wire        busy,
@@ -161,6 +187,17 @@ module thin_desc_fetch_engine #(
                 (format == 4'd1 || frame_bytes_accum_uv >= frame_bytes_target_uv)) begin
                 frame_count  <= frame_count + 1'b1;
                 frame_active <= 1'b0;
+            end else if (frame_abort) begin
+                // Refused by the format guard: drop the frame, count it as a drop so
+                // the driver sees it in drop_count as well as in the guard counters,
+                // and leave the ring head where it is - no descriptor of this frame
+                // was consumed, so a corrected profile resumes the same ring.
+                frame_active         <= 1'b0;
+                frame_launch_req     <= 1'b0;
+                frame_bytes_accum_y  <= 32'd0;
+                frame_bytes_accum_uv <= 32'd0;
+                drop_count           <= drop_count + 1'b1;
+                state                <= S_IDLE;
             end
 
             // Default strobes
@@ -196,7 +233,7 @@ module thin_desc_fetch_engine #(
                                 global_timestamp,
                                 launch_stride,
                                 frame_height,
-                                effective_width,
+                                WIDTH_FIELD_PIXELS ? frame_width : effective_width,
                                 64'd0, // plane1 dummy (walker supplies address)
                                 64'd0  // plane0 dummy (walker supplies address)
                             };

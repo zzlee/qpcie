@@ -2,6 +2,20 @@
 // Module: rq_tx_encoder
 // Description: Arbitrates and packages requester MRd/MWr/Msg transactions.
 //              Priority: IRQ > Desc Fetch > SG Table Fetch > H2C Read > C2H Write.
+//
+// SC7F0-RGB-COMPOSITOR-2PPC adds one optional Memory-Read client for the
+// overlay plane (ENABLE_OVL_REQ=1).  It is deliberately the LOWEST priority in
+// the chain: the overlay may be delayed by every legacy source (descriptor
+// fetch, SG walk, H2C upgrade programming, C2H capture) but can never delay
+// them, so an armed overlay cannot slow the upgrade path or starve capture.
+// The client supplies its OWN tag and byte enables.  Its tag pool is
+// 64..127, i.e. disjoint from every producer in this design (0 thin-descriptor,
+// 1 SG table, 2..63 h2c/sg data from the allocator's 2..MAX_TAGS-1 range and
+// 0x20 the 64-byte extended descriptor); see rtl/pcie_tag_manager.v and
+// rtl/custom_pcie_dma_top.v.  Because those are 8-bit tags above the 32 that
+// base PCIe guarantees, the *parent* must only enable this client while the
+// core's negotiated cfg_ext_tag_enable is high (rtl/custom_pcie_dma_top.v
+// gates it); this encoder stays policy-free and simply never sees VALID then.
 //              Supports both:
 //              - 128-bit AXI4-Stream interface (7-Series / A50T)
 //              - 256-bit AXI4-Stream interface in DWORD_Aligned mode (UltraScale+ / ZU4EV)
@@ -12,7 +26,11 @@ module rq_tx_encoder #(
     parameter DATA_WIDTH = 128,
     parameter KEEP_WIDTH = (DATA_WIDTH == 256) ? 8 : (DATA_WIDTH / 8),
     parameter [15:0] REQUESTER_ID = 16'h0001,
-    parameter ENABLE_C2H_BYTE_ENABLE = 0
+    parameter ENABLE_C2H_BYTE_ENABLE = 0,
+    // 0 keeps this module byte-for-byte the shipped arbiter (no extra state, no
+    // extra branch, nothing for the optimiser to remove).  1 adds the overlay
+    // Memory-Read client described above.
+    parameter ENABLE_OVL_REQ = 0
 )(
     input wire clk, input wire rst_n,
     input wire [15:0] requester_id,
@@ -33,9 +51,21 @@ module rq_tx_encoder #(
     input wire c2h_req_last,
     input wire [3:0] c2h_req_first_be, c2h_req_last_be,
     output wire c2h_req_data_ready,
-    output wire c2h_req_ack
+    output wire c2h_req_ack,
+    // ---- optional overlay Memory-Read client (ENABLE_OVL_REQ) -------------
+    input wire         ovl_req_valid,
+    input wire [63:0]  ovl_req_addr,
+    input wire [10:0]  ovl_req_dw_len,
+    input wire [7:0]   ovl_req_tag,
+    input wire [3:0]   ovl_req_first_be,
+    input wire [3:0]   ovl_req_last_be,
+    output wire        ovl_req_ack
 );
     wire unused_c2h_req_last = c2h_req_last;
+    // With the client disabled nothing may ever be taken from it, and its ack
+    // must be a hard 0 rather than a floating wire.
+    wire        ovl_req_valid_i = ENABLE_OVL_REQ ? ovl_req_valid : 1'b0;
+    wire [3:0]  ovl_last_be     = (ovl_req_dw_len > 11'd1) ? ovl_req_last_be : 4'h0;
     wire [15:0] active_requester_id = (requester_id != 16'd0) ? requester_id : REQUESTER_ID;
     wire [3:0] desc_last_be = (desc_req_dw_len > 11'd1) ? 4'hF : 4'h0;
     wire [3:0] sg_last_be   = (sg_req_dw_len > 11'd1)   ? 4'hF : 4'h0;
@@ -51,7 +81,8 @@ module rq_tx_encoder #(
                        S_SEND_DESC = 3'd2,
                        S_SEND_SG   = 3'd3,
                        S_SEND_H2C  = 3'd4,
-                       S_MWR_BURST = 3'd5;
+                       S_MWR_BURST = 3'd5,
+                       S_SEND_OVL  = 3'd6;
 
             reg [2:0] state;
             reg [DATA_WIDTH-1:0] rq_tdata;
@@ -59,7 +90,7 @@ module rq_tx_encoder #(
             reg rq_tlast;
             reg [61:0] rq_tuser;
             reg [KEEP_WIDTH-1:0] rq_tkeep;
-            reg irq_ack, desc_ack, sg_ack, h2c_ack, c2h_ack;
+            reg irq_ack, desc_ack, sg_ack, h2c_ack, c2h_ack, ovl_ack;
 
             reg [127:0] hold_hi;
             reg [10:0] rq_payload_left;
@@ -74,6 +105,7 @@ module rq_tx_encoder #(
             assign sg_req_ack       = sg_ack;
             assign h2c_req_ack      = h2c_ack;
             assign c2h_req_ack      = c2h_ack;
+            assign ovl_req_ack      = ovl_ack;
 
             // "Taken by the idle encoder" must be evaluated exactly like the
             // S_IDLE branch chain below, i.e. valid AND its own ack is not
@@ -93,6 +125,12 @@ module rq_tx_encoder #(
                                   (c2h_req_dw_len != 11'd0) &&
                                   !(idle_take_irq  || idle_take_desc ||
                                     idle_take_sg   || idle_take_h2c);
+            // Lowest priority: also excluded while a C2H write wants the bus.
+            wire idle_take_ovl  = ovl_req_valid_i && !ovl_ack &&
+                                  (ovl_req_dw_len != 11'd0) &&
+                                  !(idle_take_irq  || idle_take_desc ||
+                                    idle_take_sg   || idle_take_h2c ||
+                                    idle_take_c2h);
 
             // Only edges where c2h_req_data really is latched may pop the
             // source. In S_MWR_BURST the four held DWORDs precede the next
@@ -120,6 +158,7 @@ module rq_tx_encoder #(
                     sg_ack        <= 1'b0;
                     h2c_ack       <= 1'b0;
                     c2h_ack       <= 1'b0;
+                    ovl_ack       <= 1'b0;
                     hold_hi       <= 128'd0;
                     rq_payload_left <= 11'd0;
                 end else begin
@@ -128,6 +167,7 @@ module rq_tx_encoder #(
                     sg_ack   <= 1'b0;
                     h2c_ack  <= 1'b0;
                     c2h_ack  <= 1'b0;
+                    ovl_ack  <= 1'b0;
 
                     case (state)
                         S_IDLE: begin
@@ -179,6 +219,22 @@ module rq_tx_encoder #(
                                 rq_tlast         <= 1'b1;
                                 rq_tvalid        <= 1'b1;
                                 state            <= S_SEND_H2C;
+                            end else if (idle_take_ovl) begin
+                                // Header-only MRd.  The requester id, tag and
+                                // byte enables all come from the client, so an
+                                // unaligned head/tail of a plane segment gets
+                                // exactly the byte enables the ingress computed
+                                // instead of the 4'hF the fixed clients assume.
+                                rq_tdata[63:0]   <= ovl_req_addr;
+                                rq_tdata[74:64]  <= ovl_req_dw_len;
+                                rq_tdata[78:75]  <= 4'b0000;
+                                rq_tdata[95:80]  <= active_requester_id;
+                                rq_tdata[103:96] <= ovl_req_tag;
+                                rq_tuser         <= {54'd0, ovl_last_be, ovl_req_first_be};
+                                rq_tkeep         <= {KEEP_WIDTH{1'b1}};
+                                rq_tlast         <= 1'b1;
+                                rq_tvalid        <= 1'b1;
+                                state            <= S_SEND_OVL;
                             end else if (idle_take_c2h) begin
                                 rq_tdata[63:0]    <= c2h_req_addr;
                                 rq_tdata[74:64]   <= c2h_req_dw_len;
@@ -242,6 +298,15 @@ module rq_tx_encoder #(
                             end
                         end
 
+                        S_SEND_OVL: begin
+                            if (rq_tvalid && m_axis_rq_tready) begin
+                                ovl_ack   <= 1'b1;
+                                rq_tvalid <= 1'b0;
+                                rq_tlast  <= 1'b0;
+                                state     <= S_IDLE;
+                            end
+                        end
+
                         S_MWR_BURST: begin
                             if (rq_tvalid && m_axis_rq_tready) begin
                                 if (rq_tlast) begin
@@ -269,7 +334,7 @@ module rq_tx_encoder #(
         end else begin : gen_128b
             localparam IDLE = 3'd0, SEND_IRQ = 3'd1, SEND_DESC = 3'd2,
                        SEND_H2C = 3'd3, SEND_MWR_HEADER = 3'd4,
-                       SEND_MWR_DATA = 3'd5, SEND_SG = 3'd6;
+                       SEND_MWR_DATA = 3'd5, SEND_SG = 3'd6, SEND_OVL = 3'd7;
             localparam integer DATA_DWORDS = DATA_WIDTH / 32;
 
             reg [2:0] state;
@@ -278,7 +343,7 @@ module rq_tx_encoder #(
             reg rq_tlast;
             reg [61:0] rq_tuser;
             reg [KEEP_WIDTH-1:0] rq_tkeep;
-            reg irq_ack, desc_ack, sg_ack, h2c_ack, c2h_ack;
+            reg irq_ack, desc_ack, sg_ack, h2c_ack, c2h_ack, ovl_ack;
 
             reg [10:0] c2h_dw_remaining;
             wire [10:0] first_payload_dw =
@@ -304,6 +369,7 @@ module rq_tx_encoder #(
             assign sg_req_ack         = sg_ack;
             assign h2c_req_ack        = h2c_ack;
             assign c2h_req_ack        = c2h_ack;
+            assign ovl_req_ack        = ovl_ack;
 
             function [KEEP_WIDTH-1:0] payload_keep;
                 input [10:0] valid_dw;
@@ -335,6 +401,7 @@ module rq_tx_encoder #(
                     sg_ack <= 1'b0;
                     h2c_ack <= 1'b0;
                     c2h_ack <= 1'b0;
+                    ovl_ack <= 1'b0;
                     c2h_dw_remaining <= 11'd0;
                 end else begin
                     irq_ack <= 1'b0;
@@ -342,6 +409,7 @@ module rq_tx_encoder #(
                     sg_ack <= 1'b0;
                     h2c_ack <= 1'b0;
                     c2h_ack <= 1'b0;
+                    ovl_ack <= 1'b0;
 
                     case (state)
                         IDLE: begin
@@ -392,6 +460,21 @@ module rq_tx_encoder #(
                                 rq_tlast <= 1'b1;
                                 rq_tvalid <= 1'b1;
                                 state <= SEND_H2C;
+                            end else if (ovl_req_valid_i && !ovl_ack &&
+                                         ovl_req_dw_len != 11'd0 &&
+                                         !(irq_req_valid  || desc_req_valid ||
+                                           sg_req_valid   || h2c_req_valid ||
+                                           (c2h_req_valid && c2h_req_dw_len != 11'd0))) begin
+                                rq_tdata[63:0] <= ovl_req_addr;
+                                rq_tdata[74:64] <= ovl_req_dw_len;
+                                rq_tdata[78:75] <= 4'b0000;
+                                rq_tdata[95:80] <= active_requester_id;
+                                rq_tdata[103:96] <= ovl_req_tag;
+                                rq_tuser <= {54'd0, ovl_last_be, ovl_req_first_be};
+                                rq_tkeep <= {KEEP_WIDTH{1'b1}};
+                                rq_tlast <= 1'b1;
+                                rq_tvalid <= 1'b1;
+                                state <= SEND_OVL;
                             end else if (c2h_req_valid && !c2h_req_ack && c2h_req_dw_len != 0) begin
                                 rq_tdata[63:0] <= c2h_req_addr;
                                 rq_tdata[74:64] <= c2h_req_dw_len;
@@ -437,6 +520,15 @@ module rq_tx_encoder #(
                         SEND_H2C: begin
                             if (rq_tvalid && m_axis_rq_tready) begin
                                 h2c_ack <= 1'b1;
+                                rq_tvalid <= 1'b0;
+                                rq_tlast <= 1'b0;
+                                state <= IDLE;
+                            end
+                        end
+
+                        SEND_OVL: begin
+                            if (rq_tvalid && m_axis_rq_tready) begin
+                                ovl_ack <= 1'b1;
                                 rq_tvalid <= 1'b0;
                                 rq_tlast <= 1'b0;
                                 state <= IDLE;

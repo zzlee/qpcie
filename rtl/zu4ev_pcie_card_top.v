@@ -120,12 +120,30 @@ module zu4ev_pcie_card_top #(
     wire hdmi_ps_bvalid, hdmi_ps_bready, hdmi_ps_arvalid, hdmi_ps_arready;
     wire hdmi_ps_rvalid, hdmi_ps_rready;
     wire [1:0] hdmi_ps_bresp, hdmi_ps_rresp;
-    wire [223:0] hdmi_ctl_awaddr, hdmi_ctl_araddr, hdmi_ctl_wdata, hdmi_ctl_rdata;
-    wire [27:0] hdmi_ctl_wstrb;
-    wire [6:0] hdmi_ctl_awvalid, hdmi_ctl_awready, hdmi_ctl_wvalid, hdmi_ctl_wready;
-    wire [6:0] hdmi_ctl_bvalid, hdmi_ctl_bready, hdmi_ctl_arvalid, hdmi_ctl_arready;
-    wire [6:0] hdmi_ctl_rvalid, hdmi_ctl_rready;
-    wire [13:0] hdmi_ctl_bresp, hdmi_ctl_rresp;
+    // Eight AXI-Lite master slices, one 32-bit slice per axi_crossbar_hdmi port:
+    // M00 PHY, M01 RX SS, M02 TX SS, M03 dualpath, M04..M06 capture branch, and
+    // M07 = 0xB0080000 display/sc7f0_frmbuf_rd CSR (only consumed when
+    // SC7F0_DISPLAY_TX is defined; the slice stays unconnected otherwise, exactly
+    // as before this personality existed).
+`ifdef SC7F0_RGB_COMPOSITOR
+    wire [319:0] hdmi_ctl_awaddr, hdmi_ctl_araddr, hdmi_ctl_wdata, hdmi_ctl_rdata;
+    wire [39:0] hdmi_ctl_wstrb;
+    wire [9:0] hdmi_ctl_awvalid, hdmi_ctl_awready, hdmi_ctl_wvalid, hdmi_ctl_wready;
+    wire [9:0] hdmi_ctl_bvalid, hdmi_ctl_bready, hdmi_ctl_arvalid, hdmi_ctl_arready;
+    wire [9:0] hdmi_ctl_rvalid, hdmi_ctl_rready;
+    wire [19:0] hdmi_ctl_bresp, hdmi_ctl_rresp;
+`else
+    wire [255:0] hdmi_ctl_awaddr, hdmi_ctl_araddr, hdmi_ctl_wdata, hdmi_ctl_rdata;
+    wire [31:0] hdmi_ctl_wstrb;
+    wire [7:0] hdmi_ctl_awvalid, hdmi_ctl_awready, hdmi_ctl_wvalid, hdmi_ctl_wready;
+    wire [7:0] hdmi_ctl_bvalid, hdmi_ctl_bready, hdmi_ctl_arvalid, hdmi_ctl_arready;
+    wire [7:0] hdmi_ctl_rvalid, hdmi_ctl_rready;
+    wire [15:0] hdmi_ctl_bresp, hdmi_ctl_rresp;
+`endif
+    // as before this personality existed).  SC7F0_RGB_COMPOSITOR widens the
+    // vector to ten 32-bit slices because that personality adds
+    // M08 = 0xB0090000 (compositor Reader-B v_frmbuf_rd CSR) and
+    // M09 = 0xB00A0000 (overlay ingress / overlay writer CSR).
     axi_crossbar_hdmi u_hdmi_control (
         .aclk(pl_clk0), .aresetn(sys_100m_rst_n),
         .s_axi_awaddr(hdmi_ps_awaddr), .s_axi_awprot(3'b000),
@@ -241,6 +259,19 @@ module zu4ev_pcie_card_top #(
     wire dp_arvalid,dp_arready,dp_rvalid,dp_rready,dp_rlast;
     wire [127:0] dp_wdata,dp_rdata;
     wire [15:0] dp_wstrb;
+`ifdef SC7F0_TX_VIDEO_PRESENT
+    // Display framebuffer reader read stream (sc7f0_display_pipeline -> HP1).
+    // Declared here because u_hp1_read_arbiter and its merge stage sit above the
+    // HDMI TX block in this file; `default_nettype none` forbids use-before-decl.
+    wire [63:0]  disp_araddr;
+    wire [7:0]   disp_arlen;
+    wire [2:0]   disp_arsize;
+    wire [1:0]   disp_arburst;
+    wire         disp_arvalid,disp_arready,disp_rvalid,disp_rready,disp_rlast;
+    wire [127:0] disp_rdata;
+    wire [1:0]   disp_rresp;
+    wire         hdmi_tx_irq,display_frmbuf_irq;
+`endif
 `endif
 `ifdef SC7F0_DEBUG_ONLY
     assign capture_clk = pcie_user_clk;
@@ -648,6 +679,17 @@ module zu4ev_pcie_card_top #(
     wire [NUM_VIDEO_CH-1:0]                    m_video_tuser;
     wire [NUM_VIDEO_CH-1:0]                    m_video_tready;
 
+    // The audio AXI-Stream group is declared here, next to the video group, because
+    // the display-profile stubs above reference m_audio_tready / m_audio_tvalid /
+    // m_audio_tdata (assign m_audio_tready[1] = 1'b1, and the v_hdmi_tx_ss s_axis_audio
+    // ports).  Strict analysis rejects use-before-declaration, and leaving them in the
+    // audio section below also truncated nothing but hid the dependency; the audio
+    // section keeps its own comment block and its s_audio_* group.
+    wire [(NUM_AUDIO_CH*AUDIO_DATA_WIDTH)-1:0] m_audio_tdata;
+    wire [NUM_AUDIO_CH-1:0]                    m_audio_tvalid;
+    wire [NUM_AUDIO_CH-1:0]                    m_audio_tlast;
+    wire [NUM_AUDIO_CH-1:0]                    m_audio_tready;
+
     // v_tpg emits each pixel as {R,G,B} or {V,U,Y}. Present {8'hFF, C2, C1, C0} consistently
     // with native rx_video_packed_tdata so that Byte 0 = Y/C0, Byte 1 = U/C1, Byte 2 = V/C2.
     wire [127:0] tpg_padded_tdata = {
@@ -837,6 +879,25 @@ module zu4ev_pcie_card_top #(
     xpm_cdc_async_rst #(.DEST_SYNC_FF(4), .RST_ACTIVE_HIGH(1)) u_tx_video_reset (
         .src_arst(!sys_100m_rst_n), .dest_clk(phy_tx_video_clk), .dest_arst(tx_video_rst));
 
+`ifdef SC7F0_RGB_COMPOSITOR
+    // GT AXIS lane width is PPC samples + 8 spare bits: 24 bit at 2 PPC.
+    // Physical TMDS lanes are unchanged (3 RX + 3 TX + clock pair) and the serial
+    // rate stays 5.94 Gb/s with a 297 MHz reference: pixels per clock moves the
+    // parallel width and the pixel clock, never the lanes.
+    wire [23:0] phy_rx_axi4s_ch0_tdata;
+    wire        phy_rx_axi4s_ch0_tvalid;
+    wire [23:0] phy_rx_axi4s_ch1_tdata;
+    wire        phy_rx_axi4s_ch1_tvalid;
+    wire [23:0] phy_rx_axi4s_ch2_tdata;
+    wire        phy_rx_axi4s_ch2_tvalid;
+
+    wire [23:0] phy_tx_axi4s_ch0_tdata;
+    wire        phy_tx_axi4s_ch0_tvalid;
+    wire [23:0] phy_tx_axi4s_ch1_tdata;
+    wire        phy_tx_axi4s_ch1_tvalid;
+    wire [23:0] phy_tx_axi4s_ch2_tdata;
+    wire        phy_tx_axi4s_ch2_tvalid;
+`else
     wire [39:0] phy_rx_axi4s_ch0_tdata;
     wire        phy_rx_axi4s_ch0_tvalid;
     wire [39:0] phy_rx_axi4s_ch1_tdata;
@@ -850,13 +911,18 @@ module zu4ev_pcie_card_top #(
     wire        phy_tx_axi4s_ch1_tvalid;
     wire [39:0] phy_tx_axi4s_ch2_tdata;
     wire        phy_tx_axi4s_ch2_tvalid;
+`endif
 
     wire [7:0]  phy_status_sb_rx_tdata;
     wire        phy_status_sb_rx_tvalid;
     wire [7:0]  phy_status_sb_tx_tdata;
     wire        phy_status_sb_tx_tvalid;
 
+`ifdef SC7F0_RGB_COMPOSITOR
+    vid_phy_controller_rgb u_vid_phy_controller (
+`else
     vid_phy_controller_0 u_vid_phy_controller (
+`endif
         .tx_refclk_rdy                (hdmi_tx_refclk_rdy),
         .tx_tmds_clk                  (),
         .tx_video_clk                 (phy_tx_video_clk),
@@ -942,7 +1008,11 @@ module zu4ev_pcie_card_top #(
     // =========================================================================
     // HDMI RX Subsystem (v_hdmi_rx_ss_0)
     // =========================================================================
+`ifdef SC7F0_RGB_COMPOSITOR
+    wire [47:0] rx_ss_video_tdata;      // 2 PPC x 24 bit native RGB
+`else
     wire [95:0] rx_ss_video_tdata;
+`endif
     wire        rx_ss_video_tvalid;
     wire        rx_ss_video_tready;
     wire        rx_ss_video_tlast;
@@ -959,7 +1029,11 @@ module zu4ev_pcie_card_top #(
     // Keep the driver's low pulse visible to IT6663 when EDID is replaced.
     assign hdmi_rx_hpd_out = hdmi_rx_hpd_from_ss;
 
+`ifdef SC7F0_RGB_COMPOSITOR
+    v_hdmi_rx_ss_rgb u_hdmi_rx_ss (
+`else
     v_hdmi_rx_ss_0 u_hdmi_rx_ss (
+`endif
         .s_axi_cpu_aclk        (pl_clk0),
         .s_axi_cpu_aresetn     (sys_100m_rst_n),
         .cable_detect          (hdmi_rx_5v_det),
@@ -1020,6 +1094,48 @@ module zu4ev_pcie_card_top #(
     );
 
     // Ch 0: HDMI 148.5 MHz -> capture 150 MHz, NOT PCIe 125 MHz.
+`ifdef SC7F0_RGB_COMPOSITOR
+    // =====================================================================
+    // Packed RGB24 host capture path (SC7F0-RGB-COMPOSITOR-2PPC).
+    //
+    // The decided format change for this personality is that the host receives
+    // packed RGB24 (byte order R,G,B, stride 11520 B per 3840-pixel line,
+    // 24883200 B per 4K frame = 1.492992 GB/s) instead of the legacy host-side
+    // NV12/RGB-expanded 128-bit DMA word.  It is not RGBA and it is not the
+    // 1.99 GB/s padded figure: rtl/sc7f0_rgb24_axis_pack.v gearboxes the
+    // 2 PPC native RX field into dense 16-byte groups and publishes whole
+    // groups only, so no padding and no truncation is involved anywhere.
+    //
+    // The packer is a second observer of the same unpausable VIDEO_OUT stream
+    // that feeds the PS capture branch.  Both consumers always accept, so
+    // neither can gate RX; the packer's own s_axis_tready is deliberately
+    // unconnected and it abandons a whole frame (never part of one) when its
+    // crossing is not ready, re-arming at the next SOF.
+    // =====================================================================
+    wire [127:0] rgb24_tdata;
+    wire         rgb24_tuser, rgb24_tvalid, rgb24_tready;
+    wire [10:0]  rgb24_avail;
+    wire         rgb24_ovf_sticky, rgb24_line_align_sticky;
+    sc7f0_rgb24_axis_pack #(.NATIVE_PPC(2), .FIFO_DEPTH(1024)) u_rgb24_pack (
+        .s_clk(phy_rx_video_clk), .s_rst_n(!rx_video_rst),
+        .s_axis_tdata(rx_ss_video_tdata), .s_axis_tvalid(rx_ss_video_tvalid),
+        .s_axis_tlast(rx_ss_video_tlast), .s_axis_tuser(rx_ss_video_tuser),
+        .s_axis_tready(),
+        .m_clk(capture_clk), .m_rst_n(capture_rst_n),
+        .m_axis_tdata(rgb24_tdata), .m_axis_tuser(rgb24_tuser),
+        .m_axis_tvalid(rgb24_tvalid), .m_axis_tready(rgb24_tready),
+        .m_axis_avail(rgb24_avail),
+        .overflow_sticky(rgb24_ovf_sticky),
+        .line_align_sticky(rgb24_line_align_sticky));
+
+    // The legacy raw video crossing is replaced by the packer above, but the
+    // mux and status wiring below is shared, so keep the old names defined.
+    wire [127:0] hdmi_rx_v_tdata  = 128'd0;
+    wire         hdmi_rx_v_tvalid = 1'b0;
+    wire         hdmi_rx_v_tready = 1'b1;
+    wire         hdmi_rx_v_tlast  = 1'b0;
+    wire         hdmi_rx_v_tuser  = 1'b0;
+`else
     wire [127:0] hdmi_rx_v_tdata;
     wire         hdmi_rx_v_tvalid;
     wire         hdmi_rx_v_tready;
@@ -1050,7 +1166,11 @@ module zu4ev_pcie_card_top #(
     // v_hdmi_rx_ss_0 VIDEO_OUT is an unpausable physical scan source: TREADY must
     // stay constant high. Raw Video backpressure (raw_csc_input_ready) is confined
     // to u_rx_csc / u_hdmi_rx_video_cdc_fifo and must never gate PS capture valid.
+    // In SC7F0_RGB_COMPOSITOR the adapter u_rx_ppc_upsize drives TREADY (it is
+    // constant 1 there too) so the two drivers can never fight.
+`ifndef SC7F0_RGB_COMPOSITOR
     assign rx_ss_video_tready=1'b1;
+`endif
     video_rgb_to_yuv709 u_rx_csc (
         .clk(phy_rx_video_clk), .rst_n(!rx_video_rst), .enable(rx_csc_enable),
         .s_data(rx_video_packed_tdata), .s_valid(rx_ss_video_tvalid&&raw_rx_enabled),
@@ -1069,8 +1189,47 @@ module zu4ev_pcie_card_top #(
         .m_sof(hdmi_rx_v_tuser), .m_eol(hdmi_rx_v_tlast),
         .m_ready(hdmi_rx_v_tready)
     );
+`endif
 
     // Official PS V4L2 branch: no downstream READY is connected to RX.
+`ifdef SC7F0_RGB_COMPOSITOR
+    // The RX subsystem is 2 PPC in this personality while the published PS
+    // capture chain (frame tap -> v_proc_ss CSC -> v_frmbuf_wr) is 4 PPC, so the
+    // two geometries are joined by rtl/sc7f0_ppc_upsize.v: two 48-bit beats
+    // become one 96-bit beat, same pixels, same raster order, half the beat
+    // rate, validated capture-chain geometry kept untouched.
+    wire [95:0] rx_ss_video_up_tdata;
+    wire        rx_ss_video_up_tvalid, rx_ss_video_up_tready;
+    wire        rx_ss_video_up_tlast,  rx_ss_video_up_tuser;
+    wire        rx_up_odd_line_sticky, rx_up_out_stall_sticky;
+    wire [31:0] rx_up_odd_line_count,  rx_up_out_stall_count;
+    // PS-side READY contract.  rtl/sc7f0_capture_pipeline.v publishes the RX
+    // stream as an observer input only (its port list has rx_data/rx_valid/
+    // rx_sof/rx_eol and NO ready, and the module header says "no connection can
+    // propagate downstream READY to RX"), so nothing in the PS branch can ever
+    // drive this net.  Left undriven (round H: [Synth 8-3848] on line 1202, and
+    // the PS observer then samples a beat that never retires) sc7f0_ppc_upsize's
+    // out_room = !m_axis_tvalid || m_axis_tready goes false from the SECOND
+    // published beat onward: m_axis_tvalid stays 1 carrying a stale 96-bit word,
+    // the same SOF is re-published to the observer forever, and every later
+    // completed input pair is dropped into output_stall_count.  Both ends are
+    // unpausable - the RX source has .s_axis_tready tied 1 one level up, and the
+    // frame tap cannot back-pressure a physical scan - so the sink contract here
+    // is a documented constant 1: take every complete beat.  This changes no
+    // algorithm, no port, no 4PPC geometry and no throughput.
+    assign rx_ss_video_up_tready = 1'b1;
+    sc7f0_ppc_upsize #(.PPC_IN(2), .PPC_OUT(4)) u_rx_ppc_upsize (
+        .clk(phy_rx_video_clk), .rst_n(!rx_video_rst),
+        .s_axis_tdata(rx_ss_video_tdata), .s_axis_tvalid(rx_ss_video_tvalid),
+        .s_axis_tlast(rx_ss_video_tlast), .s_axis_tuser(rx_ss_video_tuser),
+        .s_axis_tready(rx_ss_video_tready),
+        .m_axis_tdata(rx_ss_video_up_tdata), .m_axis_tvalid(rx_ss_video_up_tvalid),
+        .m_axis_tready(rx_ss_video_up_tready), .m_axis_tlast(rx_ss_video_up_tlast),
+        .m_axis_tuser(rx_ss_video_up_tuser),
+        .odd_line_sticky(rx_up_odd_line_sticky), .odd_line_count(rx_up_odd_line_count),
+        .output_stall_sticky(rx_up_out_stall_sticky),
+        .output_stall_count(rx_up_out_stall_count));
+`endif
     wire [63:0] fb_awaddr,fb_araddr;
     wire [7:0] fb_arlen,pkt_arlen;
     wire [2:0] fb_arsize,pkt_arsize;
@@ -1080,16 +1239,25 @@ module zu4ev_pcie_card_top #(
     wire [39:0] pkt_araddr;
     wire [127:0] fb_rdata,pkt_rdata;
     assign dp_awaddr=fb_awaddr[48:0];
+    // Frame-tap reset bit 2.  Only sc7f0_display_pipeline consumes it; the wire
+    // exists in every personality because the CSR lives in u_ps_capture.
+    wire display_reader_rst_n;
     sc7f0_capture_pipeline u_ps_capture(
         .csr_clk(pl_clk0),.csr_rst_n(sys_100m_rst_n),.mem_clk(capture_clk),.mem_rst_n(dp_mem_rst_n),
+`ifdef SC7F0_RGB_COMPOSITOR
+        .rx_clk(phy_rx_video_clk),.rx_rst_n(!rx_video_rst),.rx_data(rx_ss_video_up_tdata),
+        .rx_valid(rx_ss_video_up_tvalid),.rx_sof(rx_ss_video_up_tuser),.rx_eol(rx_ss_video_up_tlast),
+`else
         .rx_clk(phy_rx_video_clk),.rx_rst_n(!rx_video_rst),.rx_data(rx_ss_video_tdata),
         .rx_valid(rx_ss_video_tvalid),.rx_sof(rx_ss_video_tuser),.rx_eol(rx_ss_video_tlast),
+`endif
         .s_awaddr(hdmi_ctl_awaddr[223:128]),.s_awvalid(hdmi_ctl_awvalid[6:4]),.s_awready(hdmi_ctl_awready[6:4]),
         .s_wdata(hdmi_ctl_wdata[223:128]),.s_wstrb(hdmi_ctl_wstrb[27:16]),.s_wvalid(hdmi_ctl_wvalid[6:4]),.s_wready(hdmi_ctl_wready[6:4]),
         .s_bresp(hdmi_ctl_bresp[13:8]),.s_bvalid(hdmi_ctl_bvalid[6:4]),.s_bready(hdmi_ctl_bready[6:4]),
         .s_araddr(hdmi_ctl_araddr[223:128]),.s_arvalid(hdmi_ctl_arvalid[6:4]),.s_arready(hdmi_ctl_arready[6:4]),
         .s_rdata(hdmi_ctl_rdata[223:128]),.s_rresp(hdmi_ctl_rresp[13:8]),.s_rvalid(hdmi_ctl_rvalid[6:4]),.s_rready(hdmi_ctl_rready[6:4]),
         .irq(capture_irq),
+        .display_reader_rst_n(display_reader_rst_n),
         .awaddr(fb_awaddr),.awlen(dp_awlen),.awsize(dp_awsize),.awburst(dp_awburst),.awvalid(dp_awvalid),.awready(dp_awready),
         .wdata(dp_wdata),.wstrb(dp_wstrb),.wlast(dp_wlast),.wvalid(dp_wvalid),.wready(dp_wready),
         .bresp(dp_bresp),.bvalid(dp_bvalid),.bready(dp_bready),
@@ -1132,6 +1300,13 @@ module zu4ev_pcie_card_top #(
         .probe_pkt_last_len(dp_pkt_last_len),
         .probe_pkt_last_pts_lo(dp_pkt_last_pts_lo),
         .probe_pkt_last_pts_hi(dp_pkt_last_pts_hi));
+    // S_AXI_HP1_FPD is one 128-bit read-only slave stream. Without the display
+    // personality the two capture readers drive it directly, as before. With it,
+    // a second identical arbiter merges the display framebuffer reader in; the
+    // capture reader logic itself is untouched.
+    wire [48:0] hp1r_addr; wire [7:0] hp1r_len; wire [2:0] hp1r_size; wire [1:0] hp1r_burst;
+    wire hp1r_valid,hp1r_ready,hp1r_rvalid,hp1r_rready,hp1r_rlast;
+    wire [127:0] hp1r_rdata; wire [1:0] hp1r_rresp;
     sc7f0_axi_read_arbiter u_hp1_read_arbiter(
         .clk(capture_clk),.rst_n(dp_mem_rst_n),
         .s0_addr({9'd0,pkt_araddr}),.s0_len(pkt_arlen),.s0_size(pkt_arsize),.s0_burst(pkt_arburst),
@@ -1140,9 +1315,27 @@ module zu4ev_pcie_card_top #(
         .s1_addr(fb_araddr[48:0]),.s1_len(fb_arlen),.s1_size(fb_arsize),.s1_burst(fb_arburst),
         .s1_valid(fb_arvalid),.s1_ready(fb_arready),.s1_data(fb_rdata),.s1_resp(fb_rresp),
         .s1_last(fb_rlast),.s1_rvalid(fb_rvalid),.s1_rready(fb_rready),
+        .m_addr(hp1r_addr),.m_len(hp1r_len),.m_size(hp1r_size),.m_burst(hp1r_burst),
+        .m_valid(hp1r_valid),.m_ready(hp1r_ready),.m_data(hp1r_rdata),.m_resp(hp1r_rresp),
+        .m_last(hp1r_rlast),.m_rvalid(hp1r_rvalid),.m_rready(hp1r_rready));
+`ifdef SC7F0_TX_VIDEO_PRESENT
+    sc7f0_axi_read_arbiter #(.AW(49)) u_hp1_display_read_arbiter(
+        .clk(capture_clk),.rst_n(dp_mem_rst_n),
+        .s0_addr(hp1r_addr),.s0_len(hp1r_len),.s0_size(hp1r_size),.s0_burst(hp1r_burst),
+        .s0_valid(hp1r_valid),.s0_ready(hp1r_ready),.s0_data(hp1r_rdata),.s0_resp(hp1r_rresp),
+        .s0_last(hp1r_rlast),.s0_rvalid(hp1r_rvalid),.s0_rready(hp1r_rready),
+        .s1_addr(disp_araddr[48:0]),.s1_len(disp_arlen),.s1_size(disp_arsize),.s1_burst(disp_arburst),
+        .s1_valid(disp_arvalid),.s1_ready(disp_arready),.s1_data(disp_rdata),.s1_resp(disp_rresp),
+        .s1_last(disp_rlast),.s1_rvalid(disp_rvalid),.s1_rready(disp_rready),
         .m_addr(dp_araddr),.m_len(dp_arlen),.m_size(dp_arsize),.m_burst(dp_arburst),
         .m_valid(dp_arvalid),.m_ready(dp_arready),.m_data(dp_rdata),.m_resp(dp_rresp),
         .m_last(dp_rlast),.m_rvalid(dp_rvalid),.m_rready(dp_rready));
+`else
+    assign dp_araddr=hp1r_addr;assign dp_arlen=hp1r_len;assign dp_arsize=hp1r_size;
+    assign dp_arburst=hp1r_burst;assign dp_arvalid=hp1r_valid;assign hp1r_ready=dp_arready;
+    assign hp1r_rdata=dp_rdata;assign hp1r_rresp=dp_rresp;assign hp1r_rlast=dp_rlast;
+    assign hp1r_rvalid=dp_rvalid;assign dp_rready=hp1r_rready;
+`endif
 
     // Synchronize 5V Cable Detect & HPD status to pcie_user_clk
     (* ASYNC_REG = "TRUE" *) reg [1:0] sync_5v_det_q;
@@ -1186,7 +1379,11 @@ module zu4ev_pcie_card_top #(
     // =========================================================================
     // HDMI TX Subsystem (v_hdmi_tx_ss_0)
     // =========================================================================
+`ifdef SC7F0_RGB_COMPOSITOR
+    wire [47:0] tx_ss_video_tdata;      // v_hdmi_tx_ss_rgb VIDEO_IN is 2 PPC
+`else
     wire [95:0] tx_ss_video_tdata;
+`endif
     wire        tx_ss_video_tvalid;
     wire        tx_ss_video_tready;
     wire        tx_ss_video_tlast;
@@ -1198,6 +1395,397 @@ module zu4ev_pcie_card_top #(
     wire        tx_ss_audio_tlast;
     wire        tx_ss_locked;
 
+`ifdef SC7F0_TX_VIDEO_PRESENT
+    // =====================================================================
+    // TX personalities: PS DDR -> v_frmbuf_rd -> HDMI TX.
+    //   SC7F0_DISPLAY_TX       one base plane, 4 PPC, 96-bit VIDEO_IN
+    //   SC7F0_RGB_COMPOSITOR   base plane + overlay plane, 2 PPC, 48-bit
+    //                          VIDEO_IN, composited by
+    //                          rtl/sc7f0_rgb_compositor.v
+    // Every register in this chain is owned by an AMD/Xilinx driver:
+    //   u_hdmi_tx_ss           hdmi-modules xlnx_drm_hdmi  (xlnx,v-hdmi-tx-ss-3.1)
+    //   u_frmbuf_rd (inside)   in-kernel xlnx,axi-frmbuf-rd-v2.2 + xlnx,pl-disp
+    //   u_vid_phy_controller   hdmi-modules phy-vphy (xlnx,vid-phy-controller-2.2)
+    // No private kernel ABI, no daemon and no bare MMIO is introduced.  The RX
+    // direct bypass (mux mode 0) and the host PCIe H2C stream (mux mode 2) are
+    // deliberately NOT wired, so the only source of VIDEO_IN is the framebuffer
+    // reader: whatever the monitor shows is exactly what the PS wrote to DDR.
+    // =====================================================================
+`ifdef SC7F0_RGB_COMPOSITOR
+    // =====================================================================
+    // SC7F0-RGB-COMPOSITOR-2PPC: two INDEPENDENT official v_frmbuf_rd readers,
+    // one per plane, both 2 PPC RGBA8888 with native 128-bit AXIMM.
+    //
+    //   Reader-A  base plane    -> PS HP1 read channel (shared with the two
+    //                             capture readers through u_hp1_read_arbiter /
+    //                             u_hp1_display_read_arbiter, read-only, so the
+    //                             already-proven HP1 merge ordering is kept)
+    //   Reader-B  overlay plane -> the NEW PS HP2 read channel, 300 MHz
+    //
+    // Two separate 128-bit 300 MHz read ports (4.8 GB/s each) carry two 4K60
+    // RGBA32 planes (1.990656 GB/s each); squeezing 3.98 GB/s of reads plus the
+    // overlay write through the single HP1 port would not fit, which is exactly
+    // why HP2 exists in this personality.
+    //
+    // The composited output is native RGB at 2 PPC (48 bit) because the HDMI
+    // cable carries RGB8 with no alpha: rtl/sc7f0_alpha_blend_2ppc.v consumes
+    // native RGBA {A,R,B,G} beats from memory RGBA byte R,G,B,A and emits
+    // native RGB {R,B,G}, and v_hdmi_tx_ss_rgb VIDEO_IN at 2 PPC is 2*24 bit.
+    // =====================================================================
+    wire [47:0] disp_video_tdata;
+    wire        disp_video_tvalid,disp_video_tready,disp_video_tlast,disp_video_tuser;
+
+    // Reader-B reset: PS EMIO GPIO bit 3 (the official xilinx_frmbuf driver
+    // requires a reset-gpios on a framebuffer reader), synchronised and
+    // stretched in capture_clk, then qualified with the CSR level.
+    wire        reader_b_gpio_reset;      // from the BD, emio_gpio_o[3]
+    wire        reader_b_reset_sync;
+    sc7f0_reset_sync #(.SOURCES(1)) u_reader_b_reset (
+        .dest_clk(capture_clk),
+        .src_rst_n(~reader_b_gpio_reset),
+        .dest_rst_n(reader_b_reset_sync));
+
+    // Reader-B AXI4 read-only master on the new PS HP2 port.
+    wire [63:0] rd_b_araddr;  wire [7:0] rd_b_arlen;
+    wire [2:0]  rd_b_arsize;  wire [1:0] rd_b_arburst;
+    wire        rd_b_arvalid, rd_b_arready, rd_b_rvalid, rd_b_rready, rd_b_rlast;
+    wire [127:0] rd_b_rdata;  wire [1:0] rd_b_rresp;
+
+    // Overlay plane writer -> PS HP3.
+    wire [48:0]  ovl_hp3_awaddr; wire [7:0] ovl_hp3_awlen;
+    wire [2:0]   ovl_hp3_awsize; wire [1:0] ovl_hp3_awburst;
+    wire [3:0]   ovl_hp3_awcache;
+    wire         ovl_hp3_awvalid, ovl_hp3_awready;
+    wire [127:0] ovl_hp3_wdata;  wire [15:0] ovl_hp3_wstrb;
+    wire         ovl_hp3_wlast, ovl_hp3_wvalid, ovl_hp3_wready;
+    wire [1:0]   ovl_hp3_bresp;  wire ovl_hp3_bvalid, ovl_hp3_bready;
+
+    // Overlay control window + compositor control (axi_crossbar_hdmi M09).
+    wire         ovl_ctrl_enable, ovl_ctrl_go, ovl_ctrl_quiesce_req, ovl_ctrl_discard_pending;
+    wire [63:0]  ovl_ctrl_src_addr;
+    wire [31:0]  ovl_ctrl_xfer_bytes;
+    wire [15:0]  ovl_ctrl_max_bytes_per_req;
+    wire         ovl_ctrl_wr_enable, ovl_ctrl_wr_auto_advance;
+    wire [48:0]  ovl_ctrl_wr_dst_base;
+    wire [31:0]  ovl_ctrl_wr_slot_bytes, ovl_ctrl_wr_frame_bytes;
+    wire [2:0]   ovl_ctrl_wr_slot_count; wire [1:0] ovl_ctrl_wr_force_slot;
+    wire [3:0]   ovl_ctrl_wr_consume;
+    wire [31:0]  ovl_status_bytes_issued, ovl_status_bytes_staged, ovl_status_bytes_drained;
+    wire [5:0]   ovl_status_outstanding;
+    wire         ovl_status_busy, ovl_status_quiesced, ovl_status_quarantined;
+    wire         ovl_status_ext_tag_blocked;
+    wire [31:0]  ovl_status_counts;
+    wire [3:0]   ovl_wr_slot_ready;  wire ovl_wr_busy;
+    wire [1:0]   ovl_wr_active_slot;
+    wire [31:0]  ovl_wr_frames_done, ovl_wr_bytes_written;
+    wire [5:0]   ovl_wr_sticky;      wire ovl_wr_irq_pulse;
+    // Review H1/H2 additions between dma_top, the plane writer and the control
+    // block: software plane discard, writer retirement/frames-suppressed, the H2
+    // video format guard, and the abandoned-tag (poison) state.
+    wire         ovl_ctrl_abort_req;
+    wire         ovl_wr_abort_busy;
+    wire [31:0]  ovl_wr_err_frames;
+    wire         ovl_video_guard_sticky;
+    wire [31:0]  ovl_video_guard_count;
+    wire         ovl_video_poison;
+    wire         comp_irq_a, comp_irq_b;
+    wire         blend_locked, blend_busy, blend_enable, alpha_force_opaque, blend_unlock;
+    wire         reader_b_reset;
+    wire [31:0]  blend_lock_lost, blend_sat_watchdog, blend_beats;
+
+    sc7f0_rgb_compositor #(.PPC(2)) u_rgb_compositor (
+        .csr_clk(pl_clk0),           .csr_rst_n(sys_100m_rst_n),
+        .mem_clk(capture_clk),       .mem_rst_n(dp_mem_rst_n),
+        // Plane-A controllable reset stays the reviewed frame-tap CSR bit 2.
+        .reader_a_rst_n(display_reader_rst_n),
+        .reader_b_rst_n(reader_b_reset_sync & ~reader_b_reset),
+        .tx_clk(phy_tx_video_clk),   .tx_rst_n(!tx_video_rst),
+        // Plane A control: axi_crossbar_hdmi M07, 0xB0080000.
+        .s_axi_a_awaddr(hdmi_ctl_awaddr[255:224]),
+        .s_axi_a_awvalid(hdmi_ctl_awvalid[7]),
+        .s_axi_a_awready(hdmi_ctl_awready[7]),
+        .s_axi_a_wdata(hdmi_ctl_wdata[255:224]),
+        .s_axi_a_wstrb(hdmi_ctl_wstrb[31:28]),
+        .s_axi_a_wvalid(hdmi_ctl_wvalid[7]),
+        .s_axi_a_wready(hdmi_ctl_wready[7]),
+        .s_axi_a_bresp(hdmi_ctl_bresp[15:14]),
+        .s_axi_a_bvalid(hdmi_ctl_bvalid[7]),
+        .s_axi_a_bready(hdmi_ctl_bready[7]),
+        .s_axi_a_araddr(hdmi_ctl_araddr[255:224]),
+        .s_axi_a_arvalid(hdmi_ctl_arvalid[7]),
+        .s_axi_a_arready(hdmi_ctl_arready[7]),
+        .s_axi_a_rdata(hdmi_ctl_rdata[255:224]),
+        .s_axi_a_rresp(hdmi_ctl_rresp[15:14]),
+        .s_axi_a_rvalid(hdmi_ctl_rvalid[7]),
+        .s_axi_a_rready(hdmi_ctl_rready[7]),
+        // Plane B control: axi_crossbar_hdmi M08, 0xB0090000.
+        .s_axi_b_awaddr(hdmi_ctl_awaddr[287:256]),
+        .s_axi_b_awvalid(hdmi_ctl_awvalid[8]),
+        .s_axi_b_awready(hdmi_ctl_awready[8]),
+        .s_axi_b_wdata(hdmi_ctl_wdata[287:256]),
+        .s_axi_b_wstrb(hdmi_ctl_wstrb[35:32]),
+        .s_axi_b_wvalid(hdmi_ctl_wvalid[8]),
+        .s_axi_b_wready(hdmi_ctl_wready[8]),
+        .s_axi_b_bresp(hdmi_ctl_bresp[17:16]),
+        .s_axi_b_bvalid(hdmi_ctl_bvalid[8]),
+        .s_axi_b_bready(hdmi_ctl_bready[8]),
+        .s_axi_b_araddr(hdmi_ctl_araddr[287:256]),
+        .s_axi_b_arvalid(hdmi_ctl_arvalid[8]),
+        .s_axi_b_arready(hdmi_ctl_arready[8]),
+        .s_axi_b_rdata(hdmi_ctl_rdata[287:256]),
+        .s_axi_b_rresp(hdmi_ctl_rresp[17:16]),
+        .s_axi_b_rvalid(hdmi_ctl_rvalid[8]),
+        .s_axi_b_rready(hdmi_ctl_rready[8]),
+        // Plane A read master: merged into S_AXI_HP1_FPD (read-only).
+        .a_araddr(disp_araddr), .a_arlen(disp_arlen),
+        .a_arsize(disp_arsize), .a_arburst(disp_arburst),
+        .a_arvalid(disp_arvalid), .a_arready(disp_arready),
+        .a_rdata(disp_rdata), .a_rresp(disp_rresp),
+        .a_rlast(disp_rlast), .a_rvalid(disp_rvalid), .a_rready(disp_rready),
+        // Plane B read master: the new S_AXI_HP2_FPD read channel.
+        .b_araddr(rd_b_araddr), .b_arlen(rd_b_arlen),
+        .b_arsize(rd_b_arsize), .b_arburst(rd_b_arburst),
+        .b_arvalid(rd_b_arvalid), .b_arready(rd_b_arready),
+        .b_rdata(rd_b_rdata), .b_rresp(rd_b_rresp),
+        .b_rlast(rd_b_rlast), .b_rvalid(rd_b_rvalid), .b_rready(rd_b_rready),
+        .blend_enable(blend_enable),
+        .alpha_force_opaque(alpha_force_opaque),
+        .blend_unlock(blend_unlock),
+        .m_axis_video_tdata(disp_video_tdata),
+        .m_axis_video_tvalid(disp_video_tvalid),
+        .m_axis_video_tready(disp_video_tready),
+        .m_axis_video_tlast(disp_video_tlast),
+        .m_axis_video_tuser(disp_video_tuser),
+        .irq_a(comp_irq_a), .irq_b(comp_irq_b),
+        .blend_locked(blend_locked), .blend_busy(blend_busy),
+        .blend_lock_lost(blend_lock_lost),
+        .blend_sat_watchdog(blend_sat_watchdog),
+        .blend_beats(blend_beats));
+
+    sc7f0_rgb_overlay_ctrl u_overlay_ctrl (
+        .csr_clk(pl_clk0),      .csr_rst_n(sys_100m_rst_n),
+        .pcie_clk(pcie_user_clk), .pcie_rst_n(pcie_user_rst_n),
+        .mem_clk(capture_clk),  .mem_rst_n(dp_mem_rst_n),
+        // axi_crossbar_hdmi M09, 0xB00A0000.
+        .s_axi_awaddr(hdmi_ctl_awaddr[319:288]),
+        .s_axi_awvalid(hdmi_ctl_awvalid[9]),
+        .s_axi_awready(hdmi_ctl_awready[9]),
+        .s_axi_wdata(hdmi_ctl_wdata[319:288]),
+        .s_axi_wstrb(hdmi_ctl_wstrb[39:36]),
+        .s_axi_wvalid(hdmi_ctl_wvalid[9]),
+        .s_axi_wready(hdmi_ctl_wready[9]),
+        .s_axi_bresp(hdmi_ctl_bresp[19:18]),
+        .s_axi_bvalid(hdmi_ctl_bvalid[9]),
+        .s_axi_bready(hdmi_ctl_bready[9]),
+        .s_axi_araddr(hdmi_ctl_araddr[319:288]),
+        .s_axi_arvalid(hdmi_ctl_arvalid[9]),
+        .s_axi_arready(hdmi_ctl_arready[9]),
+        .s_axi_rdata(hdmi_ctl_rdata[319:288]),
+        .s_axi_rresp(hdmi_ctl_rresp[19:18]),
+        .s_axi_rvalid(hdmi_ctl_rvalid[9]),
+        .s_axi_rready(hdmi_ctl_rready[9]),
+        .ovl_enable(ovl_ctrl_enable),
+        .ovl_src_addr(ovl_ctrl_src_addr),
+        .ovl_xfer_bytes(ovl_ctrl_xfer_bytes),
+        .ovl_max_bytes_per_req(ovl_ctrl_max_bytes_per_req),
+        .ovl_go(ovl_ctrl_go),
+        .ovl_quiesce_req(ovl_ctrl_quiesce_req),
+        .ovl_discard_pending(ovl_ctrl_discard_pending),
+        .ovl_bytes_issued(ovl_status_bytes_issued),
+        .ovl_bytes_staged(ovl_status_bytes_staged),
+        .ovl_bytes_drained(ovl_status_bytes_drained),
+        .ovl_outstanding(ovl_status_outstanding),
+        .ovl_busy(ovl_status_busy),
+        .ovl_quiesced(ovl_status_quiesced),
+        .ovl_quarantined(ovl_status_quarantined),
+        .ovl_ext_tag_blocked(ovl_status_ext_tag_blocked),
+        .ovl_counts(ovl_status_counts),
+        .ovl_done_pulse(ovl_wr_irq_pulse),
+        .ovl_abort_req(ovl_ctrl_abort_req),
+        .wr_abort_busy(ovl_wr_abort_busy),
+        .wr_err_frames(ovl_wr_err_frames),
+        .video_guard_sticky(ovl_video_guard_sticky),
+        .video_guard_count(ovl_video_guard_count),
+        .video_poison(ovl_video_poison),
+        .wr_enable(ovl_ctrl_wr_enable),
+        .wr_dst_base(ovl_ctrl_wr_dst_base),
+        .wr_slot_bytes(ovl_ctrl_wr_slot_bytes),
+        .wr_slot_count(ovl_ctrl_wr_slot_count),
+        .wr_frame_bytes(ovl_ctrl_wr_frame_bytes),
+        .wr_auto_advance(ovl_ctrl_wr_auto_advance),
+        .wr_force_slot(ovl_ctrl_wr_force_slot),
+        .wr_consume(ovl_ctrl_wr_consume),
+        .wr_slot_ready(ovl_wr_slot_ready),
+        .wr_busy(ovl_wr_busy),
+        .wr_active_slot(ovl_wr_active_slot),
+        .wr_frames_done(ovl_wr_frames_done),
+        .wr_bytes_written(ovl_wr_bytes_written),
+        .wr_sticky(ovl_wr_sticky),
+        .wr_irq_pulse(ovl_wr_irq_pulse),
+        .blend_enable(blend_enable),
+        .alpha_force_opaque(alpha_force_opaque),
+        .blend_unlock(blend_unlock),
+        .reader_b_reset(reader_b_reset),
+        .blend_locked(blend_locked), .blend_busy(blend_busy),
+        .blend_lock_lost(blend_lock_lost),
+        .blend_sat_watchdog(blend_sat_watchdog),
+        .blend_beats(blend_beats));
+`else
+    wire [95:0] disp_video_tdata;
+    wire        disp_video_tvalid,disp_video_tready,disp_video_tlast,disp_video_tuser;
+
+    sc7f0_display_pipeline u_display_pipeline (
+        .csr_clk(pl_clk0),           .csr_rst_n(sys_100m_rst_n),
+        .mem_clk(capture_clk),       .mem_rst_n(dp_mem_rst_n),
+        .reader_rst_n(display_reader_rst_n),
+        .tx_clk(phy_tx_video_clk),   .tx_rst_n(!tx_video_rst),
+        // axi_crossbar_hdmi M07, 0xB0080000 (32-bit slice 7 of the vector).
+        .s_axi_ctrl_awaddr(hdmi_ctl_awaddr[255:224]),
+        .s_axi_ctrl_awvalid(hdmi_ctl_awvalid[7]),
+        .s_axi_ctrl_awready(hdmi_ctl_awready[7]),
+        .s_axi_ctrl_wdata(hdmi_ctl_wdata[255:224]),
+        .s_axi_ctrl_wstrb(hdmi_ctl_wstrb[31:28]),
+        .s_axi_ctrl_wvalid(hdmi_ctl_wvalid[7]),
+        .s_axi_ctrl_wready(hdmi_ctl_wready[7]),
+        .s_axi_ctrl_bresp(hdmi_ctl_bresp[15:14]),
+        .s_axi_ctrl_bvalid(hdmi_ctl_bvalid[7]),
+        .s_axi_ctrl_bready(hdmi_ctl_bready[7]),
+        .s_axi_ctrl_araddr(hdmi_ctl_araddr[255:224]),
+        .s_axi_ctrl_arvalid(hdmi_ctl_arvalid[7]),
+        .s_axi_ctrl_arready(hdmi_ctl_arready[7]),
+        .s_axi_ctrl_rdata(hdmi_ctl_rdata[255:224]),
+        .s_axi_ctrl_rresp(hdmi_ctl_rresp[15:14]),
+        .s_axi_ctrl_rvalid(hdmi_ctl_rvalid[7]),
+        .s_axi_ctrl_rready(hdmi_ctl_rready[7]),
+        // 128-bit read-only master into S_AXI_HP1_FPD (300 MHz domain).
+        .araddr(disp_araddr),.arlen(disp_arlen),.arsize(disp_arsize),
+        .arburst(disp_arburst),.arvalid(disp_arvalid),.arready(disp_arready),
+        .rdata(disp_rdata),.rresp(disp_rresp),.rlast(disp_rlast),
+        .rvalid(disp_rvalid),.rready(disp_rready),
+        .m_axis_video_tdata(disp_video_tdata),
+        .m_axis_video_tvalid(disp_video_tvalid),
+        .m_axis_video_tready(disp_video_tready),
+        .m_axis_video_tlast(disp_video_tlast),
+        .m_axis_video_tuser(disp_video_tuser),
+        .irq(display_frmbuf_irq)
+    );
+`endif
+
+    // Single-source use of the reviewed frame-locked selector: 01 selects the
+    // framebuffer reader and never moves, so the TX only ever sees whole frames
+    // that start on a real SOF.  The two unused sources are inert (tvalid 0) and
+    // DRAIN_UNSELECTED is off because nothing drives them.
+    sc7f0_hdmi_tx_mux #(
+`ifdef SC7F0_RGB_COMPOSITOR
+        .TDATA_WIDTH(48),          // 2 PPC composited native RGB
+`else
+        .TDATA_WIDTH(96),
+`endif
+        .DRAIN_UNSELECTED(0),
+        .SEL_STABLE_CYCLES(8),
+        .STALL_LIMIT(1048576)
+    ) u_hdmi_tx_mux (
+        .clk(phy_tx_video_clk),
+        .rst_n(!tx_video_rst),
+        .mux_sel(2'b01),
+        .s0_axis_video_tdata(
+`ifdef SC7F0_RGB_COMPOSITOR
+            48'd0),
+`else
+            96'd0),
+`endif
+            .s0_axis_video_tvalid(1'b0),
+        .s0_axis_video_tready(), .s0_axis_video_tlast(1'b0), .s0_axis_video_tuser(1'b0),
+        .s1_axis_video_tdata(disp_video_tdata), .s1_axis_video_tvalid(disp_video_tvalid),
+        .s1_axis_video_tready(disp_video_tready), .s1_axis_video_tlast(disp_video_tlast),
+        .s1_axis_video_tuser(disp_video_tuser),
+        .s2_axis_video_tdata(
+`ifdef SC7F0_RGB_COMPOSITOR
+            48'd0),
+`else
+            96'd0),
+`endif
+            .s2_axis_video_tvalid(1'b0),
+        .s2_axis_video_tready(), .s2_axis_video_tlast(1'b0), .s2_axis_video_tuser(1'b0),
+        .m_axis_video_tdata(tx_ss_video_tdata),
+        .m_axis_video_tvalid(tx_ss_video_tvalid),
+        .m_axis_video_tready(tx_ss_video_tready),
+        .m_axis_video_tlast(tx_ss_video_tlast),
+        .m_axis_video_tuser(tx_ss_video_tuser)
+    );
+
+`ifdef SC7F0_RGB_COMPOSITOR
+    v_hdmi_tx_ss_rgb u_hdmi_tx_ss (
+`else
+    v_hdmi_tx_ss_0 u_hdmi_tx_ss (
+`endif
+        .s_axi_cpu_aclk        (pl_clk0),
+        .s_axi_cpu_aresetn     (sys_100m_rst_n),
+        .link_clk              (phy_txoutclk),
+        // No audio formatter in this personality and xlnx,audio-enabled is
+        // absent from DT, so the audio slave is quiesced, not routed.
+        .s_axis_audio_aclk     (pcie_user_clk),
+        .s_axis_audio_aresetn  (pcie_user_rst_n),
+        .acr_cts               (20'd148500),
+        .acr_n                 (20'd6144),
+        .acr_valid             (1'b0),
+        .hpd                   (hdmi_tx_hpd_in),
+        .irq                   (hdmi_tx_irq),
+        .video_clk             (phy_tx_video_clk),
+        .fid                   (1'b0),
+        .locked                (tx_ss_locked),
+        .s_axis_video_aclk     (phy_tx_video_clk),
+        .s_axis_video_aresetn  (!tx_video_rst),
+        .VIDEO_IN_tdata        (tx_ss_video_tdata),
+        .VIDEO_IN_tlast        (tx_ss_video_tlast),
+        .VIDEO_IN_tready       (tx_ss_video_tready),
+        .VIDEO_IN_tuser        (tx_ss_video_tuser),
+        .VIDEO_IN_tvalid       (tx_ss_video_tvalid),
+        .SB_STATUS_IN_tdata    (phy_status_sb_tx_tdata),
+        .SB_STATUS_IN_tvalid   (phy_status_sb_tx_tvalid),
+        .AUDIO_IN_tdata        (32'd0),
+        .AUDIO_IN_tid          (8'd0),
+        .AUDIO_IN_tready       (),
+        .AUDIO_IN_tvalid       (1'b0),
+        .S_AXI_CPU_IN_araddr   (hdmi_ctl_araddr[80:64]),
+        .S_AXI_CPU_IN_arprot   (3'd0),
+        .S_AXI_CPU_IN_arready  (hdmi_ctl_arready[2]),
+        .S_AXI_CPU_IN_arvalid  (hdmi_ctl_arvalid[2]),
+        .S_AXI_CPU_IN_awaddr   (hdmi_ctl_awaddr[80:64]),
+        .S_AXI_CPU_IN_awprot   (3'd0),
+        .S_AXI_CPU_IN_awready  (hdmi_ctl_awready[2]),
+        .S_AXI_CPU_IN_awvalid  (hdmi_ctl_awvalid[2]),
+        .S_AXI_CPU_IN_bready   (hdmi_ctl_bready[2]),
+        .S_AXI_CPU_IN_bresp    (hdmi_ctl_bresp[5:4]),
+        .S_AXI_CPU_IN_bvalid   (hdmi_ctl_bvalid[2]),
+        .S_AXI_CPU_IN_rdata    (hdmi_ctl_rdata[95:64]),
+        .S_AXI_CPU_IN_rready   (hdmi_ctl_rready[2]),
+        .S_AXI_CPU_IN_rresp    (hdmi_ctl_rresp[5:4]),
+        .S_AXI_CPU_IN_rvalid   (hdmi_ctl_rvalid[2]),
+        .S_AXI_CPU_IN_wdata    (hdmi_ctl_wdata[95:64]),
+        .S_AXI_CPU_IN_wready   (hdmi_ctl_wready[2]),
+        .S_AXI_CPU_IN_wstrb    (hdmi_ctl_wstrb[11:8]),
+        .S_AXI_CPU_IN_wvalid   (hdmi_ctl_wvalid[2]),
+        .DDC_OUT_scl_i         (tx_ddc_scl_i),
+        .DDC_OUT_scl_o         (tx_ddc_scl_o),
+        .DDC_OUT_scl_t         (tx_ddc_scl_t),
+        .DDC_OUT_sda_i         (tx_ddc_sda_i),
+        .DDC_OUT_sda_o         (tx_ddc_sda_o),
+        .DDC_OUT_sda_t         (tx_ddc_sda_t),
+        .LINK_DATA0_OUT_tdata  (phy_tx_axi4s_ch0_tdata),
+        .LINK_DATA0_OUT_tvalid (phy_tx_axi4s_ch0_tvalid),
+        .LINK_DATA1_OUT_tdata  (phy_tx_axi4s_ch1_tdata),
+        .LINK_DATA1_OUT_tvalid (phy_tx_axi4s_ch1_tvalid),
+        .LINK_DATA2_OUT_tdata  (phy_tx_axi4s_ch2_tdata),
+        .LINK_DATA2_OUT_tvalid (phy_tx_axi4s_ch2_tvalid)
+    );
+
+    // BAR0 TX readback and the BAR1 channel-1 streams keep the values the
+    // deployed C2H image reports: the display path is not a PCIe video channel.
+    assign hdmi_tx_status_w = 32'd0;
+    assign m_video_tready[1] = 1'b1;
+    assign m_audio_tready[1] = 1'b1;
+`else
 `ifndef SC7F0_C2H_ONLY
     v_hdmi_tx_ss_0 u_hdmi_tx_ss (
         .s_axi_cpu_aclk        (pl_clk0),
@@ -1328,6 +1916,7 @@ module zu4ev_pcie_card_top #(
         .s_axil_rready(hdmi_ctl_rready[2])
     );
 `endif
+`endif
 
     // =========================================================================
     // SC7F0 Hardware Probing and Frequency Meter Module
@@ -1457,11 +2046,6 @@ module zu4ev_pcie_card_top #(
     wire [NUM_AUDIO_CH-1:0]                    s_audio_tlast;
     wire [NUM_AUDIO_CH-1:0]                    s_audio_tready;
 
-    wire [(NUM_AUDIO_CH*AUDIO_DATA_WIDTH)-1:0] m_audio_tdata;
-    wire [NUM_AUDIO_CH-1:0]                    m_audio_tvalid;
-    wire [NUM_AUDIO_CH-1:0]                    m_audio_tlast;
-    wire [NUM_AUDIO_CH-1:0]                    m_audio_tready;
-
     // =========================================================================
     // Channel 0 Video Source Multiplexer (TPG vs HDMI RX)
     // vch0_ctrl_w[21:20]:
@@ -1501,12 +2085,24 @@ module zu4ev_pcie_card_top #(
     assign tpg_cdc_sof=0; assign tpg_cdc_eol=0;
 `endif
 
+`ifdef SC7F0_RGB_COMPOSITOR
+    // Channel 0 of the dma top is the packed RGB24 payload in this personality
+    // (rtl/sc7f0_rgb24_c2h_engine.v p_axis_*), still launched by the same thin
+    // descriptor ring with format code 4'd1, so the host descriptor ABI, the
+    // C2H byte-enable/completion semantics and the mailbox ABI are unchanged.
+    wire [127:0] video_ch0_mux_tdata = rgb24_tdata;
+    wire         video_ch0_mux_tuser = rgb24_tuser;
+    wire         video_ch0_mux_tvalid = rgb24_tvalid;
+    wire         video_ch0_mux_tlast  = 1'b0;   // line ends are inside the packer
+    wire         video_ch0_mux_tready;
+    assign       rgb24_tready = video_ch0_mux_tready;
+`else
     wire [127:0] video_ch0_mux_tdata  = capture_use_tpg ? tpg_cdc_data  : hdmi_rx_v_tdata;
     wire         video_ch0_mux_tvalid = capture_use_tpg ? tpg_cdc_valid : hdmi_rx_v_tvalid;
     wire         video_ch0_mux_tlast  = capture_use_tpg ? tpg_cdc_eol   : hdmi_rx_v_tlast;
     wire         video_ch0_mux_tuser  = capture_use_tpg ? tpg_cdc_sof   : hdmi_rx_v_tuser;
     wire         video_ch0_mux_tready;
-
+`endif
     assign tpg_cdc_ready = capture_use_tpg ? video_ch0_mux_tready : 1'b1;
     // Live TMDS cannot be backpressured. Drain unowned frames continuously;
     // the engine consumes/discards a partial raster until the next SOF.
@@ -1517,11 +2113,22 @@ module zu4ev_pcie_card_top #(
     // 4-Channel Dedicated Datapath Wiring:
     // =========================================================================
     // Channel 0 (HDMI RX / TPG mux):
+`ifdef SC7F0_RGB_COMPOSITOR
+    // Channel 0 carries the packed RGB24 payload instead of the legacy raw
+    // video word, so s_axis_video ch0 is quiesced and the dma top's channel-0
+    // engine (rtl/sc7f0_rgb24_c2h_engine.v) consumes video_ch0_* instead.
+    assign s_video_tdata[127:0] = 128'd0;
+    assign s_video_tvalid[0]    = 1'b0;
+    assign s_video_tlast[0]     = 1'b0;
+    assign s_video_tuser[0]     = 1'b0;
+    assign m_video_tready[0]    = 1'b1;
+`else
     assign s_video_tdata[127:0] = video_ch0_mux_tdata;
     assign s_video_tvalid[0]    = video_ch0_mux_tvalid;
     assign s_video_tlast[0]     = video_ch0_mux_tlast;
     assign s_video_tuser[0]     = video_ch0_mux_tuser;
     assign m_video_tready[0]    = 1'b1;
+`endif
 
 `ifdef SC7F0_C2H_ONLY
     assign s_audio_tdata[31:0]=hdmi_rx_a_tdata;
@@ -1619,6 +2226,13 @@ module zu4ev_pcie_card_top #(
     wire [1:0]  cfg_current_speed;
     wire [1:0]  cfg_max_payload;
     wire [2:0]  cfg_max_read_req;
+    // Negotiated Extended Tag Field Enable (PCIe Device Control bit 7).  This is
+    // a real dynamic config output of pcie4_uscale_plus, not a strappable and
+    // not a constant: with it low the core may only ever issue tags [5:0], so
+    // the overlay's private 64..127 pool does not exist and
+    // sc7f0_overlay_ingress.v must not arm.  The legacy 0..63 path, the upgrade
+    // path and the mailbox never look at it.
+    wire        cfg_ext_tag_enable;
     wire [15:0] cfg_function_status;
     wire [5:0]  cfg_ltssm_state;
     wire [7:0]  cfg_bus_number;
@@ -1686,6 +2300,19 @@ module zu4ev_pcie_card_top #(
         .O(sys_clk_gt),
         .ODIV2(sys_clk)
     );
+
+    // cfg_mgmt read-back wires for the extended-tag capability walk.  These are
+    // declared here, before the PCIe core instance below, because u_pcie_ip connects
+    // them (cfg_mgmt_addr / _function_number / _read / _read_data /
+    // _read_write_done).  Declaring them after that instance made the analyzer see
+    // an implicit 1-bit net first and then an explicit wide declaration, which is an
+    // error and, worse, would have truncated ext_tag_mgmt_read_data to one bit.
+    // ------------------------------------------------------------------------
+    wire [9:0]  ext_tag_mgmt_addr;
+    wire [7:0]  ext_tag_mgmt_func;
+    wire        ext_tag_mgmt_read;
+    wire [31:0] ext_tag_mgmt_read_data;
+    wire        ext_tag_mgmt_done;
 
     // =========================================================================
     // AMD/Xilinx UltraScale+ Integrated PCIe Core (pcie4_uscale_plus_0)
@@ -1760,20 +2387,27 @@ module zu4ev_pcie_card_top #(
         .cfg_current_speed                         (cfg_current_speed),
         .cfg_max_payload                           (cfg_max_payload),
         .cfg_max_read_req                          (cfg_max_read_req),
+        // cfg_ext_tag_enable is NOT a port of pcie4_uscale_plus_0 in this
+        // configuration: the generated IP stub lists 137 ports and none of them
+        // carries the Extended Tag Field Enable (only cfg_max_payload,
+        // cfg_max_read_req, cfg_rcb_status and the like).  Naming it here made
+        // synthesis stop with [Synth 8-11365] named port connection
+        // 'cfg_ext_tag_enable' does not exist.  The value is obtained from
+        // configuration space below, through the cfg_mgmt read port.
         .cfg_function_status                       (cfg_function_status),
         .cfg_function_power_state                  (),
         .cfg_vf_status                             (),
         .cfg_vf_power_state                        (),
         .cfg_link_power_state                      (),
 
-        .cfg_mgmt_addr                             (10'b0),
-        .cfg_mgmt_function_number                  (8'b0),
+        .cfg_mgmt_addr                             (ext_tag_mgmt_addr),
+        .cfg_mgmt_function_number                  (ext_tag_mgmt_func),
         .cfg_mgmt_write                            (1'b0),
         .cfg_mgmt_write_data                       (32'b0),
         .cfg_mgmt_byte_enable                      (4'b0),
-        .cfg_mgmt_read                             (1'b0),
-        .cfg_mgmt_read_data                        (),
-        .cfg_mgmt_read_write_done                  (),
+        .cfg_mgmt_read                             (ext_tag_mgmt_read),
+        .cfg_mgmt_read_data                        (ext_tag_mgmt_read_data),
+        .cfg_mgmt_read_write_done                  (ext_tag_mgmt_done),
         .cfg_mgmt_debug_access                     (1'b0),
 
         .cfg_err_cor_out                           (),
@@ -1863,6 +2497,50 @@ module zu4ev_pcie_card_top #(
         .cfg_ds_bus_number                         (8'b0),
         .cfg_ds_device_number                      (5'b0)
     );
+
+    // ------------------------------------------------------------------------
+    // Extended Tag Field Enable, read from configuration space.
+    //
+    // The overlay plane uses completion tags 64..127, which are only legal
+    // while the host has Device Control[4] (Extended Tag Field Enable) set for
+    // this function.  The PCIe core exposes no such output in this
+    // configuration, so the bit is read back through cfg_mgmt (read-only; see
+    // rtl/sc7f0_pcie_ext_tag_enable.v for the port-list evidence and the
+    // capability walk).  Until a walk completes, cfg_ext_tag_enable stays 0 and
+    // custom_pcie_dma_top keeps the overlay ingress disarmed and reports
+    // ovl_status_ext_tag_blocked - it never silently uses a >31 tag.
+    // ------------------------------------------------------------------------
+    wire        ext_tag_walk_done, ext_tag_walk_overflow;
+    wire        ext_tag_devcap_support, ext_tag_mgmt_timeout;
+
+    sc7f0_pcie_ext_tag_enable u_ext_tag (
+        .clk                         (pcie_user_clk),
+        .rst_n                       (pcie_user_rst_n),
+        // Only user_lnk_up gates the walk.  cfg_phy_link_status and
+        // cfg_function_status are deliberately NOT used here: their bit
+        // encodings were not re-derived from a source in this session (D0 has
+        // its own cfg_function_power_state port), and a wrong gate would leave
+        // the overlay plane permanently disarmed.  pcie_user_lnk_up is the
+        // indicator this design has always trusted (pcie_user_rst_n is derived
+        // from it).  cfg_phy_link_status stays connected to the PCIe core above.
+        .user_lnk_up                 (pcie_user_lnk_up),
+        .cfg_mgmt_addr               (ext_tag_mgmt_addr),
+        .cfg_mgmt_function_number    (ext_tag_mgmt_func),
+        .cfg_mgmt_read               (ext_tag_mgmt_read),
+        .cfg_mgmt_read_data          (ext_tag_mgmt_read_data),
+        .cfg_mgmt_read_write_done    (ext_tag_mgmt_done),
+        .ext_tag_enable              (cfg_ext_tag_enable),
+        .devcap_ext_tag              (ext_tag_devcap_support),
+        .walk_done                   (ext_tag_walk_done),
+        .walk_overflow               (ext_tag_walk_overflow),
+        .mgmt_timeout                (ext_tag_mgmt_timeout)
+    );
+
+    // ext_tag_devcap_support / ext_tag_walk_done / ext_tag_walk_overflow /
+    // ext_tag_mgmt_timeout are observations only in this revision: the overlay
+    // arm gate in custom_pcie_dma_top uses ext_tag_enable.  They are named here
+    // so they can be attached to overlay status later without re-deriving the
+    // walk.
 
     // =========================================================================
     // Custom Multi-Channel PCIe DMA Controller Top Module
@@ -2093,6 +2771,13 @@ module zu4ev_pcie_card_top #(
         .VIDEO_DATA_WIDTH(VIDEO_DATA_WIDTH),
         .AUDIO_DATA_WIDTH(AUDIO_DATA_WIDTH)
         ,.ENABLE_PACKET_C2H(1)
+        ,.ENABLE_RGB_COMPOSITOR(
+`ifdef SC7F0_RGB_COMPOSITOR
+            1
+`else
+            0
+`endif
+        )
     ) u_dma_top (
         .packet_req_valid(dp_packet_valid),.packet_req_addr(dp_packet_addr),
         .packet_req_dw_len(dp_packet_dw_len),.packet_req_data(dp_packet_data),
@@ -2306,7 +2991,158 @@ module zu4ev_pcie_card_top #(
         .m_axi_hp0_bready(hp0_bready_w),
 
         // PS Interrupt Notification Pulse (to PS pl_ps_irq0)
-        .out_ps_irq_pulse(ps_irq_pulse_w)
+        .out_ps_irq_pulse(ps_irq_pulse_w),
+
+        // ---- SC7F0-RGB-COMPOSITOR-2PPC ---------------------------------
+        .video_ch0_avail                 (
+`ifdef SC7F0_RGB_COMPOSITOR
+            rgb24_avail
+`else
+            11'd0
+`endif
+        ),
+        .video_ch0_src_overflow_sticky   (
+`ifdef SC7F0_RGB_COMPOSITOR
+            rgb24_ovf_sticky
+`else
+            1'b0
+`endif
+        ),
+        .video_ch0_src_line_align_sticky (
+`ifdef SC7F0_RGB_COMPOSITOR
+            rgb24_line_align_sticky
+`else
+            1'b0
+`endif
+        ),
+        .ext_tag_enable                  (cfg_ext_tag_enable),
+`ifdef SC7F0_RGB_COMPOSITOR
+        .ovl_enable                      (ovl_ctrl_enable),
+        .ovl_src_addr                    (ovl_ctrl_src_addr),
+        .ovl_xfer_bytes                  (ovl_ctrl_xfer_bytes),
+        .ovl_max_bytes_per_req           (ovl_ctrl_max_bytes_per_req),
+        .ovl_go                          (ovl_ctrl_go),
+        .ovl_abort_req                   (ovl_ctrl_abort_req),
+        .ovl_quiesce_req                 (ovl_ctrl_quiesce_req),
+        .ovl_discard_pending             (ovl_ctrl_discard_pending),
+        .ovl_status_bytes_issued         (ovl_status_bytes_issued),
+        .ovl_status_bytes_staged         (ovl_status_bytes_staged),
+        .ovl_status_bytes_drained        (ovl_status_bytes_drained),
+        .ovl_status_outstanding          (ovl_status_outstanding),
+        .ovl_status_busy                 (ovl_status_busy),
+        .ovl_status_quiesced             (ovl_status_quiesced),
+        .ovl_status_quarantined          (ovl_status_quarantined),
+        .ovl_status_ext_tag_blocked      (ovl_status_ext_tag_blocked),
+        .ovl_status_counts               (ovl_status_counts),
+        // Round 26111402: these five status outputs have been module ports of
+        // custom_pcie_dma_top (rtl/custom_pcie_dma_top.v:296-301) and are consumed by
+        // the overlay controller below (.wr_abort_busy / .wr_err_frames /
+        // .video_guard_sticky / .video_guard_count / .video_poison, read back as CSR
+        // 0x068 / 0x070 / 0x074), but this instance never connected them, so the
+        // wires above had no driver.  Synthesis then removed the whole producer
+        // chain, which is what round 26111401's routed Gray check measured:
+        //   WARNING [Synth 8-7071] port 'ovl_wr_err_frames' ... unconnected for 'u_dma_top'
+        //   WARNING [Synth 8-3848] Net ovl_wr_err_frames ... does not have driver
+        //   and xpm_cdc_gray u_errf (rtl/sc7f0_overlay_writer.v:558) vanished from the
+        //   implemented netlist (32 source + 128 destination cells absent).
+        // Connecting them restores an already-designed path; no behaviour, protocol
+        // or clock assignment here is changed.
+        .ovl_wr_abort_busy               (ovl_wr_abort_busy),
+        .ovl_wr_err_frames               (ovl_wr_err_frames),
+        .ovl_video_guard_sticky          (ovl_video_guard_sticky),
+        .ovl_video_guard_count           (ovl_video_guard_count),
+        .ovl_video_poison                (ovl_video_poison),
+        .ovl_mem_clk                     (capture_clk),
+        .ovl_mem_rst_n                   (dp_mem_rst_n),
+        .ovl_wr_enable                   (ovl_ctrl_wr_enable),
+        .ovl_wr_dst_base                 (ovl_ctrl_wr_dst_base),
+        .ovl_wr_slot_bytes               (ovl_ctrl_wr_slot_bytes),
+        .ovl_wr_slot_count               (ovl_ctrl_wr_slot_count),
+        .ovl_wr_frame_bytes              (ovl_ctrl_wr_frame_bytes),
+        .ovl_wr_auto_advance             (ovl_ctrl_wr_auto_advance),
+        .ovl_wr_force_slot               (ovl_ctrl_wr_force_slot),
+        .ovl_wr_consume                  (ovl_ctrl_wr_consume),
+        .ovl_wr_slot_ready               (ovl_wr_slot_ready),
+        .ovl_wr_busy                     (ovl_wr_busy),
+        .ovl_wr_active_slot              (ovl_wr_active_slot),
+        .ovl_wr_frames_done              (ovl_wr_frames_done),
+        .ovl_wr_bytes_written            (ovl_wr_bytes_written),
+        .ovl_wr_sticky                   (ovl_wr_sticky),
+        .ovl_wr_irq_pulse                (ovl_wr_irq_pulse),
+        .ovl_awaddr                      (ovl_hp3_awaddr),
+        .ovl_awlen                       (ovl_hp3_awlen),
+        .ovl_awsize                      (ovl_hp3_awsize),
+        .ovl_awburst                     (ovl_hp3_awburst),
+        .ovl_awcache                     (ovl_hp3_awcache),
+        .ovl_awvalid                     (ovl_hp3_awvalid),
+        .ovl_awready                     (ovl_hp3_awready),
+        .ovl_wdata                       (ovl_hp3_wdata),
+        .ovl_wstrb                       (ovl_hp3_wstrb),
+        .ovl_wlast                       (ovl_hp3_wlast),
+        .ovl_wvalid                      (ovl_hp3_wvalid),
+        .ovl_wready                      (ovl_hp3_wready),
+        .ovl_bresp                       (ovl_hp3_bresp),
+        .ovl_bvalid                      (ovl_hp3_bvalid),
+        .ovl_bready                      (ovl_hp3_bready)
+`else
+        .ovl_enable                      (1'b0),
+        .ovl_src_addr                    (64'd0),
+        .ovl_xfer_bytes                  (32'd0),
+        .ovl_max_bytes_per_req           (16'd0),
+        .ovl_go                          (1'b0),
+        .ovl_abort_req                   (1'b0),
+        .ovl_quiesce_req                 (1'b0),
+        .ovl_discard_pending             (1'b0),
+        .ovl_status_bytes_issued         (),
+        .ovl_status_bytes_staged         (),
+        .ovl_status_bytes_drained        (),
+        .ovl_status_outstanding          (),
+        .ovl_status_busy                 (),
+        .ovl_status_quiesced             (),
+        .ovl_status_quarantined          (),
+        .ovl_status_ext_tag_blocked      (),
+        .ovl_status_counts               (),
+        // Same five status ports, explicitly left open in the inactive configuration
+        // (this branch's convention for every unused output, e.g. .ovl_wr_sticky ()
+        // below).  Nothing is driven and nothing is read here, so the legacy
+        // configuration's behaviour is unchanged.
+        .ovl_wr_abort_busy               (),
+        .ovl_wr_err_frames               (),
+        .ovl_video_guard_sticky          (),
+        .ovl_video_guard_count           (),
+        .ovl_video_poison                (),
+        .ovl_mem_clk                     (capture_clk),
+        .ovl_mem_rst_n                   (dp_mem_rst_n),
+        .ovl_wr_enable                   (1'b0),
+        .ovl_wr_dst_base                 (49'd0),
+        .ovl_wr_slot_bytes               (32'd0),
+        .ovl_wr_slot_count               (3'd1),
+        .ovl_wr_frame_bytes              (32'd0),
+        .ovl_wr_auto_advance             (1'b0),
+        .ovl_wr_force_slot               (2'd0),
+        .ovl_wr_consume                  (4'd0),
+        .ovl_wr_slot_ready               (),
+        .ovl_wr_busy                     (),
+        .ovl_wr_active_slot              (),
+        .ovl_wr_frames_done              (),
+        .ovl_wr_bytes_written            (),
+        .ovl_wr_sticky                   (),
+        .ovl_wr_irq_pulse                (),
+        .ovl_awaddr                      (),
+        .ovl_awlen                       (),
+        .ovl_awsize                      (),
+        .ovl_awburst                     (),
+        .ovl_awcache                     (),
+        .ovl_awvalid                     (),
+        .ovl_wdata                       (),
+        .ovl_wstrb                       (),
+        .ovl_wlast                       (),
+        .ovl_wvalid                      (),
+        .ovl_wready                      (1'b0),
+        .ovl_bresp                       (2'b00),
+        .ovl_bvalid                      (1'b0),
+        .ovl_bready                      ()
+`endif
     );
 
     // =========================================================================
@@ -2375,14 +3211,103 @@ module zu4ev_pcie_card_top #(
         .M_AXI_HPM1_FPD_wstrb(ps_hpm1_wstrb),
         .M_AXI_HPM1_FPD_wvalid(ps_hpm1_wvalid),
 `endif
+`ifdef SC7F0_RGB_COMPOSITOR
+        // ---- S_AXI_HP2_FPD: overlay-plane reader B, read-only, 300 MHz ----
+        // Read-only master, so the write channels of the PS slave port are
+        // terminated with valid low / ready low rather than left floating: an
+        // AXI slave port with a floating AWVALID can sample X and deadlock.
+        .S_AXI_HP2_FPD_awaddr(49'd0), .S_AXI_HP2_FPD_awlen(8'd0),
+        .S_AXI_HP2_FPD_awsize(3'd0), .S_AXI_HP2_FPD_awburst(2'd1),
+        .S_AXI_HP2_FPD_awid(6'd0), .S_AXI_HP2_FPD_awlock(1'b0),
+        .S_AXI_HP2_FPD_awcache(4'd3), .S_AXI_HP2_FPD_awprot(3'd0),
+        .S_AXI_HP2_FPD_awqos(4'd0), .S_AXI_HP2_FPD_awuser(1'b0),
+        .S_AXI_HP2_FPD_awvalid(1'b0), .S_AXI_HP2_FPD_awready(),
+        .S_AXI_HP2_FPD_wdata(128'd0), .S_AXI_HP2_FPD_wstrb(16'd0),
+        .S_AXI_HP2_FPD_wlast(1'b0), .S_AXI_HP2_FPD_wvalid(1'b0),
+        .S_AXI_HP2_FPD_wready(), .S_AXI_HP2_FPD_bid(),
+        .S_AXI_HP2_FPD_bresp(), .S_AXI_HP2_FPD_bvalid(), .S_AXI_HP2_FPD_bready(1'b0),
+        .S_AXI_HP2_FPD_araddr(rd_b_araddr[48:0]), .S_AXI_HP2_FPD_arlen(rd_b_arlen),
+        .S_AXI_HP2_FPD_arsize(rd_b_arsize), .S_AXI_HP2_FPD_arburst(rd_b_arburst),
+        .S_AXI_HP2_FPD_arid(6'd0), .S_AXI_HP2_FPD_arlock(1'b0),
+        .S_AXI_HP2_FPD_arcache(4'd3), .S_AXI_HP2_FPD_arprot(3'd0),
+        .S_AXI_HP2_FPD_arqos(4'd0), .S_AXI_HP2_FPD_aruser(1'b0),
+        .S_AXI_HP2_FPD_arvalid(rd_b_arvalid), .S_AXI_HP2_FPD_arready(rd_b_arready),
+        .S_AXI_HP2_FPD_rdata(rd_b_rdata), .S_AXI_HP2_FPD_rid(),
+        .S_AXI_HP2_FPD_rresp(rd_b_rresp), .S_AXI_HP2_FPD_rlast(rd_b_rlast),
+        .S_AXI_HP2_FPD_rvalid(rd_b_rvalid), .S_AXI_HP2_FPD_rready(rd_b_rready),
+
+        // ---- S_AXI_HP3_FPD: overlay plane writer, write-only, 300 MHz ----
+        .S_AXI_HP3_FPD_awaddr(ovl_hp3_awaddr), .S_AXI_HP3_FPD_awlen(ovl_hp3_awlen),
+        .S_AXI_HP3_FPD_awsize(ovl_hp3_awsize), .S_AXI_HP3_FPD_awburst(ovl_hp3_awburst),
+        .S_AXI_HP3_FPD_awid(6'd0), .S_AXI_HP3_FPD_awlock(1'b0),
+        .S_AXI_HP3_FPD_awcache(ovl_hp3_awcache), .S_AXI_HP3_FPD_awprot(3'd0),
+        .S_AXI_HP3_FPD_awqos(4'd0), .S_AXI_HP3_FPD_awuser(1'b0),
+        .S_AXI_HP3_FPD_awvalid(ovl_hp3_awvalid), .S_AXI_HP3_FPD_awready(ovl_hp3_awready),
+        .S_AXI_HP3_FPD_wdata(ovl_hp3_wdata), .S_AXI_HP3_FPD_wstrb(ovl_hp3_wstrb),
+        .S_AXI_HP3_FPD_wlast(ovl_hp3_wlast), .S_AXI_HP3_FPD_wvalid(ovl_hp3_wvalid),
+        .S_AXI_HP3_FPD_wready(ovl_hp3_wready), .S_AXI_HP3_FPD_bid(),
+        .S_AXI_HP3_FPD_bresp(ovl_hp3_bresp), .S_AXI_HP3_FPD_bvalid(ovl_hp3_bvalid),
+        .S_AXI_HP3_FPD_bready(ovl_hp3_bready),
+        .S_AXI_HP3_FPD_araddr(49'd0), .S_AXI_HP3_FPD_arlen(8'd0),
+        .S_AXI_HP3_FPD_arsize(3'd0), .S_AXI_HP3_FPD_arburst(2'd1),
+        .S_AXI_HP3_FPD_arid(6'd0), .S_AXI_HP3_FPD_arlock(1'b0),
+        .S_AXI_HP3_FPD_arcache(4'd3), .S_AXI_HP3_FPD_arprot(3'd0),
+        .S_AXI_HP3_FPD_arqos(4'd0), .S_AXI_HP3_FPD_aruser(1'b0),
+        .S_AXI_HP3_FPD_arvalid(1'b0), .S_AXI_HP3_FPD_arready(),
+        .S_AXI_HP3_FPD_rdata(), .S_AXI_HP3_FPD_rid(), .S_AXI_HP3_FPD_rresp(),
+        .S_AXI_HP3_FPD_rlast(), .S_AXI_HP3_FPD_rvalid(), .S_AXI_HP3_FPD_rready(1'b0),
+
+        // Reader-B reset, PS EMIO GPIO output bit 3.
+        .frmbuf_rd_b_resetn(reader_b_gpio_reset),
+`endif
         .pl_clk0(pl_clk0),
         .pl_resetn0(pl_resetn0),
 `ifdef SC7F0_DEBUG_ONLY
         .pl_ps_irq0(ps_irq_pulse_w),
 `else
+`ifdef SC7F0_RGB_COMPOSITOR
+        // RGB-compositor personality.  pl_ps_irq0[4:0] keeps the published
+        // sources in the same slots (mailbox, VPHY, HDMI RX SS, dualpath,
+        // capture frmbuf_wr).  The three new sources cannot go there: this PS
+        // configuration caps pl_ps_irq0 at 8 inputs (validate_bd_design reports
+        // "BD 17-147 ... Maximum Supported width ... is 8"), so they use the
+        // second PL vector, which is the slot the removed VCU encoder frees up:
+        //   pl_ps_irq1[0]  compositor Reader-A (base plane) v_frmbuf_rd
+        //   pl_ps_irq1[1]  compositor Reader-B (overlay plane) reader
+        //   pl_ps_irq1[2]  overlay plane writer frame complete
+        //   pl_ps_irq1[3]  HDMI TX subsystem (v_hdmi_tx_ss irq)
+        // The vector is FOUR bits wide and every bit is a real source: in the
+        // previous revision hdmi_tx_irq had no destination at all in this
+        // personality (the display branch routes it through pl_ps_irq_disp,
+        // which this build does not have), so the DRM HDMI TX driver could bind
+        // through a tied-off device-tree interrupt but never saw an HPD / cable
+        // / alarm event.  Nothing is OR-ed and nothing is faked: bit 3 is the
+        // same level-high source the display branch puts on its own vector.
+        //
+        // Numeric ids, now verified against two local authoritative sources
+        // (not inferred from the IRQ0 numbers):
+        //   Vitis standalone BSP, ARMv8/64bit/platform/ZynqMP/xparameters_ps.h
+        //     XPS_FPGA0..7_INT_ID  = 121..128   (pl_ps_irq0, GIC INTID)
+        //     XPS_FPGA8..15_INT_ID = 136..143   (pl_ps_irq1, GIC INTID)
+        //   PetaLinux device-tree generator, device_tree/data/common_proc.tcl
+        //     IRQ0_F2P -> 89 + bit,  IRQ1_F2P -> 104 + bit   (DT SPI index)
+        // So the two banks are NOT contiguous: INTID = SPI + 32, IRQ0[n] is
+        // SPI 89+n (INTID 121+n) and IRQ1[n] is SPI 104+n (INTID 136+n).
+        // Reader-A/B, the overlay writer and the TX SS are therefore DT SPIs
+        // 104, 105, 106 and 107.
+        .pl_ps_irq0({capture_irq,dp_irq,hdmi_rx_irq,hdmi_phy_irq,ps_irq_pulse_w}),
+        .pl_ps_irq1({hdmi_tx_irq, ovl_wr_irq_pulse, comp_irq_b, comp_irq_a}),
+`else
         // Both HDMI IRQs originate in the PS pl_clk0 AXI-Lite domain.
         // [0]=existing PS notification, [1]=VPHY, [2]=HDMI RX SS.
         .pl_ps_irq0({capture_irq,dp_irq,hdmi_rx_irq,hdmi_phy_irq,ps_irq_pulse_w}),
+`ifdef SC7F0_DISPLAY_TX
+        // Display branch: HDMI TX SS -> GIC SPI 95, display v_frmbuf_rd -> SPI 96.
+        // The block design concatenates these into pl_ps_irq0[7:6]; bits 4:0 and
+        // the VCU bit 5 keep the numbers every deployed device tree already uses.
+        .pl_ps_irq_disp({display_frmbuf_irq,hdmi_tx_irq}),
+`endif
+`endif
 `endif
 
         // M_AXI_HPM0_FPD (full AXI4 PS master -> protocol converter)

@@ -57,6 +57,18 @@ module qpcie_csr_reg_space #(
     input  wire [31:0] reg_eol_count,
     input  wire [31:0] reg_beat_count,
 
+    // SC7F0 RGB C2H capture-engine diagnosis, BAR0 GLOBAL 0x0E0..0x0F4
+    // (read-only; docs/sc7f0_defect3_c2h_zero_payload_rootcause_20261116.md §5.3).
+    // 0xE0+ was verified free: the GLOBAL block decoded up to 0xDC, and these
+    // offsets exist only inside this existing slave, so the address map and the
+    // device tree do not change.  Personalities without the engine read 0.
+    input  wire [31:0] reg_rgb_c2h_dbg0,
+    input  wire [31:0] reg_rgb_c2h_dbg1,
+    input  wire [31:0] reg_rgb_c2h_dbg2,
+    input  wire [31:0] reg_rgb_c2h_dbg3,
+    input  wire [31:0] reg_rgb_c2h_dbg4,
+    input  wire [31:0] reg_rgb_c2h_dbg5,
+
     input  wire [31:0] completed_h2c_count,
     input  wire [31:0] completed_c2h_count,
     input  wire [15:0] reg_h2c_head_ptr,
@@ -279,6 +291,12 @@ module qpcie_csr_reg_space #(
     wire [31:0] status_reg_sof_count;
     wire [31:0] status_reg_eol_count;
     wire [31:0] status_reg_beat_count;
+    wire [31:0] status_reg_rgb_c2h_dbg0;
+    wire [31:0] status_reg_rgb_c2h_dbg1;
+    wire [31:0] status_reg_rgb_c2h_dbg2;
+    wire [31:0] status_reg_rgb_c2h_dbg3;
+    wire [31:0] status_reg_rgb_c2h_dbg4;
+    wire [31:0] status_reg_rgb_c2h_dbg5;
     wire [31:0] status_completed_h2c_count;
     wire [31:0] status_completed_c2h_count;
     wire [15:0] status_reg_h2c_head_ptr;
@@ -421,14 +439,14 @@ module qpcie_csr_reg_space #(
     assign {reg_dma_ctrl, reg_h2c_ring_addr, reg_h2c_ring_size, reg_h2c_tail_ptr, reg_c2h_ring_addr, reg_c2h_ring_size, reg_c2h_tail_ptr, reg_irq_ctrl, reg_pacer_ctrl, reg_slice_height, reg_video_ctrl, reg_video_sub_reset, perf_enable, pt_y_wr_addr, pt_y_wr_data, pt_uv_wr_addr, pt_uv_wr_data, reg_audio_dma_addr, reg_audio_dma_cfg, reg_audio_dma_addr_ch1, reg_audio_dma_cfg_ch1, reg_audio_dma_addr_ch2, reg_audio_dma_cfg_ch2, reg_audio_dma_addr_ch3, reg_audio_dma_cfg_ch3, h2c_fifo_wr_data, reg_audio_loopback_ctrl, out_vch0_ctrl, out_vch0_width, out_vch0_height, out_vch0_stride0, out_vch0_stride1, out_map_mode_new, out_overlay_en, out_vch0_irq_en, out_vch1_ctrl, out_vch1_width, out_vch1_height, out_vch1_stride0, out_vch1_stride1, out_vch1_ring0_base, out_vch1_ring0_size, out_vch1_ring0_tail, out_vch1_irq_en, out_adev0_ctrl, out_adev0_rate, out_adev0_period_bytes, out_adev0_buffer_bytes, out_adev0_ring0_base, out_adev0_ring0_cfg, out_hdmi_tx_ctrl, out_hdmi_tx_res, out_hdmi_tx_fps, pcie_upg_ctrl, pcie_upg_size, pcie_upg_host_addr} = level_word;
     assign {reg_irq_status_w1c, perf_reset, pt_y_wr_en, pt_uv_wr_en, h2c_fifo_wr_en_ch1, h2c_fifo_wr_en_ch2, h2c_fifo_wr_en_ch3, out_irq_top_status_w1c, out_vch0_irq_status_w1c, out_vch1_irq_status_w1c, out_adev0_irq_status_w1c, out_adev0_xrun_inject, out_global_reset_pulse} = event_word;
 
-    wire [1742:0] status_word;
-    qpcie_status_cdc #(.WIDTH(1743)) u_status (
+    wire [1934:0] status_word;
+    qpcie_status_cdc #(.WIDTH(1935)) u_status (
         .src_clk(pcie_clk), .src_rst_n(pcie_rst_n), .src_peer_ready(ps_ready_pcie),
         .dest_clk(clk), .dest_rst_n(rst_n), .dest_online(csr_online),
-        .src_status({in_requester_id, reg_dma_status, reg_irq_status, reg_sof_count, reg_eol_count, reg_beat_count, completed_h2c_count, completed_c2h_count, reg_h2c_head_ptr, reg_c2h_head_ptr, reg_global_timestamp, reg_last_video_pts, reg_last_audio_pts, reg_frame_drop_count, reg_bandwidth_bps, reg_latency_max_ns, reg_perf_cycles, reg_perf_tlp_count, reg_perf_payload_bytes, reg_perf_tx_active_cycles, reg_perf_tx_idle_cycles, reg_perf_tready_stall_cycles, reg_perf_inter_tlp_gap, reg_perf_tlp_128b_count, reg_perf_tlp_256b_count, reg_perf_split_4k_count, reg_perf_max_queue_depth, reg_perf_idle_cdc_empty, reg_perf_idle_no_req, cur_y_page_idx, cur_uv_page_idx, reg_audio_dma_ptr, reg_audio_dma_ptr_ch1, reg_audio_dma_ptr_ch2, reg_audio_dma_ptr_ch3, h2c_fifo_count_ch1, h2c_fifo_count_ch2, h2c_fifo_count_ch3, h2c_fifo_full_ch1, h2c_fifo_full_ch2, h2c_fifo_full_ch3, h2c_fifo_empty_ch1, h2c_fifo_empty_ch2, h2c_fifo_empty_ch3, in_vch0_frame_count, in_vch0_drop_count, in_irq_top_status, in_vch0_irq_status, in_vch1_ring0_head, in_vch1_frame_count, in_vch1_drop_count, in_vch1_irq_status, in_adev0_running, xrun_count, in_adev0_position, in_adev0_irq_status, in_hdmi_rx_status, in_hdmi_rx_res, in_hdmi_rx_timing, in_hdmi_rx_audio, in_audio_rx_frames, in_audio_rx_errors, in_audio_rx_channels, in_audio_rx_cs, in_hdmi_tx_status}),
+        .src_status({in_requester_id, reg_dma_status, reg_irq_status, reg_sof_count, reg_eol_count, reg_beat_count, reg_rgb_c2h_dbg0, reg_rgb_c2h_dbg1, reg_rgb_c2h_dbg2, reg_rgb_c2h_dbg3, reg_rgb_c2h_dbg4, reg_rgb_c2h_dbg5, completed_h2c_count, completed_c2h_count, reg_h2c_head_ptr, reg_c2h_head_ptr, reg_global_timestamp, reg_last_video_pts, reg_last_audio_pts, reg_frame_drop_count, reg_bandwidth_bps, reg_latency_max_ns, reg_perf_cycles, reg_perf_tlp_count, reg_perf_payload_bytes, reg_perf_tx_active_cycles, reg_perf_tx_idle_cycles, reg_perf_tready_stall_cycles, reg_perf_inter_tlp_gap, reg_perf_tlp_128b_count, reg_perf_tlp_256b_count, reg_perf_split_4k_count, reg_perf_max_queue_depth, reg_perf_idle_cdc_empty, reg_perf_idle_no_req, cur_y_page_idx, cur_uv_page_idx, reg_audio_dma_ptr, reg_audio_dma_ptr_ch1, reg_audio_dma_ptr_ch2, reg_audio_dma_ptr_ch3, h2c_fifo_count_ch1, h2c_fifo_count_ch2, h2c_fifo_count_ch3, h2c_fifo_full_ch1, h2c_fifo_full_ch2, h2c_fifo_full_ch3, h2c_fifo_empty_ch1, h2c_fifo_empty_ch2, h2c_fifo_empty_ch3, in_vch0_frame_count, in_vch0_drop_count, in_irq_top_status, in_vch0_irq_status, in_vch1_ring0_head, in_vch1_frame_count, in_vch1_drop_count, in_vch1_irq_status, in_adev0_running, xrun_count, in_adev0_position, in_adev0_irq_status, in_hdmi_rx_status, in_hdmi_rx_res, in_hdmi_rx_timing, in_hdmi_rx_audio, in_audio_rx_frames, in_audio_rx_errors, in_audio_rx_channels, in_audio_rx_cs, in_hdmi_tx_status}),
         .dest_status(status_word), .dest_valid(status_valid)
     );
-    assign {status_in_requester_id, status_reg_dma_status, status_reg_irq_status, status_reg_sof_count, status_reg_eol_count, status_reg_beat_count, status_completed_h2c_count, status_completed_c2h_count, status_reg_h2c_head_ptr, status_reg_c2h_head_ptr, status_reg_global_timestamp, status_reg_last_video_pts, status_reg_last_audio_pts, status_reg_frame_drop_count, status_reg_bandwidth_bps, status_reg_latency_max_ns, status_reg_perf_cycles, status_reg_perf_tlp_count, status_reg_perf_payload_bytes, status_reg_perf_tx_active_cycles, status_reg_perf_tx_idle_cycles, status_reg_perf_tready_stall_cycles, status_reg_perf_inter_tlp_gap, status_reg_perf_tlp_128b_count, status_reg_perf_tlp_256b_count, status_reg_perf_split_4k_count, status_reg_perf_max_queue_depth, status_reg_perf_idle_cdc_empty, status_reg_perf_idle_no_req, status_cur_y_page_idx, status_cur_uv_page_idx, status_reg_audio_dma_ptr, status_reg_audio_dma_ptr_ch1, status_reg_audio_dma_ptr_ch2, status_reg_audio_dma_ptr_ch3, status_h2c_fifo_count_ch1, status_h2c_fifo_count_ch2, status_h2c_fifo_count_ch3, status_h2c_fifo_full_ch1, status_h2c_fifo_full_ch2, status_h2c_fifo_full_ch3, status_h2c_fifo_empty_ch1, status_h2c_fifo_empty_ch2, status_h2c_fifo_empty_ch3, status_in_vch0_frame_count, status_in_vch0_drop_count, status_in_irq_top_status, status_in_vch0_irq_status, status_in_vch1_ring0_head, status_in_vch1_frame_count, status_in_vch1_drop_count, status_in_vch1_irq_status, status_in_adev0_running, status_xrun_count, status_in_adev0_position, status_in_adev0_irq_status, status_in_hdmi_rx_status, status_in_hdmi_rx_res, status_in_hdmi_rx_timing, status_in_hdmi_rx_audio, status_in_audio_rx_frames, status_in_audio_rx_errors, status_in_audio_rx_channels, status_in_audio_rx_cs, status_in_hdmi_tx_status} = csr_online ? status_word : 1743'd0;
+    assign {status_in_requester_id, status_reg_dma_status, status_reg_irq_status, status_reg_sof_count, status_reg_eol_count, status_reg_beat_count, status_reg_rgb_c2h_dbg0, status_reg_rgb_c2h_dbg1, status_reg_rgb_c2h_dbg2, status_reg_rgb_c2h_dbg3, status_reg_rgb_c2h_dbg4, status_reg_rgb_c2h_dbg5, status_completed_h2c_count, status_completed_c2h_count, status_reg_h2c_head_ptr, status_reg_c2h_head_ptr, status_reg_global_timestamp, status_reg_last_video_pts, status_reg_last_audio_pts, status_reg_frame_drop_count, status_reg_bandwidth_bps, status_reg_latency_max_ns, status_reg_perf_cycles, status_reg_perf_tlp_count, status_reg_perf_payload_bytes, status_reg_perf_tx_active_cycles, status_reg_perf_tx_idle_cycles, status_reg_perf_tready_stall_cycles, status_reg_perf_inter_tlp_gap, status_reg_perf_tlp_128b_count, status_reg_perf_tlp_256b_count, status_reg_perf_split_4k_count, status_reg_perf_max_queue_depth, status_reg_perf_idle_cdc_empty, status_reg_perf_idle_no_req, status_cur_y_page_idx, status_cur_uv_page_idx, status_reg_audio_dma_ptr, status_reg_audio_dma_ptr_ch1, status_reg_audio_dma_ptr_ch2, status_reg_audio_dma_ptr_ch3, status_h2c_fifo_count_ch1, status_h2c_fifo_count_ch2, status_h2c_fifo_count_ch3, status_h2c_fifo_full_ch1, status_h2c_fifo_full_ch2, status_h2c_fifo_full_ch3, status_h2c_fifo_empty_ch1, status_h2c_fifo_empty_ch2, status_h2c_fifo_empty_ch3, status_in_vch0_frame_count, status_in_vch0_drop_count, status_in_irq_top_status, status_in_vch0_irq_status, status_in_vch1_ring0_head, status_in_vch1_frame_count, status_in_vch1_drop_count, status_in_vch1_irq_status, status_in_adev0_running, status_xrun_count, status_in_adev0_position, status_in_adev0_irq_status, status_in_hdmi_rx_status, status_in_hdmi_rx_res, status_in_hdmi_rx_timing, status_in_hdmi_rx_audio, status_in_audio_rx_frames, status_in_audio_rx_errors, status_in_audio_rx_channels, status_in_audio_rx_cs, status_in_hdmi_tx_status} = csr_online ? status_word : 1935'd0;
 
     axil_reg_space #(.C_VERSION(C_VERSION), .NUM_VIDEO_CH(NUM_VIDEO_CH),
         .NUM_AUDIO_CH(NUM_AUDIO_CH), .CDC_ENABLE(1)) u_bank (
@@ -472,6 +490,12 @@ module qpcie_csr_reg_space #(
         .reg_sof_count(status_reg_sof_count),
         .reg_eol_count(status_reg_eol_count),
         .reg_beat_count(status_reg_beat_count),
+        .reg_rgb_c2h_dbg0(status_reg_rgb_c2h_dbg0),
+        .reg_rgb_c2h_dbg1(status_reg_rgb_c2h_dbg1),
+        .reg_rgb_c2h_dbg2(status_reg_rgb_c2h_dbg2),
+        .reg_rgb_c2h_dbg3(status_reg_rgb_c2h_dbg3),
+        .reg_rgb_c2h_dbg4(status_reg_rgb_c2h_dbg4),
+        .reg_rgb_c2h_dbg5(status_reg_rgb_c2h_dbg5),
         .completed_h2c_count(status_completed_h2c_count),
         .completed_c2h_count(status_completed_c2h_count),
         .reg_h2c_head_ptr(status_reg_h2c_head_ptr),

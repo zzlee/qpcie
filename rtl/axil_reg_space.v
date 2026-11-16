@@ -64,6 +64,18 @@ module axil_reg_space #(
     input  wire [31:0] reg_eol_count,
     input  wire [31:0] reg_beat_count,
 
+    // SC7F0 RGB C2H capture-engine diagnosis, BAR0 GLOBAL 0x0E0..0x0F4
+    // (read-only; docs/sc7f0_defect3_c2h_zero_payload_rootcause_20261116.md §5.3).
+    // 0xE0+ was verified free: the GLOBAL block decoded up to 0xDC, and these
+    // offsets exist only inside this existing slave, so the address map and the
+    // device tree do not change.  Personalities without the engine read 0.
+    input  wire [31:0] reg_rgb_c2h_dbg0,
+    input  wire [31:0] reg_rgb_c2h_dbg1,
+    input  wire [31:0] reg_rgb_c2h_dbg2,
+    input  wire [31:0] reg_rgb_c2h_dbg3,
+    input  wire [31:0] reg_rgb_c2h_dbg4,
+    input  wire [31:0] reg_rgb_c2h_dbg5,
+
     input  wire [31:0] completed_h2c_count,
     input  wire [31:0] completed_c2h_count,
     input  wire [15:0] reg_h2c_head_ptr,
@@ -850,6 +862,31 @@ module axil_reg_space #(
                             8'hD4: s_axil_rdata <= {16'd0, reg_perf_max_queue_depth};
                             8'hD8: s_axil_rdata <= reg_perf_idle_cdc_empty;
                             8'hDC: s_axil_rdata <= reg_perf_idle_no_req;
+                            // ---- RGB C2H engine diagnosis (read-only) -------
+                            // 0x0E0 engine state  ([6:0] SGL entries, [7] walker empty,
+                            //   [8] pl_seg_ready, [9] seg_valid, [12:10] state,
+                            //   [15:13] pl_state, [16] pl_valid, [17] armed,
+                            //   [18] locked, [19] sof_locked, [24:20] pl_beats,
+                            //   [25] have_all, [26] burst_start, [27] video_busy)
+                            // 0x0E4 payload side  ([10:0] packer avail, [12] tvalid,
+                            //   [13] tready, [14] burst_start, [15] pl_valid,
+                            //   [16] have_all, [17] pl_seg_ready, [18] engine busy,
+                            //   [19] sgl_wr_en, [20] sgl_pop_ready, [21] SGL src empty)
+                            // 0x0E8 bytes_committed   0x0EC drop_count
+                            // 0x0F0 frames_completed  0x0F4 sticky/flow
+                            //   ([0] error_sticky, [1] src_overflow_sticky,
+                            //    [2] src_line_align_sticky, [3] video_busy,
+                            //    [4] desc_valid, [5] desc_ready,
+                            //    [6] SGL source FIFO prog_full (write domain,
+                            //        synchronised before it reaches this bank),
+                            //    [7] SGL source FIFO empty, [8] SGL pop gate,
+                            //    [31:9] reserved, read 0)
+                            8'hE0: s_axil_rdata <= reg_rgb_c2h_dbg0;
+                            8'hE4: s_axil_rdata <= reg_rgb_c2h_dbg1;
+                            8'hE8: s_axil_rdata <= reg_rgb_c2h_dbg2;
+                            8'hEC: s_axil_rdata <= reg_rgb_c2h_dbg3;
+                            8'hF0: s_axil_rdata <= reg_rgb_c2h_dbg4;
+                            8'hF4: s_axil_rdata <= reg_rgb_c2h_dbg5;
                             default: s_axil_rdata <= 32'd0;
                         endcase
                     end

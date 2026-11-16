@@ -18,7 +18,16 @@ module custom_pcie_dma_top #(
     parameter NUM_AUDIO_CH     = 2,
     parameter VIDEO_DATA_WIDTH = 32,
     parameter AUDIO_DATA_WIDTH = 32,
-    parameter ENABLE_PACKET_C2H = 0
+    parameter ENABLE_PACKET_C2H = 0,
+    // SC7F0-RGB-COMPOSITOR-2PPC.  0 leaves this file exactly as published.
+    // 1 replaces the channel-0 NV12 capture engine with the packed-RGB24
+    // engine (same thin-descriptor launch, same format code 4'd1, same C2H MWr
+    // byte-enable and completion semantics, same video_req_cdc crossing) and
+    // adds the plan-A overlay path: native 256-bit RC completions ->
+    // sc7f0_overlay_ingress -> 128-bit 300 MHz stream -> sc7f0_overlay_writer
+    // -> PS DDR.  Nothing here touches the H2C upgrade engine, the mailbox ABI
+    // or the BAR0 register map.
+    parameter ENABLE_RGB_COMPOSITOR = 0
 )(
     input wire packet_req_valid,
     input wire [63:0] packet_req_addr,
@@ -240,7 +249,90 @@ module custom_pcie_dma_top #(
     output wire                                             m_axi_hp0_rready,
 
     // PS Interrupt Notification Pulse (to PS pl_ps_irq0)
-    output wire                                             out_ps_irq_pulse
+    output wire                                             out_ps_irq_pulse,
+
+    // ---- SC7F0-RGB-COMPOSITOR-2PPC (ENABLE_RGB_COMPOSITOR) ---------------
+    // Packed RGB24 payload arriving in the video_clk domain from
+    // rtl/sc7f0_rgb24_axis_pack.v.  video_ch0_tdata/tvalid/tuser/tready are
+    // reused as that stream (tuser = first beat of a source frame); only the
+    // FIFO occupancy and the two sticky source faults are new, because the
+    // engine must be able to refuse a frame it cannot place rather than write
+    // a torn one.
+    input  wire [10:0]                                      video_ch0_avail,
+    input  wire                                             video_ch0_src_overflow_sticky,
+    input  wire                                             video_ch0_src_line_align_sticky,
+
+    // Negotiated Extended Tag Field Enable from the PCIe core (real config
+    // input, never tied).  Tag 64..127 only exists once the host has set the
+    // Device Control bit; with this low the overlay simply cannot arm and
+    // ovl_ext_tag_unsupported reports why.  The legacy 0..63 pool and the
+    // upgrade path never look at it.
+    input  wire                                             ext_tag_enable,
+
+    // Overlay transfer arm / status (PCIe user clock domain)
+    input  wire                                             ovl_enable,
+    input  wire [63:0]                                      ovl_src_addr,
+    input  wire [31:0]                                      ovl_xfer_bytes,
+    input  wire [15:0]                                      ovl_max_bytes_per_req,
+    input  wire                                             ovl_go,
+    // Review H1: software-requested plane discard (from the overlay control block).
+    // It releases the ingress arm AND tells the writer to retire, which plain
+    // ovl_quiesce deliberately does not do.
+    input  wire                                             ovl_abort_req,
+    input  wire                                             ovl_quiesce_req,
+    input  wire                                             ovl_discard_pending,
+    output wire [31:0]                                      ovl_status_bytes_issued,
+    output wire [31:0]                                      ovl_status_bytes_staged,
+    output wire [31:0]                                      ovl_status_bytes_drained,
+    output wire [5:0]                                       ovl_status_outstanding,
+    output wire                                             ovl_status_busy,
+    output wire                                             ovl_status_quiesced,
+    output wire                                             ovl_status_quarantined,
+    output wire                                             ovl_status_ext_tag_blocked,
+    output wire [31:0]                                      ovl_status_counts,
+    // Review H2: the video-descriptor format guard of THIS profile's channel 0.
+    // A refused descriptor launches no DMA and raises these instead; nothing
+    // else in the design is gated by them.
+    output wire                                             ovl_video_guard_sticky,
+    output wire [31:0]                                      ovl_video_guard_count,
+    // Review H1: plane-discard handshake with the plane writer
+    output wire                                             ovl_wr_abort_busy,
+    output wire [31:0]                                      ovl_wr_err_frames,
+    output wire                                             ovl_video_poison,
+
+    // Overlay plane writer (memory clock domain, PS HP3)
+    input  wire                                             ovl_mem_clk,
+    input  wire                                             ovl_mem_rst_n,
+    input  wire                                             ovl_wr_enable,
+    input  wire [48:0]                                      ovl_wr_dst_base,
+    input  wire [31:0]                                      ovl_wr_slot_bytes,
+    input  wire [2:0]                                       ovl_wr_slot_count,
+    input  wire [31:0]                                      ovl_wr_frame_bytes,
+    input  wire                                             ovl_wr_auto_advance,
+    input  wire [1:0]                                       ovl_wr_force_slot,
+    input  wire [3:0]                                       ovl_wr_consume,
+    output wire [3:0]                                       ovl_wr_slot_ready,
+    output wire                                             ovl_wr_busy,
+    output wire [1:0]                                       ovl_wr_active_slot,
+    output wire [31:0]                                      ovl_wr_frames_done,
+    output wire [31:0]                                      ovl_wr_bytes_written,
+    output wire [5:0]                                       ovl_wr_sticky,
+    output wire                                             ovl_wr_irq_pulse,
+    output wire [48:0]                                      ovl_awaddr,
+    output wire [7:0]                                       ovl_awlen,
+    output wire [2:0]                                       ovl_awsize,
+    output wire [1:0]                                       ovl_awburst,
+    output wire [3:0]                                       ovl_awcache,
+    output wire                                             ovl_awvalid,
+    input  wire                                             ovl_awready,
+    output wire [127:0]                                     ovl_wdata,
+    output wire [15:0]                                      ovl_wstrb,
+    output wire                                             ovl_wlast,
+    output wire                                             ovl_wvalid,
+    input  wire                                             ovl_wready,
+    input  wire [1:0]                                       ovl_bresp,
+    input  wire                                             ovl_bvalid,
+    output wire                                             ovl_bready
 );
 
     // Internal Wires for BAR0 Inter-module Connection
@@ -549,6 +641,13 @@ module custom_pcie_dma_top #(
     xpm_cdc_gray #(.WIDTH(32), .DEST_SYNC_FF(4), .INIT_SYNC_FF(1)) u_beat_count_cdc (
         .src_clk(video_clk), .src_in_bin(beat_bin_v),
         .dest_clk(clk), .dest_out_bin(reg_beat_count));
+
+    // RGB C2H engine diagnosis words presented to the register bank at BAR0
+    // GLOBAL 0x0E0..0x0F4 (read-only).  They arrive in this (PCIe user) clock
+    // from the capture domain; see the SC7F0_RGB_COMPOSITOR block below the
+    // channel-0 engine for the packing and the other personalities tie 0.
+    wire [31:0] reg_rgb_c2h_dbg0, reg_rgb_c2h_dbg1, reg_rgb_c2h_dbg2;
+    wire [31:0] reg_rgb_c2h_dbg3, reg_rgb_c2h_dbg4, reg_rgb_c2h_dbg5;
     wire [63:0] reg_h2c_ring_addr, reg_c2h_ring_addr;
     wire [15:0] reg_h2c_ring_size, reg_h2c_tail_ptr, reg_h2c_head_ptr;
     wire [15:0] reg_c2h_ring_size, reg_c2h_tail_ptr, reg_c2h_head_ptr;
@@ -913,7 +1012,7 @@ module custom_pcie_dma_top #(
     // Forward declaration: video_tx_idle below consumes it, and xvlog rejects
     // a reg that is referenced ahead of its declaration (VRFC 10-3380) which
     // made the whole module unverifiable in the xsim regression flow.
-    reg         ch0_owner_busy;
+    wire        ch0_owner_busy;   // driven by u_ch0_arbiter (both launch entries)
 
     // An empty packet FIFO alone is not idle: the frontend may still be
     // producing writes to the current host buffer. Retire the owner first.
@@ -1081,6 +1180,19 @@ module custom_pcie_dma_top #(
     wire [15:0] thin_ring0_head;
     wire [15:0] thin_ring1_head;
     wire        thin_active = vch0_ctrl_w[0];
+    // Declared here because the thin fetch engine instance and the thin launch
+    // branches below both reference them, and this file analyses with implicit net
+    // declarations enabled: a first use would create a 1-bit implicit net that a
+    // later explicit declaration then collides with.
+    //   thin_fmt_ok         : the armed thin profile may drive the channel-0 engine
+    //   thin_launch_refused : a launch request being refused and retired this cycle
+    wire        thin_fmt_ok;
+    // Driven by u_ch0_arbiter and consumed by the thin walker below, so they must be
+    // declared ahead of that instantiation (xvlog otherwise creates implicit 1-bit
+    // nets on first use and then rejects the later explicit declaration).
+    wire        thin_engine_enable;   // arbiter -> walker enable (profile guarded)
+    wire        thin_frame_abort;     // arbiter -> walker frame retire (refusal)
+    wire        thin_launch_refused;
     wire        overlay_en_w;
     assign out_vch0_ctrl = vch0_ctrl_w;
 
@@ -1191,6 +1303,12 @@ module custom_pcie_dma_top #(
         .reg_sof_count(reg_sof_count),
         .reg_eol_count(reg_eol_count),
         .reg_beat_count(reg_beat_count),
+        .reg_rgb_c2h_dbg0(reg_rgb_c2h_dbg0),
+        .reg_rgb_c2h_dbg1(reg_rgb_c2h_dbg1),
+        .reg_rgb_c2h_dbg2(reg_rgb_c2h_dbg2),
+        .reg_rgb_c2h_dbg3(reg_rgb_c2h_dbg3),
+        .reg_rgb_c2h_dbg4(reg_rgb_c2h_dbg4),
+        .reg_rgb_c2h_dbg5(reg_rgb_c2h_dbg5),
 
         // Hardware Performance Monitor Ports
         .perf_enable(perf_enable),
@@ -1538,10 +1656,24 @@ module custom_pcie_dma_top #(
     // 5. RQ TX Encoder
     wire [PCIE_DATA_WIDTH-1:0] rq_c2h_req_data = c2h_req_data_mux;
 
+    // Overlay-plane Memory-Read client (lowest priority inside the encoder).
+    wire        ovl_mrd_req_valid, ovl_mrd_req_ack;
+    wire [63:0] ovl_mrd_req_addr;
+    wire [10:0] ovl_mrd_req_dw_len;
+    wire [7:0]  ovl_mrd_req_tag;
+    wire [3:0]  ovl_mrd_req_first_be, ovl_mrd_req_last_be;
+    // Overlay completion route out of rc_rx_decoder.
+    wire        ovl_cpl_valid, ovl_cpl_last;
+    wire [255:0] ovl_cpl_data;
+    wire [3:0]  ovl_cpl_dw_count;
+    wire [7:0]  ovl_cpl_tag;
+    wire        ovl_sticky_timeout, ovl_sticky_unaligned, ovl_sticky_err;
+
     rq_tx_encoder #(
         .ENABLE_C2H_BYTE_ENABLE(1),
         .DATA_WIDTH(PCIE_DATA_WIDTH),
-        .KEEP_WIDTH(PCIE_KEEP_WIDTH)
+        .KEEP_WIDTH(PCIE_KEEP_WIDTH),
+        .ENABLE_OVL_REQ(ENABLE_RGB_COMPOSITOR)
     ) u_rq_tx_encoder (
         .clk(clk),
         .rst_n(dma_rst_n),
@@ -1578,13 +1710,21 @@ module custom_pcie_dma_top #(
         .c2h_req_last(c2h_req_last_mux),
         .c2h_req_first_be(c2h_first_be_mux),.c2h_req_last_be(c2h_last_be_mux),
         .c2h_req_data_ready(c2h_req_data_ready_mux),
-        .c2h_req_ack(c2h_req_ack_mux)
+        .c2h_req_ack(c2h_req_ack_mux),
+        .ovl_req_valid(ovl_mrd_req_valid),
+        .ovl_req_addr(ovl_mrd_req_addr),
+        .ovl_req_dw_len(ovl_mrd_req_dw_len),
+        .ovl_req_tag(ovl_mrd_req_tag),
+        .ovl_req_first_be(ovl_mrd_req_first_be),
+        .ovl_req_last_be(ovl_mrd_req_last_be),
+        .ovl_req_ack(ovl_mrd_req_ack)
     );
 
     // 6. RC RX Decoder
     rc_rx_decoder #(
         .DATA_WIDTH(PCIE_DATA_WIDTH),
-        .KEEP_WIDTH(PCIE_KEEP_WIDTH)
+        .KEEP_WIDTH(PCIE_KEEP_WIDTH),
+        .ENABLE_OVL_ROUTE(ENABLE_RGB_COMPOSITOR)
     ) u_rc_rx_decoder (
         .clk(clk),
         .rst_n(dma_rst_n),
@@ -1610,8 +1750,211 @@ module custom_pcie_dma_top #(
         .h2c_fifo_wdw_count(h2c_fifo_wdw_count),
         .h2c_fifo_wtag(h2c_fifo_wtag),
         .tag_free_req(tag_free_req),
-        .tag_free_val(tag_free_val)
+        .tag_free_val(tag_free_val),
+        .ovl_cpl_valid(ovl_cpl_valid),
+        .ovl_cpl_data(ovl_cpl_data),
+        .ovl_cpl_dw_count(ovl_cpl_dw_count),
+        .ovl_cpl_last(ovl_cpl_last),
+        .ovl_cpl_tag(ovl_cpl_tag)
     );
+
+    // ---------------------------------------------------------------------
+    // 6.05 Plan-A overlay path (SC7F0-RGB-COMPOSITOR-2PPC only).
+    //
+    //   host IOVA --MRd(tag 64..127)--> rc_rx_decoder native 256-bit CplD
+    //             --> sc7f0_overlay_ingress (reorder, 4 KB split, quarantine)
+    //             --> xpm_fifo_async 256->128, 125 MHz -> 300 MHz
+    //             --> sc7f0_overlay_writer -> PS DDR plane slots (HP3)
+    //
+    // Why the ingress is fed by its own RC route instead of the H2C FIFO: the
+    // H2C route exists to turn one 256-bit CplD beat into two 128-bit FIFO
+    // writes and pulls s_axis_rc_tready low to do it.  A 1.990656 GB/s
+    // RGBA32 plane (33177600 B/frame) cannot be fetched through a half-rate,
+    // stall-prone intake.
+    //
+    // Upgrade priority: ovl_quiesce is asserted whenever the H2C engine is
+    // busy, so an in-progress firmware transfer first stops the overlay from
+    // issuing anything new.  rtl/sc7f0_overlay_ingress.v then drains or drops
+    // every inflight read and frees every tag (proven by its T7 quiesce and
+    // T9 backpressure gates), and its quarantine (T11) keeps a late completion
+    // from landing in a later transfer.  The overlay's MRd is also the lowest
+    // priority in rq_tx_encoder, so it can never delay an H2C read.
+    // ---------------------------------------------------------------------
+`ifdef SC7F0_RGB_COMPOSITOR
+    wire ovl_quiesce = ovl_quiesce_req | sg_h2c_busy;
+    // Review H1: pause and discard are different things and must not be merged.
+    // ovl_quiesce ALONE only stops NEW MRd issue (rtl/sc7f0_overlay_ingress.v
+    // keeps consuming the completions it already owes and still stages them), so
+    // a plain upgrade pause must leave the in-flight plane alone - it still
+    // completes and still publishes.  A plane is discarded only when software or
+    // the engine says so: discard requested while quiescing, or the ingress
+    // abandoning the arm, timing out, or dropping payload it was told to discard.
+    // In those cases the plane can never be complete, and the writer must retire
+    // it rather than hold active_m until a frame end that will never arrive.
+    wire ovl_ingress_abort;
+    wire ovl_plane_abort = ovl_ingress_abort | (ovl_quiesce & ovl_discard_pending) |
+                           ovl_abort_req;
+    // A new plane may not be armed while the writer is still retiring the old one:
+    // the ack (ovl_wr_abort_busy falling) IS the statement that the payload FIFO,
+    // the intake counters and the upstream crossing are free of the dead plane.
+    wire ovl_enable_eff = ovl_enable & ext_tag_enable & ~ovl_wr_abort_busy;
+    assign ovl_status_ext_tag_blocked = ovl_enable & ~ext_tag_enable;
+
+    wire [127:0] ovl_axis_tdata;
+    wire         ovl_axis_tuser, ovl_axis_tvalid, ovl_axis_tready;
+    wire [7:0]   ovl_axis_avail;
+    wire         ovl_axis_ovf_sticky;
+
+    sc7f0_overlay_ingress #(
+        .OVL_TAG_BASE   (64),
+        .OVL_TAG_COUNT  (64),
+        .NSLOT          (8),
+        .SLOT_BYTES     (2048),
+        .FIFO_DEPTH     (64),
+        .MAX_REQ_CLAMP  (16'd4096)
+    ) u_overlay_ingress (
+        .clk                   (clk),
+        .rst_n                 (dma_rst_n),
+        .epoch_rst_n           (rst_n),
+        .ovl_enable            (ovl_enable_eff),
+        .ovl_src_addr          (ovl_src_addr),
+        .ovl_xfer_bytes        (ovl_xfer_bytes),
+        .ovl_max_bytes_per_req (ovl_max_bytes_per_req),
+        .ovl_go                (ovl_go & ~ovl_abort_req),
+        .quiesce               (ovl_quiesce),
+        .discard_pending       (ovl_discard_pending),
+        .mrd_req_valid         (ovl_mrd_req_valid),
+        .mrd_req_addr          (ovl_mrd_req_addr),
+        .mrd_req_dw_len        (ovl_mrd_req_dw_len),
+        .mrd_req_tag           (ovl_mrd_req_tag),
+        .mrd_req_first_be      (ovl_mrd_req_first_be),
+        .mrd_req_last_be       (ovl_mrd_req_last_be),
+        .mrd_req_ack           (ovl_mrd_req_ack),
+        .ovl_cpl_valid         (ovl_cpl_valid),
+        .ovl_cpl_data          (ovl_cpl_data),
+        .ovl_cpl_dw_count      (ovl_cpl_dw_count),
+        .ovl_cpl_last          (ovl_cpl_last),
+        .ovl_cpl_tag           (ovl_cpl_tag),
+        .ovl_bytes_issued      (ovl_status_bytes_issued),
+        .ovl_bytes_staged      (ovl_status_bytes_staged),
+        .ovl_bytes_drained     (ovl_status_bytes_drained),
+        .ovl_outstanding       (ovl_status_outstanding),
+        .ovl_busy              (ovl_status_busy),
+        .ovl_quiesced          (ovl_status_quiesced),
+        .ovl_unexpected_count  (),
+        .ovl_overflow_count    (),
+        .ovl_split_count       (),
+        .ovl_abort_count       (),
+        .ovl_timeout_sticky    (ovl_sticky_timeout),
+        .ovl_unaligned_sticky  (ovl_sticky_unaligned),
+        .ovl_quarantined       (ovl_status_quarantined),
+        .ovl_err_sticky        (ovl_sticky_err),
+        .ovl_abort_evt         (ovl_ingress_abort),
+        .ovl_poison_sticky     (ovl_video_poison),
+        .ovl_done_pulse        (),
+        .mem_clk               (ovl_mem_clk),
+        .mem_rst_n             (ovl_mem_rst_n),
+        .m_axis_tdata          (ovl_axis_tdata),
+        .m_axis_tuser          (ovl_axis_tuser),
+        .m_axis_tvalid         (ovl_axis_tvalid),
+        .m_axis_tready         (ovl_axis_tready),
+        .m_axis_avail          (ovl_axis_avail),
+        .m_axis_ovf_sticky     (ovl_axis_ovf_sticky)
+    );
+    // Four ingress fault levels, packed so one CSR word carries all of them.
+    assign ovl_status_counts = {27'd0, ovl_axis_ovf_sticky, ovl_sticky_err,
+                                ovl_sticky_unaligned, ovl_sticky_timeout};
+
+    sc7f0_overlay_writer #(
+        .DATA_WIDTH  (128),
+        .ADDR_WIDTH  (49),
+        .FIFO_DEPTH  (1024),
+        .MAX_SLOTS   (4)
+    ) u_overlay_writer (
+        .clk               (clk),
+        .rst_n             (dma_rst_n),
+        .s_axis_tdata      (ovl_axis_tdata),
+        .s_axis_tvalid     (ovl_axis_tvalid),
+        .s_axis_tuser      (ovl_axis_tuser),
+        .s_axis_tlast      (1'b0),
+        .s_axis_tready     (ovl_axis_tready),
+        .ov_enable         (ovl_wr_enable),
+        .ov_dst_base       ({15'd0, ovl_wr_dst_base}),
+        .ov_slot_bytes     (ovl_wr_slot_bytes),
+        .ov_slot_count     (ovl_wr_slot_count),
+        .ov_frame_bytes    (ovl_wr_frame_bytes),
+        .ov_auto_advance   (ovl_wr_auto_advance),
+        .ov_force_slot     (ovl_wr_force_slot),
+        .ov_consume        (ovl_wr_consume),
+        .epoch_rst_n       (rst_n),
+        .ov_abort          (ovl_plane_abort),
+        .s_axis_avail_in   (ovl_axis_avail),
+        .ov_busy           (ovl_wr_busy),
+        .ov_slot_ready     (ovl_wr_slot_ready),
+        .ov_write_slot     (ovl_wr_active_slot),
+        .ov_frames_done    (ovl_wr_frames_done),
+        .ov_bytes_written  (ovl_wr_bytes_written),
+        .ov_stall_sticky   (ovl_wr_sticky[0]),
+        .ov_over_sticky    (ovl_wr_sticky[1]),
+        .ov_axi_err_sticky (ovl_wr_sticky[2]),
+        .ov_misalign_sticky(ovl_wr_sticky[3]),
+        .ov_err_frame_sticky(ovl_wr_sticky[5]),
+        .ov_abort_sticky   (ovl_wr_sticky[4]),
+        .ov_err_frames     (ovl_wr_err_frames),
+        .ov_abort_busy     (ovl_wr_abort_busy),
+        .ov_irq_pulse      (ovl_wr_irq_pulse),
+        .mem_clk           (ovl_mem_clk),
+        .mem_rst_n         (ovl_mem_rst_n),
+        .m_axi_awaddr      (ovl_awaddr),
+        .m_axi_awlen       (ovl_awlen),
+        .m_axi_awsize      (ovl_awsize),
+        .m_axi_awburst     (ovl_awburst),
+        .m_axi_awcache     (ovl_awcache),
+        .m_axi_awvalid     (ovl_awvalid),
+        .m_axi_awready     (ovl_awready),
+        .m_axi_wdata       (ovl_wdata),
+        .m_axi_wstrb       (ovl_wstrb),
+        .m_axi_wlast       (ovl_wlast),
+        .m_axi_wvalid      (ovl_wvalid),
+        .m_axi_wready      (ovl_wready),
+        .m_axi_bresp       (ovl_bresp),
+        .m_axi_bvalid      (ovl_bvalid),
+        .m_axi_bready      (ovl_bready)
+    );
+`else
+    assign ovl_status_bytes_issued      = 32'd0;
+    assign ovl_status_bytes_staged      = 32'd0;
+    assign ovl_status_bytes_drained     = 32'd0;
+    assign ovl_status_outstanding       = 6'd0;
+    assign ovl_status_busy              = 1'b0;
+    assign ovl_status_quiesced          = 1'b1;
+    assign ovl_status_quarantined       = 1'b0;
+    assign ovl_status_ext_tag_blocked   = 1'b0;
+    assign ovl_status_counts            = 32'd0;
+    assign ovl_video_guard_sticky       = 1'b0;
+    assign ovl_video_guard_count        = 32'd0;
+    assign ovl_wr_abort_busy            = 1'b0;
+    assign ovl_wr_err_frames            = 32'd0;
+    assign ovl_video_poison             = 1'b0;
+    assign ovl_wr_slot_ready            = 4'd0;
+    assign ovl_wr_busy                  = 1'b0;
+    assign ovl_wr_active_slot           = 2'd0;
+    assign ovl_wr_frames_done           = 32'd0;
+    assign ovl_wr_bytes_written         = 32'd0;
+    assign ovl_wr_sticky                = 6'd0;
+    assign ovl_wr_irq_pulse             = 1'b0;
+    assign ovl_awaddr                   = 49'd0;
+    assign ovl_awlen                    = 8'd0;
+    assign ovl_awsize                   = 3'd0;
+    assign ovl_awburst                  = 2'd0;
+    assign ovl_awcache                  = 4'd0;
+    assign ovl_awvalid                  = 1'b0;
+    assign ovl_wdata                    = 128'd0;
+    assign ovl_wstrb                    = 16'd0;
+    assign ovl_wlast                    = 1'b0;
+    assign ovl_wvalid                   = 1'b0;
+    assign ovl_bready                   = 1'b0;
+`endif
 
     // 6.1 SG Host Variable-Length SGL Fetch Engine
     wire [2:0]  sgl_y_channel, sgl_uv_channel;
@@ -1743,11 +2086,19 @@ module custom_pcie_dma_top #(
 
     // 7.0b Thin Descriptor Fetch Engine (Phase 3 16-Byte)
     thin_desc_fetch_engine #(
-        .DATA_WIDTH(PCIE_DATA_WIDTH)
+        .DATA_WIDTH(PCIE_DATA_WIDTH),
+        // RGB personality: the launch bus carries PIXELS in its width field, like the
+        // ordinary descriptor path.  Legacy profiles keep the historical byte/row
+        // field untouched (default 0).  See rtl/thin_desc_fetch_engine.v.
+`ifdef SC7F0_RGB_COMPOSITOR
+        .WIDTH_FIELD_PIXELS(1)
+`else
+        .WIDTH_FIELD_PIXELS(0)
+`endif
     ) u_thin_desc_fetch_engine (
         .clk(clk),
         .rst_n(dma_rst_n),
-        .enable(thin_active),
+        .enable(thin_engine_enable),
         .format(vch0_ctrl_w[7:4]),
         .frame_width(vch0_width_w[15:0]),
         .frame_height(vch0_height_w[15:0]),
@@ -1763,6 +2114,7 @@ module custom_pcie_dma_top #(
         .ring1_tail(reg_h2c_tail_ptr),
         .ring1_head(thin_ring1_head),
         .frame_done_in(pcie_frame_done),
+        .frame_abort(thin_frame_abort),
         .frame_count(thin_frame_count),
         .drop_count(thin_drop_count),
         .busy(thin_busy),
@@ -1866,8 +2218,11 @@ module custom_pcie_dma_top #(
     localparam integer NUM_A_CH = NUM_AUDIO_CH;
 
     // ---- Signal declarations (before any use) ----------------------------
-    reg         hs_send_q;
-    reg [244:0] hs_bus_q;
+    // Both channel-0 launch entries and the crossing itself live in
+    // rtl/sc7f0_video_launch_arbiter.v (u_ch0_arbiter below), so these are driven
+    // there rather than by an always block in this file.
+    wire        hs_send_q;
+    wire [244:0] hs_bus_q;
     wire        hs_src_rcv, hs_dest_req;
     wire [244:0] hs_dest_bus;
     reg          hs_dest_ack;
@@ -1897,56 +2252,148 @@ module custom_pcie_dma_top #(
     reg [31:0]  v_err_sync_q = 32'd0;
     reg [63:0]  v_pts_sync_q = 64'd0;
 
+    // ------------------------------------------------------------------------
+    // Review H2: channel-0 video descriptor format gate (RGB compositor only).
+    //
+    // The decision lives in rtl/sc7f0_video_format_guard.v so the predicate the
+    // card uses is the predicate the fixture tests.  Note what is NOT changed:
+    // c2h_desc_ready / nv12_desc_ready keep their existing meaning, so a refused
+    // legacy NV12 descriptor is still CONSUMED from the shared mailbox and the
+    // programming, upgrade, MCU and readback paths keep running.  Only the launch
+    // of the RGB24 engine (hs_bus_q / ch0_owner_busy below) is withheld, which is
+    // what turns "old app arms format 2 against an NV12 ring" from a host-memory
+    // overrun into zero C2H requests plus a readable fault.
+    // ------------------------------------------------------------------------
+    // ------------------------------------------------------------------------
+    // Review H2: channel-0 video format gate for BOTH launch entries.
+    //
+    // The predicates live in rtl/sc7f0_video_format_guard.v and are instantiated by
+    // rtl/sc7f0_video_launch_arbiter.v (u_ch0_arbiter below), which also holds the
+    // crossing, so the arbiter this card instantiates is the arbiter the fixture
+    // tests.  What is NOT changed is unchanged on purpose:
+    //   * nv12_desc_ready keeps its pre-guard meaning, so a refused legacy NV12
+    //     descriptor is still CONSUMED from the shared mailbox and the programming,
+    //     upgrade, MCU and readback paths keep running;
+    //   * only the launch of the RGB24 engine (hs_bus_q / ch0_owner_busy) is
+    //     withheld, which is what turns "old app arms format 2 against an NV12
+    //     ring" into zero C2H requests plus a readable fault.
+    // ------------------------------------------------------------------------
+    wire rgb_fmt_ok;
+    wire rgb_fmt_refused;
+    wire desc_guard_sticky;
+    wire [31:0] desc_guard_count;
+    wire [63:0] desc_frame_bytes;
+    // The arbiter's combined report pair, read by ovl_video_guard_* below.
+    wire        arb_guard_sticky;
+    wire [31:0] arb_guard_count;
+    // thin_engine_enable / thin_frame_abort are declared with the other thin signals,
+    // ahead of the walker instantiation that consumes them.
+`ifdef SC7F0_RGB_COMPOSITOR
+    // ---- Second launch entry: the THIN walker path -----------------------
+    // thin_active (vch0_ctrl[0]) puts channel 0 behind rtl/thin_desc_fetch_engine.v,
+    // which builds the same 245-bit launch bus and can launch a frame by itself.
+    // Guarding only the c2h_desc_valid branch above would leave that entry wide
+    // open: vch0_ctrl[7:4] = 4'd0 is NV12M in this file's own words
+    // (rtl/thin_desc_fetch_engine.v:27), and the walker would happily compute
+    // stride = width for two planes while the packed RGB24 engine writes 3 B/px into
+    // whatever the ring entries point at.  The predicate is the same one, evaluated
+    // on the profile the walker actually launches from: format, width, height and
+    // stride0 are exactly the inputs from which it derives launch_stride and
+    // effective_width (rtl/thin_desc_fetch_engine.v:115-117), so no field that can
+    // reach the engine is left unchecked.
+    //
+    // Refusal is not "hold the handshake": with enable gated the walker never
+    // fetches, never pushes an SGL entry and never raises frame_launch_req for an
+    // unsafe profile, and a request that is already up when the profile changes
+    // under it is acked AND aborted (thin_frame_launch_ack, frame_abort), so the
+    // walker returns to idle instead of waiting for a frame_done that a refused
+    // engine will never send.  Nothing else in the design is gated: BAR0
+    // programming, the common mailbox, the upgrade writer, the MCU path and DDR
+    // readback all keep running while an unsafe video profile is refused.
+    // The thin entry's guard instances, its refusal counting and its launch/snapshot
+    // cross-check all live in u_ch0_arbiter below, which also drives thin_enable and
+    // frame_abort into the walker, so one module holds both channel-0 entries.
+    wire arb_thin_ack;
+    wire [63:0] thin_frame_bytes;   // arbiter observation: bus-implied frame bytes
+`else
+    // Any other profile elaborates the pre-guard arbiter (ARB_ENABLED=0): same
+    // crossing, same handshake, no refusal and no reporting.  rgb_fmt_ok,
+    // rgb_fmt_refused and the guard report pair are DRIVEN BY that instance, so they
+    // must not be assigned here as well - a second driver on the same net.
+`endif
+`ifdef SC7F0_RGB_COMPOSITOR
+    // Both entries report into one readable pair: a driver reading 0x68[0]/0x70
+    // cannot tell a refused legacy descriptor from a refused legacy thin profile,
+    // but each entry counts its own refusals and the sticky covers both.
+    assign ovl_video_guard_sticky = arb_guard_sticky;
+    assign ovl_video_guard_count  = arb_guard_count;
+`endif
+
     // ---- Descriptor crossing: 125 MHz fetch -> 150 MHz engine ------------
     // Bus layout: {format[3:0], desc_ctrl[4]|desc_ctrl[5], timestamp[63:0], stride[15:0], height[15:0], width[15:0],
     //              uv_addr[63:0], y_addr[63:0]}
-    always @(posedge clk or negedge dma_rst_n) begin
-        if (!dma_rst_n) begin
-            hs_send_q <= 1'b0;
-            hs_bus_q  <= 245'd0;
-        end else if (reg_video_ctrl[0]) begin
-            hs_send_q <= 1'b0;
-            hs_bus_q  <= 245'd0;
-        end else if (thin_active) begin
-            if (!hs_send_q && !hs_src_rcv && thin_frame_launch_req && !ch0_owner_busy) begin
-                hs_bus_q  <= thin_frame_launch_bus;
-                hs_send_q <= 1'b1;
-            end else if (hs_send_q && hs_src_rcv) begin
-                hs_send_q <= 1'b0;
-            end
-        end else if (!hs_send_q && !hs_src_rcv && !ch0_owner_busy &&
-                     c2h_desc_valid && nv12_desc_select) begin
-            hs_bus_q  <= {c2h_format,
-                          (c2h_desc_ctrl[4] | c2h_desc_ctrl[5]),
-                          global_timestamp, c2h_dst_stride,
-                          c2h_line_count, c2h_line_width,
-                          c2h_plane1_dst, c2h_plane0_dst};
-            hs_send_q <= 1'b1;
-        end else if (hs_send_q && hs_src_rcv) begin
-            hs_send_q <= 1'b0;
-        end
-    end
+    // ---- Channel-0 launch arbiter: BOTH entries, one crossing -----------
+    // Moved out of this file so the ordinary descriptor entry and the thin walker
+    // entry are guarded, refused, acked and retired by one module that a fixture can
+    // bind (rtl/sc7f0_video_launch_arbiter.v).  ENABLED is a build-time constant: a
+    // profile whose channel-0 engine is already format-aware gets the pre-guard
+    // crossing with no refusal and no reporting.
+`ifdef SC7F0_RGB_COMPOSITOR
+    localparam ARB_ENABLED = 1;
+`else
+    localparam ARB_ENABLED = 0;
+`endif
+    sc7f0_video_launch_arbiter #(.MAX_WIDTH(4096), .MAX_HEIGHT(2160),
+                                .ENABLED(ARB_ENABLED)) u_ch0_arbiter (
+        .clk              (clk),
+        .rst_n            (dma_rst_n),
+        .desc_valid       (c2h_desc_valid),
+        .desc_select      (nv12_desc_select),
+        .desc_format      (c2h_format),
+        .desc_plane_count (c2h_plane_count),
+        .desc_width       (c2h_line_width),
+        .desc_height      (c2h_line_count),
+        .desc_stride      (c2h_dst_stride),
+        .desc_y_addr      (c2h_plane0_dst),
+        .desc_uv_addr     (c2h_plane1_dst),
+        .desc_sg_mode     (c2h_desc_ctrl[4] | c2h_desc_ctrl[5]),
+        .timestamp        (global_timestamp),
+        .desc_ready       (nv12_desc_ready),
+        .thin_active      (thin_active),
+        .thin_format      (vch0_ctrl_w[7:4]),
+        .thin_width       (vch0_width_w[15:0]),
+        .thin_height      (vch0_height_w[15:0]),
+        .thin_stride0     (vch0_stride0_w[15:0]),
+        .thin_enable      (thin_engine_enable),
+        .thin_launch_req  (thin_frame_launch_req),
+        .thin_launch_bus  (thin_frame_launch_bus),
+        .thin_launch_ack  (arb_thin_ack),
+        .thin_frame_abort (thin_frame_abort),
+        .force_clear      (reg_video_ctrl[0]),
+        .hs_src_rcv       (hs_src_rcv),
+        .owner_release    (pcie_frame_done),
+        .hs_send_q        (hs_send_q),
+        .hs_bus_q         (hs_bus_q),
+        .ch0_owner_busy   (ch0_owner_busy),
+        .desc_fmt_ok      (rgb_fmt_ok),
+        .desc_refused     (rgb_fmt_refused),
+        .thin_profile_ok  (thin_fmt_ok),
+        .guard_sticky     (arb_guard_sticky),
+        .guard_count      (arb_guard_count),
+        .desc_frame_bytes (desc_frame_bytes),
+        .thin_frame_bytes (thin_frame_bytes));
+    assign thin_frame_launch_ack = arb_thin_ack;
 
     // Keep the descriptor owner until the PCIe-side EOF retires. eng_busy drops
     // once the video-domain FIFO drains into the CDC, before the final MWr is
     // transmitted; accepting another descriptor then can mix frame addresses.
-    always @(posedge clk or negedge dma_rst_n) begin
-        if (!dma_rst_n)
-            ch0_owner_busy <= 1'b0;
-        else if (pcie_frame_done)
-            ch0_owner_busy <= 1'b0;
-        else if (thin_active) begin
-            if (thin_frame_launch_req && !hs_send_q && !hs_src_rcv && !ch0_owner_busy)
-                ch0_owner_busy <= 1'b1;
-        end else if (c2h_desc_valid && nv12_desc_select && !hs_send_q &&
-                     !hs_src_rcv && !ch0_owner_busy)
-            ch0_owner_busy <= 1'b1;
-    end
+    // (The descriptor owner is now held inside u_ch0_arbiter, with the same
+    //  pcie_frame_done retirement as before.)
 
-    assign thin_frame_launch_ack = hs_src_rcv;
-
-    assign nv12_desc_ready = c2h_desc_valid && nv12_desc_select &&
-                               !hs_send_q && !hs_src_rcv && !ch0_owner_busy;
+    // Review H2: a refused thin launch is still CONSUMED, and a refused descriptor
+    // is still consumed as before.  Both expressions moved into the arbiter, which
+    // drives desc_ready and thin_frame_launch_ack above; keeping them here would put
+    // two drivers on the same net.
 
     xpm_cdc_handshake #(
         .WIDTH(245),
@@ -2112,6 +2559,24 @@ module custom_pcie_dma_top #(
     wire        v_sgl_y_empty;
     wire        v_sgl_y_full;
     wire        v_sgl_y_pop_ready;
+    // One named wire for the whole SGL push/pop gate.  The source FIFO's rd_en and
+    // the engine's sgl_wr_en are the SAME condition, and Defect 3 was exactly
+    // these two drifting apart (rtl/sc7f0_rgb24_c2h_engine.v sgl_pop_ready was
+    // the un-inverted walker almost_full).  Naming it once means a future edit
+    // cannot fix one side and leave the other gated off; it also makes the real
+    // integration equation something a testbench can connect to literally
+    // (tb/tb_sc7f0_rgb24_c2h_engine.sv).
+    wire        v_sgl_y_wr_en = !v_sgl_y_empty && v_sgl_y_pop_ready && eng_busy;
+`ifdef SC7F0_RGB_COMPOSITOR
+    // Entries this CDC FIFO still holds would be the ideal extra bit here (it is
+    // the one signal that separates "the thin fetcher stopped" from "the engine
+    // will not take entries"), but reading it costs the FIFO's
+    // rd_data_count port, and this part is at 88 % LUT / 86 % BRAM with the
+    // 300 MHz capture group already the binding constraint.  empty + prog_full
+    // + the pop gate (BAR0 GLOBAL 0x0F4 [8]/[7]/[6]) answer the same question
+    // with three bits, and the walker's own entry count is already at 0x0E0[6:0],
+    // so the FIFO keeps the exact configuration every deployed round has used.
+`endif
     xpm_fifo_async #(
         .FIFO_MEMORY_TYPE("block"),
         .FIFO_WRITE_DEPTH(512),
@@ -2120,7 +2585,8 @@ module custom_pcie_dma_top #(
         .READ_MODE("fwft"),
         .FIFO_READ_LATENCY(0),
         .PROG_FULL_THRESH(480),
-        .USE_ADV_FEATURES("0002")
+        .USE_ADV_FEATURES("0002"),
+        .SIM_ASSERT_CHK(1)
     ) u_sgl_y_cdc (
         .rst(video_cdc_reset_pcie),
         .wr_clk(clk),
@@ -2129,7 +2595,7 @@ module custom_pcie_dma_top #(
         .prog_full(ch0_sgl_y_almost_full),
         .full(v_sgl_y_full),
         .rd_clk(video_clk),
-        .rd_en(!v_sgl_y_empty && v_sgl_y_pop_ready && eng_busy),
+        .rd_en(v_sgl_y_wr_en),
         .dout(v_sgl_y_dout),
         .empty(v_sgl_y_empty),
         .sleep(1'b0),
@@ -2176,6 +2642,163 @@ module custom_pcie_dma_top #(
     );
 
     // ---- The Channel 0 capture engine itself -----------------------------
+`ifdef SC7F0_RGB_COMPOSITOR
+    // Packed RGB24 channel-0 engine.  Same thin-descriptor launch bus, same
+    // format code (vch0_ctrl[7:4] == 4'd1, for which rtl/thin_desc_fetch_engine.v
+    // already computes stride = width*3 and needs no second plane ring), same
+    // C2H MWr request interface into u_video_req_cdc.  Only the payload is
+    // different: it is already byte-packed R,G,B by
+    // rtl/sc7f0_rgb24_axis_pack.v, so the host image is 3 bytes/pixel with the
+    // programmed stride (11520 B per 3840-pixel line, 24883200 B per frame at
+    // 4K60 = 1.492992 GB/s), never RGBA and never padded to 4.
+    wire        eng_rgb_desc_ready;
+    wire [31:0] rgb_drop_count;
+    wire        rgb_error_sticky;
+    // Defect 3 read-only diagnosis taps (BAR0 GLOBAL 0x0E0..0x0F4).
+    wire [6:0]  rgb_sgl_count;
+    wire [31:0] rgb_dbg_bus;
+    wire [31:0] rgb_bytes_committed;
+    wire [31:0] rgb_frames_completed;
+    wire        rgb_uv_pop_ready = 1'b0;   // single-plane format
+    assign      v_sgl_uv_pop_ready = rgb_uv_pop_ready;
+    sc7f0_rgb24_c2h_engine #(
+        .MAX_WIDTH(4096),
+        .PCIE_DATA_WIDTH(128),
+        .MAX_REQ_BYTES(256),
+        .SRC_FIFO_DEPTH(1024)
+    ) u_rgb24_capture_engine (
+        .clk(video_clk),
+        .rst_n(video_rst_n),
+        .desc_valid(eng_desc_valid),
+        .desc_ready(eng_rgb_desc_ready),
+        .desc_sg_mode(eng_desc_sg_mode),
+        .plane_y_addr(eng_y_addr),
+        .frame_width(eng_width),
+        .frame_height(eng_height),
+        .frame_stride(eng_stride),
+        .sgl_wr_en(v_sgl_y_wr_en),
+        .sgl_wr_addr(v_sgl_y_dout[63:0]),
+        .sgl_wr_len(v_sgl_y_dout[95:64]),
+        .sgl_wr_flags(v_sgl_y_dout[127:96]),
+        .cur_sgl_count(rgb_sgl_count),
+        .sgl_pop_ready(v_sgl_y_pop_ready),
+        .dbg_bus(rgb_dbg_bus),
+        .global_timestamp(eng_ts),
+        .p_axis_tdata(video_ch0_tdata),
+        .p_axis_tuser(video_ch0_tuser),
+        .p_axis_tvalid(video_ch0_tvalid),
+        .p_axis_avail(video_ch0_avail),
+        .p_axis_tready(video_ch0_tready),
+        .c2h_req_valid(eng_req_valid),
+        .c2h_req_addr(eng_req_addr),
+        .c2h_req_dw_len(eng_req_dw_len),
+        .c2h_req_data(eng_req_data),
+        .c2h_req_last(),
+        .c2h_req_data_ready(eng_req_ready),
+        .c2h_req_ack(eng_req_ack),
+        .video_busy(eng_busy),
+        .video_frame_done(eng_frame_done),
+        .frame_pts(eng_frame_pts),
+        .protocol_error_count(eng_err_count),
+        .drop_count(rgb_drop_count),
+        .frames_completed(rgb_frames_completed),
+        .align_discard_count(),
+        .bytes_committed(rgb_bytes_committed),
+        .active_line_bytes(),
+        .active_stride(),
+        .src_overflow_sticky(video_ch0_src_overflow_sticky),
+        .src_line_align_sticky(video_ch0_src_line_align_sticky),
+        .error_sticky(rgb_error_sticky)
+    );
+    // The shared ch0 descriptor handshake waits on whichever engine is present.
+    assign nv12_desc_ready_v = eng_rgb_desc_ready;
+
+    // ------------------------------------------------------------------
+    // Defect 3 read-only diagnosis path -> BAR0 GLOBAL 0x0E0..0x0F4
+    // (docs/sc7f0_defect3_c2h_zero_payload_rootcause_20261116.md §5.3).
+    //
+    // Why it exists: every field below was dangling.  With Payload 0 B and
+    // frames 0 there was no read that could tell "the engine never armed" from
+    // "the engine armed but never got an SGL segment" from "the source FIFO was
+    // empty"; the root cause cost a full RTL trace to find.  With entries /
+    // seg_valid / pl_seg_ready / avail / tready readable in one word each, that
+    // same diagnosis is one devmem.
+    //
+    // Transport: the bundle is formed in the capture (video_clk) domain, then
+    //   * status bundles    -> xpm_cdc_array_single (per-bit; bits may come from
+    //                          adjacent cycles, which is exactly what a status
+    //                          snapshot of a running engine means),
+    //   * monotonic counters -> xpm_cdc_gray (word-coherent, same pattern as
+    //                          reg_sof/eol/beat_count above),
+    // into the PCIe user clock, which is this register bank's source domain.
+    // Nothing here is writable and no address map changes, so the XSA address
+    // segments (SEG_M_AXI_HPM0_FPD_Reg @ 0x00A0000000) are untouched.
+    // ------------------------------------------------------------------
+    reg  [31:0] rgb_dbg0_v, rgb_dbg1_v, rgb_dbg2_v, rgb_dbg3_v, rgb_dbg4_v, rgb_dbg5_v;
+
+    // prog_full belongs to the FIFO's WRITE side (pcie_user_clk), while the rest
+    // of this bundle is formed in video_clk.  The first build of this window
+    // (rgb-c2h-fix-26111601-20261116T055423Z) sampled it directly and the routed
+    // netlist measured that as a real crossing:
+    //   u_sgl_y_cdc/gen_pf_ic_rc.gpf_ic.prog_full_i_reg (pcie_user_clk)
+    //     -> rgb_dbg5_v_reg[6] (capture_clk_300m), requirement 0.337 ns,
+    //     slack -1.003 ns - an unsynchronised sample of an asynchronous bit and
+    //     a violation no directive can close.  Everything else in this bundle is
+    //     either a video_clk signal or already sits in the video domain; this one
+    //     needs its own synchroniser, so it gets one.
+    wire sgl_src_af_v;
+    xpm_cdc_single #(.DEST_SYNC_FF(4), .SRC_INPUT_REG(1)) u_sgl_src_af_cdc (
+        .src_clk(clk), .src_in(ch0_sgl_y_almost_full),
+        .dest_clk(video_clk), .dest_out(sgl_src_af_v));
+
+    always @(posedge video_clk or negedge video_rst_n) begin
+        if (!video_rst_n) begin
+            rgb_dbg0_v <= 32'd0;  rgb_dbg1_v <= 32'd0;  rgb_dbg2_v <= 32'd0;
+            rgb_dbg3_v <= 32'd0;  rgb_dbg4_v <= 32'd0;  rgb_dbg5_v <= 32'd0;
+        end else begin
+            // 0x0E0 engine state bundle, straight from the engine.
+            rgb_dbg0_v <= rgb_dbg_bus;
+            // 0x0E4 payload side: [10:0] avail, [12] tvalid, [13] tready,
+            // [14] burst_start, [15] pl_valid, [16] have_all, [17] pl_seg_ready,
+            // [18] eng_busy, [19] sgl_wr_en, [20] sgl_pop_ready, [21] src empty.
+            rgb_dbg1_v <= {10'd0, v_sgl_y_empty, v_sgl_y_pop_ready, v_sgl_y_wr_en,
+                           eng_busy, rgb_dbg_bus[8], rgb_dbg_bus[25], rgb_dbg_bus[16],
+                           rgb_dbg_bus[26], video_ch0_tready, video_ch0_tvalid, 1'b0,
+                           video_ch0_avail};
+            rgb_dbg2_v <= rgb_bytes_committed;
+            rgb_dbg3_v <= rgb_drop_count;
+            rgb_dbg4_v <= rgb_frames_completed;
+            // 0x0F4 sticky/flow: [0] error_sticky, [1] src_overflow_sticky,
+            // [2] src_line_align_sticky, [3] video_busy, [4] desc_valid,
+            // [5] desc_ready, [6] SGL source FIFO prog_full (synchronised, see
+            // u_sgl_src_af_cdc), [7] SGL source FIFO empty, [8] pop gate.
+            rgb_dbg5_v <= {23'd0, v_sgl_y_wr_en, v_sgl_y_empty,
+                           sgl_src_af_v,
+                           eng_rgb_desc_ready, eng_desc_valid, eng_busy,
+                           video_ch0_src_line_align_sticky,
+                           video_ch0_src_overflow_sticky, rgb_error_sticky};
+        end
+    end
+
+    xpm_cdc_array_single #(.WIDTH(32), .DEST_SYNC_FF(4)) u_rgb_dbg0_cdc (
+        .src_clk(video_clk), .src_in(rgb_dbg0_v), .dest_clk(clk),
+        .dest_out(reg_rgb_c2h_dbg0));
+    xpm_cdc_array_single #(.WIDTH(32), .DEST_SYNC_FF(4)) u_rgb_dbg1_cdc (
+        .src_clk(video_clk), .src_in(rgb_dbg1_v), .dest_clk(clk),
+        .dest_out(reg_rgb_c2h_dbg1));
+    xpm_cdc_array_single #(.WIDTH(32), .DEST_SYNC_FF(4)) u_rgb_dbg5_cdc (
+        .src_clk(video_clk), .src_in(rgb_dbg5_v), .dest_clk(clk),
+        .dest_out(reg_rgb_c2h_dbg5));
+    xpm_cdc_gray #(.WIDTH(32), .DEST_SYNC_FF(4), .INIT_SYNC_FF(1)) u_rgb_bytes_cdc (
+        .src_clk(video_clk), .src_in_bin(rgb_dbg2_v),
+        .dest_clk(clk), .dest_out_bin(reg_rgb_c2h_dbg2));
+    xpm_cdc_gray #(.WIDTH(32), .DEST_SYNC_FF(4), .INIT_SYNC_FF(1)) u_rgb_drop_cdc (
+        .src_clk(video_clk), .src_in_bin(rgb_dbg3_v),
+        .dest_clk(clk), .dest_out_bin(reg_rgb_c2h_dbg3));
+    xpm_cdc_gray #(.WIDTH(32), .DEST_SYNC_FF(4), .INIT_SYNC_FF(1)) u_rgb_frames_cdc (
+        .src_clk(video_clk), .src_in_bin(rgb_dbg4_v),
+        .dest_clk(clk), .dest_out_bin(reg_rgb_c2h_dbg4));
+`else
     nv12_capture_engine #(
         .MAX_WIDTH(4096),
         .PCIE_DATA_WIDTH(128),
@@ -2193,7 +2816,7 @@ module custom_pcie_dma_top #(
         .frame_width(eng_width),
         .frame_height(eng_height),
         .frame_stride(eng_stride),
-        .sgl_y_wr_en(!v_sgl_y_empty && v_sgl_y_pop_ready && eng_busy),
+        .sgl_y_wr_en(v_sgl_y_wr_en),
         .sgl_y_wr_addr(v_sgl_y_dout[63:0]),
         .sgl_y_wr_len(v_sgl_y_dout[95:64]),
         .sgl_y_wr_flags(v_sgl_y_dout[127:96]),
@@ -2225,6 +2848,16 @@ module custom_pcie_dma_top #(
         .frame_pts(eng_frame_pts),
         .protocol_error_count(eng_err_count)
     );
+
+    // Every other personality keeps the 0x0E0..0x0F4 reads at 0: they are this
+    // engine's internals, not a shared channel ABI.
+    assign reg_rgb_c2h_dbg0 = 32'd0;
+    assign reg_rgb_c2h_dbg1 = 32'd0;
+    assign reg_rgb_c2h_dbg2 = 32'd0;
+    assign reg_rgb_c2h_dbg3 = 32'd0;
+    assign reg_rgb_c2h_dbg4 = 32'd0;
+    assign reg_rgb_c2h_dbg5 = 32'd0;
+`endif
 
     // =========================================================================
     // Loopback & Capture Engines for Channels 1, 2, and 3

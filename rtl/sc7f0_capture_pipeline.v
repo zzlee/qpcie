@@ -11,6 +11,9 @@ module sc7f0_capture_pipeline(
     input wire [95:0] s_araddr,input wire [2:0] s_arvalid,output wire [2:0] s_arready,
     output wire [95:0] s_rdata,output wire [5:0] s_rresp,output wire [2:0] s_rvalid,input wire [2:0] s_rready,
     output wire irq,
+    // Frame-tap reset bit 2, already synchronised into mem_clk (capture_clk).
+    // Consumed by sc7f0_display_pipeline; unused when SC7F0_DISPLAY_TX=0.
+    output wire display_reader_rst_n,
     output wire [63:0] awaddr,output wire [7:0] awlen,output wire [2:0] awsize,output wire [1:0] awburst,
     output wire awvalid,input wire awready,output wire [127:0] wdata,output wire [15:0] wstrb,
     output wire wlast,wvalid,input wire wready,input wire [1:0] bresp,input wire bvalid,output wire bready,
@@ -59,7 +62,8 @@ module sc7f0_capture_pipeline(
         .enable(enabled),.width(width),.height(height),.busy(tap_busy),.drops(drops),.ticks_gray(ticks_gray),
         .credit_valid(credit_valid),.credit_clear(credit_clear),.credit_add(credit_add),.started_count(started_count),
         .meta_data(metadata),.meta_valid(meta_valid),.meta_ready(meta_ready),
-        .writer_rst_n(writer_rst_n),.csc_rst_n(csc_rst_n));
+        .writer_rst_n(writer_rst_n),.csc_rst_n(csc_rst_n),
+        .reader_rst_n(display_reader_rst_n));
     sc7f0_frame_tap u_tap(
         .s_clk(rx_clk),.s_rst_n(rx_rst_n),.s_data(rx_data),.s_valid(rx_valid),.s_sof(rx_sof),.s_eol(rx_eol),
         .m_clk(mem_clk),.m_rst_n(mem_rst_n),.enable(enabled&&writer_rst_n&&csc_rst_n),.width(width),.height(height),

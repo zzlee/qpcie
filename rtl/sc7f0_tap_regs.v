@@ -2,6 +2,15 @@
 `timescale 1ns/1ps
 // AXI-Lite100MHz -> frame-tap150MHz. Ordered config, stable metadata head.
 // GPIO bits are physical reset_n values:0 asserts,1 releases (active-low DT).
+// Bit 2 is the SC7F0_DISPLAY_TX framebuffer reader (sc7f0_display_pipeline /
+// sc7f0_frmbuf_rd ap_rst_n).  The official in-tree xilinx_frmbuf driver makes
+// `reset-gpios` mandatory (drivers/dma/xilinx/xilinx_frmbuf.c:1700-1712 in
+// 6.1.30-xilinx-v2023.2 returns -ENOENT without it), and this is the only
+// controllable reset input the display reader has.  Bits 0/1 keep their exact
+// pre-existing meaning (0 = capture frmbuf_wr, 1 = VPSS CSC), the CSR offsets
+// 0x030/0x034/0x038 are unchanged, and the reset value 0 only ever holds the
+// reader in reset until its own driver releases it, exactly like bit 0 does
+// for the capture writer.
 module sc7f0_tap_regs(
     input wire clk,rst_n,m_clk,m_rst_n,
     input wire [31:0] s_awaddr,input wire s_awvalid,output wire s_awready,
@@ -13,18 +22,25 @@ module sc7f0_tap_regs(
     output wire credit_valid,credit_clear,output wire [15:0] credit_add,
     input wire busy,input wire [31:0] drops,started_count,input wire [63:0] ticks_gray,
     input wire [159:0] meta_data,input wire meta_valid,output wire meta_ready,
-    output wire writer_rst_n,csc_rst_n
+    output wire writer_rst_n,csc_rst_n,reader_rst_n
 );
-    reg [1:0] reset_n;
+    reg [2:0] reset_n;
     // m_rst_n (memory clock domain) and the CSR-written reset_n bits (CSR clock
     // domain) are independent sources: each gets its own synchronizer into m_clk
     // before they are combined (rtl/sc7f0_reset_cdc.v, CDC-10 root cause).
-    wire writer_all_n, csc_all_n;
+    wire writer_all_n, csc_all_n, reader_all_n;
     sc7f0_reset_sync #(.SOURCES(2)) u_writer_reset(
         .dest_clk(m_clk),.src_rst_n({reset_n[0],m_rst_n}),.dest_rst_n(writer_all_n));
     sc7f0_reset_sync #(.SOURCES(2)) u_csc_reset(
         .dest_clk(m_clk),.src_rst_n({reset_n[1],m_rst_n}),.dest_rst_n(csc_all_n));
+    // Third independent crossing, same idiom as the two above: one synchronizer
+    // per async source, combined only in m_clk.  m_clk here is capture_clk, which
+    // is also sc7f0_display_pipeline.mem_clk, so the display reader needs no
+    // second crossing of its own.
+    sc7f0_reset_sync #(.SOURCES(2)) u_reader_reset(
+        .dest_clk(m_clk),.src_rst_n({reset_n[2],m_rst_n}),.dest_rst_n(reader_all_n));
     assign writer_rst_n=writer_all_n;assign csc_rst_n=csc_all_n;
+    assign reader_rst_n=reader_all_n;
     reg [15:0] staged_w,staged_h;
     reg [81:0] command;reg push,pop;
     reg [31:0] stop_requested,stop_target,stop_ack_m,retired_count;
@@ -100,9 +116,11 @@ module sc7f0_tap_regs(
                     'h014:for(b=0;b<2;b=b+1)if(ws[b])staged_h[b*8+:8]<=wd[b*8+:8];
                     'h01c:if(ws[0]&&wd[0]&&valid)begin pop<=1;retired_count<=retired_count+1'b1;end else s_bresp<=2'b10;
                     'h028:if(ws[0]&&ws[1]&&ready&&wd[15:0]!=0)begin command<={32'd0,1'b1,wd[15:0],33'd0};push<=1;end else s_bresp<=2'b10;
-                    'h030:if(ws[0])reset_n<=wd[1:0];
-                    'h034:if(ws[0])reset_n<=reset_n|wd[1:0];
-                    'h038:if(ws[0])reset_n<=reset_n&~wd[1:0];
+                    // wd[2:0]: bits 0/1 keep their old meaning and old write
+                    // behaviour (byte 0), bit 2 is the new display-reader reset.
+                    'h030:if(ws[0])reset_n<=wd[2:0];
+                    'h034:if(ws[0])reset_n<=reset_n|wd[2:0];
+                    'h038:if(ws[0])reset_n<=reset_n&~wd[2:0];
                     default:s_bresp<=2'b11;
                 endcase
             end
