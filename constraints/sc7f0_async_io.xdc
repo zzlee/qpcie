@@ -124,21 +124,35 @@ set_false_path -from [get_ports hdmi_rx_ddc_sda] \
     -to [get_cells -hier -regexp {.*v_hdmi_rx/inst/SYS_INST/DDC_INST/clk_sda_flt_reg\[0\]}]
 
 # -----------------------------------------------------------------------------
-# HDMI TX TMDS clock pads, capture-only personality.
+# HDMI TX TMDS clock pads: NO exception lives in this file any more.  Removed here,
+# not overridden, and not left in place under a new clock definition.
 #
-# Approved-but-not-accepted scope: this build captures (video0) and encodes on the
-# on-card VCU; HDMI TX is not part of the acceptance path.  The pads stay wired to
-# the VPHY (u_vid_phy_controller drives one OBUFTDS each, OSERDESE3 on clkout1_1,
-# build/evidence-dcpio-26111106/query/s4-tx-tmds-driver.txt) - nothing here claims
-# the pad is undriven or has no external load.  Only the missing output-delay
-# question is excepted, one command per port, and the driver identity plus the
-# OSERDESE3 population are re-measured so a change of TX implementation fails the
-# gate instead of inheriting this exception.  A TX personality must delete these
-# two lines and re-review the pad with an output delay against hdmi_tx_clk_p
-# (3.367 ns), which Vivado itself names in methodology.rpt.
+# Why: the two `set_false_path -to [get_ports hdmi_tx_tmds_clk_p|_n]` commands that
+# used to sit at :140-141 were written for, and self-declared, the capture-only
+# personality ("Any TX personality must delete this entry and re-review the pad").
+# The SC7F0_RGB_COMPOSITOR profile is a TX-live personality (4K60 RGB8 out of
+# u_hdmi_tx_ss + u_vid_phy_controller), so that entry's own precondition is false in
+# this profile, and an FP -to a pad also suppresses the missing-output-delay check on
+# it - i.e. it can turn "no model" into a green report.  hdmi_tx_tmds_clk_p/n are not
+# asynchronous data outputs: they are the VPHY forwarded TMDS clock (MMCM CLKOUT1 ->
+# OSERDESE3 in ODDR mode -> OBUFTDS -> the diff pair), so they are now MODELLED as a
+# clock instead of excepted as data.
+#
+#   * RGB compositor profile: 0 false paths on either pad.  scripts/
+#     apply_sc7f0_tx_tmds_clock_forward.tcl (reached from STEPS.OPT_DESIGN.TCL.PRE =
+#     scripts/impl_pre_opt_sc7f0.tcl, after scripts/check_sc7f0_capture_gray.tcl and
+#     before opt_design) creates hdmi_tx_tmds_clk_fwd_p/_n with
+#     create_generated_clock -divide_by 1 anchored on the real forwarder CLK pin, and
+#     errors out if either pad carries a false path when it runs.
+#   * Legacy capture-only profile: the same two commands, unchanged, are mounted from
+#     constraints/sc7f0_tx_tmds_clk_capture_only.xdc by scripts/build_zu4ev.tcl.  No
+#     behaviour change there, and no claim that the legacy artifact inherits any new
+#     acceptance.
+#
+# This file therefore stays profile-neutral; a forwarded clock is not declarative XDC
+# material here because it needs a pin-path guard that must be able to `error`, and
+# the managed XDC reader drops control flow with a warning only.
 # -----------------------------------------------------------------------------
-set_false_path -to [get_ports hdmi_tx_tmds_clk_p]
-set_false_path -to [get_ports hdmi_tx_tmds_clk_n]
 
 # -----------------------------------------------------------------------------
 # RX DDC / EDID pair, OUTPUT direction (check_timing HIGH of round 26111202).
@@ -169,8 +183,20 @@ set_false_path -to [get_ports hdmi_tx_tmds_clk_n]
 #     hot plug) open in sc7f0_cdc_review.json io_items rx_ddc_scl / rx_ddc_sda
 #     rather than pretending a netlist answered it.
 # -----------------------------------------------------------------------------
-set_false_path -name async_out_hdmi_rx_ddc_scl -to [get_ports hdmi_rx_ddc_scl]
-set_false_path -name async_out_hdmi_rx_ddc_sda -to [get_ports hdmi_rx_ddc_sda]
+# set_false_path has no -name option in Vivado 2023.2: with -name on the command
+# line the managed XDC reader emits [Common 17-170] "Unknown option '-name'" and
+# drops the whole command, so in every round up to and including
+# rgb-fullimpl-26111333-20261113T204036Z these two RX-DDC output exceptions did
+# not exist (logs/build_full26111333.log:3792-3793), which is exactly why the
+# Layer B hook of round 26111331 reported "the named output-direction constraint
+# async_out_hdmi_rx_ddc_scl is not in this design".  The label is not lost by
+# removing the flag: scripts/check_sc7f0_named_constraints.tcl resolves a named
+# exception by its FROM/TO OBJECTS through report_exceptions, never by a name
+# attribute, so the ids below stay the lookup keys and the exception is now real.
+# async_out_hdmi_rx_ddc_scl
+set_false_path -to [get_ports hdmi_rx_ddc_scl]
+# async_out_hdmi_rx_ddc_sda
+set_false_path -to [get_ports hdmi_rx_ddc_sda]
 
 # -----------------------------------------------------------------------------
 # INTERNAL (flop -> first-stage-flop) asynchronous entries: the u_hdmi_probe
@@ -245,3 +271,57 @@ set_false_path \
 set_false_path \
     -from [get_cells -hier -regexp {.*u_hdmi_probe/phy_ch2_tvalid_src_reg}] \
     -to [get_cells -hier -regexp {.*u_hdmi_probe/phy_ch2_tvalid_sync_reg\[0\]}]
+
+# -----------------------------------------------------------------------------
+# INTERNAL (flop -> first-stage-flop) asynchronous entries: the two sticky
+# stream-error levels of the RGB24 packer (rgb24_pack_*).
+#
+# rtl/sc7f0_rgb24_axis_pack.v registers each sticky level in its OWN source clock
+# (ovf_sticky_s / eol_sticky_s on s_clk, :224-283) and crosses it with a
+# two-stage chain on m_clk (:285-296) - the same shape as the six probe levels
+# above, and report_cdc agrees (CDC-2 "1-bit synchronized", Exception = None).
+#
+# In the RGB-compositor personality s_clk is clkout2, the VPHY RX MMCM video
+# clock (Clock Utilization: u_vid_phy_controller/.../rx_mmcm.../mmcm_adv_inst/
+# CLKOUT2, 3.367 ns), and m_clk is capture_clk_300m (pl_clk_300m_p through
+# u_capture_clock, a BUFGCE_DIV, 3.333 ns).  Two independent physical sources
+# with no common primary clock, so what the tool derives for the pair is an edge
+# pair 0.035 ns apart - less than one flop's clock-to-out plus any wire.
+# Measured on the routed netlist of round
+# rgb-c2h-fix-26111601-20261116T055423Z (reports in that round's reports/):
+#   ovf_sticky_s_reg -> sync_ovf_reg[0]   slack -2.246 ns, data 0.283 ns
+#                                          (logic 0.077 / route 0.206), 0 levels,
+#                                          clock skew -1.890 ns, req 0.035 ns
+#   eol_sticky_s_reg -> sync_eol_reg[0]   slack -2.209 ns, same requirement
+# Those two were the round's WNS/TNS holders (WNS -2.246 / TNS -9.404), and they
+# are also exactly what report_methodology then names for
+# clkout2 <-> capture_clk_300m (TIMING-6 Critical Warning, "related (timed
+# together) but no common primary clock"; TIMING-7 the same pair, no common node).
+# Re-measured on that round's own post-route-phsysopt DCP
+# (diag-timing-004: S0 5 TIMING-6/7/8 rows -> S1 3 with these two commands added
+# -> S2 0 once the third, unrelated pcie_user_clk crossing is also removed):
+# exceptioning these two pairs makes the clkout2 pair disappear from
+# report_methodology entirely, which is how the same crossing behaved in every
+# round whose clock routing happened to give this pair +2 ns of skew.  Meeting it
+# by clock luck is not a design: an earlier round passed these two paths only
+# because the destination clock arrived later, and this one lost that bet.
+#
+# Both signals are STICKY LEVELS, not data and not a qualifier of any beat: a
+# source FIFO overflow / line-alignment event sets the flag and it is held until
+# the packer is reset.  In the capture domain rtl/sc7f0_rgb24_c2h_engine.v:556
+# only latches them into error_sticky (a diagnostic latch read out through BAR0
+#    GLOBAL 0x0F4[1:0]) and nothing in the datapath waits on them, so the crossing
+# is allowed to resolve on whichever capture cycle the synchroniser reaches it -
+# which is what a false path on a first-stage flop means.  One command per named
+# pair; -from/-to each resolve to exactly one cell (measured 1/1 and 1/1 on the
+# routed DCP), no -from-clock/-to-clock cut, no clock group, no wildcard beyond
+# the leading ".*/" path prefix the probe rows above already use.  The [0] -> [1]
+# stage of each chain and the destination fan-out stay analysed, unchanged.
+# rgb24_pack_ovf_sticky_src_to_capture (clkout2 -> capture_clk_300m)
+set_false_path \
+    -from [get_cells -hier -regexp {.*u_rgb24_pack/ovf_sticky_s_reg}] \
+    -to [get_cells -hier -regexp {.*u_rgb24_pack/sync_ovf_reg\[0\]}]
+# rgb24_pack_eol_sticky_src_to_capture (clkout2 -> capture_clk_300m)
+set_false_path \
+    -from [get_cells -hier -regexp {.*u_rgb24_pack/eol_sticky_s_reg}] \
+    -to [get_cells -hier -regexp {.*u_rgb24_pack/sync_eol_reg\[0\]}]

@@ -8,7 +8,11 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-IMG_DIR="$ROOT_DIR/petalinux/qpcie-zu4ev/images/linux"
+# SC7F0_IMG_DIR lets a candidate build inject into its own isolated images
+# directory (a build copy on another disk, for instance) without touching the
+# images/linux of this repository, which carries validated artifacts.  With the
+# variable unset the path is byte-identical to what every previous caller used.
+IMG_DIR="${SC7F0_IMG_DIR:-$ROOT_DIR/petalinux/qpcie-zu4ev/images/linux}"
 TARGET_DAEMON="$ROOT_DIR/test_app/qpcie_upgrade_daemon"
 ROOTFS_BASE="$IMG_DIR/rootfs.cpio.gz"
 KERNEL_GZ="$IMG_DIR/Image.gz"

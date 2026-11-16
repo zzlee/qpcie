@@ -986,6 +986,22 @@ sc7f0_put clock_groups [list class metric review_required 0 count \
 # named max-delay / bus-skew exceptions
 #   id | from cell regexp | from pin | to cell regexp | to pin |
 #   expected max_delay ns (0 = any) | expected bus skew ns (0 = none expected)
+#
+# overlay_epoch_sync_max_delay / overlay_poison_sync_max_delay /
+# overlay_arm_sync_max_delay are the three hand-rolled 125 MHz -> 300 MHz
+# single-bit synchronisers of the RGB overlay path (writer epoch_sync_l[0],
+# writer poison_sync[0], ingress sync0), bounded by constraints/
+# sc7f0_overlay_sync.xdc with set_max_delay -datapath_only 3.333 -to the named
+# first stage.  Measured on rgb-fullimpl-26111331-20261113T194329Z (routed,
+# BEFORE that file existed): -1.109 / -0.923 / -0.913 ns against a 0.337 ns
+# requirement, 0-1 logic levels, 1.42-1.72 ns data path - those three async
+# endpoints were the whole design's WNS.  These rows measure them (object counts,
+# timed paths, the REQUIREMENT the engine applied this round); they approve
+# nothing: scripts/gates/*.json holds no REVIEWED_SAFE entry for them, so the
+# gate still fails them closed until a reviewer writes one.  No comment may be
+# written INSIDE the [list] below - within a command substitution '#' is a
+# literal word, so prose there silently becomes table rows (caught by
+# test_stub_harness_runs_the_evidence_hook_end_to_end).
 # ---------------------------------------------------------------------------
 set max_delay_table [list \
     [list probe_meter_max_delay \
@@ -995,6 +1011,15 @@ set max_delay_table [list \
     [list capture_gray_to_source_time \
         {.*u_ps_capture/u_tap/gray_q_reg\[[0-9]+\]} {} \
         {.*u_ps_capture/u_tap/u_source_time/stage0_reg\[[0-9]+\]} {} 6.000 6.000] \
+    [list overlay_epoch_sync_max_delay \
+        {.*u_pcie_ip/inst/user_reset_reg.*} {} \
+        {.*u_overlay_writer/epoch_sync_l_reg\[0\]} {} 3.333 0] \
+    [list overlay_poison_sync_max_delay \
+        {.*u_overlay_writer/debt_poison_epoch_reg} {} \
+        {.*u_overlay_writer/poison_sync_reg\[0\]} {} 3.333 0] \
+    [list overlay_arm_sync_max_delay \
+        {.*u_overlay_ingress/arm_toggle_reg} {} \
+        {.*u_overlay_ingress/sync0_reg} {} 3.333 0] \
     [list capture_gray_to_csr_time \
         {.*u_ps_capture/u_tap/gray_q_reg\[[0-9]+\]} {} \
         {.*u_ps_capture/u_regs/u_time/stage0_reg\[[0-9]+\]} {} 6.000 6.000] \
@@ -1097,7 +1122,7 @@ array set d [sc7f0_timing $dpram_from $dpram_to 16]
 set drec(paths_analysed) $d(paths)
 set drec(requirement) $d(requirement)
 set drec(worst_slack) $d(slack)
-set drec(instances) [sc7f0_count "$out_dir/clock_networks.rpt" {aclk_dpram}]
+set drec(instances) [sc7f0_count "$out_dir/clock-networks.rpt" {aclk_dpram}]
 } err]} {
     append drec(probe_error) "item query aborted: $err "
     incr ::sc7f0_section_errors
@@ -1128,10 +1153,91 @@ set io_table [list \
     [list async_in_hdmi_rx_ddc_sda_probe {hdmi_rx_ddc_sda} {.*u_hdmi_probe/sda_sync_reg\[0\]}] \
     [list async_in_hdmi_rx_ddc_sda_filter {hdmi_rx_ddc_sda} {.*DDC_INST/clk_sda_flt_reg\[0\]}] \
     [list async_out_hdmi_rx_hpd_out {hdmi_rx_hpd_out} {}] \
-    [list async_out_hdmi_tx_tmds_clk {hdmi_tx_tmds_clk_p hdmi_tx_tmds_clk_n} {}] \
     [list async_out_leds {user_led_dma_active user_led_pcie_link_up} {}] \
     [list async_out_hdmi_rx_ddc_scl {hdmi_rx_ddc_scl} {}] \
     [list async_out_hdmi_rx_ddc_sda {hdmi_rx_ddc_sda} {}]]
+
+# ---------------------------------------------------------------------------
+# HDMI TX subsystem first stages (SC7F0-RGB profile, row set verified against
+# the design, never against a wish).
+#
+# Candidate rgb-fullimpl-26111335-20261113T214238Z (E) failed Layer B with three
+# unclaimed first-stage loads: hdmi_tx_ddc_scl / hdmi_tx_ddc_sda on
+# u_hdmi_tx_ss/.../SYS_INST/GEN_DDC.DDC_INST/clk_{scl,sda}_flt_reg[0] and
+# hdmi_tx_hpd_in on .../SYS_INST/HPD_INST/HPD_CAP_INST/XPM_INST/syncstages_ff_reg[0]
+# (E/evidence-r3-finaldcp/reports/named-constraint-evidence.json, three items with
+# endpoint_count = 2 and claimed_first_stage_endpoints = 1;
+# E/logs/runner_post_r3.log:218-260).  The legacy rows at
+# constraints/sc7f0_async_io.xdc:60-71 claim only our u_hdmi_probe chain and say
+# why: they were written while the TX subsystem was not built.  With the RGB
+# compositor the TX SS is a second, real consumer of the same asynchronous pads,
+# so it gets its own named row per chain - the same shape the RX DDC pair and
+# hdmi_rx_5v_det already use.  Nothing is deleted, nothing is marked NA, no item
+# is NA'd and no coverage rule is relaxed: the pad closure below still enumerates
+# every sequential load of each pad with all_fanout and fails on any load these
+# rows do not name, so a fourth consumer still stops the round.
+#
+# The rows are added only when (a) this is the RGB profile and (b) the design
+# really contains the TX subsystem.  Both halves are required: (a) keeps the
+# legacy capture-only and display personalities answering the same 40 items they
+# answered before, and (b) makes the RGB round fail closed if the subsystem is
+# renamed or dropped rather than reporting an empty to_objects as clean.  The
+# exceptions themselves are applied by scripts/apply_sc7f0_tx_io_first_stage.tcl
+# (STEPS.OPT_DESIGN.TCL.PRE, RGB branch), which guards 1 port / 1 cell / 1 D pin
+# and reads the exception back; a row here without its exception in the design
+# reports exception_type/position as missing and fails the manifest.
+# ---------------------------------------------------------------------------
+set sc7f0_tx_rgb_profile [expr {[info exists ::env(SC7F0_RGB_COMPOSITOR)] &&
+    [string tolower [string trim $::env(SC7F0_RGB_COMPOSITOR)]] in {1 true yes}}]
+set sc7f0_tx_ss_cells [get_cells -quiet -hier -regexp {.*u_hdmi_tx_ss/inst/v_hdmi_tx/inst/SYS_INST/.*}]
+puts "SC7F0_NAMED_TX_SS_CELLS objects=[llength $sc7f0_tx_ss_cells] rgb_profile=$sc7f0_tx_rgb_profile"
+if {$sc7f0_tx_rgb_profile} {
+    if {[llength $sc7f0_tx_ss_cells] == 0} {
+        error "SC7F0_NAMED_TX_SS_ABSENT: the SC7F0-RGB profile builds v_hdmi_tx inside u_hdmi_tx_ss, but this design has 0 cells under u_hdmi_tx_ss/inst/v_hdmi_tx/inst/SYS_INST. Either the TX subsystem disappeared (a functional change, not a measurement change) or the hierarchy moved; the three TX input rows below cannot be graded from an absent subsystem."
+    }
+    lappend io_table \
+        [list async_in_hdmi_tx_hpd_in_txss {hdmi_tx_hpd_in} \
+            {.*u_hdmi_tx_ss/inst/v_hdmi_tx/inst/SYS_INST/HPD_INST/HPD_CAP_INST/XPM_INST/syncstages_ff_reg\[0\]}] \
+        [list async_in_hdmi_tx_ddc_scl_filter {hdmi_tx_ddc_scl} \
+            {.*u_hdmi_tx_ss/inst/v_hdmi_tx/inst/SYS_INST/GEN_DDC.DDC_INST/clk_scl_flt_reg\[0\]}] \
+        [list async_in_hdmi_tx_ddc_sda_filter {hdmi_tx_ddc_sda} \
+            {.*u_hdmi_tx_ss/inst/v_hdmi_tx/inst/SYS_INST/GEN_DDC.DDC_INST/clk_sda_flt_reg\[0\]}]
+    # Output direction of the same DDC pair.  These two ids are the manifest half
+    # of the two rows scripts/apply_sc7f0_tx_io_first_stage.tcl now applies
+    # (`set_false_path -to [get_ports hdmi_tx_ddc_scl|sda]`), and they exist for a
+    # measured reason: round rgb-fullimpl-26111403-20261114T041353Z still reported
+    #   TIMING-18#1  An output delay is missing on hdmi_tx_ddc_scl relative to the
+    #                rising and/or falling clock edge(s) of clk_pl_0
+    #   TIMING-18#2  ... on hdmi_tx_ddc_sda ...
+    # (audit_final_dcp/methodology_final.rpt:1655-1663), i.e. a fabric register
+    # launches each pad and nothing describes when.  The pad is a passive I2C line
+    # whose timing is the bus protocol, not clk_pl_0, so the honest constraint is
+    # an output-direction false path ending at the pad - the identical shape the RX
+    # DDC pair already carries above (async_out_hdmi_rx_ddc_scl / _sda,
+    # constraints/sc7f0_async_io.xdc:183/185).
+    #
+    # What this does NOT do: it adds no input-direction exception, so the pad's two
+    # measured first-stage loads (vendor clk_*_flt_reg[0] and u_hdmi_probe) stay
+    # individually claimed by the four async_in_* rows and the pad closure still
+    # fails on a third load; the output-only branch of the loop below measures
+    # direction / IOSTANDARD / pad leaf / endpoint count and demands that a named
+    # exception really resolves at the port.  Both ids stay review_required = 1:
+    # adding a row to the manifest is not the same as approving the crossing, and
+    # no gate JSON is edited here.
+    lappend io_table \
+        [list async_out_hdmi_tx_ddc_scl {hdmi_tx_ddc_scl} {}] \
+        [list async_out_hdmi_tx_ddc_sda {hdmi_tx_ddc_sda} {}]
+} else {
+    # Capture-only personality: the TMDS clock pads are not driven as a forwarded
+    # clock here (HDMI TX is not the acceptance path), so the historical
+    # output-direction exception record stays, and only here.  The two commands live
+    # in constraints/sc7f0_tx_tmds_clk_capture_only.xdc, which scripts/build_zu4ev.tcl
+    # mounts in this branch only.  In the RGB profile this id is deliberately absent:
+    # the pads get the tx_tmds_clock_forwarded record below instead, and a record
+    # that names an exception which no longer exists would be a fake, not evidence.
+    lappend io_table \
+        [list async_out_hdmi_tx_tmds_clk {hdmi_tx_tmds_clk_p hdmi_tx_tmds_clk_n} {}]
+}
 
 # OSERDESE3 population of the routed netlist: the TMDS pad entry is reviewed as
 # "the VPHY still serialises into this pad" (build/evidence-dcpio-26111106/query/
@@ -1279,6 +1385,199 @@ foreach row $io_table {
 }
 
 # ---------------------------------------------------------------------------
+# TX TMDS clock pads, SC7F0-RGB (TX-live) profile: forwarded-clock record.
+#
+# This REPLACES async_out_hdmi_tx_tmds_clk in this profile. That record graded an
+# output-direction false path on hdmi_tx_tmds_clk_p/_n, which was the capture-only
+# personality's answer and whose own rationale said a TX personality must delete it.
+# In the RGB profile those pads are the VPHY forwarded TMDS clock (MMCM CLKOUT1 ->
+# OSERDESE3 in ODDR mode -> OBUFTDS -> the differential pair), constrained by
+# scripts/apply_sc7f0_tx_tmds_clock_forward.tcl as a generated clock, and the two
+# legacy set_false_path commands now live only in constraints/
+# sc7f0_tx_tmds_clk_capture_only.xdc (mounted by scripts/build_zu4ev.tcl for the
+# capture profile only). So this record measures a CLOCK, not an exception:
+#   * the forwarder and buffer cells with REF_NAME / ODDR_MODE / DATA_WIDTH,
+#   * the canonical forwarded-clock pin pattern (UG903 D[0]=1, D[4]=0, no CE,
+#     CLK == CLKDIV) read back as constant nets, not copied from a comment,
+#   * the pad clock objects: period, both waveforms, master, root clock and port,
+#   * the required negatives: 0 exception rows -to either pad and 0 clock groups
+#     naming the pad clocks (a pad that is both a clock and excepted would be
+#     green-without-model).
+# review_required stays 1: measuring a topology is not approving it, and no policy
+# JSON is edited here. Until scripts/gates/sc7f0_cdc_review.json carries a matching
+# entry the Layer B coverage check fails on this id, which is the fail-closed
+# direction: an unreviewed record must stop the round, not pass it.
+# ---------------------------------------------------------------------------
+if {$sc7f0_tx_rgb_profile} {
+if {[info procs sc7f0_fwd_pin] eq ""} {
+proc sc7f0_fwd_pin {cell suffix} {
+    set n [string length $suffix]
+    set out {}
+    foreach p [get_pins -quiet -of_objects $cell] {
+        set nm [get_property NAME $p]
+        if {[string length $nm] >= $n &&
+            [string equal [string range $nm end-[expr {$n - 1}] end] $suffix]} {lappend out $p}
+    }
+    return $out
+}
+}
+if {[info procs sc7f0_fwd_pin_state] eq ""} {
+proc sc7f0_fwd_pin_state {cell suffix} {
+    set hit [sc7f0_fwd_pin $cell $suffix]
+    if {[llength $hit] != 1} {return "pin_absent([llength $hit])"}
+    set nets [get_nets -quiet -of_objects [lindex $hit 0]]
+    if {[llength $nets] == 0} {return "no_net"}
+    set nm [lindex [get_property NAME [lindex $nets 0]] 0]
+    set ty [lindex [get_property TYPE [lindex $nets 0]] 0]
+    if {[string match {*<const1>} $nm] && $ty eq "POWER"}  {return VCC}
+    if {[string match {*<const0>} $nm] && $ty eq "GROUND"} {return GND}
+    if {$ty eq "SIGNAL"} {return "SIGNAL:$nm"}
+    return "OTHER:$ty:$nm"
+}
+}
+if {[info procs sc7f0_fwd_net_name] eq ""} {
+proc sc7f0_fwd_net_name {cell suffix} {
+    set hit [sc7f0_fwd_pin $cell $suffix]
+    if {[llength $hit] != 1} {return ""}
+    set nets [get_nets -quiet -of_objects [lindex $hit 0]]
+    if {[llength $nets] != 1} {return ""}
+    return [lindex [get_property NAME [lindex $nets 0]] 0]
+}
+}
+catch {array set fwd_rec {}}
+array set fwd_rec {class forwarded_clock review_required 1 probe_error {} measured 0 \
+    ports {hdmi_tx_tmds_clk_p hdmi_tx_tmds_clk_n} \
+    forwarder {} forwarder_ref {} oddr_mode {} data_width {} \
+    clk_net {} clkdiv_net {} clkdiv_same_net 0 d_pattern {} rst_state {} tri_state_state {} ce_pins 0 \
+    buffer {} buffer_ref {} p_leg_net {} n_leg_net {} \
+    clock_p_count 0 clock_n_count 0 clock_p_names {} clock_n_names {} \
+    period_p {} period_n {} waveform_p {} waveform_n {} master_p {} master_n {} \
+    source_clock {} source_period {} source_waveform {} root_clock {} root_port {} root_period {} \
+    ratio_p {} ratio_n {} \
+    exception_rows_p -1 exception_rows_n -1 exception_rows_to_p -1 exception_rows_to_n -1 clock_group_rows -1 \
+    legacy_async_exception_on_pads -1}
+if {[catch {
+    set fwd_oddr u_vid_phy_controller/inst/gt_usrclk_source_inst/tx_mmcm.GT0_TX_MMCM_CLKOUT1_ODDR_INST
+    set fwd_buf  u_vid_phy_controller/inst/gt_usrclk_source_inst/tx_mmcm.GT0_TX_MMCM_CLKOUT1_OBUFTDS_INST
+    set fwd_rec(forwarder) $fwd_oddr
+    set cells [get_cells -quiet $fwd_oddr]
+    if {[llength $cells] != 1} {
+        append fwd_rec(probe_error) "forwarder matched [llength $cells] objects "
+    } else {
+        set fcell [lindex $cells 0]
+        set fwd_rec(forwarder_ref) [get_property REF_NAME $fcell]
+        catch {set fwd_rec(oddr_mode) [get_property ODDR_MODE $fcell]}
+        catch {set fwd_rec(data_width) [get_property DATA_WIDTH $fcell]}
+        set states {}
+        for {set i 0} {$i < 8} {incr i} {
+            lappend states [format {D[%d]=%s} $i [sc7f0_fwd_pin_state $fcell [format {/D[%d]} $i]]]
+        }
+        set fwd_rec(d_pattern) [join $states ,]
+        set fwd_rec(rst_state) [sc7f0_fwd_pin_state $fcell /RST]
+        set fwd_rec(tri_state_state) [sc7f0_fwd_pin_state $fcell /T]
+        set nce 0
+        foreach p [get_pins -quiet -of_objects $fcell] {
+            if {[string match {@*/CE} [get_property NAME $p]]} {incr nce}
+        }
+        set fwd_rec(ce_pins) $nce
+        set fwd_rec(clk_net)    [sc7f0_fwd_net_name $fcell /CLK]
+        set fwd_rec(clkdiv_net) [sc7f0_fwd_net_name $fcell /CLKDIV]
+        if {$fwd_rec(clk_net) ne "" && $fwd_rec(clk_net) eq $fwd_rec(clkdiv_net)} {
+            set fwd_rec(clkdiv_same_net) 1
+        }
+    }
+    set fwd_rec(buffer) $fwd_buf
+    set bcells [get_cells -quiet $fwd_buf]
+    if {[llength $bcells] != 1} {
+        append fwd_rec(probe_error) "buffer matched [llength $bcells] objects "
+    } else {
+        set bcell [lindex $bcells 0]
+        set fwd_rec(buffer_ref) [get_property REF_NAME $bcell]
+        set fwd_rec(p_leg_net) [sc7f0_fwd_net_name $bcell /O]
+        set fwd_rec(n_leg_net) [sc7f0_fwd_net_name $bcell /OB]
+    }
+    foreach {pad nkey names_key per_key wave_key master_key ratio_key} [list \
+        hdmi_tx_tmds_clk_p clock_p_count clock_p_names period_p waveform_p master_p ratio_p \
+        hdmi_tx_tmds_clk_n clock_n_count clock_n_names period_n waveform_n master_n ratio_n] {
+        set po [get_ports -quiet $pad]
+        if {[llength $po] != 1} {append fwd_rec(probe_error) "$pad missing "; continue}
+        set ck [get_clocks -quiet -of_objects $po]
+        set fwd_rec($nkey) [llength $ck]
+        if {[llength $ck] != 1} {continue}
+        set fwd_rec($names_key)  [lindex [get_property NAME $ck] 0]
+        set fwd_rec($per_key)    [lindex [get_property PERIOD $ck] 0]
+        set fwd_rec($wave_key)   [join [lindex [get_property WAVEFORM $ck] 0] -]
+        set fwd_rec($master_key) [lindex [get_property MASTER_CLOCK $ck] 0]
+        set m [get_clocks -quiet $fwd_rec($master_key)]
+        if {[llength $m] == 1} {
+            set fwd_rec(source_clock)   [lindex [get_property NAME $m] 0]
+            set fwd_rec(source_period)  [lindex [get_property PERIOD $m] 0]
+            set fwd_rec(source_waveform) [join [lindex [get_property WAVEFORM $m] 0] -]
+            set root $m
+            for {set g 0} {$g < 12} {incr g} {
+                if {![string is true -quiet [lindex [get_property IS_GENERATED $root] 0]]} {break}
+                set mname [lindex [get_property MASTER_CLOCK $root] 0]
+                if {$mname eq "" || [llength [get_clocks -quiet $mname]] != 1} {break}
+                set root [get_clocks -quiet $mname]
+            }
+            set fwd_rec(root_clock)  [lindex [get_property NAME $root] 0]
+            set fwd_rec(root_period) [lindex [get_property PERIOD $root] 0]
+            set rp [get_ports -quiet -of_objects $root]
+            if {[llength $rp] == 1} {set fwd_rec(root_port) [lindex [get_property NAME $rp] 0]}
+            if {$fwd_rec(source_period) ne "" && $fwd_rec($per_key) ne "" &&
+                [string is double -strict $fwd_rec(source_period)] &&
+                [double $fwd_rec(source_period)] > 0} {
+                set fwd_rec($ratio_key) [format {%.4f} [expr {double($fwd_rec($per_key)) / double($fwd_rec(source_period))}]]
+            }
+        }
+    }
+    foreach {pad slot to_slot} [list hdmi_tx_tmds_clk_p exception_rows_p exception_rows_to_p \
+                                 hdmi_tx_tmds_clk_n exception_rows_n exception_rows_to_n] {
+        set po [get_ports -quiet $pad]
+        if {[llength $po] != 1} {continue}
+        # -to filtered table and a name scan of the full -coverage table are counted
+        # separately; the reported row count is the larger of the two, so a query form
+        # that resolves nothing cannot read as "no exception on the clock pad".
+        set txt [report_exceptions -coverage -quiet -return_string -to $po]
+        set n 0
+        foreach l [split $txt \n] {
+            if {[regexp {^\d+\s+(False Path|Clock Groups|Multicycle Path|Max Delay|Min Delay)} [string trim $l]]} {incr n}
+        }
+        set fwd_rec($to_slot) $n
+        set all [report_exceptions -quiet -return_string]
+        set m 0
+        foreach l [split $all \n] {
+            set t [string trim $l]
+            if {![regexp {^\d+\s} $t]} {continue}
+            set pat "get_ports $pad"
+            if {[string match *$pat* $t]} {incr m}
+        }
+        set fwd_rec($slot) [expr {$m > $n ? $m : $n}]
+    }
+    set all_exc [report_exceptions -coverage -quiet -return_string]
+    set cg 0
+    foreach l [split $all_exc \n] {
+        if {[string match {*Clock Groups*} $l] && [string match {*hdmi_tx_tmds_clk_fwd*} $l]} {incr cg}
+    }
+    set fwd_rec(clock_group_rows) $cg
+    if {$fwd_rec(exception_rows_p) >= 0 && $fwd_rec(exception_rows_n) >= 0} {
+        set fwd_rec(legacy_async_exception_on_pads) [expr {$fwd_rec(exception_rows_p) + $fwd_rec(exception_rows_n)}]
+    }
+    if {$fwd_rec(clock_p_count) == 1 && $fwd_rec(clock_n_count) == 1 &&
+        $fwd_rec(clkdiv_same_net) == 1 && $fwd_rec(exception_rows_p) == 0 &&
+        $fwd_rec(exception_rows_n) == 0} {
+        set fwd_rec(measured) 1
+    } else {
+        append fwd_rec(probe_error) "forwarded-clock model incomplete: p=$fwd_rec(clock_p_count) n=$fwd_rec(clock_n_count) clkdiv_same=$fwd_rec(clkdiv_same_net) fp_rows=$fwd_rec(exception_rows_p)/$fwd_rec(exception_rows_n) "
+    }
+} err]} {
+    append fwd_rec(probe_error) "item query aborted: $err "
+    incr ::sc7f0_section_errors
+}
+sc7f0_put tx_tmds_clock_forwarded [array get fwd_rec]
+}
+
+# ---------------------------------------------------------------------------
 # named INTERNAL asynchronous entries: one registered source flop -> one named
 # first-stage flop (rtl/sc7f0_hdmi_probe.v, round 26111202 CDC-10 / WNS holders).
 #   id | source-register stem | destination chain stem | reviewed source clock
@@ -1306,9 +1605,25 @@ foreach row $internal_table {
                    scope_overridden 0}
     set rec(reviewed_source_clock) $src_clock
     if {[catch {
+    # Whole-name anchors.  These three queries are the measurement behind
+    # probe_*_src_to_probe; in rgb-fullimpl-26111333 the same queries reported
+    # from_objects=1, to_objects=1 but chain_stage_objects=0, i.e. the [1]/[2]
+    # stages of the chain did not resolve while the first stage did.  That is a
+    # fact about this round's netlist or about the query, not permission to drop
+    # the item: the truth was measured read-only in
+    # <D>/smoke-probe-names2-215308Z (the source FDREs and the u_meter/* chains
+    # are present) and <D>/smoke-probe-stages2-* (per-stage names + ASYNC_REG +
+    # source->stage timing).  No item here was deleted or marked NA on the
+    # strength of an empty query.
     set from [get_cells -quiet -hier -regexp [format {.*u_hdmi_probe/%s_reg} $src_stem]]
     set to [get_cells -quiet -hier -regexp [format {.*u_hdmi_probe/%s_reg\[0\]} $dst_stem]]
-    set chain [get_cells -quiet -hier -regexp [format {.*u_hdmi_probe/%s_reg\[12\]} $dst_stem]]
+    # `\[[12]\]`, not `\[12\]`: the latter is a literal "[12]" and matches no
+    # real cell name, which is the measured reason chain_stage_objects reported 0
+    # while the chain cells exist (verified against
+    # <D>/smoke-probe-stages2-*/smoke.log: u_hdmi_probe/<stem>_reg[0..2] all present
+    # with ASYNC_REG=1; and in tclsh, {.*reg\[[12]\]} matches reg[1] and reg[2] and
+    # not reg[0] or reg[12], whereas {.*reg\[12\]} matches only the literal reg[12]).
+    set chain [get_cells -quiet -hier -regexp [format {.*u_hdmi_probe/%s_reg\[[12]\]} $dst_stem]]
     set rec(from_cells) [format {u_hdmi_probe/%s_reg} $src_stem]
     set rec(to_cells) [format {u_hdmi_probe/%s_reg[0]} $dst_stem]
     set rec(from_objects) [llength $from]

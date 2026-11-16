@@ -14,7 +14,12 @@ LOGS="${OUT}-logs"
 # frozen R7 values, so an unset environment reproduces the R7 build unchanged.
 : "${SC7F0_VERSION:=26102901}"
 : "${SC7F0_ENABLE_VCU:=0}"
+: "${SC7F0_DISPLAY_TX:=0}"
 : "${SC7F0_TIMING_GATE:=strict}"
+# Optional top-level synthesis directive (empty = Vivado default). Recorded here
+# and proved from the synthesis run script by scripts/impl_sc7f0_dual_video.tcl;
+# it changes mapping effort only, never IP configuration or constraints.
+: "${SC7F0_SYNTH_DIRECTIVE:=}"
 # Build identity is stamped by scripts/impl_sc7f0_dual_video.tcl immediately
 # before synthesis is re-launched. When any one of the three identity variables
 # is supplied all three are required, and they are exported to both Vivado
@@ -41,6 +46,9 @@ fi
 if [[ "$SC7F0_ENABLE_VCU" != 0 && "$SC7F0_ENABLE_VCU" != 1 ]]; then
     echo "SC7F0_ENABLE_VCU must be 0 or 1" >&2; exit 1
 fi
+if [[ "$SC7F0_DISPLAY_TX" != 0 && "$SC7F0_DISPLAY_TX" != 1 ]]; then
+    echo "SC7F0_DISPLAY_TX must be 0 or 1" >&2; exit 1
+fi
 if [[ "$SC7F0_TIMING_GATE" != strict && "$SC7F0_TIMING_GATE" != record ]]; then
     echo "SC7F0_TIMING_GATE must be strict or record" >&2; exit 1
 fi
@@ -62,8 +70,8 @@ finish() { local rc=$?; trap - EXIT; printf '%s\n' "$rc" > "$LOGS/build.exit"; e
 trap finish EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-printf 'XILINXD_LICENSE_FILE=%s\nPROJECT=%s\nSC7F0_PROFILE=full\nSC7F0_VERSION=%s\nSC7F0_ENABLE_VCU=%s\nSC7F0_TIMING_GATE=%s\nSC7F0_GIT_HASH=%s\nSC7F0_BUILD_DATE=%s\nSC7F0_GIT_HASH_SOURCE=%s\nSC7F0_RELEASE_FLOW=%s\nBUILD_EPOCH=%s\n' \
-    "$XILINXD_LICENSE_FILE" "$OUT" "$SC7F0_VERSION" "$SC7F0_ENABLE_VCU" "$SC7F0_TIMING_GATE" \
+printf 'XILINXD_LICENSE_FILE=%s\nPROJECT=%s\nSC7F0_PROFILE=full\nSC7F0_VERSION=%s\nSC7F0_ENABLE_VCU=%s\nSC7F0_DISPLAY_TX=%s\nSC7F0_SYNTH_DIRECTIVE=%s\nSC7F0_TIMING_GATE=%s\nSC7F0_GIT_HASH=%s\nSC7F0_BUILD_DATE=%s\nSC7F0_GIT_HASH_SOURCE=%s\nSC7F0_RELEASE_FLOW=%s\nBUILD_EPOCH=%s\n' \
+    "$XILINXD_LICENSE_FILE" "$OUT" "$SC7F0_VERSION" "$SC7F0_ENABLE_VCU" "$SC7F0_DISPLAY_TX" "$SC7F0_SYNTH_DIRECTIVE" "$SC7F0_TIMING_GATE" \
     "${SC7F0_GIT_HASH:-}" "${SC7F0_BUILD_DATE:-}" "${SC7F0_GIT_HASH_SOURCE:-}" "${SC7F0_RELEASE_FLOW:-0}" \
     "${SC7F0_BUILD_EPOCH:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}" > "$LOGS/environment.txt"
 git rev-parse HEAD > "$LOGS/git-head.txt"
@@ -89,7 +97,9 @@ sha256sum scripts/build_sc7f0_dual_video_hw.sh scripts/build_zu4ev.tcl \
     scripts/impl_sc7f0_dual_video.tcl scripts/check_sc7f0_timing.py \
     scripts/generate_sc7f0_csr_cdc.py scripts/create_sc7f0_frmbuf_ip.tcl \
     scripts/create_sc7f0_vpss_csc_ip.tcl scripts/check_sc7f0_capture_gray.tcl \
-    scripts/check_sc7f0_vcu_bd.tcl scripts/check_sc7f0_vcu_delta.py > "$LOGS/SOURCE_BUILD.sha256"
+    scripts/check_sc7f0_vcu_bd.tcl scripts/check_sc7f0_vcu_delta.py \
+    scripts/create_sc7f0_hdmi_tx_ip.tcl scripts/create_sc7f0_frmbuf_rd_ip.tcl \
+    > "$LOGS/SOURCE_BUILD.sha256"
 # Preserve exact inputs, including untracked new RTL, without changing the tree.
 python3 - "$LOGS" <<'PY'
 from pathlib import Path
@@ -106,7 +116,7 @@ PY
 set +u
 source "${VIVADO_SETTINGS:-/opt/Xilinx/Vivado/2023.2/settings64.sh}"
 set -u
-export SC7F0_PROJECT_DIR="$OUT" SC7F0_PROFILE=full SC7F0_VERSION SC7F0_ENABLE_VCU SC7F0_TIMING_GATE
+export SC7F0_PROJECT_DIR="$OUT" SC7F0_PROFILE=full SC7F0_VERSION SC7F0_ENABLE_VCU SC7F0_DISPLAY_TX SC7F0_TIMING_GATE SC7F0_SYNTH_DIRECTIVE
 # All IPs are generated fresh under the supplied license environment. Do not
 # reuse R1's Design_Linking netlists after restoring access to the license server.
 SC7F0_BUILD_STAGE=ip vivado -mode batch -notrace -nojournal \

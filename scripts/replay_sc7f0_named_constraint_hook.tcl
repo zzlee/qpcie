@@ -78,7 +78,7 @@ if {$dcp eq "" || ![file exists $dcp]} {
 set gate_reports [list timing_summary.rpt check-timing.rpt cdc.rpt methodology.rpt \
     bus-skew.rpt drc.rpt clock-interaction.rpt exceptions-ignored.rpt \
     exceptions-scope-override.rpt exceptions-coverage.rpt exceptions-all.rpt io.rpt \
-    clock_networks.rpt]
+    clock-networks.rpt]
 set before {}
 set copied {}
 foreach name $gate_reports {

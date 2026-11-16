@@ -207,6 +207,18 @@ if {[info exists ::env(SC7F0_ENABLE_VCU)]} {
     if {$vcu_req in {1 true yes}} {set vcu 1}
 }
 puts "SC7F0_IMPL_VCU $vcu"
+# Display personality switch. It must match what scripts/build_zu4ev.tcl saw when
+# the project was created, otherwise the block design would be regenerated without
+# the two display interrupt inputs and the wrapper port would not connect.
+set disp 0
+if {[info exists ::env(SC7F0_DISPLAY_TX)]} {
+    set disp_req [string tolower [string trim $::env(SC7F0_DISPLAY_TX)]]
+    if {$disp_req ni {0 1 true false yes no}} {
+        error "SC7F0_DISPLAY_TX must be 0/1 (true/false), got '$disp_req'"
+    }
+    if {$disp_req in {1 true yes}} {set disp 1}
+}
+puts "SC7F0_IMPL_DISPLAY $disp"
 # SC7F0_IMPL_RESUME=postroute skips BD regeneration, synthesis and implementation
 # and only re-runs the routed reports, gates and XSA export on an existing run.
 # It exists for evidence recovery after a post-route script defect; the routed
@@ -228,14 +240,20 @@ set old_bd [get_files -quiet */zu4ev_ps_bd.bd]
 if {![llength $old_bd]} {
     source scripts/create_zu4ev_ps_bd.tcl
     if {$vcu} {
-        create_zu4ev_ps_bd 1 1 "xbar"
+        create_zu4ev_ps_bd 1 1 "xbar" $disp
     } else {
-        create_zu4ev_ps_bd 1
+        create_zu4ev_ps_bd 1 0 "" $disp
     }
     set bd [get_files zu4ev_ps_bd.bd]
 } else {
     set bd [lindex $old_bd 0]
     open_bd_design $bd
+    # A display project must actually carry the two new interrupt inputs. If the
+    # block design came from a non-display project the wrapper port below simply
+    # does not exist and synthesis fails with an opaque message; fail here instead.
+    if {$disp && ![llength [get_bd_ports -quiet pl_ps_irq_disp]]} {
+        error "SC7F0_DISPLAY_TX is set but $bd has no pl_ps_irq_disp port; this project was created without the display personality"
+    }
 }
 set_property -dict [list CONFIG.AWUSER_WIDTH {1} CONFIG.ARUSER_WIDTH {1} CONFIG.FREQ_HZ {300000000}] [get_bd_intf_ports S_AXI_HP1_FPD]
 set_property CONFIG.FREQ_HZ 300000000 [get_bd_ports dp_mem_clk]
@@ -298,12 +316,64 @@ if {$identity ne "" && $resume eq "postroute"} {
 }
 if {$resume eq ""} {
 if {$identity ne ""} {sc7f0_apply_identity $identity}
+# Area-oriented top-level synthesis, opt-in.  Round 26111206 fitted every
+# function but missed the xczu4ev Slice-LUT budget by 962 cells (88,802 needed,
+# 87,840 available), which is a capacity fact, not a logic bug.  This knob asks
+# the synthesiser for area instead of speed.  Scope is deliberately narrow: only
+# the top-level synth_1 run changes, every out-of-context IP run keeps its own
+# Vivado default, and no IP/BRAM/width/clock/constraint is touched.
+# The value is validated against Vivado's own choice list (no hand-written list
+# that could drift), read back out of the run, and proved from the generated
+# synthesis run script, because an echo is not evidence.
+set synth_directive ""
+if {[info exists ::env(SC7F0_SYNTH_DIRECTIVE)]} {
+    set synth_directive [string trim $::env(SC7F0_SYNTH_DIRECTIVE)]
+}
+if {$synth_directive ne ""} {
+    set allowed [list_property_value STEPS.SYNTH_DESIGN.ARGS.DIRECTIVE [get_runs synth_1]]
+    if {[lsearch -exact $allowed $synth_directive] < 0} {
+        error "SC7F0_SYNTH_DIRECTIVE='$synth_directive' is not a legal synth_1 directive; Vivado offers: $allowed"
+    }
+    set_property STEPS.SYNTH_DESIGN.ARGS.DIRECTIVE $synth_directive [get_runs synth_1]
+    puts "SC7F0_SYNTH_DIRECTIVE_SET run=synth_1 value=$synth_directive readback=[get_property STEPS.SYNTH_DESIGN.ARGS.DIRECTIVE [get_runs synth_1]]"
+} else {
+    puts "SC7F0_SYNTH_DIRECTIVE_SET run=synth_1 value=default (env unset)"
+}
 set_property AUTO_INCREMENTAL_CHECKPOINT 0 [get_runs synth_1]
 reset_runs synth_1
 launch_runs synth_1 -jobs 6
 wait_on_run synth_1
 if {[get_property PROGRESS [get_runs synth_1]] ne "100%" ||
     [string first "ERROR" [get_property STATUS [get_runs synth_1]]] >= 0} {error "Dual-video synthesis failed"}
+# Proof that the requested area directive really reached the run that just
+# executed: the run script Vivado generated for synth_1 must carry it.
+if {$synth_directive ne ""} {
+    set run_tcl_path [file join $out qpcie_zu4ev_card.runs synth_1 zu4ev_pcie_card_top.tcl]
+    if {![file exists $run_tcl_path]} {
+        error "SC7F0_SYNTH_DIRECTIVE_PROOF missing run script $run_tcl_path"
+    }
+    set fh [open $run_tcl_path r]; set run_tcl [read $fh]; close $fh
+    set proof ""
+    foreach line [split $run_tcl "\n"] {
+        if {[string first "synth_design" $line] >= 0 &&
+            [string first "-directive" $line] >= 0} {set proof [string trim $line]}
+    }
+    if {$proof eq "" || [string first $synth_directive $proof] < 0} {
+        error "SC7F0_SYNTH_DIRECTIVE_NOT_APPLIED: requested '$synth_directive', run script line: '$proof'"
+    }
+    set dh [open $out/synth-directive.json w]
+    puts $dh [format {  {
+  "run": "synth_1",
+  "property": "STEPS.SYNTH_DESIGN.ARGS.DIRECTIVE",
+  "value": "%s",
+  "readback": "%s",
+  "scope": "top-level synth_1 only; every *_synth_1 out-of-context IP run keeps its Vivado default",
+  "proof_run_script": "qpcie_zu4ev_card.runs/synth_1/zu4ev_pcie_card_top.tcl",
+  "proof_line": "%s"
+}} $synth_directive [get_property STEPS.SYNTH_DESIGN.ARGS.DIRECTIVE [get_runs synth_1]] $proof]
+    close $dh
+    puts "SC7F0_SYNTH_DIRECTIVE_PROOF $proof"
+}
 }
 open_run synth_1
 if {$identity ne ""} {
@@ -312,13 +382,25 @@ if {$identity ne ""} {
 }
 report_utilization -hierarchical -hierarchical_depth 3 -file $out/utilization_synth_hierarchical.rpt
 # Prove production source pruning in the linked design, not just in Tcl/IP lists.
+# Two personalities are audited from the same report format:
+#   C2H (default, all published rounds): the HDMI TX subsystem must be ABSENT.
+#   display (SC7F0_DISPLAY_TX=1): the official TX chain must be PRESENT, while the
+#     legacy PCIe H2C -> TX bridge and the PCIe TX audio bridge stay forbidden, so
+#     turning TX on cannot silently re-enable the retired multiplexing features.
+set forbidden {u_hdmi_tx_video_bridge u_hdmi_tx_audio_bridge u_v_tpg u_audio_pattern_gen u_tpg_marker_overlay u_tpg_video_cdc u_ch1_loopback_cdc u_ch2_loopback_cdc u_ch3_loopback_cdc u_nv12_capture_engine_ch1 u_nv12_capture_engine_ch2 u_nv12_capture_engine_ch3 u_video_req_cdc_ch1 u_video_req_cdc_ch2 u_video_req_cdc_ch3 u_audio_h2c_fifo_ch1 u_audio_h2c_fifo_ch2 u_audio_h2c_fifo_ch3 u_audio_stream_engine_ch1 u_audio_stream_engine_ch2 u_audio_stream_engine_ch3}
+set required {u_hdmi_rx_ss u_vid_phy_controller u_ps_capture u_nv12_capture_engine u_audio_stream_engine_ch0 u_dualpath u_h2c_ps_ddr_writer}
+if {$disp} {
+    lappend required u_hdmi_tx_ss u_display_pipeline u_frmbuf_rd u_hdmi_tx_mux u_hp1_display_read_arbiter u_memory_width u_ctrl_cdc
+} else {
+    lappend forbidden u_hdmi_tx_ss u_display_pipeline u_hdmi_tx_mux
+}
 set audit [open $out/c2h-personality.rpt w]
-foreach pattern {u_hdmi_tx_ss u_hdmi_tx_video_bridge u_hdmi_tx_audio_bridge u_v_tpg u_audio_pattern_gen u_tpg_marker_overlay u_tpg_video_cdc u_ch1_loopback_cdc u_ch2_loopback_cdc u_ch3_loopback_cdc u_nv12_capture_engine_ch1 u_nv12_capture_engine_ch2 u_nv12_capture_engine_ch3 u_video_req_cdc_ch1 u_video_req_cdc_ch2 u_video_req_cdc_ch3 u_audio_h2c_fifo_ch1 u_audio_h2c_fifo_ch2 u_audio_h2c_fifo_ch3 u_audio_stream_engine_ch1 u_audio_stream_engine_ch2 u_audio_stream_engine_ch3} {
+foreach pattern $forbidden {
     set cells [get_cells -quiet -hier -filter "NAME =~ *$pattern*"]
     puts $audit "ABSENT $pattern [llength $cells]"
     if {[llength $cells]} {close $audit; error "Unwanted production hardware: $pattern"}
 }
-foreach pattern {u_hdmi_rx_ss u_vid_phy_controller u_ps_capture u_nv12_capture_engine u_audio_stream_engine_ch0 u_dualpath u_h2c_ps_ddr_writer} {
+foreach pattern $required {
     set cells [get_cells -quiet -hier -filter "NAME =~ *$pattern*"]
     puts $audit "PRESENT $pattern [llength $cells]"
     if {![llength $cells]} {close $audit; error "Missing required hardware: $pattern"}
@@ -405,6 +487,71 @@ open_run impl_1
 puts "SC7F0_GRAY_ROUTED_BEGIN"
 source scripts/check_sc7f0_capture_gray.tcl
 puts "SC7F0_GRAY_ROUTED_END"
+if {$disp} {
+    # Positive routed presence proof for the display branch.  The exported XSA
+    # carries zu4ev_ps_bd.hwh only, which describes the PS block design, so "the
+    # TX IP is missing from the HWH" proves nothing either way; the routed netlist
+    # connections recorded here are the evidence that PS DDR really reaches the
+    # HDMI TX connector through the official IP chain.
+    set disp_rpt [open $out/display-personality.rpt w]
+    foreach {label pattern} {
+        hdmi_tx_subsystem       u_hdmi_tx_ss
+        framebuffer_reader      u_frmbuf_rd
+        display_pipeline        u_display_pipeline
+        video_source_mux        u_hdmi_tx_mux
+        hp1_read_merge          u_hp1_display_read_arbiter
+        memory_width_converter  u_memory_width
+        csr_clock_converter     u_ctrl_cdc
+        video_cdc_fifo          u_video_cdc
+    } {
+        set cells [get_cells -quiet -hier -filter "NAME =~ *$pattern*"]
+        puts $disp_rpt "ROUTED_PRESENT $label $pattern [llength $cells]"
+        if {![llength $cells]} {
+            close $disp_rpt
+            error "display hardware missing from the routed design: $pattern"
+        }
+    }
+    # The TX subsystem must really drive the shared GT quad: LINK_DATA*_OUT of
+    # u_hdmi_tx_ss and the matching vid_phy_tx_axi4s_ch* input of
+    # u_vid_phy_controller have to sit on one net, per lane.  A cell-presence
+    # failure above is fatal; this net proof is recorded loudly instead of
+    # aborting a completed route over a netlist-naming pattern, because the
+    # routed netlist is the only place those names can be checked and a typo
+    # must never be able to destroy the bitstream evidence.  A NONE row here is
+    # a reportable defect, not a pass.
+    foreach lane {0 1 2} {
+        set tx_pins [get_pins -quiet -hier -filter "NAME =~ *u_hdmi_tx_ss*LINK_DATA${lane}_OUT*"]
+        set phy_pins [get_pins -quiet -hier -filter "NAME =~ *u_vid_phy_controller*vid_phy_tx_axi4s_ch${lane}*"]
+        set tx_net {}
+        set phy_net {}
+        if {[llength $tx_pins]}  { set tx_net  [get_property NAME [get_nets -quiet -of $tx_pins]] }
+        if {[llength $phy_pins]} { set phy_net [get_property NAME [get_nets -quiet -of $phy_pins]] }
+        set shared {}
+        foreach n $tx_net {
+            if {[lsearch -exact $phy_net $n] >= 0} { lappend shared $n }
+        }
+        if {![llength $tx_pins] || ![llength $phy_pins]} {
+            puts $disp_rpt "ROUTED_NET TXLane${lane} NO_PINS tx=[llength $tx_pins] vphy=[llength $phy_pins]"
+            puts "SC7F0_DISPLAY_TX_NET_PROOF_MISSING lane $lane: no matching pins"
+        } elseif {![llength $shared]} {
+            puts $disp_rpt "ROUTED_NET TXLane${lane} txss=$tx_net vphy=$phy_net shared=NONE"
+            puts "SC7F0_DISPLAY_TX_NET_PROOF_MISSING lane $lane: $tx_net vs $phy_net"
+        } else {
+            puts $disp_rpt "ROUTED_NET TXLane${lane} txss=$tx_net vphy=$phy_net shared=$shared"
+        }
+    }
+    # And the framebuffer reader must really reach the PS HP1 read stream.
+    set rd_pins [get_pins -quiet -hier -filter "NAME =~ *u_hp1_display_read_arbiter*m_addr*"]
+    set rd_net {}
+    if {[llength $rd_pins]} { set rd_net [get_property NAME [get_nets -quiet -of $rd_pins]] }
+    puts $disp_rpt "ROUTED_NET HP1_READ_FROM_READER_ARBITER count=[llength $rd_pins] nets=$rd_net"
+    if {![llength $rd_pins]} {
+        puts "SC7F0_DISPLAY_TX_NET_PROOF_MISSING hp1 read arbiter m_addr pins not found"
+    }
+    puts $disp_rpt "SC7F0_DISPLAY_PERSONALITY_ROUTED_RECORDED"
+    close $disp_rpt
+    puts "SC7F0_DISPLAY_PERSONALITY_ROUTED_RECORDED"
+}
 if {$vcu} {
     # Routed proof: the encoder hard macro survived implementation.
     set vcu_macro [get_cells -quiet -hier -filter {IS_PRIMITIVE == true && REF_NAME =~ "VCU*"}]

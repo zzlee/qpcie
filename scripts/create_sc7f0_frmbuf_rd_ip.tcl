@@ -18,6 +18,18 @@
 #   HAS_RGBA8.
 #   With alpha=1 this proc logs SC7F0_FRMBUF_RD_ALPHA_WIDTH so the build log
 #   records that a 128->96 pixel packer becomes mandatory.
+#
+# Format name mapping, taken from the 2023.2 official device-tree generator
+# (device-tree-xlnx framebuf_rd/data/framebuf_rd.tcl) and confirmed against
+# drivers/dma/xilinx/xilinx_frmbuf.c in the same kernel, because the IP property
+# names and the DT strings are deliberately NOT spelled the same way:
+#   CONFIG.HAS_BGR8 -> xlnx,vid-formats "rgb888" -> DRM_FORMAT_RGB888 ("RG24")
+#   CONFIG.HAS_RGB8 -> xlnx,vid-formats "bgr888" -> DRM_FORMAT_BGR888 ("BG24")
+#   CONFIG.HAS_Y_UV8_420 -> "nv12"               -> DRM_FORMAT_NV12
+# Both RGB8 and BGR8 are enabled so the PS phase can pick the byte order that its
+# pattern writer actually produces instead of silently displaying mirrored colours;
+# the CRTC selects exactly one of them through xlnx,vformat on the xlnx,pl-disp
+# node.  All three are 1- or 3-component formats, so m_axis_video_TDATA stays 96 bit.
 
 # set_property -dict aborts on the first unknown CONFIG key, which would break
 # the whole build for a parameter this IP version simply does not publish
@@ -55,6 +67,7 @@ proc create_sc7f0_frmbuf_rd_ip {{alpha 0}} {
         CONFIG.AXIMM_ADDR_WIDTH {64} \
         CONFIG.AXIMM_DATA_WIDTH {256} \
         CONFIG.HAS_RGB8 {1} \
+        CONFIG.HAS_BGR8 {1} \
         CONFIG.HAS_RGBA8 [expr {$alpha ? 1 : 0}] \
         CONFIG.HAS_ARGB8 [expr {$alpha ? 1 : 0}] \
         CONFIG.HAS_Y_UV8_420 {1} \
