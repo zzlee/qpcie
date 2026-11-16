@@ -739,6 +739,7 @@ struct qpcie_dev {
     bool debug_only; /* Explicit debug-profile capability, not an AV failure fallback. */
     bool c2h_only; /* Raw video + encoded packet + raw audio personality. */
     struct qpcie_debug *debug;
+    struct qpcie_overlay *overlay;
     u32 bar1_offset_tpg;
     u32 bar1_offset_i2c;
     u32 bar1_offset_spi_flash;
@@ -770,6 +771,9 @@ void qpcie_sysfs_remove(struct qpcie_dev *qdev);
 
 int qpcie_debug_init(struct qpcie_dev *qdev);
 void qpcie_debug_remove(struct qpcie_dev *qdev);
+
+int qpcie_overlay_init(struct qpcie_dev *qdev);
+void qpcie_overlay_remove(struct qpcie_dev *qdev);
 
 int qpcie_upgrade_init(struct qpcie_dev *qdev);
 void qpcie_upgrade_remove(struct qpcie_dev *qdev);

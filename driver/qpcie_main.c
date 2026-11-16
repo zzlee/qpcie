@@ -474,6 +474,13 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
     if (ret)
         dev_warn(&pdev->dev, "Debug mailbox unavailable: %d\n", ret);
 
+    /* Optional RGB-compositor overlay plane ring: it self-gates on the fabric
+     * version, and a card without sc7f0_overlay_ingress.v must not be able to
+     * lose a 33 MB coherent allocation. */
+    ret = qpcie_overlay_init(qdev);
+    if (ret)
+        dev_warn(&pdev->dev, "RGB overlay ring unavailable: %d\n", ret);
+
     return 0;
 
 alsa_remove:
@@ -587,6 +594,17 @@ static void qpcie_remove(struct pci_dev *pdev)
     }
 
     pci_clear_master(pdev);
+
+    /* Last, on purpose.  qpcie_overlay_remove() clears bus mastering itself and
+     * is the only point at which the overlay plane ring may be released, so it
+     * must run after every engine has been halted, the DMA soft reset has run,
+     * the TLP drain has elapsed and the master enable is off - not before the
+     * V4L2/ALSA teardown that still depends on the device being live.
+     * Open file handles or mappings may keep the ring past this point; that is
+     * deliberate (see driver/qpcie_overlay.c) and they take their own
+     * pci_dev_get(), so the function object cannot disappear under them. */
+    qpcie_overlay_remove(qdev);
+
     free_irq(qdev->irq, qdev);
     pci_free_irq_vectors(pdev);
     if (qdev->bar1_mmio) pci_iounmap(pdev, qdev->bar1_mmio);

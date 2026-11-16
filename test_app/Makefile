@@ -58,6 +58,26 @@ sc7f0_pkt_dma_test: sc7f0_pkt_dma_test.cpp
 host_pkt_dma_test: host_pkt_dma_test.c
 	$(CC) -O2 -Wall -Wextra -std=c11 -o $@ $<
 
+# ---------------------------------------------------------------------------
+# SC7F0-RGB-COMPOSITOR-2PPC host half (x86_64, host PCIe root complex)
+#
+#   host_rgb_compositor  tx: RGBA8888 4K planes out of the coherent slot ring
+#     that driver/qpcie_overlay.c allocated, read back by
+#     rtl/sc7f0_overlay_ingress.v -> overlay pool -> Reader-B -> alpha blend ->
+#     HDMI.  rx: packed RGB24 4K (stride 11520, 24883200 B/frame) in.
+#     Control always goes through `sc7f0ctl exec 'sc7f0_rgb_overlay ...'`.
+#   Not in $(TARGETS): it needs ../include/qpcie_overlay.h and the matching
+#   qpcie.ko, so a tree built for the card alone must still `make all`.
+# ---------------------------------------------------------------------------
+# sc7f0_fill_oracle (Host): independent expected-content digests for the
+# overlay H2C check, so a byte count reaching the writer is never mistaken for
+# the right bytes arriving.  Runs anywhere sha256sum exists.
+sc7f0_fill_oracle: sc7f0_fill_oracle.c
+	$(CC) -O2 -Wall -Wextra -std=c11 -o $@ $<
+
+host_rgb_compositor: host_rgb_compositor.c ../include/qpcie_overlay.h
+	$(CC) -O2 -Wall -Wextra -std=c11 -o $@ host_rgb_compositor.c
+
 qpcie_upgrade: qpcie_upgrade.c
 	$(CC) $(CFLAGS) -o $@ qpcie_upgrade.c $(LDFLAGS)
 
@@ -72,6 +92,13 @@ qpcie_stage_push: qpcie_stage_push.c
 
 sc7f0_ps_watchdog: sc7f0_ps_watchdog.c sc7f0_health.h
 	$(AARCH64_CC) -O2 -Wall -Wextra -static -o $@ sc7f0_ps_watchdog.c
+
+# SC7F0-RGB-COMPOSITOR-2PPC (0x26111405) overlay/plane bring-up tool.  Not in
+# $(TARGETS): it is ARM64-only like the daemons, so "make all" on a host without
+# the cross toolchain keeps working.  It is also built into the rootfs by
+# project-spec/meta-user/recipes-apps/sc7f0-rgb-overlay.
+sc7f0_rgb_overlay: sc7f0_rgb_overlay.c
+	$(AARCH64_CC) -O2 -Wall -Wextra -static -o $@ sc7f0_rgb_overlay.c
 
 qpcie_upgrade_daemon: qpcie_upgrade_daemon.c sc7f0_health.h qpcie_file_transaction.h qpcie_commit_helpers.h qpcie_archive_verify.h
 	$(AARCH64_CC) -O2 -Wall -static -o $@ qpcie_upgrade_daemon.c
