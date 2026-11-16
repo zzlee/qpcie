@@ -14,6 +14,24 @@ deployable=true` 且存在 `gates/package.ok`、不存在 `NOT_DEPLOYABLE`）的
 本节步骤可以跳：授权解决的是「要不要每次问」，顺序与证据要求解决的是「会不会把卡变
 成砖且回不去」。
 
+> **烧录入口（2026-11-16 起）**：正式烧录**只**用
+> `./scripts/sc7f0_flash.sh --build <BUILD_DIR>`（唯一入口，步骤清单见
+> [docs/sc7f0_build_package_flash.md §3](sc7f0_build_package_flash.md) 与 AGENTS.md
+> 「🔥 燒錄專案步驟」）。本文下面的 `qpcie_upgrade --package / --commit / --reboot` 逐段
+> 指令是该入口内部的**同一批动作**，保留下来是为了**分段诊断与回滚**（VERIFY 不过、COMMIT
+> 结果不明、eMMC 读回不符时照本节逐段定位），**不是**第二条烧录入口。
+>
+> 两个因此必须遵守的推论：
+> 1. **手动序列不含 NUC1262 runtime restart**（`i2ctransfer -y 0 w2@0x32 0x06 0x01`）。
+>    只有入口脚本会无条件、恰一次地执行它；手动跑完整套后宣告「升级完成」而不能证明
+>    RX 可用，就是本项被遗漏的旧病。想知道当次有没有执行，看该次
+>    `logs/flash.log` 里的 `MCU_RESTART_RC` 与测试机 `/home/rd/sc7f0/logs/mcu-restart-history`。
+> 2. 本文早期版本命令里的 `/home/rd/qpcie_upgrade`、`/home/rd/upgrade-*.tar` 等**根目录路径
+>    已停用**（AGENTS.md 强制测试机一律 `/home/rd/sc7f0/` 下）；保留原文是当时事实记录，
+>    重新执行时改用 `/home/rd/sc7f0/bin/sc7f0ctl`、`/home/rd/sc7f0/packages/`、
+>    `/home/rd/sc7f0/tmp/`；新旧路径完整对照见 AGENTS.md「測試機檔案放置規範」与
+>    docs/sc7f0_build_package_flash.md「測試機檔案放置與整理」两节。
+
 ---
 
 ## 0. 术语与硬事实（照实写，不美化）
