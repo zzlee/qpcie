@@ -58,6 +58,7 @@ module interrupt_ctrl (
     input  wire [3:0]  v_done_ch,
     input  wire [3:1]  h2c_done_ch,
     input  wire [3:0]  a_done_irq,
+    input  wire        ovl_wr_done,
 
     // Error triggers
     input  wire [3:0]  v_overflow_ch,
@@ -88,6 +89,7 @@ module interrupt_ctrl (
     localparam SRC_VCH3 = 4'd6;
     localparam SRC_AUD  = 4'd7;
     localparam SRC_PERF = 4'd8;
+    localparam SRC_OVL  = 4'd9;
 
     reg [1:0] state;
     reg [3:0] active_source;
@@ -100,6 +102,7 @@ module interrupt_ctrl (
     reg [7:0] vch2_pending;
     reg [7:0] vch3_pending;
     reg [7:0] aud_pending;
+    reg [7:0] ovl_pending;
     reg [7:0] perf_pending;
 
     // Event signals
@@ -127,9 +130,10 @@ module interrupt_ctrl (
     wire ack_vch2 = (state == SEND_MSI) && msi_ack && (active_source == SRC_VCH2);
     wire ack_vch3 = (state == SEND_MSI) && msi_ack && (active_source == SRC_VCH3);
     wire ack_aud  = (state == SEND_MSI) && msi_ack && (active_source == SRC_AUD);
+    wire ack_ovl  = (state == SEND_MSI) && msi_ack && (active_source == SRC_OVL);
     wire ack_perf = (state == SEND_MSI) && msi_ack && (active_source == SRC_PERF);
 
-    // Arbitration (Strict Priority: ERR > H2C > VCH0 > VCH1 > VCH2 > VCH3 > AUD > PERF)
+    // Arbitration (Strict Priority: ERR > H2C > VCH0 > VCH1 > VCH2 > VCH3 > AUD > OVL > PERF)
     // Note: Errors ALWAYS bypass enable and cannot be masked!
     wire err_req  = (err_pending != 8'd0);
     wire h2c_req  = (h2c_pending != 8'd0)  && reg_irq_ctrl[0];
@@ -138,6 +142,7 @@ module interrupt_ctrl (
     wire vch2_req = (vch2_pending != 8'd0) && (vch2_irq_en | reg_irq_ctrl[1]);
     wire vch3_req = (vch3_pending != 8'd0) && (vch3_irq_en | reg_irq_ctrl[1]);
     wire aud_req  = (aud_pending != 8'd0)  && (adev0_irq_en | reg_irq_ctrl[1]);
+    wire ovl_req  = (ovl_pending != 8'd0);
     wire perf_req = (perf_pending != 8'd0);
 
     reg [3:0] arb_winner;
@@ -165,6 +170,9 @@ module interrupt_ctrl (
         end else if (aud_req) begin
             arb_winner = SRC_AUD;
             arb_code   = 8'h06;
+        end else if (ovl_req) begin
+            arb_winner = SRC_OVL;
+            arb_code   = 8'h08;
         end else if (perf_req) begin
             arb_winner = SRC_PERF;
             arb_code   = 8'h07;
@@ -184,6 +192,7 @@ module interrupt_ctrl (
             vch2_pending <= 8'd0;
             vch3_pending <= 8'd0;
             aud_pending  <= 8'd0;
+            ovl_pending  <= 8'd0;
             perf_pending <= 8'd0;
         end else begin
             // ERR
@@ -232,6 +241,13 @@ module interrupt_ctrl (
             case ({aud_done, ack_aud})
                 2'b10: if (aud_pending != 8'hFF) aud_pending <= aud_pending + 8'd1;
                 2'b01: if (aud_pending != 8'd0)  aud_pending <= aud_pending - 8'd1;
+                default: ;
+            endcase
+
+            // OVL (Overlay H2C frame write complete)
+            case ({ovl_wr_done, ack_ovl})
+                2'b10: if (ovl_pending != 8'hFF) ovl_pending <= ovl_pending + 8'd1;
+                2'b01: if (ovl_pending != 8'd0)  ovl_pending <= ovl_pending - 8'd1;
                 default: ;
             endcase
 
@@ -294,6 +310,7 @@ module interrupt_ctrl (
             if (any_err)                    irq_top_status[5] <= 1'b1;
             if (perf_req)                   irq_top_status[6] <= 1'b1;
             if (h2c_done)                   irq_top_status[7] <= 1'b1;
+            if (ovl_wr_done)                irq_top_status[8] <= 1'b1;
         end
     end
 

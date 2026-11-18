@@ -130,6 +130,13 @@ module sc7f0_rgb_compositor #(
     input  wire                 alpha_force_opaque,
     input  wire                 blend_unlock,
 
+    // ---- hardware tear-free Reader-B slot auto-advance (mem_clk) ---------
+    input  wire [3:0]           ovl_slot_ready_m,
+    input  wire [1:0]           ovl_last_slot_m,
+    input  wire [31:0]          ovl_slot_bytes_m,
+    input  wire                 ovl_hw_auto_slot,
+    output reg  [3:0]           ovl_slot_release_m,
+
     // ---- composited video, tx_clk, PPC pixels of native RGB ---------------
     output wire [PPC*24-1:0]    m_axis_video_tdata,
     output wire                 m_axis_video_tvalid,
@@ -144,7 +151,16 @@ module sc7f0_rgb_compositor #(
     output wire                 blend_busy,
     output wire [31:0]          blend_lock_lost,
     output wire [31:0]          blend_sat_watchdog,
-    output wire [31:0]          blend_beats
+    output wire [31:0]          blend_beats,
+    // SOF genlock observability (rtl/sc7f0_alpha_blend_2ppc.v).  blend_locked is
+    // only "GL_LOCKED"; these say what the compositor is doing when it is NOT
+    // locked and why it last lost the lock, which is the difference between an
+    // overlay that was never armed, one that is armed but off by half a frame, and
+    // one that fell out of lock mid-frame.
+    output wire [1:0]           blend_gl_state,
+    output wire [2:0]           blend_drop_reason,
+    output wire [31:0]          blend_lock_count,
+    output wire [31:0]          blend_base_passthru
 );
     localparam integer RB = PPC*32;               // RGBA beat
     localparam integer OB = PPC*24;               // RGB beat
@@ -267,6 +283,7 @@ module sc7f0_rgb_compositor #(
     // ------------------------------------------------------------------------
     wire [RB-1:0] b_vid_tdata;
     wire          b_vid_tvalid, b_vid_tready, b_vid_tlast, b_vid_tuser;
+    wire [63:0]   b_araddr_raw;
     sc7f0_frmbuf_rd_rgb u_frmbuf_rd_b (
         .ap_clk              (mem_clk),
         .ap_rst_n            (reader_b_rst_n),
@@ -299,7 +316,7 @@ module sc7f0_rgb_compositor #(
         .m_axi_mm_video_WREADY (1'b0),
         .m_axi_mm_video_BRESP  (2'b00), .m_axi_mm_video_BVALID(1'b0),
         .m_axi_mm_video_BREADY (),
-        .m_axi_mm_video_ARADDR (b_araddr),  .m_axi_mm_video_ARLEN (b_arlen),
+        .m_axi_mm_video_ARADDR (b_araddr_raw),  .m_axi_mm_video_ARLEN (b_arlen),
         .m_axi_mm_video_ARSIZE (b_arsize),  .m_axi_mm_video_ARBURST(b_arburst),
         .m_axi_mm_video_ARLOCK (), .m_axi_mm_video_ARCACHE(),
         .m_axi_mm_video_ARPROT (), .m_axi_mm_video_ARQOS  (),
@@ -309,6 +326,79 @@ module sc7f0_rgb_compositor #(
         .m_axi_mm_video_RLAST  (b_rlast),   .m_axi_mm_video_RVALID(b_rvalid),
         .m_axi_mm_video_RREADY (b_rready)
     );
+
+    // ------------------------------------------------------------------------
+    // Hardware tear-free Reader-B slot selector (mem_clk, zero PS/CPU loop)
+    // ------------------------------------------------------------------------
+    reg  [1:0]  disp_slot;
+    reg  [11:0] b_line_cnt;
+    reg  [11:0] b_lines_per_frame;
+    reg         b_switch_pending;
+    wire        b_sof = b_vid_tvalid && b_vid_tready && b_vid_tuser;
+    wire        b_eol = b_vid_tvalid && b_vid_tready && b_vid_tlast;
+    wire        b_eof = b_eol && (b_lines_per_frame != 12'd0) &&
+                        (b_line_cnt == (b_lines_per_frame - 12'd1));
+    wire        b_init_switch = !b_arvalid && !ovl_slot_ready_m[disp_slot] && (|ovl_slot_ready_m);
+
+    reg [1:0] next_disp_slot;
+    always @(*) begin
+        if (ovl_slot_ready_m[ovl_last_slot_m])
+            next_disp_slot = ovl_last_slot_m;
+        else if (ovl_slot_ready_m[2'd0]) next_disp_slot = 2'd0;
+        else if (ovl_slot_ready_m[2'd1]) next_disp_slot = 2'd1;
+        else if (ovl_slot_ready_m[2'd2]) next_disp_slot = 2'd2;
+        else                             next_disp_slot = 2'd3;
+    end
+
+    always @(posedge mem_clk) begin
+        if (!mem_rst_n) begin
+            disp_slot          <= 2'd0;
+            b_line_cnt         <= 12'd0;
+            b_lines_per_frame  <= 12'd0;
+            b_switch_pending   <= 1'b0;
+            ovl_slot_release_m <= 4'b0000;
+        end else begin
+            ovl_slot_release_m <= 4'b0000;
+            if (b_sof) begin
+                if (b_line_cnt != 12'd0)
+                    b_lines_per_frame <= b_line_cnt;
+                b_line_cnt <= 12'd0;
+            end else if (b_eol) begin
+                b_line_cnt <= b_line_cnt + 12'd1;
+            end
+
+            if (!ovl_hw_auto_slot) begin
+                disp_slot        <= 2'd0;
+                b_switch_pending <= 1'b0;
+            end else begin
+                if (b_eof)
+                    b_switch_pending <= 1'b1;
+
+                if ((b_switch_pending || b_eof || b_init_switch) && !b_arvalid) begin
+                    b_switch_pending <= 1'b0;
+                    if (|ovl_slot_ready_m) begin
+                        if (next_disp_slot != disp_slot) begin
+                            disp_slot          <= next_disp_slot;
+                            ovl_slot_release_m <= ovl_slot_ready_m & ~(4'b0001 << next_disp_slot);
+                        end else if ((ovl_slot_ready_m & ~(4'b0001 << disp_slot)) != 4'b0000) begin
+                            ovl_slot_release_m <= ovl_slot_ready_m & ~(4'b0001 << disp_slot);
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    reg [33:0] disp_slot_offset;
+    always @(*) begin
+        case (disp_slot)
+            2'd0: disp_slot_offset = 34'd0;
+            2'd1: disp_slot_offset = {2'b00, ovl_slot_bytes_m};
+            2'd2: disp_slot_offset = {1'b0, ovl_slot_bytes_m, 1'b0};
+            2'd3: disp_slot_offset = {2'b00, ovl_slot_bytes_m} + {1'b0, ovl_slot_bytes_m, 1'b0};
+        endcase
+    end
+    assign b_araddr = ovl_hw_auto_slot ? (b_araddr_raw + {30'd0, disp_slot_offset}) : b_araddr_raw;
 
     // ------------------------------------------------------------------------
     // control levels into the mem-domain compositor
@@ -351,9 +441,13 @@ module sc7f0_rgb_compositor #(
         .m_axis_tuser       (bl_tuser),
         .locked             (blend_locked),
         .pipeline_busy      (blend_busy),
+        .gl_state           (blend_gl_state),
+        .gl_drop_reason     (blend_drop_reason),
+        .gl_lock_count      (blend_lock_count),
         .lock_lost_count    (blend_lock_lost),
         .sat_watchdog_count (blend_sat_watchdog),
-        .beats_blended      (blend_beats)
+        .beats_blended      (blend_beats),
+        .base_passthru_beats(blend_base_passthru)
     );
 
     // ------------------------------------------------------------------------
@@ -364,7 +458,7 @@ module sc7f0_rgb_compositor #(
 
     sc7f0_dp_fifo #(
         .WIDTH    (OB+2),
-        .DEPTH    (256),
+        .DEPTH    (4096),
         .MEMORY   ("block"),
         .W_SOURCES(1),
         .R_SOURCES(1)

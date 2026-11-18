@@ -238,6 +238,12 @@
 #define REG_NEW_GLOBAL_VERSION      0x04
 #define REG_NEW_GLOBAL_CAPS         0x08
 #define QPCIE_CAP_C2H_ONLY          BIT(28) /* No TX, TPG or auxiliary streams. */
+#define QPCIE_CAP_RGB_COMPOSITOR    BIT(20) /* H2C overlay plane + 2PPC alpha
+                                             * blend fabric is in the bitstream
+                                             * (SC7F0_RGB_COMPOSITOR profile).
+                                             * Published from C_VERSION
+                                             * 0x26111701; driver/qpcie_overlay.c
+                                             * treats it as authoritative. */
 #define REG_NEW_GLOBAL_GITHASH      0x0C
 #define REG_NEW_GLOBAL_BUILDTIME    0x10
 #define REG_NEW_GLOBAL_RESET        0x14
@@ -774,6 +780,7 @@ void qpcie_debug_remove(struct qpcie_dev *qdev);
 
 int qpcie_overlay_init(struct qpcie_dev *qdev);
 void qpcie_overlay_remove(struct qpcie_dev *qdev);
+void qpcie_overlay_irq_handler(struct qpcie_dev *qdev);
 
 int qpcie_upgrade_init(struct qpcie_dev *qdev);
 void qpcie_upgrade_remove(struct qpcie_dev *qdev);

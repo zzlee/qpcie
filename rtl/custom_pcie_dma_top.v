@@ -332,7 +332,32 @@ module custom_pcie_dma_top #(
     input  wire                                             ovl_wready,
     input  wire [1:0]                                       ovl_bresp,
     input  wire                                             ovl_bvalid,
-    output wire                                             ovl_bready
+    output wire                                             ovl_bready,
+
+    // Hardware Reader-B slot auto-advance handshake (ovl_mem_clk domain)
+    input  wire [3:0]                                       ovl_wr_slot_release_m,
+    output wire [3:0]                                       ovl_wr_slot_ready_m,
+    output wire [1:0]                                       ovl_wr_last_slot_m,
+    output wire [31:0]                                      ovl_wr_slot_bytes_m,
+
+    // PCIe BAR0 0x4000..0x4FFF Overlay CSR Master (pcie_user_clk domain)
+    output wire [31:0]                                      m_axil_ovl_awaddr,
+    output wire                                             m_axil_ovl_awvalid,
+    input  wire                                             m_axil_ovl_awready,
+    output wire [31:0]                                      m_axil_ovl_wdata,
+    output wire [3:0]                                       m_axil_ovl_wstrb,
+    output wire                                             m_axil_ovl_wvalid,
+    input  wire                                             m_axil_ovl_wready,
+    input  wire [1:0]                                       m_axil_ovl_bresp,
+    input  wire                                             m_axil_ovl_bvalid,
+    output wire                                             m_axil_ovl_bready,
+    output wire [31:0]                                      m_axil_ovl_araddr,
+    output wire                                             m_axil_ovl_arvalid,
+    input  wire                                             m_axil_ovl_arready,
+    input  wire [31:0]                                      m_axil_ovl_rdata,
+    input  wire [1:0]                                       m_axil_ovl_rresp,
+    input  wire                                             m_axil_ovl_rvalid,
+    output wire                                             m_axil_ovl_rready
 );
 
     // Internal Wires for BAR0 Inter-module Connection
@@ -393,28 +418,54 @@ module custom_pcie_dma_top #(
     // Production dual-path design: PS AXI ILA removed. The independent
     // debug mailbox and normal PS/PCIe AXI control path remain intact.
 
+    wire [31:0] bar0_def_awaddr, bar0_def_wdata, bar0_def_araddr, bar0_def_rdata;
+    wire [3:0]  bar0_def_wstrb;
+    wire [1:0]  bar0_def_bresp, bar0_def_rresp;
+    wire        bar0_def_awvalid, bar0_def_awready, bar0_def_wvalid, bar0_def_wready;
+    wire        bar0_def_bvalid, bar0_def_bready, bar0_def_arvalid, bar0_def_arready;
+    wire        bar0_def_rvalid, bar0_def_rready;
+
+    sc7f0_axil_demux_1to2 u_bar0_demux (
+        .clk(clk), .rst_n(rst_n),
+        .s_awaddr(bar0_axil_awaddr), .s_awvalid(bar0_axil_awvalid), .s_awready(bar0_axil_awready),
+        .s_wdata(bar0_axil_wdata),   .s_wstrb(bar0_axil_wstrb),     .s_wvalid(bar0_axil_wvalid),   .s_wready(bar0_axil_wready),
+        .s_bresp(bar0_axil_bresp),   .s_bvalid(bar0_axil_bvalid),   .s_bready(bar0_axil_bready),
+        .s_araddr(bar0_axil_araddr), .s_arvalid(bar0_axil_arvalid), .s_arready(bar0_axil_arready),
+        .s_rdata(bar0_axil_rdata),   .s_rresp(bar0_axil_rresp),     .s_rvalid(bar0_axil_rvalid),   .s_rready(bar0_axil_rready),
+        .m0_awaddr(bar0_def_awaddr), .m0_awvalid(bar0_def_awvalid), .m0_awready(bar0_def_awready),
+        .m0_wdata(bar0_def_wdata),   .m0_wstrb(bar0_def_wstrb),     .m0_wvalid(bar0_def_wvalid),   .m0_wready(bar0_def_wready),
+        .m0_bresp(bar0_def_bresp),   .m0_bvalid(bar0_def_bvalid),   .m0_bready(bar0_def_bready),
+        .m0_araddr(bar0_def_araddr), .m0_arvalid(bar0_def_arvalid), .m0_arready(bar0_def_arready),
+        .m0_rdata(bar0_def_rdata),   .m0_rresp(bar0_def_rresp),     .m0_rvalid(bar0_def_rvalid),   .m0_rready(bar0_def_rready),
+        .m1_awaddr(m_axil_ovl_awaddr), .m1_awvalid(m_axil_ovl_awvalid), .m1_awready(m_axil_ovl_awready),
+        .m1_wdata(m_axil_ovl_wdata),   .m1_wstrb(m_axil_ovl_wstrb),     .m1_wvalid(m_axil_ovl_wvalid),   .m1_wready(m_axil_ovl_wready),
+        .m1_bresp(m_axil_ovl_bresp),   .m1_bvalid(m_axil_ovl_bvalid),   .m1_bready(m_axil_ovl_bready),
+        .m1_araddr(m_axil_ovl_araddr), .m1_arvalid(m_axil_ovl_arvalid), .m1_arready(m_axil_ovl_arready),
+        .m1_rdata(m_axil_ovl_rdata),   .m1_rresp(m_axil_ovl_rresp),     .m1_rvalid(m_axil_ovl_rvalid),   .m1_rready(m_axil_ovl_rready)
+    );
+
     axi_clock_converter_0 u_axi_clock_converter_0 (
         .s_axi_aclk(clk),
         .s_axi_aresetn(rst_n),
-        .s_axi_awaddr(bar0_axil_awaddr),
+        .s_axi_awaddr(bar0_def_awaddr),
         .s_axi_awprot(3'd0),
-        .s_axi_awvalid(bar0_axil_awvalid),
-        .s_axi_awready(bar0_axil_awready),
-        .s_axi_wdata(bar0_axil_wdata),
-        .s_axi_wstrb(bar0_axil_wstrb),
-        .s_axi_wvalid(bar0_axil_wvalid),
-        .s_axi_wready(bar0_axil_wready),
-        .s_axi_bresp(bar0_axil_bresp),
-        .s_axi_bvalid(bar0_axil_bvalid),
-        .s_axi_bready(bar0_axil_bready),
-        .s_axi_araddr(bar0_axil_araddr),
+        .s_axi_awvalid(bar0_def_awvalid),
+        .s_axi_awready(bar0_def_awready),
+        .s_axi_wdata(bar0_def_wdata),
+        .s_axi_wstrb(bar0_def_wstrb),
+        .s_axi_wvalid(bar0_def_wvalid),
+        .s_axi_wready(bar0_def_wready),
+        .s_axi_bresp(bar0_def_bresp),
+        .s_axi_bvalid(bar0_def_bvalid),
+        .s_axi_bready(bar0_def_bready),
+        .s_axi_araddr(bar0_def_araddr),
         .s_axi_arprot(3'd0),
-        .s_axi_arvalid(bar0_axil_arvalid),
-        .s_axi_arready(bar0_axil_arready),
-        .s_axi_rdata(bar0_axil_rdata),
-        .s_axi_rresp(bar0_axil_rresp),
-        .s_axi_rvalid(bar0_axil_rvalid),
-        .s_axi_rready(bar0_axil_rready),
+        .s_axi_arvalid(bar0_def_arvalid),
+        .s_axi_arready(bar0_def_arready),
+        .s_axi_rdata(bar0_def_rdata),
+        .s_axi_rresp(bar0_def_rresp),
+        .s_axi_rvalid(bar0_def_rvalid),
+        .s_axi_rready(bar0_def_rready),
         
         .m_axi_aclk(pl_clk0),
         .m_axi_aresetn(sys_100m_rst_n),
@@ -1905,6 +1956,10 @@ module custom_pcie_dma_top #(
         .ov_irq_pulse      (ovl_wr_irq_pulse),
         .mem_clk           (ovl_mem_clk),
         .mem_rst_n         (ovl_mem_rst_n),
+        .ov_slot_release_m (ovl_wr_slot_release_m),
+        .ov_slot_ready_m   (ovl_wr_slot_ready_m),
+        .ov_last_slot_m    (ovl_wr_last_slot_m),
+        .ov_slot_bytes_m   (ovl_wr_slot_bytes_m),
         .m_axi_awaddr      (ovl_awaddr),
         .m_axi_awlen       (ovl_awlen),
         .m_axi_awsize      (ovl_awsize),
@@ -1937,6 +1992,9 @@ module custom_pcie_dma_top #(
     assign ovl_wr_err_frames            = 32'd0;
     assign ovl_video_poison             = 1'b0;
     assign ovl_wr_slot_ready            = 4'd0;
+    assign ovl_wr_slot_ready_m          = 4'd0;
+    assign ovl_wr_last_slot_m           = 2'd0;
+    assign ovl_wr_slot_bytes_m          = 32'd0;
     assign ovl_wr_busy                  = 1'b0;
     assign ovl_wr_active_slot           = 2'd0;
     assign ovl_wr_frames_done           = 32'd0;
@@ -3434,6 +3492,7 @@ module custom_pcie_dma_top #(
         .v_done_ch(v_done_ch),
         .h2c_done_ch(h2c_done_ch),
         .a_done_irq(a_done_irq_vec),
+        .ovl_wr_done(ovl_wr_irq_pulse),
         .v_overflow_ch({3'd0, vch0_overflow_pulse}),
         .v_desc_err_ch(4'd0),
         .v_fifo_err_ch(4'd0),

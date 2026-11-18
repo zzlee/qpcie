@@ -126,12 +126,17 @@ module zu4ev_pcie_card_top #(
     // SC7F0_DISPLAY_TX is defined; the slice stays unconnected otherwise, exactly
     // as before this personality existed).
 `ifdef SC7F0_RGB_COMPOSITOR
-    wire [319:0] hdmi_ctl_awaddr, hdmi_ctl_araddr, hdmi_ctl_wdata, hdmi_ctl_rdata;
-    wire [39:0] hdmi_ctl_wstrb;
-    wire [9:0] hdmi_ctl_awvalid, hdmi_ctl_awready, hdmi_ctl_wvalid, hdmi_ctl_wready;
-    wire [9:0] hdmi_ctl_bvalid, hdmi_ctl_bready, hdmi_ctl_arvalid, hdmi_ctl_arready;
-    wire [9:0] hdmi_ctl_rvalid, hdmi_ctl_rready;
-    wire [19:0] hdmi_ctl_bresp, hdmi_ctl_rresp;
+    // Eleven 32-bit slices: M00..M09 plus M10 = 0xB0030000, the upper half of the
+    // HDMI TX subsystem aperture (its VTC lives at tx_ss+0x10000).  u_hdmi_tx_ctl_merge
+    // below re-merges the two TX halves in fabric and is what actually drives
+    // subsystem address bit 16; see the comment there and
+    // scripts/create_sc7f0_hdmi_crossbar.tcl.
+    wire [351:0] hdmi_ctl_awaddr, hdmi_ctl_araddr, hdmi_ctl_wdata, hdmi_ctl_rdata;
+    wire [43:0] hdmi_ctl_wstrb;
+    wire [10:0] hdmi_ctl_awvalid, hdmi_ctl_awready, hdmi_ctl_wvalid, hdmi_ctl_wready;
+    wire [10:0] hdmi_ctl_bvalid, hdmi_ctl_bready, hdmi_ctl_arvalid, hdmi_ctl_arready;
+    wire [10:0] hdmi_ctl_rvalid, hdmi_ctl_rready;
+    wire [21:0] hdmi_ctl_bresp, hdmi_ctl_rresp;
 `else
     wire [255:0] hdmi_ctl_awaddr, hdmi_ctl_araddr, hdmi_ctl_wdata, hdmi_ctl_rdata;
     wire [31:0] hdmi_ctl_wstrb;
@@ -257,6 +262,7 @@ module zu4ev_pcie_card_top #(
     wire [1:0] dp_awburst,dp_arburst,dp_bresp,dp_rresp;
     wire dp_awvalid,dp_awready,dp_wvalid,dp_wready,dp_wlast,dp_bvalid,dp_bready;
     wire dp_arvalid,dp_arready,dp_rvalid,dp_rready,dp_rlast;
+    wire [5:0] dp_arid,dp_rid;
     wire [127:0] dp_wdata,dp_rdata;
     wire [15:0] dp_wstrb;
 `ifdef SC7F0_TX_VIDEO_PRESENT
@@ -852,6 +858,29 @@ module zu4ev_pcie_card_top #(
         .O(tx_mgtrefclk0_odiv2_bufg)
     );
 
+    // TX Refclk Bypass: forward Si5319 clock (tx_mgtrefclk0_odiv2_bufg)
+    // directly to hdmi_tx_tmds_clk_p/n via ODDRE1 + OBUFDS, bypassing VPHY's
+    // internal TXOUTCLK -> MMCM clock path.
+    wire tx_tmds_clk_fwd;
+    ODDRE1 #(
+        .IS_C_INVERTED  (1'b0),
+        .IS_D1_INVERTED (1'b0),
+        .IS_D2_INVERTED (1'b0),
+        .SIM_DEVICE     ("ULTRASCALE_PLUS"),
+        .SRVAL          (1'b0)
+    ) u_tx_tmds_clk_oddr (
+        .Q  (tx_tmds_clk_fwd),
+        .C  (tx_mgtrefclk0_odiv2_bufg),
+        .D1 (1'b1),
+        .D2 (1'b0),
+        .SR (1'b0)
+    );
+    OBUFDS u_tx_tmds_clk_obufds (
+        .O  (hdmi_tx_tmds_clk_p),
+        .OB (hdmi_tx_tmds_clk_n),
+        .I  (tx_tmds_clk_fwd)
+    );
+
     // =========================================================================
     // Video PHY Controller (vid_phy_controller_0)
     // Full-Duplex Quad 226 Transceiver (RX + TX)
@@ -926,8 +955,8 @@ module zu4ev_pcie_card_top #(
         .tx_refclk_rdy                (hdmi_tx_refclk_rdy),
         .tx_tmds_clk                  (),
         .tx_video_clk                 (phy_tx_video_clk),
-        .tx_tmds_clk_p                (hdmi_tx_tmds_clk_p),
-        .tx_tmds_clk_n                (hdmi_tx_tmds_clk_n),
+        .tx_tmds_clk_p                (),
+        .tx_tmds_clk_n                (),
         .rx_tmds_clk                  (),
         .rx_video_clk                 (phy_rx_video_clk),
         .rx_tmds_clk_p                (),
@@ -1305,35 +1334,36 @@ module zu4ev_pcie_card_top #(
     // a second identical arbiter merges the display framebuffer reader in; the
     // capture reader logic itself is untouched.
     wire [48:0] hp1r_addr; wire [7:0] hp1r_len; wire [2:0] hp1r_size; wire [1:0] hp1r_burst;
+    wire [5:0] hp1r_arid,hp1r_rid;
     wire hp1r_valid,hp1r_ready,hp1r_rvalid,hp1r_rready,hp1r_rlast;
     wire [127:0] hp1r_rdata; wire [1:0] hp1r_rresp;
-    sc7f0_axi_read_arbiter u_hp1_read_arbiter(
+    sc7f0_axi_read_arbiter_mo #(.AW(49), .IW(6), .ID_BIT(0)) u_hp1_read_arbiter(
         .clk(capture_clk),.rst_n(dp_mem_rst_n),
-        .s0_addr({9'd0,pkt_araddr}),.s0_len(pkt_arlen),.s0_size(pkt_arsize),.s0_burst(pkt_arburst),
-        .s0_valid(pkt_arvalid),.s0_ready(pkt_arready),.s0_data(pkt_rdata),.s0_resp(pkt_rresp),
+        .s0_addr({9'd0,pkt_araddr}),.s0_len(pkt_arlen),.s0_size(pkt_arsize),.s0_burst(pkt_arburst),.s0_arid(6'd0),
+        .s0_valid(pkt_arvalid),.s0_ready(pkt_arready),.s0_data(pkt_rdata),.s0_resp(pkt_rresp),.s0_rid(),
         .s0_last(pkt_rlast),.s0_rvalid(pkt_rvalid),.s0_rready(pkt_rready),
-        .s1_addr(fb_araddr[48:0]),.s1_len(fb_arlen),.s1_size(fb_arsize),.s1_burst(fb_arburst),
-        .s1_valid(fb_arvalid),.s1_ready(fb_arready),.s1_data(fb_rdata),.s1_resp(fb_rresp),
+        .s1_addr(fb_araddr[48:0]),.s1_len(fb_arlen),.s1_size(fb_arsize),.s1_burst(fb_arburst),.s1_arid(6'd0),
+        .s1_valid(fb_arvalid),.s1_ready(fb_arready),.s1_data(fb_rdata),.s1_resp(fb_rresp),.s1_rid(),
         .s1_last(fb_rlast),.s1_rvalid(fb_rvalid),.s1_rready(fb_rready),
-        .m_addr(hp1r_addr),.m_len(hp1r_len),.m_size(hp1r_size),.m_burst(hp1r_burst),
-        .m_valid(hp1r_valid),.m_ready(hp1r_ready),.m_data(hp1r_rdata),.m_resp(hp1r_rresp),
+        .m_addr(hp1r_addr),.m_len(hp1r_len),.m_size(hp1r_size),.m_burst(hp1r_burst),.m_arid(hp1r_arid),
+        .m_valid(hp1r_valid),.m_ready(hp1r_ready),.m_data(hp1r_rdata),.m_resp(hp1r_rresp),.m_rid(hp1r_rid),
         .m_last(hp1r_rlast),.m_rvalid(hp1r_rvalid),.m_rready(hp1r_rready));
 `ifdef SC7F0_TX_VIDEO_PRESENT
-    sc7f0_axi_read_arbiter #(.AW(49)) u_hp1_display_read_arbiter(
+    sc7f0_axi_read_arbiter_mo #(.AW(49), .IW(6), .ID_BIT(1)) u_hp1_display_read_arbiter(
         .clk(capture_clk),.rst_n(dp_mem_rst_n),
-        .s0_addr(hp1r_addr),.s0_len(hp1r_len),.s0_size(hp1r_size),.s0_burst(hp1r_burst),
-        .s0_valid(hp1r_valid),.s0_ready(hp1r_ready),.s0_data(hp1r_rdata),.s0_resp(hp1r_rresp),
+        .s0_addr(hp1r_addr),.s0_len(hp1r_len),.s0_size(hp1r_size),.s0_burst(hp1r_burst),.s0_arid(hp1r_arid),
+        .s0_valid(hp1r_valid),.s0_ready(hp1r_ready),.s0_data(hp1r_rdata),.s0_resp(hp1r_rresp),.s0_rid(hp1r_rid),
         .s0_last(hp1r_rlast),.s0_rvalid(hp1r_rvalid),.s0_rready(hp1r_rready),
-        .s1_addr(disp_araddr[48:0]),.s1_len(disp_arlen),.s1_size(disp_arsize),.s1_burst(disp_arburst),
-        .s1_valid(disp_arvalid),.s1_ready(disp_arready),.s1_data(disp_rdata),.s1_resp(disp_rresp),
+        .s1_addr(disp_araddr[48:0]),.s1_len(disp_arlen),.s1_size(disp_arsize),.s1_burst(disp_arburst),.s1_arid(6'd0),
+        .s1_valid(disp_arvalid),.s1_ready(disp_arready),.s1_data(disp_rdata),.s1_resp(disp_rresp),.s1_rid(),
         .s1_last(disp_rlast),.s1_rvalid(disp_rvalid),.s1_rready(disp_rready),
-        .m_addr(dp_araddr),.m_len(dp_arlen),.m_size(dp_arsize),.m_burst(dp_arburst),
-        .m_valid(dp_arvalid),.m_ready(dp_arready),.m_data(dp_rdata),.m_resp(dp_rresp),
+        .m_addr(dp_araddr),.m_len(dp_arlen),.m_size(dp_arsize),.m_burst(dp_arburst),.m_arid(dp_arid),
+        .m_valid(dp_arvalid),.m_ready(dp_arready),.m_data(dp_rdata),.m_resp(dp_rresp),.m_rid(dp_rid),
         .m_last(dp_rlast),.m_rvalid(dp_rvalid),.m_rready(dp_rready));
 `else
     assign dp_araddr=hp1r_addr;assign dp_arlen=hp1r_len;assign dp_arsize=hp1r_size;
-    assign dp_arburst=hp1r_burst;assign dp_arvalid=hp1r_valid;assign hp1r_ready=dp_arready;
-    assign hp1r_rdata=dp_rdata;assign hp1r_rresp=dp_rresp;assign hp1r_rlast=dp_rlast;
+    assign dp_arburst=hp1r_burst;assign dp_arid=hp1r_arid;assign dp_arvalid=hp1r_valid;assign hp1r_ready=dp_arready;
+    assign hp1r_rdata=dp_rdata;assign hp1r_rresp=dp_rresp;assign hp1r_rid=dp_rid;assign hp1r_rlast=dp_rlast;
     assign hp1r_rvalid=dp_rvalid;assign dp_rready=hp1r_rready;
 `endif
 
@@ -1491,7 +1521,26 @@ module zu4ev_pcie_card_top #(
     wire         comp_irq_a, comp_irq_b;
     wire         blend_locked, blend_busy, blend_enable, alpha_force_opaque, blend_unlock;
     wire         reader_b_reset;
+    wire         ovl_hw_auto_slot;
+    wire [3:0]   ovl_wr_slot_release_m, ovl_wr_slot_ready_m;
+    wire [1:0]   ovl_wr_last_slot_m;
+    wire [31:0]  ovl_wr_slot_bytes_m;
+    wire [31:0]  bar0_ovl_awaddr, bar0_ovl_wdata, bar0_ovl_araddr, bar0_ovl_rdata;
+    wire [3:0]   bar0_ovl_wstrb;
+    wire [1:0]   bar0_ovl_bresp, bar0_ovl_rresp;
+    wire         bar0_ovl_awvalid, bar0_ovl_awready, bar0_ovl_wvalid, bar0_ovl_wready;
+    wire         bar0_ovl_bvalid, bar0_ovl_bready, bar0_ovl_arvalid, bar0_ovl_arready;
+    wire         bar0_ovl_rvalid, bar0_ovl_rready;
     wire [31:0]  blend_lock_lost, blend_sat_watchdog, blend_beats;
+    // B1 SOF genlock status.  The 2-bit state is expanded to three one-hot levels
+    // before it reaches sc7f0_rgb_overlay_ctrl, because only single-bit levels may
+    // cross into the CSR clock without a tearing hazard.
+    wire [1:0]   blend_gl_state;
+    wire [2:0]   blend_drop_reason;
+    wire [31:0]  blend_lock_count, blend_base_passthru;
+    wire         blend_gl_seeking   = (blend_gl_state == 2'd0);
+    wire         blend_gl_wait_vsof = (blend_gl_state == 2'd1);
+    wire         blend_gl_lock_state= (blend_gl_state == 2'd2);
 
     sc7f0_rgb_compositor #(.PPC(2)) u_rgb_compositor (
         .csr_clk(pl_clk0),           .csr_rst_n(sys_100m_rst_n),
@@ -1551,6 +1600,11 @@ module zu4ev_pcie_card_top #(
         .blend_enable(blend_enable),
         .alpha_force_opaque(alpha_force_opaque),
         .blend_unlock(blend_unlock),
+        .ovl_slot_ready_m(ovl_wr_slot_ready_m),
+        .ovl_last_slot_m(ovl_wr_last_slot_m),
+        .ovl_slot_bytes_m(ovl_wr_slot_bytes_m),
+        .ovl_hw_auto_slot(ovl_hw_auto_slot),
+        .ovl_slot_release_m(ovl_wr_slot_release_m),
         .m_axis_video_tdata(disp_video_tdata),
         .m_axis_video_tvalid(disp_video_tvalid),
         .m_axis_video_tready(disp_video_tready),
@@ -1560,7 +1614,11 @@ module zu4ev_pcie_card_top #(
         .blend_locked(blend_locked), .blend_busy(blend_busy),
         .blend_lock_lost(blend_lock_lost),
         .blend_sat_watchdog(blend_sat_watchdog),
-        .blend_beats(blend_beats));
+        .blend_beats(blend_beats),
+        .blend_gl_state(blend_gl_state),
+        .blend_drop_reason(blend_drop_reason),
+        .blend_lock_count(blend_lock_count),
+        .blend_base_passthru(blend_base_passthru));
 
     sc7f0_rgb_overlay_ctrl u_overlay_ctrl (
         .csr_clk(pl_clk0),      .csr_rst_n(sys_100m_rst_n),
@@ -1584,6 +1642,24 @@ module zu4ev_pcie_card_top #(
         .s_axi_rresp(hdmi_ctl_rresp[19:18]),
         .s_axi_rvalid(hdmi_ctl_rvalid[9]),
         .s_axi_rready(hdmi_ctl_rready[9]),
+        .s_axil_pcie_awaddr(bar0_ovl_awaddr),
+        .s_axil_pcie_awvalid(bar0_ovl_awvalid),
+        .s_axil_pcie_awready(bar0_ovl_awready),
+        .s_axil_pcie_wdata(bar0_ovl_wdata),
+        .s_axil_pcie_wstrb(bar0_ovl_wstrb),
+        .s_axil_pcie_wvalid(bar0_ovl_wvalid),
+        .s_axil_pcie_wready(bar0_ovl_wready),
+        .s_axil_pcie_bresp(bar0_ovl_bresp),
+        .s_axil_pcie_bvalid(bar0_ovl_bvalid),
+        .s_axil_pcie_bready(bar0_ovl_bready),
+        .s_axil_pcie_araddr(bar0_ovl_araddr),
+        .s_axil_pcie_arvalid(bar0_ovl_arvalid),
+        .s_axil_pcie_arready(bar0_ovl_arready),
+        .s_axil_pcie_rdata(bar0_ovl_rdata),
+        .s_axil_pcie_rresp(bar0_ovl_rresp),
+        .s_axil_pcie_rvalid(bar0_ovl_rvalid),
+        .s_axil_pcie_rready(bar0_ovl_rready),
+        .wr_auto_advance_m(ovl_hw_auto_slot),
         .ovl_enable(ovl_ctrl_enable),
         .ovl_src_addr(ovl_ctrl_src_addr),
         .ovl_xfer_bytes(ovl_ctrl_xfer_bytes),
@@ -1629,7 +1705,13 @@ module zu4ev_pcie_card_top #(
         .blend_locked(blend_locked), .blend_busy(blend_busy),
         .blend_lock_lost(blend_lock_lost),
         .blend_sat_watchdog(blend_sat_watchdog),
-        .blend_beats(blend_beats));
+        .blend_beats(blend_beats),
+        .blend_gl_seeking(blend_gl_seeking),
+        .blend_gl_wait_vsof(blend_gl_wait_vsof),
+        .blend_gl_lock_state(blend_gl_lock_state),
+        .blend_gl_drop_reason(blend_drop_reason),
+        .blend_gl_lock_count(blend_lock_count),
+        .blend_base_passthru(blend_base_passthru));
 `else
     wire [95:0] disp_video_tdata;
     wire        disp_video_tvalid,disp_video_tready,disp_video_tlast,disp_video_tuser;
@@ -1715,6 +1797,99 @@ module zu4ev_pcie_card_top #(
     );
 
 `ifdef SC7F0_RGB_COMPOSITOR
+    // ------------------------------------------------------------------------
+    // G8: HDMI TX subsystem control merge (26111602).
+    //
+    // v_hdmi_tx_ss keeps its VTC at +0x10000, so software must see one
+    // contiguous 128 KiB aperture (the driver derives VTC = base + 0x10000 from a
+    // single reg).  The 26111601 bitstream published that aperture as one 17-bit
+    // crossbar slice, and on hardware every access with address bit 16 set died
+    // with DECERR (synchronous external abort / SIGBUS) while the TX core aliased
+    // every 2 KiB.  The deployed routed design shows a single crossbar-carried
+    // bit 16 cannot be trusted here: the read-channel bit is connected
+    // (u_hdmi_control/m_axi_araddr[80] -> u_hdmi_tx_ss/S_AXI_CPU_IN_araddr[16] ->
+    // inner crossbar -> inst/v_tc/s_axi_araddr[0]) while the write-channel bit has
+    // no net at all at the subsystem boundary (m_axi_awaddr[80] and
+    // S_AXI_CPU_IN_awaddr[16] both report no net), so a VTC write could never have
+    // selected the VTC segment.  Evidence:
+    //   build/g6g8-20261116T110140Z/tx-ss-slice2-readprobe.txt
+    //   build/g6g8-20261116T110140Z/netlist-probe/probe*.log (routed + IP DCP)
+    //   tb/tb_sc7f0_hdmi_xbar_addr_map.v (gate-level crossbar decode simulation)
+    //
+    // Fix: the crossbar now decodes two 64 KiB slices -- the window class that is
+    // proven good on this card (RX SS, frame tap, frmbuf, overlay) -- and this
+    // lock-safe 2:1 AXI4-Lite merge drives subsystem address bit 16 from the slice
+    // index: slice 2 (0xB0020000) -> bit16 = 0 selects the TX core, slice 10
+    // (0xB0030000) -> bit16 = 1 selects the VTC.  No other address bit changes, so
+    // the PS still sees 0xB0020000..0xB003FFFF as one contiguous aperture and the
+    // driver/device-tree contract is untouched.
+    // ------------------------------------------------------------------------
+    wire [16:0] txss_ctl_awaddr, txss_ctl_araddr;
+    wire        txss_ctl_awvalid, txss_ctl_awready, txss_ctl_wvalid, txss_ctl_wready;
+    wire        txss_ctl_bvalid, txss_ctl_bready, txss_ctl_arvalid, txss_ctl_arready;
+    wire        txss_ctl_rvalid, txss_ctl_rready;
+    wire [31:0] txss_ctl_wdata, txss_ctl_rdata;
+    wire [3:0]  txss_ctl_wstrb;
+    wire [1:0]  txss_ctl_bresp, txss_ctl_rresp;
+
+    sc7f0_axil_merge_2to1 #(.ADDR_WIDTH(17), .DATA_WIDTH(32)) u_hdmi_tx_ctl_merge (
+        .clk(pl_clk0), .rst_n(sys_100m_rst_n),
+        // S0 = slice 2,  0xB0020000..0xB002FFFF -> subsystem address bit16 = 0
+        .s0_axil_awaddr ({1'b0, hdmi_ctl_awaddr[79:64]}),
+        .s0_axil_awvalid(hdmi_ctl_awvalid[2]),
+        .s0_axil_awready(hdmi_ctl_awready[2]),
+        .s0_axil_wdata  (hdmi_ctl_wdata[95:64]),
+        .s0_axil_wstrb  (hdmi_ctl_wstrb[11:8]),
+        .s0_axil_wvalid (hdmi_ctl_wvalid[2]),
+        .s0_axil_wready (hdmi_ctl_wready[2]),
+        .s0_axil_bresp  (hdmi_ctl_bresp[5:4]),
+        .s0_axil_bvalid (hdmi_ctl_bvalid[2]),
+        .s0_axil_bready (hdmi_ctl_bready[2]),
+        .s0_axil_araddr ({1'b0, hdmi_ctl_araddr[79:64]}),
+        .s0_axil_arvalid(hdmi_ctl_arvalid[2]),
+        .s0_axil_arready(hdmi_ctl_arready[2]),
+        .s0_axil_rdata  (hdmi_ctl_rdata[95:64]),
+        .s0_axil_rresp  (hdmi_ctl_rresp[5:4]),
+        .s0_axil_rvalid (hdmi_ctl_rvalid[2]),
+        .s0_axil_rready (hdmi_ctl_rready[2]),
+        // S1 = slice 10, 0xB0030000..0xB003FFFF -> subsystem address bit16 = 1
+        .s1_axil_awaddr ({1'b1, hdmi_ctl_awaddr[335:320]}),
+        .s1_axil_awvalid(hdmi_ctl_awvalid[10]),
+        .s1_axil_awready(hdmi_ctl_awready[10]),
+        .s1_axil_wdata  (hdmi_ctl_wdata[351:320]),
+        .s1_axil_wstrb  (hdmi_ctl_wstrb[43:40]),
+        .s1_axil_wvalid (hdmi_ctl_wvalid[10]),
+        .s1_axil_wready (hdmi_ctl_wready[10]),
+        .s1_axil_bresp  (hdmi_ctl_bresp[21:20]),
+        .s1_axil_bvalid (hdmi_ctl_bvalid[10]),
+        .s1_axil_bready (hdmi_ctl_bready[10]),
+        .s1_axil_araddr ({1'b1, hdmi_ctl_araddr[335:320]}),
+        .s1_axil_arvalid(hdmi_ctl_arvalid[10]),
+        .s1_axil_arready(hdmi_ctl_arready[10]),
+        .s1_axil_rdata  (hdmi_ctl_rdata[351:320]),
+        .s1_axil_rresp  (hdmi_ctl_rresp[21:20]),
+        .s1_axil_rvalid (hdmi_ctl_rvalid[10]),
+        .s1_axil_rready (hdmi_ctl_rready[10]),
+        // M = the subsystem's single control port, 17-bit address
+        .m_axil_awaddr  (txss_ctl_awaddr),
+        .m_axil_awvalid (txss_ctl_awvalid),
+        .m_axil_awready (txss_ctl_awready),
+        .m_axil_wdata   (txss_ctl_wdata),
+        .m_axil_wstrb   (txss_ctl_wstrb),
+        .m_axil_wvalid  (txss_ctl_wvalid),
+        .m_axil_wready  (txss_ctl_wready),
+        .m_axil_bresp   (txss_ctl_bresp),
+        .m_axil_bvalid  (txss_ctl_bvalid),
+        .m_axil_bready  (txss_ctl_bready),
+        .m_axil_araddr  (txss_ctl_araddr),
+        .m_axil_arvalid (txss_ctl_arvalid),
+        .m_axil_arready (txss_ctl_arready),
+        .m_axil_rdata   (txss_ctl_rdata),
+        .m_axil_rresp   (txss_ctl_rresp),
+        .m_axil_rvalid  (txss_ctl_rvalid),
+        .m_axil_rready  (txss_ctl_rready)
+    );
+
     v_hdmi_tx_ss_rgb u_hdmi_tx_ss (
 `else
     v_hdmi_tx_ss_0 u_hdmi_tx_ss (
@@ -1747,6 +1922,31 @@ module zu4ev_pcie_card_top #(
         .AUDIO_IN_tid          (8'd0),
         .AUDIO_IN_tready       (),
         .AUDIO_IN_tvalid       (1'b0),
+        // SC7F0_RGB_COMPOSITOR: two 64 KiB crossbar slices merged by
+        // u_hdmi_tx_ctl_merge, which drives subsystem address bit 16 (0 = TX core
+        // at +0x00000, 1 = VTC at +0x10000).  Other personalities keep the
+        // original single slice-2 connection.
+`ifdef SC7F0_RGB_COMPOSITOR
+        .S_AXI_CPU_IN_araddr   (txss_ctl_araddr),
+        .S_AXI_CPU_IN_arprot   (3'd0),
+        .S_AXI_CPU_IN_arready  (txss_ctl_arready),
+        .S_AXI_CPU_IN_arvalid  (txss_ctl_arvalid),
+        .S_AXI_CPU_IN_awaddr   (txss_ctl_awaddr),
+        .S_AXI_CPU_IN_awprot   (3'd0),
+        .S_AXI_CPU_IN_awready  (txss_ctl_awready),
+        .S_AXI_CPU_IN_awvalid  (txss_ctl_awvalid),
+        .S_AXI_CPU_IN_bready   (txss_ctl_bready),
+        .S_AXI_CPU_IN_bresp    (txss_ctl_bresp),
+        .S_AXI_CPU_IN_bvalid   (txss_ctl_bvalid),
+        .S_AXI_CPU_IN_rdata    (txss_ctl_rdata),
+        .S_AXI_CPU_IN_rready   (txss_ctl_rready),
+        .S_AXI_CPU_IN_rresp    (txss_ctl_rresp),
+        .S_AXI_CPU_IN_rvalid   (txss_ctl_rvalid),
+        .S_AXI_CPU_IN_wdata    (txss_ctl_wdata),
+        .S_AXI_CPU_IN_wready   (txss_ctl_wready),
+        .S_AXI_CPU_IN_wstrb    (txss_ctl_wstrb),
+        .S_AXI_CPU_IN_wvalid   (txss_ctl_wvalid),
+`else
         .S_AXI_CPU_IN_araddr   (hdmi_ctl_araddr[80:64]),
         .S_AXI_CPU_IN_arprot   (3'd0),
         .S_AXI_CPU_IN_arready  (hdmi_ctl_arready[2]),
@@ -1766,6 +1966,7 @@ module zu4ev_pcie_card_top #(
         .S_AXI_CPU_IN_wready   (hdmi_ctl_wready[2]),
         .S_AXI_CPU_IN_wstrb    (hdmi_ctl_wstrb[11:8]),
         .S_AXI_CPU_IN_wvalid   (hdmi_ctl_wvalid[2]),
+`endif
         .DDC_OUT_scl_i         (tx_ddc_scl_i),
         .DDC_OUT_scl_o         (tx_ddc_scl_o),
         .DDC_OUT_scl_t         (tx_ddc_scl_t),
@@ -3083,7 +3284,28 @@ module zu4ev_pcie_card_top #(
         .ovl_wready                      (ovl_hp3_wready),
         .ovl_bresp                       (ovl_hp3_bresp),
         .ovl_bvalid                      (ovl_hp3_bvalid),
-        .ovl_bready                      (ovl_hp3_bready)
+        .ovl_bready                      (ovl_hp3_bready),
+        .ovl_wr_slot_release_m           (ovl_wr_slot_release_m),
+        .ovl_wr_slot_ready_m             (ovl_wr_slot_ready_m),
+        .ovl_wr_last_slot_m              (ovl_wr_last_slot_m),
+        .ovl_wr_slot_bytes_m             (ovl_wr_slot_bytes_m),
+        .m_axil_ovl_awaddr               (bar0_ovl_awaddr),
+        .m_axil_ovl_awvalid              (bar0_ovl_awvalid),
+        .m_axil_ovl_awready              (bar0_ovl_awready),
+        .m_axil_ovl_wdata                (bar0_ovl_wdata),
+        .m_axil_ovl_wstrb                (bar0_ovl_wstrb),
+        .m_axil_ovl_wvalid               (bar0_ovl_wvalid),
+        .m_axil_ovl_wready               (bar0_ovl_wready),
+        .m_axil_ovl_bresp                (bar0_ovl_bresp),
+        .m_axil_ovl_bvalid               (bar0_ovl_bvalid),
+        .m_axil_ovl_bready               (bar0_ovl_bready),
+        .m_axil_ovl_araddr               (bar0_ovl_araddr),
+        .m_axil_ovl_arvalid              (bar0_ovl_arvalid),
+        .m_axil_ovl_arready              (bar0_ovl_arready),
+        .m_axil_ovl_rdata                (bar0_ovl_rdata),
+        .m_axil_ovl_rresp                (bar0_ovl_rresp),
+        .m_axil_ovl_rvalid               (bar0_ovl_rvalid),
+        .m_axil_ovl_rready               (bar0_ovl_rready)
 `else
         .ovl_enable                      (1'b0),
         .ovl_src_addr                    (64'd0),
@@ -3141,7 +3363,28 @@ module zu4ev_pcie_card_top #(
         .ovl_wready                      (1'b0),
         .ovl_bresp                       (2'b00),
         .ovl_bvalid                      (1'b0),
-        .ovl_bready                      ()
+        .ovl_bready                      (),
+        .ovl_wr_slot_release_m           (4'd0),
+        .ovl_wr_slot_ready_m             (),
+        .ovl_wr_last_slot_m              (),
+        .ovl_wr_slot_bytes_m             (),
+        .m_axil_ovl_awaddr               (),
+        .m_axil_ovl_awvalid              (),
+        .m_axil_ovl_awready              (1'b1),
+        .m_axil_ovl_wdata                (),
+        .m_axil_ovl_wstrb                (),
+        .m_axil_ovl_wvalid               (),
+        .m_axil_ovl_wready               (1'b1),
+        .m_axil_ovl_bresp                (2'b00),
+        .m_axil_ovl_bvalid               (1'b0),
+        .m_axil_ovl_bready               (),
+        .m_axil_ovl_araddr               (),
+        .m_axil_ovl_arvalid              (),
+        .m_axil_ovl_arready              (1'b1),
+        .m_axil_ovl_rdata                (32'd0),
+        .m_axil_ovl_rresp                (2'b00),
+        .m_axil_ovl_rvalid               (1'b0),
+        .m_axil_ovl_rready               ()
 `endif
     );
 
@@ -3163,11 +3406,11 @@ module zu4ev_pcie_card_top #(
         .S_AXI_HP1_FPD_bresp(dp_bresp),.S_AXI_HP1_FPD_bvalid(dp_bvalid),.S_AXI_HP1_FPD_bready(dp_bready),
         .S_AXI_HP1_FPD_araddr(dp_araddr),.S_AXI_HP1_FPD_arlen(dp_arlen),
         .S_AXI_HP1_FPD_arsize(dp_arsize),.S_AXI_HP1_FPD_arburst(dp_arburst),
-        .S_AXI_HP1_FPD_arid(6'd0),.S_AXI_HP1_FPD_arlock(1'b0),
+        .S_AXI_HP1_FPD_arid(dp_arid),.S_AXI_HP1_FPD_arlock(1'b0),
         .S_AXI_HP1_FPD_arcache(4'd3),.S_AXI_HP1_FPD_arprot(3'd0),
-        .S_AXI_HP1_FPD_arqos(4'd0),.S_AXI_HP1_FPD_aruser(1'b0),
+        .S_AXI_HP1_FPD_arqos(4'hF),.S_AXI_HP1_FPD_aruser(1'b0),
         .S_AXI_HP1_FPD_arvalid(dp_arvalid),.S_AXI_HP1_FPD_arready(dp_arready),
-        .S_AXI_HP1_FPD_rdata(dp_rdata),.S_AXI_HP1_FPD_rid(),
+        .S_AXI_HP1_FPD_rdata(dp_rdata),.S_AXI_HP1_FPD_rid(dp_rid),
         .S_AXI_HP1_FPD_rresp(dp_rresp),.S_AXI_HP1_FPD_rlast(dp_rlast),
         .S_AXI_HP1_FPD_rvalid(dp_rvalid),.S_AXI_HP1_FPD_rready(dp_rready),
         // M_AXI_HPM1_FPD (full AXI4 PS master -> protocol converter -> HDMI crossbar)
@@ -3230,7 +3473,7 @@ module zu4ev_pcie_card_top #(
         .S_AXI_HP2_FPD_arsize(rd_b_arsize), .S_AXI_HP2_FPD_arburst(rd_b_arburst),
         .S_AXI_HP2_FPD_arid(6'd0), .S_AXI_HP2_FPD_arlock(1'b0),
         .S_AXI_HP2_FPD_arcache(4'd3), .S_AXI_HP2_FPD_arprot(3'd0),
-        .S_AXI_HP2_FPD_arqos(4'd0), .S_AXI_HP2_FPD_aruser(1'b0),
+        .S_AXI_HP2_FPD_arqos(4'hF), .S_AXI_HP2_FPD_aruser(1'b0),
         .S_AXI_HP2_FPD_arvalid(rd_b_arvalid), .S_AXI_HP2_FPD_arready(rd_b_arready),
         .S_AXI_HP2_FPD_rdata(rd_b_rdata), .S_AXI_HP2_FPD_rid(),
         .S_AXI_HP2_FPD_rresp(rd_b_rresp), .S_AXI_HP2_FPD_rlast(rd_b_rlast),

@@ -37,8 +37,6 @@ module sc7f0_rgb24_pack_tb;
 
     reg s_clk = 0, m_clk = 0;
     reg s_rst_n = 0, m_rst_n = 0;
-    always #1.7 s_clk = ~s_clk;      // ~294 MHz (video side)
-    always #4.0 m_clk = ~m_clk;      // 125 MHz  (PCIe side)
 
     reg  [PPC*24-1:0] tdata = 0;
     reg               tvalid = 0, tlast = 0, tuser = 0;
@@ -51,6 +49,20 @@ module sc7f0_rgb24_pack_tb;
 
     integer errors = 0;
     reg gate_pass = 1'b0;
+    reg tb_finished = 1'b0;   // set with the verdict; silences the watchdog and the clock
+
+    initial begin : clk_gen
+        // Stopping the clock at the verdict is what makes this testbed
+        // re-runnable: a batch gate may issue a second `run` after the test
+        // already called $finish, and with a free-running clock the scoreboards
+        // keep observing beats no stimulus ever drove (that is how a passing
+        // repack testbed once came out of the gate with gate_pass=0).
+        while (!tb_finished) begin
+            #1.7 s_clk = ~s_clk;   // ~294 MHz (video side)
+            #4.0 m_clk = ~m_clk;   // 125 MHz  (PCIe side)
+        end
+    end
+
 
     sc7f0_rgb24_axis_pack #(.NATIVE_PPC(PPC), .FIFO_DEPTH(64)) dut (
         .s_clk(s_clk), .s_rst_n(s_rst_n),
@@ -82,11 +94,13 @@ module sc7f0_rgb24_pack_tb;
     // condition a reported FAIL instead of an xsimk that spins for 30 minutes.
     initial begin : watchdog
         #2_000_000;                       // whole suite needs ~200 us of sim time
+        if (!tb_finished) begin
         $display("TB_WATCHDOG_TIMEOUT sc7f0_rgb24_pack_tb: no $finish within 2 ms (beats=%0d produced=%0d published=%0d)",
                  beats_seen, gp, ghead);
         gate_pass = 1'b0;
         $display("RGB24_PACK_TB_FAIL");
         $finish;
+        end
     end
 
     always @(posedge s_clk) if (!tready && s_rst_n) ready_low_cycles <= ready_low_cycles + 1;
@@ -308,6 +322,7 @@ module sc7f0_rgb24_pack_tb;
         $display("SC7F0_RGB24_PACK T5 overflow_sticky=1 ovf_full_cnt=%0d published_bytes=%0d (frame abandoned, not silently truncated)",
                  dut.ovf_full_cnt, ghead);
 
+        tb_finished = 1'b1;
         gate_pass = (errors == 0);
         $display("SC7F0_RGB24_PACK_TB errors=%0d gate_pass=%b", errors, gate_pass);
         if (errors == 0) $display("RGB24_PACK_TB_PASS");

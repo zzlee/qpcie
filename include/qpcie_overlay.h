@@ -118,4 +118,53 @@ struct qovl_busy {
 /* Always -EOPNOTSUPP in this revision; see struct qovl_busy. */
 #define QOVL_IOC_FREE	_IOW(QOVL_IOC_MAGIC, 0x42, struct qovl_busy)
 
+/* Phase C-B: BAR0 Overlay CSR window (pcie_user_clk) + MSI frame sync */
+#define QOVL_BAR0_OFFSET	0x4000U
+#define QOVL_REG_CTRL		0x00U
+#define QOVL_REG_SRC_LO		0x04U
+#define QOVL_REG_SRC_HI		0x08U
+#define QOVL_REG_XFER_BYTES	0x0CU
+#define QOVL_REG_MAX_REQ	0x10U
+#define QOVL_REG_DST_BASE_LO	0x14U
+#define QOVL_REG_DST_BASE_HI	0x18U
+#define QOVL_REG_SLOT_BYTES	0x1CU
+#define QOVL_REG_FRAME_BYTES	0x20U
+#define QOVL_REG_CONSUME	0x24U
+#define QOVL_REG_COMP_CTRL	0x30U
+#define QOVL_REG_STATUS		0x40U
+#define QOVL_REG_STATUS2	0x44U
+#define QOVL_REG_WR_FRAMES_DONE	0x54U
+#define QOVL_REG_ID		0x78U
+
+#define QOVL_SUBMIT_NONBLOCK	(1U << 0)
+#define QOVL_SUBMIT_ASYNC	(1U << 1)
+
+struct qovl_config {
+	__u64 ps_dst_base;	/* 0 = default QOVL_PS_POOL_BASE (0x54000000) */
+	__u32 frame_bytes;	/* 0 = default QOVL_RGBA_FRAME_BYTES */
+	__u32 nslots;		/* 0 = keep ring nslots */
+	__u32 blend_enable;	/* 0 or 1 */
+	__u32 alpha_opaque;	/* 0 or 1 */
+	__u32 flags;
+	__u32 reserved;
+};
+
+struct qovl_submit {
+	__u32 slot;		/* in: 0..nslots-1 */
+	__u32 bytes;		/* in: 0 = frame_bytes */
+	__u32 flags;		/* in: QOVL_SUBMIT_NONBLOCK | QOVL_SUBMIT_ASYNC */
+	__u32 seq_out;		/* out: frame sequence number */
+};
+
+struct qovl_wait {
+	__u32 target_seq;	/* in: 0 = wait for current submit_seq */
+	__u32 timeout_ms;	/* in: 0 = 1000 ms default */
+	__u32 done_seq;		/* out: latest completed seq */
+	__u32 status;		/* out: BAR0 STATUS (0x40) */
+};
+
+#define QOVL_IOC_CONFIG	_IOW(QOVL_IOC_MAGIC, 0x43, struct qovl_config)
+#define QOVL_IOC_SUBMIT	_IOWR(QOVL_IOC_MAGIC, 0x44, struct qovl_submit)
+#define QOVL_IOC_WAIT	_IOWR(QOVL_IOC_MAGIC, 0x45, struct qovl_wait)
+
 #endif /* QPCIE_OVERLAY_H */

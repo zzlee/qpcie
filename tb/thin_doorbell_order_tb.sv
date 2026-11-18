@@ -27,6 +27,10 @@ module thin_doorbell_order_tb;
     wire frame_launch_req;
     wire [244:0] frame_launch_bus;
     reg frame_launch_ack=0, capture_engine_busy=0;
+    // Format-guard refusal input of rtl/thin_desc_fetch_engine.v:73; this bench tests
+    // descriptor doorbell ordering with an accepting guard, so it must be driven low
+    // rather than left floating (see tb/thin_nv_formats_tb.sv for the same reason).
+    reg frame_abort=0;
     integer y_bytes=0, uv_bytes=0, launches=0, frame_index;
     integer y_target=1024, uv_target=512, y_descriptors=1, uv_descriptors=1;
     function [31:0] descriptor_bytes(input [63:0] address);

@@ -62,7 +62,16 @@
 			};
 			port@1 {
 				reg = <1>;
+				/* Label follows the CSC (see sc7f0_ps_csc port@0): RGB under
+				 * the RGB personality, YCbCr 4:2:2 otherwise.  A mismatch here
+				 * only mislabels the graph, but a mislabelled graph is exactly
+				 * what makes a colour-cast bug look like a driver bug.
+				 */
+#if defined(SC7F0_RGB_COMPOSITOR_ENABLE) && SC7F0_RGB_COMPOSITOR_ENABLE
+				xlnx,video-format = <0>;
+#else
 				xlnx,video-format = <2>;
+#endif
 				xlnx,video-width = <8>;
 				sc7f0_tap_out: endpoint { remote-endpoint = <&sc7f0_csc_in>; };
 			};
@@ -81,13 +90,32 @@
 			#size-cells = <0>;
 			port@0 {
 				reg = <0>;
+				/* drivers/media/platform/xilinx/xilinx-vpss-csc.c numbers the
+				 * colour spaces RGB=0, YCRCB_444=1, YCRCB_422=2, YCRCB_420=3.
+				 * The shipped capture persona takes YCbCr 4:2:2 from the tap and
+				 * puts YCbCr 4:2:0 (NV12) in DDR.  Under the RGB personality the
+				 * writer takes RGBX, so the CSC has to leave the pixels as RGB:
+				 * both ends become 0 and the driver runs its RGB->RGB path
+				 * (xilinx-vpss-csc.c defaults cft_in/cft_out to XVIDC_CSF_RGB).
+				 * If a source turns out to be YCbCr rather than RGB, the fix is
+				 * this pair of values (in 1 or 2, out 0), not a fabric change;
+				 * scripts/audit_sc7f0_rgb_compositor_image.sh is what decides it.
+				 */
+#if defined(SC7F0_RGB_COMPOSITOR_ENABLE) && SC7F0_RGB_COMPOSITOR_ENABLE
+				xlnx,video-format = <0>;
+#else
 				xlnx,video-format = <2>;
+#endif
 				xlnx,video-width = <8>;
 				sc7f0_csc_in: endpoint { remote-endpoint = <&sc7f0_tap_out>; };
 			};
 			port@1 {
 				reg = <1>;
+#if defined(SC7F0_RGB_COMPOSITOR_ENABLE) && SC7F0_RGB_COMPOSITOR_ENABLE
+				xlnx,video-format = <0>;
+#else
 				xlnx,video-format = <3>;
+#endif
 				xlnx,video-width = <8>;
 				sc7f0_csc_out: endpoint { remote-endpoint = <&sc7f0_capture_in>; };
 			};
@@ -107,7 +135,22 @@
 		xlnx,dma-align = <32>;
 		xlnx,max-width = <4096>;
 		xlnx,max-height = <2160>;
+		/* A1 (round 26111602): under the RGB compositor personality this buffer IS
+		 * the compositor's Plane A, and Plane A is DRM_FORMAT_ABGR8888 (AB24),
+		 * whose memory bytes are R,G,B,A.  The IP is built with HAS_RGBX8, and the
+		 * driver's own table in drivers/dma/xilinx/xilinx_frmbuf.c pairs
+		 *   "xbgr8888" -> XILINX_FRMBUF_FMT_RGBX8 -> DRM_FORMAT_XBGR8888 -> R,G,B,X
+		 *   "xrgb8888" -> XILINX_FRMBUF_FMT_BGRX8 -> DRM_FORMAT_XRGB8888 -> B,G,R,X
+		 * so "xbgr8888" is the only string here that is byte-compatible with the
+		 * plane that reads it; "xrgb8888" would reach the HDMI output with red and
+		 * blue exchanged.  One format on purpose: the driver must have exactly one
+		 * format to negotiate on this node.
+		 */
+#if defined(SC7F0_RGB_COMPOSITOR_ENABLE) && SC7F0_RGB_COMPOSITOR_ENABLE
+		xlnx,vid-formats = "xbgr8888";
+#else
 		xlnx,vid-formats = "nv12";
+#endif
 		status = "okay";
 	};
 };

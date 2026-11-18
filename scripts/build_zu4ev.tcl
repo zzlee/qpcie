@@ -433,8 +433,13 @@ generate_target all [get_ips proc_sys_reset_0]
 
 if {!$debug_profile} {
 # PS HPM1 control aperture. All three IP register banks run on pl_clk0.
+# AXI4-Lite control crossbar on M_AXI_HPM1_FPD.  The SC7F0_RGB_COMPOSITOR profile
+# adds three slices: M08 (0xB0090000 compositor Reader-B CSR), M09 (0xB00A0000
+# overlay ingress/writer/compositor control) and M10 (0xB0030000, the upper half of
+# the HDMI TX subsystem aperture so the VTC at tx_ss+0x10000 is reachable; see
+# scripts/create_sc7f0_hdmi_crossbar.tcl and docs/g6_hdmi_tx_drm_reachability.md).
 source ./scripts/create_sc7f0_hdmi_crossbar.tcl
-create_sc7f0_hdmi_crossbar [expr {$rgb_enable ? 2 : 0}]
+create_sc7f0_hdmi_crossbar [expr {$rgb_enable ? 3 : 0}]
 if {!$rgb_enable} {
 # 6. Generate Video PHY Controller IP Core (vid_phy_controller_0 - Quad 226 HDMI RX/TX)
 puts "Generating Video PHY Controller IP Core (vid_phy_controller_0)..."
@@ -505,6 +510,14 @@ source scripts/create_sc7f0_frmbuf_ip.tcl
 create_sc7f0_frmbuf_ip
 source scripts/create_sc7f0_vpss_csc_ip.tcl
 create_sc7f0_vpss_csc_ip
+# A1: under the compositor personality the PS DDR capture buffer IS the base
+# plane, so the branch gets the 32-bit RGBX writer as well (rtl/
+# sc7f0_ps_frmbuf_writer.v picks between the two at elaboration; the NV12 module
+# above stays generated because it is still what every other personality and the
+# official-capture simulation gate uses).
+if {$rgb_enable} {
+    create_sc7f0_frmbuf_wr_rgbx_ip
+}
 
 # Display branch IP, only when the personality asks for it. The two procs and
 # their geometry guards live in their own files and were previously sourced by

@@ -83,6 +83,11 @@ module sc7f0_capture_pipeline(
         .s_axi_ctrl_araddr(cra[40:32]),.s_axi_ctrl_arvalid(crav[1]),.s_axi_ctrl_arready(crar[1]),
         .s_axi_ctrl_rdata(crd[63:32]),.s_axi_ctrl_rresp(crr[3:2]),.s_axi_ctrl_rvalid(crv[1]),.s_axi_ctrl_rready(crrdy[1]));
     // 4PPC framebuffer uses vendor-recommended FB256; PS HP1 remains 128-bit.
+    // u_writer is rtl/sc7f0_ps_frmbuf_writer.v: the same 4PPC/native-256 shape in
+    // every personality, whose memory FORMAT is the thing that switches - NV12
+    // (VCU era) or 32-bit RGBX whose bytes match the compositor's AB24 base plane
+    // (SC7F0_RGB_COMPOSITOR).  Instance name, ports, clock, reset and the 256->128
+    // converter onto S_AXI_HP1_FPD at 300 MHz are unchanged in both branches.
     wire [63:0] fb_awaddr,fb_araddr;
     wire [7:0] fb_awlen,fb_arlen;
     wire [2:0] fb_awsize,fb_arsize;
@@ -91,7 +96,7 @@ module sc7f0_capture_pipeline(
     wire fb_arvalid,fb_arready,fb_rvalid,fb_rready,fb_rlast;
     wire [255:0] fb_wdata,fb_rdata;
     wire [31:0] fb_wstrb;
-    sc7f0_frmbuf_wr u_writer(
+    sc7f0_ps_frmbuf_writer u_writer(
         .ap_clk(mem_clk),.ap_rst_n(writer_rst_n),.interrupt(irq),
         .s_axis_video_TDATA(converted),.s_axis_video_TVALID(cv),.s_axis_video_TREADY(cready),
         .s_axis_video_TUSER(cs),.s_axis_video_TLAST(ce),.s_axis_video_TKEEP(keep),.s_axis_video_TSTRB(strb),

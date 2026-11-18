@@ -105,7 +105,7 @@ proc create_sc7f0_hdmi_tx_ip_rgb {} {
     sc7f0_rgb_apply_ip_config [get_ips v_hdmi_tx_ss_rgb] [list \
         CONFIG.C_INCLUDE_AUDIO {1} \
         CONFIG.C_INCLUDE_DCPCOMBINER {1} \
-        CONFIG.C_INCLUDE_HDCP {1} \
+        CONFIG.C_INCLUDE_HDCP {0} \
         CONFIG.C_INPUT_PIXELS_PER_CLOCK {2} \
         CONFIG.C_MAX_BITS_PER_COMPONENT {8} \
         CONFIG.C_VID_INTERFACE {0} \

@@ -93,6 +93,10 @@ module tb_thin_desc_fetch_engine;
         .ring1_tail(ring1_tail),
         .ring1_head(ring1_head),
         .frame_done_in(frame_done_in),
+        // Format-guard refusal (rtl/thin_desc_fetch_engine.v:73) tied off: this bench
+        // never arms a profile the guard would refuse, and leaving the input floating
+        // would make the walker's retire condition depend on an unresolved z.
+        .frame_abort(1'b0),
         .frame_count(frame_count),
         .drop_count(drop_count),
         .busy(busy),

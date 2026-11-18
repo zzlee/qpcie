@@ -413,6 +413,6 @@
 	xlnx,max-bits-per-component = <8>;
 	clock-names = "s_axi_cpu_aclk", "s_axis_video_aclk", "txref-clk",
 		      "retimer-clk";
-	clocks = <&zynqmp_clk 71>, <&sc7f0_tx_video_clk>, <&sc7f0_tx_ref_clk>,
+	clocks = <&zynqmp_clk 71>, <&sc7f0_tx_video_clk>, <&si5319 0>,
 		 <&sc7f0_tx_retimer_clk>;
 };

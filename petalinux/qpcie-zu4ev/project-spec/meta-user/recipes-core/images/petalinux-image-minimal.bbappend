@@ -60,3 +60,29 @@ IMAGE_INSTALL:remove = "${SC7F0_RGB_COMPOSITOR_VCU_REMOVE}"
 # the only way it can be present when it is needed is to ship in the image.
 # Kept on its own IMAGE_INSTALL line so every line above stays byte-identical.
 IMAGE_INSTALL:append = " sc7f0-rgb-overlay"
+
+# A1's acceptance needs the capture buffer and the display plane to be the SAME
+# buffer, which only a program that does VIDIOC_EXPBUF -> drmPrimeFDToHandle ->
+# drmModeAddFB2 -> drmModePageFlip can show; modetest allocates its own framebuffers
+# and therefore proves nothing about the capture path.  Shipped unconditionally for
+# the same reason as sc7f0-rgb-overlay (the card has no network and no base64, so a
+# diagnostic that is not in the image cannot be used), and it is inert unless run.
+IMAGE_INSTALL:append = " sc7f0-dmabuf-loop"
+
+# Nothing in the RGB persona configures the capture graph any more.  The VCU persona gets
+# that from sc7f0-vcud.service's ExecStartPre, and sc7f0-vcud is exactly what the :remove
+# above takes away, so on this persona a cold boot leaves both vpss-csc pads at the driver
+# default UYVY8_1X16/1280x720 and the VIPP node unconfigurable - the state recorded in
+# build/accept-26111602/card-pipeline.txt, which the 26111602 acceptance session repaired by
+# hand with two `media-ctl -V` writes before RGB capture worked
+# (build/accept-26111602/card-capture-final.txt section A).  sc7f0-capture-init-rgb ships
+# that sequence as a boot unit so a reboot reproduces it without a human; it is installed
+# only for the persona that needs it, because on the VCU persona the same pads must stay
+# RGB->YUV for the encoder.  Same ':remove'-style ordering argument as above: this runs
+# after every :append in the file, and every line above stays byte-identical.
+SC7F0_RGB_COMPOSITOR_IMAGE_ADDONS ?= ""
+python __anonymous() {
+    if d.getVar('SC7F0_RGB_COMPOSITOR_ENABLE') == '1':
+        d.setVar('SC7F0_RGB_COMPOSITOR_IMAGE_ADDONS', 'sc7f0-capture-init-rgb')
+}
+IMAGE_INSTALL:append = " ${SC7F0_RGB_COMPOSITOR_IMAGE_ADDONS}"

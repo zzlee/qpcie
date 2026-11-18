@@ -24,7 +24,17 @@ module sc7f0_c2h_caps_tb;
     initial begin
         repeat(3) @(posedge clk); @(negedge clk); rst_n=1;
         read_check(12'h004,32'h26102802);
+        // Caps must say exactly what fabric is present: bit28 is the C2H-only
+        // personality, and bit20 (QPCIE_CAP_RGB_COMPOSITOR) additionally marks
+        // the H2C overlay plane + 2PPC alpha blend. driver/qpcie_overlay.c opens
+        // /dev/qpcie-ovl-* on that bit, so a wrong value here silently removes a
+        // userspace interface. Compiled both ways by
+        // scripts/tests/test_sc7f0_c2h_profile.py.
+`ifdef SC7F0_RGB_COMPOSITOR
+        read_check(12'h008,32'h1011011f);
+`else
         read_check(12'h008,32'h1001011f);
+`endif
         $display("SC7F0_C2H_CAPS_PASS"); $finish;
     end
     initial begin #20000; $fatal(1,"timeout"); end

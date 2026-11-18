@@ -171,7 +171,13 @@ def check(args, output):
         require(cells(cap, "yuan,frame-tap"), cells(tap, "phandle"), "SOF provider")
         require(cells("/capture-clock", "clock-frequency"), [300000000], "capture clock")
         require(strings(fb, "compatible"), ["xlnx,axi-frmbuf-wr-v2.2"], "framebuffer driver match")
-        require(strings(fb, "xlnx,vid-formats"), ["nv12"], "capture formats")
+        # A1 (round 26111602): under the RGB personality the capture buffer is Plane A,
+        # so it is RGBX ("xbgr8888" -> XILINX_FRMBUF_FMT_RGBX8 -> DRM_FORMAT_XBGR8888 ->
+        # memory R,G,B,X, which is what AB24 reads).  "xrgb8888" is the OTHER format
+        # (FMT_BGRX8, memory B,G,R,X) and would come out of the HDMI output with red and
+        # blue exchanged, so the two strings are not interchangeable here.
+        require(strings(fb, "xlnx,vid-formats"),
+                ["xbgr8888"] if rgb else ["nv12"], "capture formats")
         fp = xci("sc7f0_frmbuf_wr")
         cp = xci("sc7f0_vpss_csc")
         for prop, param in {"dma-addr-width": "AXIMM_ADDR_WIDTH", "pixels-per-clock": "SAMPLES_PER_CLOCK", "max-width": "MAX_COLS", "max-height": "MAX_ROWS"}.items():
@@ -194,7 +200,28 @@ def check(args, output):
         # masters when the RGB compositor is present, and sc7f0-rgb-compositor.dtsi
         # names M07/M08/M09 as the Reader-A / Reader-B / overlay windows, so the
         # destination count and those three windows are personality facts.
-        require(int(cross["NUM_MI"]), 10 if rgb else 7, "control destinations")
+        # G8 (round 26111602) added the third RGB slice (M10 at 0xB0030000, the upper
+        # half of the HDMI TX subsystem aperture, so the Timing Controller at
+        # tx_ss + 0x10000 is reachable).  11 is read out of this round's own generated
+        # axi_crossbar_hdmi.xci, not derived arithmetically.
+        require(int(cross["NUM_MI"]), 11 if rgb else 7, "control destinations")
+        # G8 (round 26111602): under the RGB personality the HDMI TX subsystem is
+        # decoded as TWO 64 KiB slices, M02 = 0xB0020000 and M10 = 0xB0030000, and
+        # that split IS the fix - 26111601 shipped one 128 KiB M02 and 0xB0030000
+        # DECERRed, because the subsystem's own control port loses address bit 16 and
+        # the VTC therefore has to arrive on a separate slice.  Nothing checked it:
+        # the window list below only covers M04..M09, so a build that quietly kept
+        # the old 128 KiB slice passed this gate unchanged.  Assert both slices here,
+        # and keep the legacy personality's single slice asserted too so neither one
+        # can drift by accident.
+        require(int(cross["M02_A00_BASE_ADDR"], 16), 0xB0020000, "TX SS control base")
+        require(int(cross["M02_A00_ADDR_WIDTH"]), 16 if rgb else 17,
+                "TX SS lower slice width (64 KiB under RGB, 128 KiB legacy)")
+        if rgb:
+            require(int(cross["M10_A00_BASE_ADDR"], 16), 0xB0030000,
+                    "TX SS upper slice base (the VTC half)")
+            require(int(cross["M10_A00_ADDR_WIDTH"]), 16,
+                    "TX SS upper slice width")
         windows = [(4, 0xb0050000, 12), (5, 0xb0060000, 16), (6, 0xb0070000, 12)]
         if rgb:
             windows += [(7, 0xb0080000, 16), (8, 0xb0090000, 12),
@@ -236,8 +263,27 @@ def check(args, output):
         want = [f for f, on in (("abgr8888", rd["HAS_RGBA8"]),
                                ("argb8888", rd["HAS_BGRA8"])) if on == "1"]
         require(formats, want, "reader formats")
-        print("SC7F0_RGB_GEOMETRY_DT_PASS: VPHY/RX/TX/plane-A cells match the *_rgb "
-              "XCI (transceiver-width, pixels-per-clock, dma-align, formats)")
+        # A1: the writer side of the same claim.  The buffer Plane A reads must be built
+        # by an IP that was actually configured HAS_RGBX8, and the DT must describe that
+        # IP (4 PPC, native 256-bit AXIMM), not the NV12 one.
+        wr = xci("sc7f0_frmbuf_wr_rgbx")
+        require(int(wr["HAS_RGBX8"]), 1, "RGBX writer HAS_RGBX8")
+        for off in ("HAS_BGRX8", "HAS_RGB8", "HAS_Y_UV8_420"):
+            require(int(wr[off]), 0, "RGBX writer " + off + " must be off")
+        require(int(wr["SAMPLES_PER_CLOCK"]),
+                cells(fb, "xlnx,pixels-per-clock")[0], "RGBX writer pixels-per-clock")
+        require(int(wr["AXIMM_DATA_WIDTH"]), 256, "RGBX writer native AXIMM width")
+        # The CSC runs RGB -> RGB under this personality (xilinx-vpss-csc.c numbers
+        # RGB = 0), because the writer downstream takes RGBX.
+        # The ports live under the CSC node's `ports` container, exactly as the
+        # graph-link check above addresses them; a bare csc/port@0 path does not
+        # exist in the DTB and fdtget answers FDT_ERR_NOTFOUND.
+        for port in ("port@0", "port@1"):
+            require(cells(csc + "/ports/" + port, "xlnx,video-format"), [0],
+                    "CSC " + port + " colour space is RGB under the RGB personality")
+        print("SC7F0_RGB_GEOMETRY_DT_PASS: VPHY/RX/TX/plane-A/plane-buffer cells match "
+              "the *_rgb and RGBX-writer XCI (transceiver-width, pixels-per-clock, "
+              "dma-align, formats, colour spaces)")
     print("HDMI_DT_PASS: complete board DTS compiled; RX/PHY parameters match XCI")
 
 

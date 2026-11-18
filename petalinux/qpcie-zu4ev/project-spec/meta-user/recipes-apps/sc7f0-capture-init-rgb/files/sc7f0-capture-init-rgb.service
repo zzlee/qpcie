@@ -1,0 +1,39 @@
+[Unit]
+Description=SC7F0 RGB-compositor capture graph initialisation (vpss-csc RBG888_1X24 to RX24)
+Documentation=file:docs/sc7f0_hdmitx_display_pl_phase1_20261112.md
+# The graph lives entirely in the media controller, so this needs the device nodes and
+# nothing else: no network (this card has none), no qpcie daemon, no display service.  It
+# is deliberately not ordered behind anything that can fail, because on this persona the
+# only consumer (sc7f0_dmabuf_loop, and any manual capture) is started by a human after
+# boot and reads whatever state this unit left behind.
+#
+# Why a unit at all: the RGB-compositor persona has no VCU, so sc7f0-vcud - which owns the
+# VCU persona's capture initialiser as an ExecStartPre - is removed from this image
+# (recipes-core/images/petalinux-image-minimal.bbappend, SC7F0_RGB_COMPOSITOR_VCU_REMOVE).
+# Without this unit nothing in the image ever sets the vpss-csc pads, so after every cold
+# boot the pads keep the driver default UYVY8_1X16/1280x720 and the capture node cannot be
+# configured, which is the state build/accept-26111602/card-pipeline.txt records and the
+# state the acceptance session fixed by hand with two media-ctl -V commands.
+After=systemd-udevd.service
+Wants=systemd-udevd.service
+
+[Service]
+Type=oneshot
+# RemainAfterExit so `systemctl` reports the boot-time result (active/exited plus the
+# SC7F0_RGB_CAPTURE_INIT PASS journal line) instead of "inactive (dead)", which is what a
+# host-side acceptance check greps for, and so a later manual run cannot look like a
+# success that the boot never produced.
+RemainAfterExit=yes
+# The script waits (bounded) for a locked 3840x2160p60 timing, sets the CSC sink pad then
+# the source pad, re-reads the media controller and asserts both landed, then sets and
+# asserts the VIPP node format (RX24).  It refuses a locked-but-different timing instead of
+# fitting it, and it never issues I2C or an MCU restart.
+ExecStart=/usr/lib/sc7f0/sc7f0-capture-init-rgb.sh
+# Longer than the script's own 120 s wait budget, so a timeout is always the script's own
+# reported WAIT_TIMEOUT line and never a systemd kill.
+TimeoutStartSec=240
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

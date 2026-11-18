@@ -49,6 +49,13 @@
 //   0x48 bytes_issued  0x4C bytes_staged  0x50 bytes_drained
 //   0x54 wr_frames_done  0x58 wr_bytes_written  0x5C blend_beats
 //   0x60 blend_lock_lost 0x64 blend_sat_watchdog
+//   0x7C GENLOCK          [0] gl_seeking  [1] gl_wait_vsof  [2] gl_locked
+//                          [6:4] gl_drop_reason (0 none / 1 sideband mismatch /
+//                          2 overlay starved / 3 blend_unlock)
+//   0x80 gl_lock_count    0x84 blend_base_passthru_beats
+//                          (B1 SOF genlock; 0x84 counts un-blended background
+//                          beats emitted while the compositor was not locked,
+//                          which is normal while the overlay is off)
 //   0x6C ABORT_STATUS     [0] ovl_abort_req pending   [1] wr_abort_busy
 //   0x78 ID = 32'h52474231 ("RGB1") so software can prove it is talking to
 //        this block and not to a decoded-but-absent aperture.
@@ -93,6 +100,25 @@ module sc7f0_rgb_overlay_ctrl (
     output wire [1:0]  s_axi_rresp,
     output wire        s_axi_rvalid,
     input  wire        s_axi_rready,
+
+    // ---- AXI4-Lite slave, pcie_clk (Host BAR0 0x4000..0x4FFF) -------------
+    input  wire [31:0] s_axil_pcie_awaddr,
+    input  wire        s_axil_pcie_awvalid,
+    output wire        s_axil_pcie_awready,
+    input  wire [31:0] s_axil_pcie_wdata,
+    input  wire [3:0]  s_axil_pcie_wstrb,
+    input  wire        s_axil_pcie_wvalid,
+    output wire        s_axil_pcie_wready,
+    output wire [1:0]  s_axil_pcie_bresp,
+    output wire        s_axil_pcie_bvalid,
+    input  wire        s_axil_pcie_bready,
+    input  wire [31:0] s_axil_pcie_araddr,
+    input  wire        s_axil_pcie_arvalid,
+    output wire        s_axil_pcie_arready,
+    output wire [31:0] s_axil_pcie_rdata,
+    output wire [1:0]  s_axil_pcie_rresp,
+    output wire        s_axil_pcie_rvalid,
+    input  wire        s_axil_pcie_rready,
 
     // ---- overlay ingress arm / status (pcie_clk) --------------------------
     output reg         ovl_enable,
@@ -144,12 +170,25 @@ module sc7f0_rgb_overlay_ctrl (
     output wire        alpha_force_opaque,
     output wire        blend_unlock,
     output wire        reader_b_reset,
+    output wire        wr_auto_advance_m,
     // blend status, same domain as the blend (levels)
     input  wire        blend_locked,
     input  wire        blend_busy,
     input  wire [31:0] blend_lock_lost,
     input  wire [31:0] blend_sat_watchdog,
-    input  wire [31:0] blend_beats
+    input  wire [31:0] blend_beats,
+    // SOF genlock state and counters, same domain as the blend.  The state is
+    // crossed as three independent one-hot LEVELS rather than as a 2-bit code:
+    // a multi-bit state that is not Gray-coded cannot cross a clock boundary
+    // without a tearing hazard, and "which of the three genlock states am I in"
+    // is exactly the question software asks when the overlay is offset.  At most
+    // one synchroniser period can read all three low (a state in flight).
+    input  wire        blend_gl_seeking,      // GL_SEEK_OVL
+    input  wire        blend_gl_wait_vsof,    // GL_WAIT_VSOF
+    input  wire        blend_gl_lock_state,   // GL_LOCKED (== blend_locked)
+    input  wire [2:0]  blend_gl_drop_reason,  // 0 none 1 sideband 2 starved 3 unlock
+    input  wire [31:0] blend_gl_lock_count,
+    input  wire [31:0] blend_base_passthru
 );
     localparam [31:0] BLOCK_ID = 32'h5247_4231;   // "RGB1"
 
@@ -166,6 +205,9 @@ module sc7f0_rgb_overlay_ctrl (
     // "Synth 8-685 variable 'blend_beats_c' should not be used in output port
     // connection", which is what killed the previous run.
     wire [31:0] blend_beats_c, blend_lock_lost_c, blend_sat_watchdog_c;
+    wire        gl_seeking_c, gl_wait_c, gl_lock_state_c;
+    wire [2:0]  gl_reason_c;
+    wire [31:0] gl_lock_count_c, gl_passthru_c;
 
     // ------------------------------------------------------------------------
     // CSR crossing.  APROT is not routed by axi_crossbar_hdmi, same as every
@@ -206,6 +248,32 @@ module sc7f0_rgb_overlay_ctrl (
         .m_axi_arvalid (r_arvalid), .m_axi_arready(r_arready),
         .m_axi_rdata   (r_rdata),   .m_axi_rresp  (r_rresp),
         .m_axi_rvalid  (r_rvalid),  .m_axi_rready (r_rready)
+    );
+
+    wire [31:0] m_awaddr, m_araddr, m_wdata, m_rdata;
+    wire [3:0]  m_wstrb;
+    wire [1:0]  m_bresp, m_rresp;
+    wire        m_awvalid, m_awready, m_wvalid, m_wready;
+    wire        m_bvalid, m_bready, m_arvalid, m_arready;
+    wire        m_rvalid, m_rready;
+
+    sc7f0_axil_mux_2to1 u_csr_arb (
+        .clk(pcie_clk), .rst_n(pcie_rst_n),
+        .s0_awaddr(r_awaddr),  .s0_awvalid(r_awvalid),  .s0_awready(r_awready),
+        .s0_wdata(r_wdata),    .s0_wstrb(r_wstrb),      .s0_wvalid(r_wvalid),    .s0_wready(r_wready),
+        .s0_bresp(r_bresp),    .s0_bvalid(r_bvalid),    .s0_bready(r_bready),
+        .s0_araddr(r_araddr),  .s0_arvalid(r_arvalid),  .s0_arready(r_arready),
+        .s0_rdata(r_rdata),    .s0_rresp(r_rresp),      .s0_rvalid(r_rvalid),    .s0_rready(r_rready),
+        .s1_awaddr(s_axil_pcie_awaddr),   .s1_awvalid(s_axil_pcie_awvalid), .s1_awready(s_axil_pcie_awready),
+        .s1_wdata(s_axil_pcie_wdata),     .s1_wstrb(s_axil_pcie_wstrb),     .s1_wvalid(s_axil_pcie_wvalid),   .s1_wready(s_axil_pcie_wready),
+        .s1_bresp(s_axil_pcie_bresp),     .s1_bvalid(s_axil_pcie_bvalid),   .s1_bready(s_axil_pcie_bready),
+        .s1_araddr(s_axil_pcie_araddr),   .s1_arvalid(s_axil_pcie_arvalid), .s1_arready(s_axil_pcie_arready),
+        .s1_rdata(s_axil_pcie_rdata),     .s1_rresp(s_axil_pcie_rresp),     .s1_rvalid(s_axil_pcie_rvalid),   .s1_rready(s_axil_pcie_rready),
+        .m_awaddr(m_awaddr),   .m_awvalid(m_awvalid),   .m_awready(m_awready),
+        .m_wdata(m_wdata),     .m_wstrb(m_wstrb),       .m_wvalid(m_wvalid),     .m_wready(m_wready),
+        .m_bresp(m_bresp),     .m_bvalid(m_bvalid),     .m_bready(m_bready),
+        .m_araddr(m_araddr),   .m_arvalid(m_arvalid),   .m_arready(m_arready),
+        .m_rdata(m_rdata),     .m_rresp(m_rresp),       .m_rvalid(m_rvalid),     .m_rready(m_rready)
     );
 
     // ------------------------------------------------------------------------
@@ -258,7 +326,7 @@ module sc7f0_rgb_overlay_ctrl (
 
     wire wr_strobe = aw_hold && w_hold && !b_pending;
     wire [11:0] wr_off = aw_addr_q[11:0];
-    wire [11:0] rd_off = r_araddr[11:0];
+    wire [11:0] rd_off = m_araddr[11:0];
 
     // writer irq / plane-complete levels, stretched so a read cannot miss them
     reg wr_irq_sticky, ovl_irq_sticky;
@@ -287,9 +355,9 @@ module sc7f0_rgb_overlay_ctrl (
             // address / data capture: independent channels, either order, any
             // number of cycles apart; each half is held until it has been
             // committed, and its ready stays low meanwhile.
-            if (r_awvalid && r_awready) begin aw_addr_q <= r_awaddr; aw_hold <= 1'b1; end
-            if (r_wvalid  && r_wready ) begin w_data_q  <= r_wdata;
-                                            w_strb_q    <= r_wstrb;  w_hold  <= 1'b1; end
+            if (m_awvalid && m_awready) begin aw_addr_q <= m_awaddr; aw_hold <= 1'b1; end
+            if (m_wvalid  && m_wready ) begin w_data_q  <= m_wdata;
+                                            w_strb_q    <= m_wstrb;  w_hold  <= 1'b1; end
 
             if (wr_strobe) begin
                 aw_hold <= 1'b0; w_hold <= 1'b0; b_pending <= 1'b1;
@@ -386,14 +454,14 @@ module sc7f0_rgb_overlay_ctrl (
 
             // B is held until the master takes it, and only then does the window
             // become able to commit the next write.
-            if (r_bvalid && r_bready) b_pending <= 1'b0;
+            if (m_bvalid && m_bready) b_pending <= 1'b0;
 
             if (wr_irq_pulse)       wr_irq_sticky  <= 1'b1;
             if (ovl_done_pulse)     ovl_irq_sticky <= 1'b1;
             if (ovl_abort_req && !wr_abort_busy) ovl_abort_req <= 1'b0;
 
             // single-beat read
-            if (r_arvalid && r_arready && !r_valid_q) begin
+            if (m_arvalid && m_arready && !r_valid_q) begin
                 r_valid_q <= 1'b1;
                 case (rd_off)
                     12'h000: r_data_q <= {21'd0, wr_slot_count, wr_force_slot,
@@ -457,25 +525,38 @@ module sc7f0_rgb_overlay_ctrl (
                     12'h05C: r_data_q <= blend_beats_c;
                     12'h060: r_data_q <= blend_lock_lost_c;
                     12'h064: r_data_q <= blend_sat_watchdog_c;
+                    // GENLOCK status (B1).  Three one-hot state levels instead of
+                    // a code, so no read can be torn across a state change:
+                    //   [0] seeking      overlay not synchronised yet (draining)
+                    //   [1] wait_vsof    overlay held at its frame start, waiting
+                    //                    for the background's own frame start
+                    //   [2] locked       beats are being composited (== 0x40[9])
+                    //   [6:4] drop_reason 0 none, 1 sideband mismatch, 2 overlay
+                    //                     starved mid-frame, 3 blend_unlock set
+                    12'h07C: r_data_q <= {25'd0, gl_reason_c,
+                                          1'b0, gl_lock_state_c, gl_wait_c,
+                                          gl_seeking_c};
+                    12'h080: r_data_q <= gl_lock_count_c;
+                    12'h084: r_data_q <= gl_passthru_c;
                     12'h078: r_data_q <= BLOCK_ID;
                     default: r_data_q <= 32'd0;
                 endcase
-            end else if (r_valid_q && r_rready) begin
+            end else if (r_valid_q && m_rready) begin
                 r_valid_q <= 1'b0;
             end
         end
     end
 
-    assign r_bresp  = 2'b00;
-    assign r_rresp  = 2'b00;
-    assign r_rdata  = r_data_q;
-    assign r_rvalid = r_valid_q;
+    assign m_bresp  = 2'b00;
+    assign m_rresp  = 2'b00;
+    assign m_rdata  = r_data_q;
+    assign m_rvalid = r_valid_q;
     // Ready stays low while the corresponding half of the pending transaction is
     // still held, so a second AW/W cannot overwrite it before it is committed.
-    assign r_awready = ~aw_hold;
-    assign r_wready  = ~w_hold;
-    assign r_bvalid  = b_pending;          // accepted, no error possible
-    assign r_arready = ~r_valid_q;
+    assign m_awready = ~aw_hold;
+    assign m_wready  = ~w_hold;
+    assign m_bvalid  = b_pending;          // accepted, no error possible
+    assign m_arready = ~r_valid_q;
 
     // ------------------------------------------------------------------------
     // pcie_clk -> mem_clk.  All four are quasi-static control levels written
@@ -483,7 +564,7 @@ module sc7f0_rgb_overlay_ctrl (
     // (rtl/sc7f0_reset_cdc.v documents why combining sources before a
     // synchroniser is the CDC pattern this tree was flagged for).
     // ------------------------------------------------------------------------
-    wire blend_en_d,  blend_unlock_d, alpha_opaque_d, reader_b_reset_d;
+    wire blend_en_d,  blend_unlock_d, alpha_opaque_d, reader_b_reset_d, wr_auto_adv_d;
     xpm_cdc_single #(.DEST_SYNC_FF(4), .SRC_INPUT_REG(1)) u_blend_en (
         .src_clk(pcie_clk), .src_in(blend_en_r),
         .dest_clk(mem_clk), .dest_out(blend_en_d));
@@ -496,6 +577,9 @@ module sc7f0_rgb_overlay_ctrl (
     xpm_cdc_single #(.DEST_SYNC_FF(4), .SRC_INPUT_REG(1)) u_reader_b_reset (
         .src_clk(pcie_clk), .src_in(reader_b_reset_r),
         .dest_clk(mem_clk), .dest_out(reader_b_reset_d));
+    xpm_cdc_single #(.DEST_SYNC_FF(4), .SRC_INPUT_REG(1)) u_wr_auto_adv (
+        .src_clk(pcie_clk), .src_in(wr_auto_advance),
+        .dest_clk(mem_clk), .dest_out(wr_auto_adv_d));
 
     // blend_enable must not come up asserted out of configuration: the blend
     // only ever runs because software asked for it.
@@ -503,6 +587,7 @@ module sc7f0_rgb_overlay_ctrl (
     assign alpha_force_opaque = alpha_opaque_d;
     assign blend_unlock       = blend_unlock_d;
     assign reader_b_reset     = reader_b_reset_d;
+    assign wr_auto_advance_m  = wr_auto_adv_d;
 
     // ------------------------------------------------------------------------
     // mem_clk -> pcie_clk for the blend status levels, and Gray code for the
@@ -540,6 +625,37 @@ module sc7f0_rgb_overlay_ctrl (
     xpm_cdc_gray #(.DEST_SYNC_FF(4), .INIT_SYNC_FF(0), .WIDTH(32)) u_sat (
         .src_clk(mem_clk), .src_in_bin(blend_sat_watchdog),
         .dest_clk(pcie_clk), .dest_out_bin(blend_sat_watchdog_c));
+
+    // ------------------------------------------------------------------------
+    // Genlock observability (B1).  One xpm_cdc_single per state/reason bit, and
+    // Gray for the two counters - both are strictly +1-per-cycle, never reloaded
+    // (rtl/sc7f0_alpha_blend_2ppc.v gl_lock_count, base_passthru_beats), which is
+    // the condition xpm_cdc_gray's lossless check requires.
+    // ------------------------------------------------------------------------
+    xpm_cdc_single #(.DEST_SYNC_FF(4), .SRC_INPUT_REG(1)) u_gl_seeking (
+        .src_clk(mem_clk), .src_in(blend_gl_seeking),
+        .dest_clk(pcie_clk), .dest_out(gl_seeking_c));
+    xpm_cdc_single #(.DEST_SYNC_FF(4), .SRC_INPUT_REG(1)) u_gl_wait (
+        .src_clk(mem_clk), .src_in(blend_gl_wait_vsof),
+        .dest_clk(pcie_clk), .dest_out(gl_wait_c));
+    xpm_cdc_single #(.DEST_SYNC_FF(4), .SRC_INPUT_REG(1)) u_gl_lock_state (
+        .src_clk(mem_clk), .src_in(blend_gl_lock_state),
+        .dest_clk(pcie_clk), .dest_out(gl_lock_state_c));
+    xpm_cdc_single #(.DEST_SYNC_FF(4), .SRC_INPUT_REG(1)) u_gl_r0 (
+        .src_clk(mem_clk), .src_in(blend_gl_drop_reason[0]),
+        .dest_clk(pcie_clk), .dest_out(gl_reason_c[0]));
+    xpm_cdc_single #(.DEST_SYNC_FF(4), .SRC_INPUT_REG(1)) u_gl_r1 (
+        .src_clk(mem_clk), .src_in(blend_gl_drop_reason[1]),
+        .dest_clk(pcie_clk), .dest_out(gl_reason_c[1]));
+    xpm_cdc_single #(.DEST_SYNC_FF(4), .SRC_INPUT_REG(1)) u_gl_r2 (
+        .src_clk(mem_clk), .src_in(blend_gl_drop_reason[2]),
+        .dest_clk(pcie_clk), .dest_out(gl_reason_c[2]));
+    xpm_cdc_gray #(.DEST_SYNC_FF(4), .INIT_SYNC_FF(0), .WIDTH(32)) u_gl_locks (
+        .src_clk(mem_clk), .src_in_bin(blend_gl_lock_count),
+        .dest_clk(pcie_clk), .dest_out_bin(gl_lock_count_c));
+    xpm_cdc_gray #(.DEST_SYNC_FF(4), .INIT_SYNC_FF(0), .WIDTH(32)) u_gl_passthru (
+        .src_clk(mem_clk), .src_in_bin(blend_base_passthru),
+        .dest_clk(pcie_clk), .dest_out_bin(gl_passthru_c));
 
 endmodule
 `default_nettype wire

@@ -309,6 +309,10 @@ module sc7f0_overlay_writer #(
     // ---- memory clock domain: intake + AXI4 master ------------------------
     input  wire                     mem_clk,
     input  wire                     mem_rst_n,
+    input  wire [MAX_SLOTS-1:0]     ov_slot_release_m,
+    output wire [MAX_SLOTS-1:0]     ov_slot_ready_m,
+    output reg  [1:0]               ov_last_slot_m,
+    output wire [31:0]              ov_slot_bytes_m,
     output reg  [ADDR_WIDTH-1:0]    m_axi_awaddr,
     output reg  [7:0]               m_axi_awlen,
     output wire [2:0]               m_axi_awsize,
@@ -559,7 +563,9 @@ module sc7f0_overlay_writer #(
         .src_clk(mem_clk), .src_in_bin(err_frames_m), .dest_clk(clk),
         .dest_out_bin(err_frames_c));
 
-    assign ov_slot_ready = ready_lvl;
+    assign ov_slot_ready   = ready_lvl;
+    assign ov_slot_ready_m = ready_r;
+    assign ov_slot_bytes_m = c_slot_bytes;
 
     // ------------------------------------------------------------------------
     // 3c. completion: ONE bundled {slot, event} record, mem_clk -> pcie_clk
@@ -809,6 +815,19 @@ module sc7f0_overlay_writer #(
                                                           : c_slot_count);
     wire       slot_in_use = (wslot < MAX_SLOTS[2:0]) ? ready_r[wslot] : 1'b0;
 
+    // When auto-advancing, skip any slot still held by Reader-B (ready_r) or
+    // in flight so the writer can never deadlock against the 1 slot on display.
+    wire [1:0] wslot_p1 = ({1'b0, wslot} == (slots_n - 3'd1)) ? 2'd0 : (wslot + 2'd1);
+    wire [1:0] wslot_p2 = ({1'b0, wslot_p1} == (slots_n - 3'd1)) ? 2'd0 : (wslot_p1 + 2'd1);
+    wire [1:0] wslot_p3 = ({1'b0, wslot_p2} == (slots_n - 3'd1)) ? 2'd0 : (wslot_p2 + 2'd1);
+    reg  [1:0] next_free_wslot;
+    always @(*) begin
+        if      (!ready_r[wslot_p1] && !inflight_m[wslot_p1]) next_free_wslot = wslot_p1;
+        else if (!ready_r[wslot_p2] && !inflight_m[wslot_p2]) next_free_wslot = wslot_p2;
+        else if (!ready_r[wslot_p3] && !inflight_m[wslot_p3]) next_free_wslot = wslot_p3;
+        else                                                  next_free_wslot = wslot_p1;
+    end
+
     // The payload FIFO is a burst buffer, so its depth says nothing about how
     // long a frame may be.  A frame is bounded by its SLOT and by the 256 B
     // geometry rule only; 33,177,600 B of 4K60 RGBA8888 is a legal program and
@@ -953,6 +972,7 @@ module sc7f0_overlay_writer #(
             job_start          <= 1'b0;
             rel_m_d            <= {MAX_SLOTS{1'b0}};
             ready_r            <= {MAX_SLOTS{1'b0}};
+            ov_last_slot_m     <= 2'd0;
             stall_sticky_m     <= 1'b0;
             over_sticky_m      <= 1'b0;
             misalign_sticky_m  <= 1'b0;
@@ -994,7 +1014,7 @@ module sc7f0_overlay_writer #(
 
             // release is honoured in any state: the slot stops being readable
             for (i = 0; i < MAX_SLOTS; i = i + 1)
-                if (rel_edge[i]) ready_r[i] <= 1'b0;
+                if (rel_edge[i] || ov_slot_release_m[i]) ready_r[i] <= 1'b0;
 
             if (frame_done) begin
                 // Published only now, and only if the frame is entitled to be:
@@ -1028,6 +1048,7 @@ module sc7f0_overlay_writer #(
                     end
                 end else begin
                     ready_r[job_slot_m]    <= 1'b1;
+                    ov_last_slot_m         <= job_slot_m;
                     frames_m               <= frames_m + 32'd1;
                     // One record for this completion: the slot it belongs to and
                     // the event that announces it leave as the same crossing word
@@ -1102,16 +1123,23 @@ module sc7f0_overlay_writer #(
                 ((!room && !accept) || (s_axis_tuser && !disc_active)))
                 over_sticky_m <= 1'b1;
 
+            // If the current wslot is held by Reader-B while idle, advance to a
+            // free slot before the next frame arrives.
+            if (c_auto_adv && !active_m && !job_open &&
+                (ready_r[wslot] || inflight_m[wslot]) &&
+                (!ready_r[next_free_wslot] && !inflight_m[next_free_wslot])) begin
+                wslot <= next_free_wslot;
+            end
+
             // The intake retires when the frame's last byte is taken; the master
             // keeps draining, and the slot stays protected until its final B
+            // (and Reader-B release).
             if (eof_beat) begin
                 active_m   <= 1'b0;
                 cnt_frame  <= 32'd0;
                 if (ROOM_FAST) bleft <= {(BPL_W){1'b0}};
                 over_wait  <= 1'b1;      // this source transfer is now finished
-                wslot      <= c_auto_adv ? (({1'b0, wslot} == (slots_n - 3'd1))
-                                                ? 2'd0 : wslot + 2'd1)
-                                         : c_force_slot;
+                wslot      <= c_auto_adv ? next_free_wslot : c_force_slot;
             end
 
             // Bytes past the end of the frame.  Once a transfer's own byte count

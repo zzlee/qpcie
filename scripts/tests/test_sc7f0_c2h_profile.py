@@ -9,10 +9,11 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class C2HProfileTest(unittest.TestCase):
-    def run_tb(self, top, sources):
+    def run_tb(self, top, sources, defines=("SC7F0_C2H_ONLY",)):
         with tempfile.TemporaryDirectory(prefix="sc7f0-c2h-") as tmp:
             output = Path(tmp) / "test.vvp"
-            subprocess.run(["iverilog", "-g2012", "-DSC7F0_C2H_ONLY",
+            subprocess.run(["iverilog", "-g2012",
+                            *([f"-D{d}" for d in defines]),
                             "-s", top, "-o", str(output), *sources],
                            cwd=ROOT, check=True, capture_output=True, text=True)
             result = subprocess.run(["vvp", str(output)], cwd=ROOT,
@@ -23,6 +24,15 @@ class C2HProfileTest(unittest.TestCase):
     def test_caps_advertise_only_supported_channels(self):
         self.assertIn("SC7F0_C2H_CAPS_PASS", self.run_tb(
             "sc7f0_c2h_caps_tb", ["rtl/axil_reg_space.v", "tb/sc7f0_c2h_caps_tb.sv"]))
+
+    def test_rgb_compositor_publishes_the_overlay_capability_bit(self):
+        # The RGB persona keeps SC7F0_C2H_ONLY (no TPG / legacy TX video bridge)
+        # and adds SC7F0_RGB_COMPOSITOR, exactly as scripts/build_zu4ev.tcl does
+        # for SC7F0_PROFILE=rgb_compositor. The bit must appear, or the host
+        # driver has no personality signal and /dev/qpcie-ovl-* disappears.
+        self.assertIn("SC7F0_C2H_CAPS_PASS", self.run_tb(
+            "sc7f0_c2h_caps_tb", ["rtl/axil_reg_space.v", "tb/sc7f0_c2h_caps_tb.sv"],
+            defines=("SC7F0_C2H_ONLY", "SC7F0_RGB_COMPOSITOR")))
 
     def test_disabled_windows_accept_both_aw_w_orders(self):
         self.assertIn("SC7F0_DISABLED_AXI_PASS", self.run_tb(

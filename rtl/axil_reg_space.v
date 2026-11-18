@@ -325,7 +325,16 @@ module axil_reg_space #(
     localparam [31:0] HARDWARE_CAPS_VAL   = 32'h8000_0010;
 `elsif SC7F0_C2H_ONLY
     // Bit28: RX-only personality. Packet DMA is independent of raw geometry.
-    localparam [31:0] HARDWARE_CAPS_VAL = 32'h1001_011F;
+    // Bit20 (QPCIE_CAP_RGB_COMPOSITOR) is added only when the H2C overlay plane
+    // and the 2PPC alpha-blend fabric are actually in the bitstream, so the host
+    // driver can tell an RGB persona from a plain C2H card without matching a
+    // version literal. driver/qpcie_overlay.c reads this bit.
+    localparam [31:0] SC7F0_C2H_CAPS_BASE = 32'h1001_011F;
+`ifdef SC7F0_RGB_COMPOSITOR
+    localparam [31:0] HARDWARE_CAPS_VAL = SC7F0_C2H_CAPS_BASE | 32'h0010_0000;
+`else
+    localparam [31:0] HARDWARE_CAPS_VAL = SC7F0_C2H_CAPS_BASE;
+`endif
 `elsif QPCIe_single_rgb24_path
     // Single-path build: 4 Audio, 1 Video (RGB24 TPG only), Caps: 2D+AES3+DualBAR+Stream, [4]=NEW_MAP_PRESENT
     localparam [31:0] HARDWARE_CAPS_VAL   = 32'h0001_041F;

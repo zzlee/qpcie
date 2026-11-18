@@ -9,6 +9,14 @@ module thin_nv_formats_tb;
     wire [15:0] ring0_size=16, ring1_size=16, ring0_tail=1, ring1_tail=2;
     wire [15:0] ring0_head, ring1_head;
     reg frame_done_in=0;
+    // rtl/thin_desc_fetch_engine.v:73 `frame_abort` is the format guard's refusal of
+    // an in-flight frame (rtl/sc7f0_video_format_guard.v via
+    // rtl/sc7f0_video_launch_arbiter.v).  This bench models a guard that always
+    // accepts the profile it arms, so the walker must never see a refusal -- it has
+    // to be driven, not left floating: a dangling input reads as z here, and
+    // 2026-11-17's gate run failed at elaboration before it was connected at all.
+    // The refusal path itself is exercised by tb/tb_sc7f0_video_launch_arbiter.sv.
+    reg frame_abort=0;
     wire [31:0] frame_count, drop_count;
     wire busy, mrd_req_valid;
     wire [63:0] mrd_req_addr;

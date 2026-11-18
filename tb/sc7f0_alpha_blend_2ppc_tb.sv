@@ -37,7 +37,6 @@ module sc7f0_alpha_blend_2ppc_tb;
     localparam integer PPC = 2;
 
     reg clk = 0, rst_n = 0;
-    always #3.3 clk = ~clk;              // ~150 MHz model of the 300 MHz domain
 
     reg  [PPC*32-1:0] bd = 0, od = 0;
     reg               bv = 0, ov = 0, bl = 0, ol = 0, bu = 0, ou = 0;
@@ -47,10 +46,27 @@ module sc7f0_alpha_blend_2ppc_tb;
     reg               mready = 1;
     reg               blend_en = 1, force_opaque = 0, unlock = 0;
     wire              locked, busy;
-    wire [31:0]       lock_lost, sat_cnt, beats;
+    wire [1:0]        gl_state;
+    wire [2:0]        gl_reason;
+    wire [31:0]       lock_lost, sat_cnt, beats, lock_count, passthru;
 
     integer errors = 0;
     reg gate_pass = 1'b0;
+    // Set once the sequence has reached its verdict.  A batch gate may resume a
+    // testbed whose $finish already ran (see scripts/sim_sc7f0_rgb_compositor.tcl),
+    // and a watchdog must then stay silent rather than overrule a finished test.
+    reg tb_finished = 1'b0;
+
+    initial begin : clk_gen
+        // Stopping the clock at the verdict is what makes this testbed
+        // re-runnable: a batch gate may issue a second `run` after the test
+        // already called $finish, and with a free-running clock the scoreboards
+        // keep observing beats no stimulus ever drove (that is how a passing
+        // repack testbed once came out of the gate with gate_pass=0).
+        while (!tb_finished) begin
+            #3.3 clk = ~clk;
+        end
+    end
 
     sc7f0_alpha_blend_2ppc #(.PPC(PPC), .QUEUE_DEPTH(16)) dut (
         .clk(clk), .rst_n(rst_n),
@@ -62,8 +78,10 @@ module sc7f0_alpha_blend_2ppc_tb;
         .m_axis_tdata(mtdata), .m_axis_tvalid(mtvalid), .m_axis_tready(mready),
         .m_axis_tlast(mtlast), .m_axis_tuser(mtuser),
         .locked(locked), .pipeline_busy(busy),
+        .gl_state(gl_state), .gl_drop_reason(gl_reason),
+        .gl_lock_count(lock_count),
         .lock_lost_count(lock_lost), .sat_watchdog_count(sat_cnt),
-        .beats_blended(beats)
+        .beats_blended(beats), .base_passthru_beats(passthru)
     );
 
     // reference model -------------------------------------------------------
@@ -78,19 +96,77 @@ module sc7f0_alpha_blend_2ppc_tb;
         end
     endfunction
 
-    // expected output queue --------------------------------------------------
+    // Expected output queue.  The expectations used to be booked by the stimulus
+    // tasks, which cannot work any more: since B1 the compositor itself decides
+    // whether a pair is composited, forwarded un-blended, or DISCARDED (a pair
+    // whose sideband disagrees), so a task-side scoreboard either books a beat
+    // that never comes out or misses one that does - and the mismatch then
+    // cascades into every later beat.  Booking is therefore taken from the DUT's
+    // own front-pop edge, exactly mirroring rtl/sc7f0_alpha_blend_2ppc.v:
+    //
+    //   paired && pair_ok -> a composited beat (base, or the blend, according to
+    //                        the mode the beat is captured with)
+    //   base_only         -> the background beat, bit-exact
+    //   paired && !pair_ok-> popped and discarded, nothing emitted, nothing booked
+    //
+    // exp_b / exp_o are kept only so a mismatch prints the pair that produced it.
     reg [PPC*24-1:0] exp_q [0:4095];
     reg [PPC*32-1:0] exp_b [0:4095], exp_o [0:4095];   // the beat that produced it
     integer eq_tail = 0, eq_head = 0;
+    integer book, bkp;
+    reg [7:0] bka;
+
+    always @(posedge clk) begin
+        if (rst_n && dut.b_pop) begin
+            book = 0;
+            if (dut.paired && dut.pair_ok) begin
+                for (bkp = 0; bkp < PPC; bkp = bkp + 1) begin
+                    // alpha_force_opaque is folded into the beat at stage 0, and
+                    // blend_enable is captured as en0_r on the same edge, so the
+                    // live inputs are the right thing to read here.
+                    bka = force_opaque ? 8'hFF : dut.o_head[bkp*32+31 -: 8];
+                    if (!blend_en) begin
+                        exp_q[eq_tail][bkp*24+23 -: 8] = dut.b_head[bkp*32+23 -: 8];
+                        exp_q[eq_tail][bkp*24+15 -: 8] = dut.b_head[bkp*32+15 -: 8];
+                        exp_q[eq_tail][bkp*24+7  -: 8] = dut.b_head[bkp*32+7   -: 8];
+                    end else begin
+                        exp_q[eq_tail][bkp*24+23 -: 8] =
+                            ref_comp(bka, dut.o_head[bkp*32+23 -: 8],
+                                         dut.b_head[bkp*32+23 -: 8]);
+                        exp_q[eq_tail][bkp*24+15 -: 8] =
+                            ref_comp(bka, dut.o_head[bkp*32+15 -: 8],
+                                         dut.b_head[bkp*32+15 -: 8]);
+                        exp_q[eq_tail][bkp*24+7  -: 8] =
+                            ref_comp(bka, dut.o_head[bkp*32+7  -: 8],
+                                         dut.b_head[bkp*32+7   -: 8]);
+                    end
+                end
+                exp_b[eq_tail] = dut.b_head[PPC*32-1:0];
+                exp_o[eq_tail] = dut.o_head[PPC*32-1:0];
+                book = 1;
+            end else if (dut.base_only) begin
+                for (bkp = 0; bkp < PPC; bkp = bkp + 1)
+                    exp_q[eq_tail][bkp*24 +: 24] = dut.b_head[bkp*32 +: 24];
+                exp_b[eq_tail] = dut.b_head[PPC*32-1:0];
+                exp_o[eq_tail] = {PPC*32{1'b0}};
+                book = 1;
+            end
+            if (book) eq_tail = eq_tail + 1;
+            else if (dut.paired && !dut.pair_ok) discarded = discarded + 1;
+        end
+    end
 
     // Watchdog: an unreachable wait must fail loudly, not spin the simulator.
-    initial begin : watchdog
-        #300_000;                        // ~90k cycles; the suite needs a few hundred
-        $display("TB_WATCHDOG_TIMEOUT sc7f0_alpha_blend_2ppc_tb: no $finish within 300 us (errors=%0d beats=%0d expected=%0d)",
-                 errors, beats, eq_tail);
-        gate_pass = 1'b0;
-        $display("ALPHA_BLEND_TB_FAIL");
-        $finish;
+            initial begin : watchdog
+        #300_000;
+        if (!tb_finished) begin
+            // ~90k cycles; the suite needs a few hundred
+            $display("TB_WATCHDOG_TIMEOUT sc7f0_alpha_blend_2ppc_tb: no $finish within 300 us (errors=%0d beats=%0d expected=%0d)",
+            errors, beats, eq_tail);
+            gate_pass = 1'b0;
+            $display("ALPHA_BLEND_TB_FAIL");
+            $finish;
+        end
     end
 
     // Actual pop accounting, taken from the DUT: `consume` is the beat the
@@ -127,33 +203,81 @@ module sc7f0_alpha_blend_2ppc_tb;
             while (!(bready && oready) && k < limit) begin @(posedge clk); k = k + 1; end
             if (!(bready && oready)) begin
                 errors = errors + 1;
-                $display("TB FAIL queues never accepted the beat within %0d cycles (locked=%b bfull=%b ofull=%b drain=%b mvalid=%b mready=%b)",
-                         limit, locked, dut.b_full, dut.o_full, dut.drain_now,
+                $display("TB FAIL queues never accepted the beat within %0d cycles (locked=%b gl=%0d bfull=%b ofull=%b mvalid=%b mready=%b)",
+                         limit, locked, gl_state, dut.b_full, dut.o_full,
                          mtvalid, mready);
             end
         end
     endtask
 
-    // One protocol-legal beat on each plane while the compositor is unlocked:
-    // both planes must have it discarded, and nothing may reach the output.
-    task automatic drive_ignored_pair(input [PPC*32-1:0] b, input [PPC*32-1:0] o);
-        integer b0, o0, bt;
+    // Driven base beats are counted here, and every pop the DUT makes is counted
+    // in the booking block above, so the two must agree:
+    //
+    //     driven_total == eq_tail + discarded
+    //
+    // i.e. every background beat the test offered either became an emitted beat
+    // or was one of the pairs the compositor is required to discard (a sideband
+    // mismatch, T5c).  Nothing else is allowed to consume plane A, and that is the
+    // whole "flow control must neither drop nor duplicate" claim of T4 stated as
+    // one invariant instead of a per-test guess.
+    integer driven_total = 0, discarded = 0;
+
+    task automatic drain_all(input integer limit);
+        integer k, target;
         begin
-            b0 = bpop_cnt; o0 = opop_cnt; bt = beats;
+            target = driven_total - discarded;
+            k = 0;
+            while (eq_tail < target && k < limit) begin @(posedge clk); k = k + 1; end
+            if (eq_tail < target) begin
+                errors = errors + 1;
+                $display("TB FAIL %0d of %0d driven background beat(s) were never popped from plane A",
+                         target - eq_tail, driven_total);
+            end
+            k = 0;
+            while (eq_head < eq_tail && k < limit) begin @(posedge clk); k = k + 1; end
+            if (eq_head < eq_tail) begin
+                errors = errors + 1;
+                $display("TB FAIL %0d booked beat(s) never came out of the compositor",
+                         eq_tail - eq_head);
+            end
+            if (driven_total != eq_tail + discarded) begin
+                errors = errors + 1;
+                $display("TB FAIL accounting: driven=%0d emitted=%0d discarded=%0d",
+                         driven_total, eq_tail, discarded);
+            end
+        end
+    endtask
+
+    // One protocol-legal beat on each plane while the compositor is unlocked.
+    // Under the SOF genlock (B1) that pair does two things: the overlay beat is
+    // discarded (it belongs to no synchronised frame), and the background beat is
+    // FORWARDED un-blended - never composited, never dropped, because plane A is
+    // the stream the TX is scanning.  The scoreboard books that automatically from
+    // the pop edge; this task only checks the counters it is about.
+    task automatic drive_ignored_pair(input [PPC*32-1:0] b, input [PPC*32-1:0] o);
+        integer b0, o0, bt, pt0;
+        begin
+            b0 = bpop_cnt; o0 = opop_cnt; bt = beats; pt0 = passthru;
             bd <= b; od <= o; bv <= 1'b1; ov <= 1'b1;
             bl <= 1'b0; ol <= 1'b0; bu <= 1'b0; ou <= 1'b0;
             wait_accept(20000);
+            driven_total = driven_total + 1;
             bv <= 0; ov <= 0;
             repeat (20) @(posedge clk);
             if (bpop_cnt == b0 || opop_cnt == o0) begin
                 errors = errors + 1;
-                $display("TB FAIL an unlocked mid-frame beat was neither blended nor discarded (locked=%b bfull=%b ofull=%b drain=%b pops %0d->%0d / %0d->%0d)",
-                         locked, dut.b_full, dut.o_full, dut.drain_now,
+                $display("TB FAIL an unlocked mid-frame beat was neither blended nor discarded (locked=%b bfull=%b ofull=%b gl=%0d pops %0d->%0d / %0d->%0d)",
+                         locked, dut.b_full, dut.o_full, gl_state,
                          b0, bpop_cnt, o0, opop_cnt);
             end
             if (beats != bt) begin
                 errors = errors + 1;
-                $display("TB FAIL compositor emitted a beat while it was not frame-locked");
+                $display("TB FAIL compositor COMPOSITED a beat while it was not frame-locked");
+            end
+            if (passthru != pt0 + 1) begin
+                errors = errors + 1;
+                $display("TB FAIL the background beat of an unlocked pair was not forwarded (passthru %0d -> %0d)",
+                         pt0, passthru);
             end
         end
     endtask
@@ -185,31 +309,18 @@ module sc7f0_alpha_blend_2ppc_tb;
     end
 
     // drive one beat pair ---------------------------------------------------
+    // `en` records the mode the test is exercising; the scoreboard no longer uses
+    // it (it reads the live blend_enable on the pop edge), so the argument is now
+    // a self-check that the test says what it does.
     task automatic drive_pair(input [PPC*32-1:0] b, input [PPC*32-1:0] o,
                               input integer eol, input integer sof,
                               input integer en);
-        integer p;
-        reg [PPC*24-1:0] exp;
-        reg [7:0] a, fr, fb, fg, br, bb, bg;
         begin
-            exp = {PPC*24{1'b0}};
-            for (p = 0; p < PPC; p = p + 1) begin
-                a  = o[p*32+31 -: 8]; fr = o[p*32+23 -: 8];
-                fb = o[p*32+15 -: 8]; fg = o[p*32+7  -: 8];
-                br = b[p*32+23 -: 8]; bb = b[p*32+15 -: 8];
-                bg = b[p*32+7  -: 8];
-                if (!en) begin
-                    exp[p*24+23 -: 8] = br;
-                    exp[p*24+15 -: 8] = bb;
-                    exp[p*24+7  -: 8] = bg;
-                end else begin
-                    exp[p*24+23 -: 8] = ref_comp(a, fr, br);
-                    exp[p*24+15 -: 8] = ref_comp(a, fb, bb);
-                    exp[p*24+7  -: 8] = ref_comp(a, fg, bg);
-                end
+            if ((en != 0) != (blend_en != 0)) begin
+                errors = errors + 1;
+                $display("TB FAIL the test drove a pair with en=%0d while blend_enable=%b",
+                         en, blend_en);
             end
-            exp_q[eq_tail] = exp; exp_b[eq_tail] = b; exp_o[eq_tail] = o;
-            eq_tail = eq_tail + 1;
             // Hold the pair, unchanged, until the queues accept it, then drop it
             // on the next edge (exactly one take per beat).
             bd <= b; od <= o; bv <= 1'b1; ov <= 1'b1;
@@ -217,6 +328,7 @@ module sc7f0_alpha_blend_2ppc_tb;
             wait_accept(20000);
             bd <= 0; od <= 0; bv <= 1'b0; ov <= 1'b0;
             bl <= 0; ol <= 0; bu <= 0; ou <= 0;
+            driven_total = driven_total + 1;
         end
     endtask
 
@@ -270,8 +382,7 @@ module sc7f0_alpha_blend_2ppc_tb;
                       repeat (($random & 32'h7fff) % 3) @(posedge clk);
                       mready <= 1; end join
         end
-        k = 0;
-        while (eq_head < eq_tail && k < 6000) begin @(posedge clk); k = k + 1; end
+        drain_all(6000);
         if (sat_cnt != 0) begin
             errors = errors + 1;
             $display("T2 FAIL sat_watchdog_count=%0d; the blend maths left [0,255]", sat_cnt);
@@ -299,11 +410,14 @@ module sc7f0_alpha_blend_2ppc_tb;
         $display("SC7F0_BLEND T3 passthrough done errors=%0d", errors);
 
         // ---- T5a frame lock: an unpaired frame start must composite nothing --
+        // It must, however, still FORWARD the background beat: plane A is what the
+        // TX scans, and holding it is exactly the 坑 16 failure this revision fixes.
         unlock <= 1; repeat (4) @(posedge clk); unlock <= 0; repeat (4) @(posedge clk);
         beats0 = beats;
         bd <= 32'h1234_5678; bv <= 1'b1; bu <= 1'b1; bl <= 1'b0;
         od <= 32'h9abc_def0; ov <= 1'b1; ou <= 1'b0; ol <= 1'b0;
         wait_accept(20000);                     // one take per plane, then drop
+        driven_total = driven_total + 1;
         bv <= 1'b0; ov <= 1'b0; bu <= 1'b0; ou <= 1'b0;
         repeat (20) @(posedge clk);             // the stale overlay beat is purged
         repeat (30) @(posedge clk);
@@ -311,16 +425,24 @@ module sc7f0_alpha_blend_2ppc_tb;
             errors = errors + 1;
             $display("T5 FAIL compositor locked without an aligned frame start on both planes");
         end
+        if (gl_state !== 2'd0) begin
+            errors = errors + 1;
+            $display("T5a FAIL genlock state %0d after an unpaired SOF, want GL_SEEK_OVL(0)", gl_state);
+        end
         if (beats != beats0) begin
             errors = errors + 1;
-            $display("T5 FAIL %0d beat(s) emitted without an aligned frame start", beats - beats0);
+            $display("T5 FAIL %0d beat(s) COMPOSITED without an aligned frame start", beats - beats0);
+        end
+        if (passthru == 0) begin
+            errors = errors + 1;
+            $display("T5a FAIL the background frame start was not forwarded (base_passthru_beats=0)");
         end
         if (dut.purge_o_count == 0) begin
             errors = errors + 1;
             $display("T5 FAIL the unpaired overlay beat was not discarded (purge_o_count=0)");
         end else
-            $display("SC7F0_BLEND T5a unpaired_sof ignored, purge o=%0d b=%0d",
-                     dut.purge_o_count, dut.purge_b_count);
+            $display("SC7F0_BLEND T5a unpaired_sof not composited but forwarded, purge o=%0d passthru=%0d",
+                     dut.purge_o_count, passthru);
 
         // ---- T5b matched TLAST is end of LINE: the lock must survive ---------
         // 3 lines of 3 beats; TLAST on the last beat of every line, on BOTH
@@ -341,8 +463,7 @@ module sc7f0_alpha_blend_2ppc_tb;
             end
             drive_pair(b, o, (l % 3 == 2) ? 1 : 0, (l == 0) ? 1 : 0, 1);
         end
-        k = 0;
-        while (eq_head < eq_tail && k < 2000) begin @(posedge clk); k = k + 1; end
+        drain_all(4000);
         if (beats != beats0 + 9) begin
             errors = errors + 1;
             $display("T5b FAIL composited %0d beats over 3 lines of 3 beats, want 9 (locked=%b)",
@@ -361,6 +482,7 @@ module sc7f0_alpha_blend_2ppc_tb;
         bd <= 64'h1122_3344_5566_7788; bv <= 1'b1; bl <= 1'b1; bu <= 1'b0;
         od <= 64'h99aa_bbcc_ddee_ff00; ov <= 1'b1; ol <= 1'b0; ou <= 1'b0;
         wait_accept(20000);                     // both queues take the pair
+        driven_total = driven_total + 1;        // ... and it is required to discard it
         bv <= 1'b0; ov <= 1'b0; bl <= 1'b0; ol <= 1'b0;
         repeat (20) @(posedge clk);
         if (locked) begin
@@ -393,8 +515,7 @@ module sc7f0_alpha_blend_2ppc_tb;
             o[p*32+7  -: 8] = 8'hcc;
         end
         drive_pair(b, o, 0, 1, 1);           // fresh simultaneous frame start
-        k = 0;
-        while (eq_head < eq_tail && k < 2000) begin @(posedge clk); k = k + 1; end
+        drain_all(2000);
         if (beats != beats0 + 1 || !locked) begin
             errors = errors + 1;
             $display("T6 FAIL re-lock did not produce exactly one composited beat (beats %0d -> %0d, locked=%b)",
@@ -410,21 +531,17 @@ module sc7f0_alpha_blend_2ppc_tb;
         end
 
         // ---- closing accounting ------------------------------------------
-        repeat (40) @(posedge clk);
-        if (eq_head != eq_tail) begin
+        drain_all(4000);
+        if (beats + passthru != eq_head) begin
             errors = errors + 1;
-            $display("T4 FAIL %0d expected beat(s) never came out (emitted %0d of %0d)",
-                     eq_tail - eq_head, eq_head, eq_tail);
+            $display("T4 FAIL blended=%0d + passthru=%0d but %0d beat(s) were popped and booked",
+                     beats, passthru, eq_head);
         end
-        if (beats != eq_tail) begin
-            errors = errors + 1;
-            $display("T4 FAIL beats_blended=%0d but %0d beat(s) were offered to the compositor",
-                     beats, eq_tail);
-        end
-        $display("SC7F0_ALPHA_BLEND_STATS errors=%0d blended=%0d offered=%0d lock_lost=%0d sat=%0d purge_b=%0d purge_o=%0d",
-                 errors, beats, eq_tail, lock_lost, sat_cnt,
-                 dut.purge_b_count, dut.purge_o_count);
+        $display("SC7F0_ALPHA_BLEND_STATS errors=%0d blended=%0d passthru=%0d offered=%0d lock_lost=%0d locks=%0d reason=%0d sat=%0d purge_o=%0d base_stall=%0d",
+                 errors, beats, passthru, eq_tail, lock_lost, lock_count, gl_reason,
+                 sat_cnt, dut.purge_o_count, dut.base_stall_cycles);
 
+        tb_finished = 1'b1;   // the verdict below is final; a resumed run must not overrule it
         gate_pass = (errors == 0);
         $display("SC7F0_ALPHA_BLEND_TB errors=%0d beats=%0d sat=%0d gate_pass=%b",
                  errors, beats, sat_cnt, gate_pass);

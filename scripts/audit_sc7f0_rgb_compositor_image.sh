@@ -309,6 +309,16 @@ if len(entries) < 500:
 # puts them into the initramfs of image.ub, which the release step audits.
 for f in ('usr/bin/modetest', 'usr/bin/peek', 'usr/bin/poke',
           'usr/bin/qpcie_debugd', 'usr/bin/sc7f0_ps_capture',
+          # The two tools the HDMI-TX/loop-through acceptance actually runs on the
+          # card.  Both are IMAGE_INSTALL lines in the bbappend, and both reach the
+          # rootfs only through a recipe whose do_compile has to succeed, so if this
+          # ever goes red it means the tool was dropped (or failed and was skipped),
+          # not that a name is spelled wrong: sc7f0_rgb_overlay drives the overlay
+          # controller and the genlock counters, sc7f0_dmabuf_loop is the only thing
+          # that proves RX -> PS DDR -> HDMI TX without a copy.  Neither can be
+          # scp'ed onto the card afterwards (no network, no base64), so a missing one
+          # is only fixable by rebuilding.
+          'usr/bin/sc7f0_rgb_overlay', 'usr/bin/sc7f0_dmabuf_loop',
           'lib/systemd/system/qpcie-debugd.service',
           'lib/modules/6.1.30-xilinx-v2023.2/extra/qpcie_v4l2_bridge.ko',
           'etc/modules-load.d/qpcie_v4l2_bridge.conf'):
