@@ -116,6 +116,15 @@ proc sc7f0_txclk_pin_state {cell suffix} {
 }
 }
 
+if {[llength [get_cells -quiet u_tx_tmds_clk_obufds]] == 1} {
+    set bypass_src_pin [get_pins -quiet u_tx_tmds_clk_oddr/CLK]
+    if {[llength $bypass_src_pin] == 0} { set bypass_src_pin [get_pins -quiet u_tx_tmds_clk_oddr/C] }
+    create_generated_clock -name hdmi_tx_tmds_clk_fwd_p -divide_by 1 -source $bypass_src_pin [get_ports hdmi_tx_tmds_clk_p]
+    create_generated_clock -name hdmi_tx_tmds_clk_fwd_n -divide_by 1 -invert -source $bypass_src_pin [get_ports hdmi_tx_tmds_clk_n]
+    puts "SC7F0_TX_TMDSCLOCK_BYPASS_APPLIED forwarder=u_tx_tmds_clk_oddr buffer=u_tx_tmds_clk_obufds"
+    return
+}
+
 set sc7f0_txclk_forwarder "u_vid_phy_controller/inst/gt_usrclk_source_inst/tx_mmcm.GT0_TX_MMCM_CLKOUT1_ODDR_INST"
 set sc7f0_txclk_buf       "u_vid_phy_controller/inst/gt_usrclk_source_inst/tx_mmcm.GT0_TX_MMCM_CLKOUT1_OBUFTDS_INST"
 
