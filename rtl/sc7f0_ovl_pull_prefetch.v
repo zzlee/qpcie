@@ -157,16 +157,25 @@ module sc7f0_ovl_pull_prefetch #(
             case (p_state)
                 P_IDLE: begin
                     ing_ovl_go <= 1'b0;
-                    if (host_ovl_enable && active_valid && !ing_busy && !ing_quarantined &&
-                        (base_vblank_p || vblank_pending)) begin
-                        vblank_pending        <= 1'b0;
-                        ing_src_addr          <= pending_irq_armed ? pending_addr    : active_addr;
-                        ing_xfer_bytes        <= pending_irq_armed ? pending_bytes   : active_bytes;
-                        ing_max_bytes_per_req <= pending_irq_armed ? pending_max_req : active_max_req;
-                        run_irq_armed         <= pending_irq_armed;
-                        pending_irq_armed     <= 1'b0;
-                        ing_ovl_go            <= 1'b1;
-                        p_state               <= P_RUN;
+                    if (host_ovl_enable && !ing_busy && !ing_quarantined &&
+                        ((host_ovl_go && !host_go_q && (host_xfer_bytes != 32'd0)) ||
+                         (active_valid && (base_vblank_p || vblank_pending)))) begin
+                        vblank_pending <= 1'b0;
+                        if (host_ovl_go && !host_go_q && (host_xfer_bytes != 32'd0)) begin
+                            ing_src_addr          <= host_src_addr;
+                            ing_xfer_bytes        <= host_xfer_bytes;
+                            ing_max_bytes_per_req <= host_max_bytes_per_req;
+                            run_irq_armed         <= 1'b1;
+                            pending_irq_armed     <= 1'b0;
+                        end else begin
+                            ing_src_addr          <= pending_irq_armed ? pending_addr    : active_addr;
+                            ing_xfer_bytes        <= pending_irq_armed ? pending_bytes   : active_bytes;
+                            ing_max_bytes_per_req <= pending_irq_armed ? pending_max_req : active_max_req;
+                            run_irq_armed         <= pending_irq_armed;
+                            pending_irq_armed     <= 1'b0;
+                        end
+                        ing_ovl_go <= 1'b1;
+                        p_state    <= P_RUN;
                     end
                 end
 

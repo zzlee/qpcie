@@ -505,22 +505,24 @@ module sc7f0_rgb_compositor #(
     assign rx_live_tready = rx_passthrough ? base_tready : 1'b1;
 
     reg [11:0] base_line_cnt;
+    reg [11:0] base_lines_per_frame;
     always @(posedge mem_clk or negedge mem_rst_n) begin
         if (!mem_rst_n) begin
-            base_line_cnt <= 12'd0;
-            base_vblank_p <= 1'b0;
+            base_line_cnt        <= 12'd0;
+            base_lines_per_frame <= 12'd2160;
+            base_vblank_p        <= 1'b0;
         end else begin
             base_vblank_p <= 1'b0;
             if (base_tvalid && base_tready) begin
                 if (base_tuser) begin
+                    if (base_line_cnt != 12'd0)
+                        base_lines_per_frame <= base_line_cnt;
                     base_line_cnt <= 12'd0;
                 end else if (base_tlast) begin
-                    if (base_line_cnt == 12'd2159) begin
+                    if ((base_line_cnt + 12'd1) == base_lines_per_frame) begin
                         base_vblank_p <= 1'b1;
-                        base_line_cnt <= 12'd0;
-                    end else begin
-                        base_line_cnt <= base_line_cnt + 12'd1;
                     end
+                    base_line_cnt <= base_line_cnt + 12'd1;
                 end
             end
         end
