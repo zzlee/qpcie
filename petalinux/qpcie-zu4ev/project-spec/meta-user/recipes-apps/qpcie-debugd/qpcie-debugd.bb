@@ -11,6 +11,7 @@ inherit systemd
 SYSTEMD_SERVICE:${PN} = "qpcie-debugd.service"
 SYSTEMD_AUTO_ENABLE = "enable"
 RDEPENDS:${PN} += "bash"
+QPCIE_DEBUGD_ALLOW_EXEC ?= "1"
 
 do_compile() {
     ${CC} ${CFLAGS} ${CPPFLAGS} -I${S} qpcie_debugd.c -o qpcie_debugd ${LDFLAGS}
@@ -19,5 +20,9 @@ do_install() {
     install -d ${D}${bindir} ${D}${systemd_system_unitdir}
     install -m 0755 qpcie_debugd ${D}${bindir}/qpcie_debugd
     install -m 0644 qpcie-debugd.service ${D}${systemd_system_unitdir}/
-    # No /etc/default/qpcie-debugd shipped: execution is disabled by default.
+    if [ "${QPCIE_DEBUGD_ALLOW_EXEC}" = "1" ]; then
+        install -d ${D}${sysconfdir}/default
+        printf 'DEBUG_EXEC_ARGS=--allow-exec\nDEBUG_SHELL=/bin/bash\n' > ${D}${sysconfdir}/default/qpcie-debugd
+        chmod 0600 ${D}${sysconfdir}/default/qpcie-debugd
+    fi
 }

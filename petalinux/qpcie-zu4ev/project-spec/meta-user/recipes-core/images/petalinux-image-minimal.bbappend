@@ -86,3 +86,37 @@ python __anonymous() {
         d.setVar('SC7F0_RGB_COMPOSITOR_IMAGE_ADDONS', 'sc7f0-capture-init-rgb')
 }
 IMAGE_INSTALL:append = " ${SC7F0_RGB_COMPOSITOR_IMAGE_ADDONS}"
+
+# Always ship qpcie-upgrade-daemon and qpcie-debugd natively in the image so
+# `petalinux-build` produces a complete, PCIe-upgradable image.ub directly
+# without needing inject_upgrade_daemon_to_image_ub.sh.
+IMAGE_INSTALL:append = " qpcie-upgrade-daemon qpcie-debugd"
+
+# SC7F0 has no RJ45 ethernet port: mask network/nfs services to avoid boot
+# delays, and enable root autologin on ttyPS0 for serial console debug.
+sc7f0_no_network_and_autologin() {
+    rm -f ${IMAGE_ROOTFS}/etc/systemd/system/multi-user.target.wants/systemd-networkd.service \
+          ${IMAGE_ROOTFS}/etc/systemd/system/network-online.target.wants/systemd-networkd-wait-online.service \
+          ${IMAGE_ROOTFS}/etc/systemd/system/sysinit.target.wants/systemd-network-generator.service \
+          ${IMAGE_ROOTFS}/etc/systemd/system/sysinit.target.wants/systemd-resolved.service \
+          ${IMAGE_ROOTFS}/etc/systemd/system/sysinit.target.wants/systemd-timesyncd.service \
+          ${IMAGE_ROOTFS}/etc/systemd/system/multi-user.target.wants/nfs-*.service \
+          ${IMAGE_ROOTFS}/etc/systemd/system/multi-user.target.wants/remote-fs.target \
+          ${IMAGE_ROOTFS}/etc/systemd/system/multi-user.target.wants/rpcbind.service \
+          ${IMAGE_ROOTFS}/etc/systemd/system/sockets.target.wants/systemd-networkd.socket \
+          ${IMAGE_ROOTFS}/etc/systemd/system/sockets.target.wants/rpcbind.socket \
+          ${IMAGE_ROOTFS}/etc/systemd/system/sockets.target.wants/sshd.socket \
+          ${IMAGE_ROOTFS}/etc/systemd/system/dbus-org.freedesktop.network1.service \
+          ${IMAGE_ROOTFS}/etc/systemd/system/dbus-org.freedesktop.resolve1.service \
+          ${IMAGE_ROOTFS}/etc/systemd/system/dbus-org.freedesktop.timesync1.service
+    mkdir -p ${IMAGE_ROOTFS}/etc/systemd/system
+    for svc in networking.service systemd-networkd.service systemd-networkd-wait-online.service \
+               systemd-network-generator.service systemd-resolved.service systemd-timesyncd.service \
+               nfs-common.service nfs-statd.service nfs-mountd.service rpcbind.service; do
+        ln -sfn /dev/null ${IMAGE_ROOTFS}/etc/systemd/system/$svc
+    done
+    mkdir -p ${IMAGE_ROOTFS}/etc/systemd/system/serial-getty@ttyPS0.service.d
+    printf '[Service]\nExecStart=\nExecStart=-/sbin/agetty --autologin root --noclear %%I $TERM\n' \
+        > ${IMAGE_ROOTFS}/etc/systemd/system/serial-getty@ttyPS0.service.d/autologin.conf
+}
+ROOTFS_POSTPROCESS_COMMAND += "sc7f0_no_network_and_autologin; "

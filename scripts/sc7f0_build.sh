@@ -76,12 +76,6 @@ with ZipFile(p/'hardware.xsa') as z:
     assert len(names)==1 and z.read(names[0])==(p/'zu4ev_pcie_card_top.bit').read_bytes()
 PY
 make -C petalinux/qpcie-zu4ev hw-desc linux XSA_DIR="$OUT/fpga/hardware.xsa"
-make -B -C test_app qpcie_upgrade_daemon qpcie_debugd qpcie_hdmi_daemon
-# Build the deployable PS FIT with all three services enabled; never publish
-# into release/zu4ev_sd_installer or overwrite a validated release directory.
-REL_TARGET_DIR="$OUT/.no-release-copy" INCLUDE_DEBUG_DAEMON=1 ENABLE_DEBUG_EXEC=1 ENABLE_HDMI_DAEMON=1 \
-    ENABLE_SC7F0_WATCHDOG=1 SC7F0_PL_BASE_VERSION="0x$VERSION" \
-    bash scripts/inject_upgrade_daemon_to_image_ub.sh
 for f in image.ub boot.scr zynqmp_fsbl.elf pmufw.elf bl31.elf u-boot.elf system.dtb; do
     cp -L "petalinux/qpcie-zu4ev/images/linux/$f" "$OUT/images/$f"
 done

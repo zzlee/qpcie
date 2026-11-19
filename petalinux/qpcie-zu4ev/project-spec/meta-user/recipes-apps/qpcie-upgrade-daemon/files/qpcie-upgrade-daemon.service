@@ -1,0 +1,16 @@
+[Unit]
+Description=QPCIe SC7F0 In-System Firmware Upgrade Daemon
+After=local-fs.target systemd-udevd.service
+Wants=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/qpcie_upgrade_daemon
+Restart=always
+RestartSec=10
+TimeoutStartSec=60
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

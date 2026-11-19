@@ -188,22 +188,11 @@ DEBUG_SHELL=/bin/bash
 Then restart `qpcie-debugd.service`. Remove/clear DEBUG_EXEC_ARGS to disable
 execution. An image without Bash can use `/bin/sh` (not Bash syntax).
 
-The existing production image injection flow can also include this service:
-
-```bash
-# Point copies at an isolated candidate directory, NOT the published installer.
-mkdir -p build/debug-first/candidate
-REL_TARGET_DIR="$PWD/build/debug-first/candidate" \
-  INCLUDE_DEBUG_DAEMON=1 ENABLE_DEBUG_EXEC=1 \
-  bash scripts/inject_upgrade_daemon_to_image_ub.sh
-```
-
-This explicit lab-only flag installs an execution-enabled config. Bash
-selection resolves absolute Yocto alternatives and usrmerge links inside the
-TARGET rootfs, never against the build host; `/usr/bin/bash`-only layouts also
-use the correct executable path. Without ENABLE_DEBUG_EXEC, the helper explicitly
-clears execution even on a reused rootfs. **Never inject the debug/upgrade
-services into the standalone SD installer RAMDisk.**
+Both `qpcie-upgrade-daemon` and `qpcie-debugd` are now built and enabled natively
+by `petalinux-build` (`meta-user/recipes-apps/qpcie-upgrade-daemon` and
+`meta-user/recipes-apps/qpcie-debugd`, with `QPCIE_DEBUGD_ALLOW_EXEC ?= "1"`
+installing `/etc/default/qpcie-debugd`). **Never enable the debug/upgrade
+services in a standalone SD installer RAMDisk.**
 
 Hardware changes require C_VERSION, regenerated targets/XSA, PetaLinux
 hardware-description import, image/BOOT.BIN rebuild and release hashes. Do
