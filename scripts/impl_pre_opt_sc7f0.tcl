@@ -60,7 +60,12 @@ if {[info exists ::env(SC7F0_RGB_COMPOSITOR)] &&
     if {[llength [get_cells -quiet -hier -regexp {.*u_overlay_writer/.*}]] > 0} {
         source [file join $sc7f0_impl_pre_dir apply_sc7f0_overlay_cdc.tcl]
     } else {
-        puts "SC7F0_OVERLAY_CDC_APPLY_SKIPPED direct pull-mode overlay active (no u_overlay_writer)"
+        set arm_src [get_cells -quiet -hier -regexp {.*u_overlay_ingress/arm_toggle_reg}]
+        set arm_dst [get_pins -quiet -hier -regexp {.*u_overlay_ingress/sync0_reg/D}]
+        if {[llength $arm_src] > 0 && [llength $arm_dst] > 0} {
+            set_max_delay -datapath_only 3.333 -from $arm_src -to $arm_dst
+        }
+        puts "SC7F0_OVERLAY_CDC_APPLY_SKIPPED direct pull-mode overlay active (no u_overlay_writer; ingress arm CDC applied)"
     }
     source [file join $sc7f0_impl_pre_dir apply_sc7f0_tx_io_first_stage.tcl]
     source [file join $sc7f0_impl_pre_dir apply_sc7f0_tx_tmds_clock_forward.tcl]

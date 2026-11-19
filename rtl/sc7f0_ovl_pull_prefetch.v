@@ -24,7 +24,7 @@
 module sc7f0_ovl_pull_prefetch #(
     parameter integer ACTIVE_BEATS_PER_LINE = 1920,  // 3840 px / 2 PPC
     parameter integer ACTIVE_LINES          = 2160,
-    parameter integer URAM_FIFO_DEPTH       = 65536  // 65536 x 16 B = 1.0 MB (32 URAMs)
+    parameter integer URAM_FIFO_DEPTH       = 32768  // 32768 x 16 B = 0.5 MB (~34 lines, 16 URAMs)
 )(
     // ---- PCIe user clock domain -------------------------------------------
     input  wire         pcie_clk,
@@ -202,6 +202,7 @@ module sc7f0_ovl_pull_prefetch #(
     assign s_axis_tready = !uram_full && !uram_wr_rst_busy;
 
     xpm_fifo_sync #(
+        .CASCADE_HEIGHT     (1),
         .DOUT_RESET_VALUE   ("0"),
         .ECC_MODE           ("no_ecc"),
         .FIFO_MEMORY_TYPE   ("ultra"),
@@ -210,14 +211,14 @@ module sc7f0_ovl_pull_prefetch #(
         .FULL_RESET_VALUE   (0),
         .PROG_EMPTY_THRESH  (10),
         .PROG_FULL_THRESH   (10),
-        .RD_DATA_COUNT_WIDTH(17),
+        .RD_DATA_COUNT_WIDTH(16),
         .READ_DATA_WIDTH    (129),
         .READ_MODE          ("fwft"),
         .SIM_ASSERT_CHK     (0),
         .USE_ADV_FEATURES   ("0000"),
         .WAKEUP_TIME        (0),
         .WRITE_DATA_WIDTH   (129),
-        .WR_DATA_COUNT_WIDTH(17)
+        .WR_DATA_COUNT_WIDTH(16)
     ) u_ovl_uram_fifo (
         .sleep        (1'b0),
         .rst          (!mem_rst_n),
