@@ -66,8 +66,9 @@ eMMC boot mount 為 `/run/media/BOOT-mmcblk0p1`。其他部署配置應先確認
 2. **透過 sc7f0ctl exec** 檢查真正 PS 的架構及三個 daemon 皆 `active`。
 3. 在 x86 上針對該機 kernel 編譯 matched driver；拒絕正在使用 `/dev/video0` 的情況。
 4. PCIe push／PS VERIFY；不接受 E1，VERIFY 失敗**絕對不會**走到 COMMIT。
-5. 備份 PS eMMC 三個 boot files 與 host module（host 端依 srcversion 解析「實際載入的那個
-   `qpcie.ko`」，解析不出來就 `REFUSE_UNKNOWN_RUNNING_MODULE` 停止）。
+5. 檢查並記錄 host module（host 端依 srcversion 解析「實際載入的那個
+   `qpcie.ko`」，解析不出來就 `REFUSE_UNKNOWN_RUNNING_MODULE` 停止；PS eMMC 端
+   目前暫不建立 `.backup_cli_*` 備份）。
 6. 安裝 matched driver；新 module 被拒時立刻回裝舊 module，**此時尚未動 eMMC**。
 7. COMMIT（恰一次）；經 PS mailbox 獨立讀回三個檔案的 SHA（`EMMC_READBACK_SHA_PASS`）。
 8. 讀取重啟前的 **PS boot id**（讀不到就停止，之後就無法證明卡端真的重啟過）。

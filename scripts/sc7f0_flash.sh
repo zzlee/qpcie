@@ -107,8 +107,6 @@ if ((VERIFY_ONLY)); then
     echo 'VERIFIED only: no eMMC write, driver installation or reboot performed.'
     exit 0
 fi
-STAMP=$(date -u +%Y%m%dT%H%M%SZ)
-sudo -n "$CTL" exec "set -eu; b=/run/media/BOOT-mmcblk0p1; test -s \$b/BOOT.BIN; d=\$b/.backup_cli_$STAMP; mkdir \$d; for n in BOOT.BIN image.ub boot.scr; do cp \$b/\$n \$d/\$n; done; sync; sha256sum \$d/*"
 # Resolve the file that is actually loaded, so the rollback copy is the code the
 # card is talking to.  `modinfo -n qpcie` only works for a module that has a
 # modules.dep entry: on the 7.0.0-43 test host the running module was insmod'ed
