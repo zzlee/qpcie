@@ -10,7 +10,7 @@ diff --git a/drivers/clk/clk-si5324.c b/drivers/clk/clk-si5324.c
 index 1111111..2222222 100644
 --- a/drivers/clk/clk-si5324.c
 +++ b/drivers/clk/clk-si5324.c
-@@ -762,6 +762,38 @@ static int si5324_clkout_set_rate(struct clk_hw *hw, unsigned long rate,
+@@ -762,6 +762,34 @@ static int si5324_clkout_set_rate(struct clk_hw *hw, unsigned long rate,
  	u8 n1_hs, n2_hs, bwsel, buf[SI5324_OUT_REGS * 2];
  	int i, ret, rc;
  

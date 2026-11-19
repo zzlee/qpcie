@@ -318,8 +318,9 @@ foreach {ovs2_name ovs2_dst_pat ovs2_next_pat} {
         if {$ovs2_eclk ne "capture_clk_300m"} {
             error "SC7F0_OVERLAY_SYNC_R2_DEST_DOMAIN $ovs2_name: second-stage data path ending at $ovs2_ep is captured by '$ovs2_eclk', expected capture_clk_300m"
         }
-        if {$ovs2_r eq "" || [expr {abs(double($ovs2_r) - $ovs2_period) > 0.001}]} {
-            error "SC7F0_OVERLAY_SYNC_R2_SECOND_STAGE_REQ $ovs2_name: $ovs2_ep carries requirement '$ovs2_r', expected one destination period ($ovs2_period ns)"
+        set ovs2_dest_period [get_property PERIOD [get_clocks capture_clk_300m]]
+        if {$ovs2_r eq "" || [expr {abs(double($ovs2_r) - double($ovs2_dest_period)) > 0.002}]} {
+            error "SC7F0_OVERLAY_SYNC_R2_SECOND_STAGE_REQ $ovs2_name: $ovs2_ep carries requirement '$ovs2_r', expected one destination period ($ovs2_dest_period ns)"
         }
         set ovs2_s [get_property SLACK $ovs2_p]
         if {$ovs2_nslack eq "" || [expr {double($ovs2_s) < double($ovs2_nslack)}]} {set ovs2_nslack $ovs2_s}

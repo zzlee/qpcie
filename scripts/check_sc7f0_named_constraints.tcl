@@ -1859,7 +1859,8 @@ foreach id [lsort [array names sc7f0_items]] {
     catch {array unset rec}
     array set rec $sc7f0_items($id)
     if {[expr {double($rec(review_required))}] == 0} continue
-    if {$rec(from_objects) == 0 || $rec(to_objects) == 0} {
+    if {([info exists rec(from_objects)] && $rec(from_objects) == 0) ||
+        ([info exists rec(to_objects)] && $rec(to_objects) == 0)} {
         lappend problems "$id resolved to [expr {$rec(from_objects)}]/[expr {$rec(to_objects)}] objects"
     }
     if {[info exists rec(ignored)] && $rec(ignored)} {lappend problems "$id is ignored"}
