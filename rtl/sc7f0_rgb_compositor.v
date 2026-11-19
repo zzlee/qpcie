@@ -41,7 +41,8 @@
 // ============================================================================
 
 module sc7f0_rgb_compositor #(
-    parameter integer PPC = 2
+    parameter integer PPC               = 2,
+    parameter integer DIRECT_OVL_STREAM = 0
 )(
     input  wire                 csr_clk,
     input  wire                 csr_rst_n,
@@ -144,7 +145,15 @@ module sc7f0_rgb_compositor #(
     input  wire [1:0]           ovl_last_slot_m,
     input  wire [31:0]          ovl_slot_bytes_m,
     input  wire                 ovl_hw_auto_slot,
-    output reg  [3:0]           ovl_slot_release_m,
+    output wire [3:0]           ovl_slot_release_m,
+
+    // ---- direct pull overlay stream (used when DIRECT_OVL_STREAM == 1) ----
+    input  wire [PPC*32-1:0]    s_o_axis_tdata,
+    input  wire                 s_o_axis_tvalid,
+    output wire                 s_o_axis_tready,
+    input  wire                 s_o_axis_tlast,
+    input  wire                 s_o_axis_tuser,
+    output reg                  base_vblank_p,
 
     // ---- composited video, tx_clk, PPC pixels of native RGB ---------------
     output wire [PPC*24-1:0]    m_axis_video_tdata,
@@ -288,126 +297,153 @@ module sc7f0_rgb_compositor #(
     );
 
     // ------------------------------------------------------------------------
-    // Reader-B: overlay plane (separate IP instance, separate HP port)
+    // Reader-B: overlay plane (omitted when DIRECT_OVL_STREAM == 1)
     // ------------------------------------------------------------------------
     wire [RB-1:0] b_vid_tdata;
     wire          b_vid_tvalid, b_vid_tready, b_vid_tlast, b_vid_tuser;
-    wire [63:0]   b_araddr_raw;
-    sc7f0_frmbuf_rd_rgb u_frmbuf_rd_b (
-        .ap_clk              (mem_clk),
-        .ap_rst_n            (reader_b_rst_n),
-        .interrupt           (irq_b),
-        .m_axis_video_TDATA  (b_vid_tdata),
-        .m_axis_video_TVALID (b_vid_tvalid),
-        .m_axis_video_TREADY (b_vid_tready),
-        .m_axis_video_TLAST  (b_vid_tlast),
-        .m_axis_video_TUSER  (b_vid_tuser),
-        .m_axis_video_TKEEP  (), .m_axis_video_TSTRB (),
-        .m_axis_video_TID    (), .m_axis_video_TDEST (),
-        .s_axi_CTRL_AWADDR   (cb_awaddr[6:0]),
-        .s_axi_CTRL_AWVALID  (cb_awvalid), .s_axi_CTRL_AWREADY (cb_awready),
-        .s_axi_CTRL_WDATA    (cb_wdata),   .s_axi_CTRL_WSTRB   (cb_wstrb),
-        .s_axi_CTRL_WVALID   (cb_wvalid),  .s_axi_CTRL_WREADY  (cb_wready),
-        .s_axi_CTRL_BRESP    (cb_bresp),   .s_axi_CTRL_BVALID  (cb_bvalid),
-        .s_axi_CTRL_BREADY   (cb_bready),
-        .s_axi_CTRL_ARADDR   (cb_araddr[6:0]),
-        .s_axi_CTRL_ARVALID  (cb_arvalid), .s_axi_CTRL_ARREADY (cb_arready),
-        .s_axi_CTRL_RDATA    (cb_rdata),   .s_axi_CTRL_RRESP   (cb_rresp),
-        .s_axi_CTRL_RVALID   (cb_rvalid),  .s_axi_CTRL_RREADY  (cb_rready),
-        .m_axi_mm_video_AWADDR (), .m_axi_mm_video_AWLEN  (),
-        .m_axi_mm_video_AWSIZE (), .m_axi_mm_video_AWBURST(),
-        .m_axi_mm_video_AWLOCK (), .m_axi_mm_video_AWCACHE(),
-        .m_axi_mm_video_AWPROT (), .m_axi_mm_video_AWQOS  (),
-        .m_axi_mm_video_AWREGION(),.m_axi_mm_video_AWVALID(),
-        .m_axi_mm_video_AWREADY(1'b0),
-        .m_axi_mm_video_WDATA  (), .m_axi_mm_video_WSTRB (),
-        .m_axi_mm_video_WLAST  (), .m_axi_mm_video_WVALID(),
-        .m_axi_mm_video_WREADY (1'b0),
-        .m_axi_mm_video_BRESP  (2'b00), .m_axi_mm_video_BVALID(1'b0),
-        .m_axi_mm_video_BREADY (),
-        .m_axi_mm_video_ARADDR (b_araddr_raw),  .m_axi_mm_video_ARLEN (b_arlen),
-        .m_axi_mm_video_ARSIZE (b_arsize),  .m_axi_mm_video_ARBURST(b_arburst),
-        .m_axi_mm_video_ARLOCK (), .m_axi_mm_video_ARCACHE(),
-        .m_axi_mm_video_ARPROT (), .m_axi_mm_video_ARQOS  (),
-        .m_axi_mm_video_ARREGION(),.m_axi_mm_video_ARVALID(b_arvalid),
-        .m_axi_mm_video_ARREADY(b_arready),
-        .m_axi_mm_video_RDATA  (b_rdata),   .m_axi_mm_video_RRESP (b_rresp),
-        .m_axi_mm_video_RLAST  (b_rlast),   .m_axi_mm_video_RVALID(b_rvalid),
-        .m_axi_mm_video_RREADY (b_rready)
-    );
+    generate
+        if (DIRECT_OVL_STREAM == 0) begin : g_reader_b
+            wire [63:0] b_araddr_raw;
+            reg  [3:0]  ovl_slot_release_r;
+            assign ovl_slot_release_m = ovl_slot_release_r;
 
-    // ------------------------------------------------------------------------
-    // Hardware tear-free Reader-B slot selector (mem_clk, zero PS/CPU loop)
-    // ------------------------------------------------------------------------
-    reg  [1:0]  disp_slot;
-    reg  [11:0] b_line_cnt;
-    reg  [11:0] b_lines_per_frame;
-    reg         b_switch_pending;
-    wire        b_sof = b_vid_tvalid && b_vid_tready && b_vid_tuser;
-    wire        b_eol = b_vid_tvalid && b_vid_tready && b_vid_tlast;
-    wire        b_eof = b_eol && (b_lines_per_frame != 12'd0) &&
-                        (b_line_cnt == (b_lines_per_frame - 12'd1));
-    wire        b_init_switch = !b_arvalid && !ovl_slot_ready_m[disp_slot] && (|ovl_slot_ready_m);
+            sc7f0_frmbuf_rd_rgb u_frmbuf_rd_b (
+                .ap_clk              (mem_clk),
+                .ap_rst_n            (reader_b_rst_n),
+                .interrupt           (irq_b),
+                .m_axis_video_TDATA  (b_vid_tdata),
+                .m_axis_video_TVALID (b_vid_tvalid),
+                .m_axis_video_TREADY (b_vid_tready),
+                .m_axis_video_TLAST  (b_vid_tlast),
+                .m_axis_video_TUSER  (b_vid_tuser),
+                .m_axis_video_TKEEP  (), .m_axis_video_TSTRB (),
+                .m_axis_video_TID    (), .m_axis_video_TDEST (),
+                .s_axi_CTRL_AWADDR   (cb_awaddr[6:0]),
+                .s_axi_CTRL_AWVALID  (cb_awvalid), .s_axi_CTRL_AWREADY (cb_awready),
+                .s_axi_CTRL_WDATA    (cb_wdata),   .s_axi_CTRL_WSTRB   (cb_wstrb),
+                .s_axi_CTRL_WVALID   (cb_wvalid),  .s_axi_CTRL_WREADY  (cb_wready),
+                .s_axi_CTRL_BRESP    (cb_bresp),   .s_axi_CTRL_BVALID  (cb_bvalid),
+                .s_axi_CTRL_BREADY   (cb_bready),
+                .s_axi_CTRL_ARADDR   (cb_araddr[6:0]),
+                .s_axi_CTRL_ARVALID  (cb_arvalid), .s_axi_CTRL_ARREADY (cb_arready),
+                .s_axi_CTRL_RDATA    (cb_rdata),   .s_axi_CTRL_RRESP   (cb_rresp),
+                .s_axi_CTRL_RVALID   (cb_rvalid),  .s_axi_CTRL_RREADY  (cb_rready),
+                .m_axi_mm_video_AWADDR (), .m_axi_mm_video_AWLEN  (),
+                .m_axi_mm_video_AWSIZE (), .m_axi_mm_video_AWBURST(),
+                .m_axi_mm_video_AWLOCK (), .m_axi_mm_video_AWCACHE(),
+                .m_axi_mm_video_AWPROT (), .m_axi_mm_video_AWQOS  (),
+                .m_axi_mm_video_AWREGION(),.m_axi_mm_video_AWVALID(),
+                .m_axi_mm_video_AWREADY(1'b0),
+                .m_axi_mm_video_WDATA  (), .m_axi_mm_video_WSTRB (),
+                .m_axi_mm_video_WLAST  (), .m_axi_mm_video_WVALID(),
+                .m_axi_mm_video_WREADY (1'b0),
+                .m_axi_mm_video_BRESP  (2'b00), .m_axi_mm_video_BVALID(1'b0),
+                .m_axi_mm_video_BREADY (),
+                .m_axi_mm_video_ARADDR (b_araddr_raw),  .m_axi_mm_video_ARLEN (b_arlen),
+                .m_axi_mm_video_ARSIZE (b_arsize),  .m_axi_mm_video_ARBURST(b_arburst),
+                .m_axi_mm_video_ARLOCK (), .m_axi_mm_video_ARCACHE(),
+                .m_axi_mm_video_ARPROT (), .m_axi_mm_video_ARQOS  (),
+                .m_axi_mm_video_ARREGION(),.m_axi_mm_video_ARVALID(b_arvalid),
+                .m_axi_mm_video_ARREADY(b_arready),
+                .m_axi_mm_video_RDATA  (b_rdata),   .m_axi_mm_video_RRESP (b_rresp),
+                .m_axi_mm_video_RLAST  (b_rlast),   .m_axi_mm_video_RVALID(b_rvalid),
+                .m_axi_mm_video_RREADY (b_rready)
+            );
 
-    reg [1:0] next_disp_slot;
-    always @(*) begin
-        if (ovl_slot_ready_m[ovl_last_slot_m])
-            next_disp_slot = ovl_last_slot_m;
-        else if (ovl_slot_ready_m[2'd0]) next_disp_slot = 2'd0;
-        else if (ovl_slot_ready_m[2'd1]) next_disp_slot = 2'd1;
-        else if (ovl_slot_ready_m[2'd2]) next_disp_slot = 2'd2;
-        else                             next_disp_slot = 2'd3;
-    end
+            reg  [1:0]  disp_slot;
+            reg  [11:0] b_line_cnt;
+            reg  [11:0] b_lines_per_frame;
+            reg         b_switch_pending;
+            wire        b_sof = b_vid_tvalid && b_vid_tready && b_vid_tuser;
+            wire        b_eol = b_vid_tvalid && b_vid_tready && b_vid_tlast;
+            wire        b_eof = b_eol && (b_lines_per_frame != 12'd0) &&
+                                (b_line_cnt == (b_lines_per_frame - 12'd1));
+            wire        b_init_switch = !b_arvalid && !ovl_slot_ready_m[disp_slot] && (|ovl_slot_ready_m);
 
-    always @(posedge mem_clk) begin
-        if (!mem_rst_n) begin
-            disp_slot          <= 2'd0;
-            b_line_cnt         <= 12'd0;
-            b_lines_per_frame  <= 12'd0;
-            b_switch_pending   <= 1'b0;
-            ovl_slot_release_m <= 4'b0000;
-        end else begin
-            ovl_slot_release_m <= 4'b0000;
-            if (b_sof) begin
-                if (b_line_cnt != 12'd0)
-                    b_lines_per_frame <= b_line_cnt;
-                b_line_cnt <= 12'd0;
-            end else if (b_eol) begin
-                b_line_cnt <= b_line_cnt + 12'd1;
+            reg [1:0] next_disp_slot;
+            always @(*) begin
+                if (ovl_slot_ready_m[ovl_last_slot_m])
+                    next_disp_slot = ovl_last_slot_m;
+                else if (ovl_slot_ready_m[2'd0]) next_disp_slot = 2'd0;
+                else if (ovl_slot_ready_m[2'd1]) next_disp_slot = 2'd1;
+                else if (ovl_slot_ready_m[2'd2]) next_disp_slot = 2'd2;
+                else                             next_disp_slot = 2'd3;
             end
 
-            if (!ovl_hw_auto_slot) begin
-                disp_slot        <= 2'd0;
-                b_switch_pending <= 1'b0;
-            end else begin
-                if (b_eof)
-                    b_switch_pending <= 1'b1;
+            always @(posedge mem_clk) begin
+                if (!mem_rst_n) begin
+                    disp_slot          <= 2'd0;
+                    b_line_cnt         <= 12'd0;
+                    b_lines_per_frame  <= 12'd0;
+                    b_switch_pending   <= 1'b0;
+                    ovl_slot_release_r <= 4'b0000;
+                end else begin
+                    ovl_slot_release_r <= 4'b0000;
+                    if (b_sof) begin
+                        if (b_line_cnt != 12'd0)
+                            b_lines_per_frame <= b_line_cnt;
+                        b_line_cnt <= 12'd0;
+                    end else if (b_eol) begin
+                        b_line_cnt <= b_line_cnt + 12'd1;
+                    end
 
-                if ((b_switch_pending || b_eof || b_init_switch) && !b_arvalid) begin
-                    b_switch_pending <= 1'b0;
-                    if (|ovl_slot_ready_m) begin
-                        if (next_disp_slot != disp_slot) begin
-                            disp_slot          <= next_disp_slot;
-                            ovl_slot_release_m <= ovl_slot_ready_m & ~(4'b0001 << next_disp_slot);
-                        end else if ((ovl_slot_ready_m & ~(4'b0001 << disp_slot)) != 4'b0000) begin
-                            ovl_slot_release_m <= ovl_slot_ready_m & ~(4'b0001 << disp_slot);
+                    if (!ovl_hw_auto_slot) begin
+                        disp_slot        <= 2'd0;
+                        b_switch_pending <= 1'b0;
+                    end else begin
+                        if (b_eof)
+                            b_switch_pending <= 1'b1;
+
+                        if ((b_switch_pending || b_eof || b_init_switch) && !b_arvalid) begin
+                            b_switch_pending <= 1'b0;
+                            if (|ovl_slot_ready_m) begin
+                                if (next_disp_slot != disp_slot) begin
+                                    disp_slot          <= next_disp_slot;
+                                    ovl_slot_release_r <= ovl_slot_ready_m & ~(4'b0001 << next_disp_slot);
+                                end else if ((ovl_slot_ready_m & ~(4'b0001 << disp_slot)) != 4'b0000) begin
+                                    ovl_slot_release_r <= ovl_slot_ready_m & ~(4'b0001 << disp_slot);
+                                end
+                            end
                         end
                     end
                 end
             end
-        end
-    end
 
-    reg [33:0] disp_slot_offset;
-    always @(*) begin
-        case (disp_slot)
-            2'd0: disp_slot_offset = 34'd0;
-            2'd1: disp_slot_offset = {2'b00, ovl_slot_bytes_m};
-            2'd2: disp_slot_offset = {1'b0, ovl_slot_bytes_m, 1'b0};
-            2'd3: disp_slot_offset = {2'b00, ovl_slot_bytes_m} + {1'b0, ovl_slot_bytes_m, 1'b0};
-        endcase
-    end
-    assign b_araddr = ovl_hw_auto_slot ? (b_araddr_raw + {30'd0, disp_slot_offset}) : b_araddr_raw;
+            reg [33:0] disp_slot_offset;
+            always @(*) begin
+                case (disp_slot)
+                    2'd0: disp_slot_offset = 34'd0;
+                    2'd1: disp_slot_offset = {2'b00, ovl_slot_bytes_m};
+                    2'd2: disp_slot_offset = {1'b0, ovl_slot_bytes_m, 1'b0};
+                    2'd3: disp_slot_offset = {2'b00, ovl_slot_bytes_m} + {1'b0, ovl_slot_bytes_m, 1'b0};
+                endcase
+            end
+            assign b_araddr        = ovl_hw_auto_slot ? (b_araddr_raw + {30'd0, disp_slot_offset}) : b_araddr_raw;
+            assign s_o_axis_tready = 1'b0;
+        end else begin : g_direct_ovl
+            assign irq_b              = 1'b0;
+            assign cb_awready         = 1'b1;
+            assign cb_wready          = 1'b1;
+            assign cb_bresp           = 2'b00;
+            assign cb_bvalid          = 1'b0;
+            assign cb_arready         = 1'b1;
+            assign cb_rdata           = 32'd0;
+            assign cb_rresp           = 2'b00;
+            assign cb_rvalid          = 1'b0;
+            assign b_araddr           = 64'd0;
+            assign b_arlen            = 8'd0;
+            assign b_arsize           = 3'd0;
+            assign b_arburst          = 2'd1;
+            assign b_arvalid          = 1'b0;
+            assign b_rready           = 1'b0;
+            assign ovl_slot_release_m = 4'b0000;
+            assign b_vid_tdata        = s_o_axis_tdata;
+            assign b_vid_tvalid       = s_o_axis_tvalid;
+            assign b_vid_tlast        = s_o_axis_tlast;
+            assign b_vid_tuser        = s_o_axis_tuser;
+            assign s_o_axis_tready    = b_vid_tready;
+        end
+    endgenerate
 
     // ------------------------------------------------------------------------
     // control levels into the mem-domain compositor
@@ -467,6 +503,28 @@ module sc7f0_rgb_compositor #(
     wire          base_tready;
     assign a_vid_tready   = rx_passthrough ? 1'b0        : base_tready;
     assign rx_live_tready = rx_passthrough ? base_tready : 1'b1;
+
+    reg [11:0] base_line_cnt;
+    always @(posedge mem_clk or negedge mem_rst_n) begin
+        if (!mem_rst_n) begin
+            base_line_cnt <= 12'd0;
+            base_vblank_p <= 1'b0;
+        end else begin
+            base_vblank_p <= 1'b0;
+            if (base_tvalid && base_tready) begin
+                if (base_tuser) begin
+                    base_line_cnt <= 12'd0;
+                end else if (base_tlast) begin
+                    if (base_line_cnt == 12'd2159) begin
+                        base_vblank_p <= 1'b1;
+                        base_line_cnt <= 12'd0;
+                    end else begin
+                        base_line_cnt <= base_line_cnt + 12'd1;
+                    end
+                end
+            end
+        end
+    end
 
     sc7f0_alpha_blend_2ppc #(.PPC(PPC), .QUEUE_DEPTH(16)) u_blend (
         .clk                (mem_clk),

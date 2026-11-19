@@ -109,10 +109,6 @@ create_clock -period 3.333 -name pl_clk_300m [get_ports pl_clk_300m_p]
 # 300 MHz capture & display/compositor memory clock (Reader-A/B > 297 MHz 2PPC).
 create_generated_clock -name capture_clk_300m -source [get_ports pl_clk_300m_p] \
     -divide_by 1 [get_pins u_capture_clock/O]
-# 250 MHz overlay writer + S_AXI_HP3_FPD clock (300 MHz * 5 / 6) for wide HP3 timing margin.
-create_generated_clock -name ovl_wr_clk_250m -source [get_pins u_capture_mmcm/CLKOUT0] \
-    -divide_by 1 [get_pins u_ovl_wr_clock/O]
-set_clock_groups -asynchronous -group [get_clocks capture_clk_300m] -group [get_clocks ovl_wr_clk_250m]
 
 ## 8. Diagnostic Probing CDC Max Delay Constraints
 set_max_delay -datapath_only 10.0 -from [get_cells -hierarchical -filter {NAME =~ *u_meter*/*snapshot_test_reg[*]}] -to [get_cells -hierarchical -filter {NAME =~ *u_meter*/*measured_freq_hz_reg[*] || NAME =~ *u_meter*/*raw_cycle_count_reg[*]}]

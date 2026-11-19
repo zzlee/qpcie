@@ -341,6 +341,14 @@ module custom_pcie_dma_top #(
     output wire [1:0]                                       ovl_wr_last_slot_m,
     output wire [31:0]                                      ovl_wr_slot_bytes_m,
 
+    // Direct pull-mode H2C overlay stream (ovl_mem_clk domain)
+    input  wire                                             ovl_base_vblank_p,
+    output wire [63:0]                                      ovl_direct_tdata,
+    output wire                                             ovl_direct_tvalid,
+    input  wire                                             ovl_direct_tready,
+    output wire                                             ovl_direct_tlast,
+    output wire                                             ovl_direct_tuser,
+
     // PCIe BAR0 0x4000..0x4FFF Overlay CSR Master (pcie_user_clk domain)
     output wire [31:0]                                      m_axil_ovl_awaddr,
     output wire                                             m_axil_ovl_awvalid,
@@ -1856,6 +1864,12 @@ module custom_pcie_dma_top #(
     wire         ovl_axis_tuser, ovl_axis_tvalid, ovl_axis_tready;
     wire [7:0]   ovl_axis_avail;
     wire         ovl_axis_ovf_sticky;
+    wire         ovl_ing_done_pulse;
+
+    wire         pull_ing_enable, pull_ing_go;
+    wire [63:0]  pull_ing_src_addr;
+    wire [31:0]  pull_ing_xfer_bytes;
+    wire [15:0]  pull_ing_max_req;
 
     sc7f0_overlay_ingress #(
         .OVL_TAG_BASE   (64),
@@ -1868,11 +1882,11 @@ module custom_pcie_dma_top #(
         .clk                   (clk),
         .rst_n                 (dma_rst_n),
         .epoch_rst_n           (rst_n),
-        .ovl_enable            (ovl_enable_eff),
-        .ovl_src_addr          (ovl_src_addr),
-        .ovl_xfer_bytes        (ovl_xfer_bytes),
-        .ovl_max_bytes_per_req (ovl_max_bytes_per_req),
-        .ovl_go                (ovl_go & ~ovl_abort_req),
+        .ovl_enable            (pull_ing_enable),
+        .ovl_src_addr          (pull_ing_src_addr),
+        .ovl_xfer_bytes        (pull_ing_xfer_bytes),
+        .ovl_max_bytes_per_req (pull_ing_max_req),
+        .ovl_go                (pull_ing_go),
         .quiesce               (ovl_quiesce),
         .discard_pending       (ovl_discard_pending),
         .mrd_req_valid         (ovl_mrd_req_valid),
@@ -1903,7 +1917,7 @@ module custom_pcie_dma_top #(
         .ovl_err_sticky        (ovl_sticky_err),
         .ovl_abort_evt         (ovl_ingress_abort),
         .ovl_poison_sticky     (ovl_video_poison),
-        .ovl_done_pulse        (),
+        .ovl_done_pulse        (ovl_ing_done_pulse),
         .mem_clk               (ovl_mem_clk),
         .mem_rst_n             (ovl_mem_rst_n),
         .m_axis_tdata          (ovl_axis_tdata),
@@ -1917,67 +1931,64 @@ module custom_pcie_dma_top #(
     assign ovl_status_counts = {27'd0, ovl_axis_ovf_sticky, ovl_sticky_err,
                                 ovl_sticky_unaligned, ovl_sticky_timeout};
 
-    sc7f0_overlay_writer #(
-        .DATA_WIDTH  (128),
-        .ADDR_WIDTH  (49),
-        .FIFO_DEPTH  (1024),
-        .MAX_SLOTS   (4)
-    ) u_overlay_writer (
-        .clk               (clk),
-        .rst_n             (dma_rst_n),
-        .s_axis_tdata      (ovl_axis_tdata),
-        .s_axis_tvalid     (ovl_axis_tvalid),
-        .s_axis_tuser      (ovl_axis_tuser),
-        .s_axis_tlast      (1'b0),
-        .s_axis_tready     (ovl_axis_tready),
-        .ov_enable         (ovl_wr_enable),
-        .ov_dst_base       ({15'd0, ovl_wr_dst_base}),
-        .ov_slot_bytes     (ovl_wr_slot_bytes),
-        .ov_slot_count     (ovl_wr_slot_count),
-        .ov_frame_bytes    (ovl_wr_frame_bytes),
-        .ov_auto_advance   (ovl_wr_auto_advance),
-        .ov_force_slot     (ovl_wr_force_slot),
-        .ov_consume        (ovl_wr_consume),
-        .epoch_rst_n       (rst_n),
-        .ov_abort          (ovl_plane_abort),
-        .s_axis_avail_in   (ovl_axis_avail),
-        .ov_busy           (ovl_wr_busy),
-        .ov_slot_ready     (ovl_wr_slot_ready),
-        .ov_write_slot     (ovl_wr_active_slot),
-        .ov_frames_done    (ovl_wr_frames_done),
-        .ov_bytes_written  (ovl_wr_bytes_written),
-        .ov_stall_sticky   (ovl_wr_sticky[0]),
-        .ov_over_sticky    (ovl_wr_sticky[1]),
-        .ov_axi_err_sticky (ovl_wr_sticky[2]),
-        .ov_misalign_sticky(ovl_wr_sticky[3]),
-        .ov_err_frame_sticky(ovl_wr_sticky[5]),
-        .ov_abort_sticky   (ovl_wr_sticky[4]),
-        .ov_err_frames     (ovl_wr_err_frames),
-        .ov_abort_busy     (ovl_wr_abort_busy),
-        .ov_axi_dbg        (ovl_axi_dbg),
-        .ov_irq_pulse      (ovl_wr_irq_pulse),
-        .mem_clk           (ovl_mem_clk),
-        .mem_rst_n         (ovl_mem_rst_n),
-        .ov_slot_release_m (ovl_wr_slot_release_m),
-        .ov_slot_ready_m   (ovl_wr_slot_ready_m),
-        .ov_last_slot_m    (ovl_wr_last_slot_m),
-        .ov_slot_bytes_m   (ovl_wr_slot_bytes_m),
-        .m_axi_awaddr      (ovl_awaddr),
-        .m_axi_awlen       (ovl_awlen),
-        .m_axi_awsize      (ovl_awsize),
-        .m_axi_awburst     (ovl_awburst),
-        .m_axi_awcache     (ovl_awcache),
-        .m_axi_awvalid     (ovl_awvalid),
-        .m_axi_awready     (ovl_awready),
-        .m_axi_wdata       (ovl_wdata),
-        .m_axi_wstrb       (ovl_wstrb),
-        .m_axi_wlast       (ovl_wlast),
-        .m_axi_wvalid      (ovl_wvalid),
-        .m_axi_wready      (ovl_wready),
-        .m_axi_bresp       (ovl_bresp),
-        .m_axi_bvalid      (ovl_bvalid),
-        .m_axi_bready      (ovl_bready)
+    sc7f0_ovl_pull_prefetch #(
+        .ACTIVE_BEATS_PER_LINE(1920),
+        .ACTIVE_LINES         (2160),
+        .URAM_FIFO_DEPTH      (65536)
+    ) u_ovl_pull_prefetch (
+        .pcie_clk               (clk),
+        .pcie_rst_n             (dma_rst_n),
+        .host_ovl_enable        (ovl_enable_eff),
+        .host_ovl_go            (ovl_go & ~ovl_abort_req),
+        .host_src_addr          (ovl_src_addr),
+        .host_xfer_bytes        (ovl_xfer_bytes),
+        .host_max_bytes_per_req (ovl_max_bytes_per_req),
+        .ing_ovl_enable         (pull_ing_enable),
+        .ing_ovl_go             (pull_ing_go),
+        .ing_src_addr           (pull_ing_src_addr),
+        .ing_xfer_bytes         (pull_ing_xfer_bytes),
+        .ing_max_bytes_per_req  (pull_ing_max_req),
+        .ing_busy               (ovl_status_busy),
+        .ing_quarantined        (ovl_status_quarantined),
+        .ing_done_pulse         (ovl_ing_done_pulse),
+        .ing_abort_evt          (ovl_ingress_abort),
+        .ovl_wr_irq_pulse       (ovl_wr_irq_pulse),
+        .ovl_wr_frames_done     (ovl_wr_frames_done),
+        .ovl_wr_bytes_written   (ovl_wr_bytes_written),
+        .ovl_wr_busy            (ovl_wr_busy),
+        .mem_clk                (ovl_mem_clk),
+        .mem_rst_n              (ovl_mem_rst_n),
+        .base_vblank_p_m        (ovl_base_vblank_p),
+        .s_axis_tdata           (ovl_axis_tdata),
+        .s_axis_tuser           (ovl_axis_tuser),
+        .s_axis_tvalid          (ovl_axis_tvalid),
+        .s_axis_tready          (ovl_axis_tready),
+        .m_o_axis_tdata         (ovl_direct_tdata),
+        .m_o_axis_tvalid        (ovl_direct_tvalid),
+        .m_o_axis_tready        (ovl_direct_tready),
+        .m_o_axis_tlast         (ovl_direct_tlast),
+        .m_o_axis_tuser         (ovl_direct_tuser)
     );
+    assign ovl_wr_slot_ready   = 4'd0;
+    assign ovl_wr_slot_ready_m = 4'd0;
+    assign ovl_wr_last_slot_m  = 2'd0;
+    assign ovl_wr_slot_bytes_m = 32'd0;
+    assign ovl_wr_active_slot  = 2'd0;
+    assign ovl_wr_sticky       = 6'd0;
+    assign ovl_wr_err_frames   = 32'd0;
+    assign ovl_wr_abort_busy   = 1'b0;
+    assign ovl_axi_dbg         = 4'd0;
+    assign ovl_awaddr          = 49'd0;
+    assign ovl_awlen           = 8'd0;
+    assign ovl_awsize          = 3'd0;
+    assign ovl_awburst         = 2'd0;
+    assign ovl_awcache         = 4'd0;
+    assign ovl_awvalid         = 1'b0;
+    assign ovl_wdata           = 128'd0;
+    assign ovl_wstrb           = 16'd0;
+    assign ovl_wlast           = 1'b0;
+    assign ovl_wvalid          = 1'b0;
+    assign ovl_bready          = 1'b0;
 `else
     assign ovl_status_bytes_issued      = 32'd0;
     assign ovl_status_bytes_staged      = 32'd0;
@@ -2015,6 +2026,10 @@ module custom_pcie_dma_top #(
     assign ovl_wlast                    = 1'b0;
     assign ovl_wvalid                   = 1'b0;
     assign ovl_bready                   = 1'b0;
+    assign ovl_direct_tdata             = 64'd0;
+    assign ovl_direct_tvalid            = 1'b0;
+    assign ovl_direct_tlast             = 1'b0;
+    assign ovl_direct_tuser             = 1'b0;
 `endif
 
     // 6.1 SG Host Variable-Length SGL Fetch Engine

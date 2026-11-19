@@ -1555,35 +1555,9 @@ module zu4ev_pcie_card_top #(
     wire [3:0]   ovl_wr_slot_release_m, ovl_wr_slot_ready_m;
     wire [1:0]   ovl_wr_last_slot_m;
     wire [31:0]  ovl_wr_slot_bytes_m;
-    // CDC between ovl_wr_clk (250 MHz overlay writer) and capture_clk (300 MHz compositor)
-    wire [3:0]   ovl_wr_slot_ready_c, ovl_wr_slot_release_c;
-    wire [1:0]   ovl_wr_last_slot_c;
-    wire [31:0]  ovl_wr_slot_bytes_c;
-    genvar cdc_i;
-    generate
-        for (cdc_i = 0; cdc_i < 4; cdc_i = cdc_i + 1) begin : g_ovl_slot_cdc
-            xpm_cdc_single #(
-                .DEST_SYNC_FF(4), .INIT_SYNC_FF(0), .SIM_ASSERT_CHK(0), .SRC_INPUT_REG(1)
-            ) u_ovl_slot_ready_cdc (
-                .src_clk(ovl_wr_clk), .src_in(ovl_wr_slot_ready_m[cdc_i]),
-                .dest_clk(capture_clk), .dest_out(ovl_wr_slot_ready_c[cdc_i]));
-            xpm_cdc_pulse #(
-                .DEST_SYNC_FF(4), .INIT_SYNC_FF(0), .REG_OUTPUT(0), .RST_USED(1), .SIM_ASSERT_CHK(0)
-            ) u_ovl_slot_rel_cdc (
-                .src_clk(capture_clk), .src_rst(!dp_mem_rst_n), .src_pulse(ovl_wr_slot_release_c[cdc_i]),
-                .dest_clk(ovl_wr_clk), .dest_rst(!ovl_wr_rst_n), .dest_pulse(ovl_wr_slot_release_m[cdc_i]));
-        end
-    endgenerate
-    xpm_cdc_gray #(
-        .DEST_SYNC_FF(4), .INIT_SYNC_FF(0), .REG_OUTPUT(1), .SIM_ASSERT_CHK(0), .SIM_LOSSLESS_GRAY_CHK(0), .WIDTH(2)
-    ) u_ovl_last_slot_cdc (
-        .src_clk(ovl_wr_clk), .src_in_bin(ovl_wr_last_slot_m),
-        .dest_clk(capture_clk), .dest_out_bin(ovl_wr_last_slot_c));
-    xpm_cdc_array_single #(
-        .DEST_SYNC_FF(2), .INIT_SYNC_FF(0), .SIM_ASSERT_CHK(0), .SRC_INPUT_REG(1), .WIDTH(32)
-    ) u_ovl_slot_bytes_cdc (
-        .src_clk(ovl_wr_clk), .src_in(ovl_wr_slot_bytes_m),
-        .dest_clk(capture_clk), .dest_out(ovl_wr_slot_bytes_c));
+    wire         ovl_base_vblank_p;
+    wire [63:0]  ovl_direct_tdata;
+    wire         ovl_direct_tvalid, ovl_direct_tready, ovl_direct_tlast, ovl_direct_tuser;
     wire [31:0]  bar0_ovl_awaddr, bar0_ovl_wdata, bar0_ovl_araddr, bar0_ovl_rdata;
     wire [3:0]   bar0_ovl_wstrb;
     wire [1:0]   bar0_ovl_bresp, bar0_ovl_rresp;
@@ -1601,7 +1575,7 @@ module zu4ev_pcie_card_top #(
     wire         blend_gl_wait_vsof = (blend_gl_state == 2'd1);
     wire         blend_gl_lock_state= (blend_gl_state == 2'd2);
 
-    sc7f0_rgb_compositor #(.PPC(2)) u_rgb_compositor (
+    sc7f0_rgb_compositor #(.PPC(2), .DIRECT_OVL_STREAM(1)) u_rgb_compositor (
         .csr_clk(pl_clk0),           .csr_rst_n(sys_100m_rst_n),
         .mem_clk(capture_clk),       .mem_rst_n(dp_mem_rst_n),
         // Plane-A controllable reset stays the reviewed frame-tap CSR bit 2.
@@ -1665,11 +1639,17 @@ module zu4ev_pcie_card_top #(
         .blend_enable(blend_enable),
         .alpha_force_opaque(alpha_force_opaque),
         .blend_unlock(blend_unlock),
-        .ovl_slot_ready_m(ovl_wr_slot_ready_c),
-        .ovl_last_slot_m(ovl_wr_last_slot_c),
-        .ovl_slot_bytes_m(ovl_wr_slot_bytes_c),
+        .ovl_slot_ready_m(ovl_wr_slot_ready_m),
+        .ovl_last_slot_m(ovl_wr_last_slot_m),
+        .ovl_slot_bytes_m(ovl_wr_slot_bytes_m),
         .ovl_hw_auto_slot(ovl_hw_auto_slot),
-        .ovl_slot_release_m(ovl_wr_slot_release_c),
+        .ovl_slot_release_m(ovl_wr_slot_release_m),
+        .s_o_axis_tdata(ovl_direct_tdata),
+        .s_o_axis_tvalid(ovl_direct_tvalid),
+        .s_o_axis_tready(ovl_direct_tready),
+        .s_o_axis_tlast(ovl_direct_tlast),
+        .s_o_axis_tuser(ovl_direct_tuser),
+        .base_vblank_p(ovl_base_vblank_p),
         .m_axis_video_tdata(disp_video_tdata),
         .m_axis_video_tvalid(disp_video_tvalid),
         .m_axis_video_tready(disp_video_tready),
@@ -3320,8 +3300,8 @@ module zu4ev_pcie_card_top #(
         .ovl_video_guard_sticky          (ovl_video_guard_sticky),
         .ovl_video_guard_count           (ovl_video_guard_count),
         .ovl_video_poison                (ovl_video_poison),
-        .ovl_mem_clk                     (ovl_wr_clk),
-        .ovl_mem_rst_n                   (ovl_wr_rst_n),
+        .ovl_mem_clk                     (capture_clk),
+        .ovl_mem_rst_n                   (dp_mem_rst_n),
         .ovl_wr_enable                   (ovl_ctrl_wr_enable),
         .ovl_wr_dst_base                 (ovl_ctrl_wr_dst_base),
         .ovl_wr_slot_bytes               (ovl_ctrl_wr_slot_bytes),
@@ -3357,6 +3337,12 @@ module zu4ev_pcie_card_top #(
         .ovl_wr_slot_ready_m             (ovl_wr_slot_ready_m),
         .ovl_wr_last_slot_m              (ovl_wr_last_slot_m),
         .ovl_wr_slot_bytes_m             (ovl_wr_slot_bytes_m),
+        .ovl_base_vblank_p               (ovl_base_vblank_p),
+        .ovl_direct_tdata                (ovl_direct_tdata),
+        .ovl_direct_tvalid               (ovl_direct_tvalid),
+        .ovl_direct_tready               (ovl_direct_tready),
+        .ovl_direct_tlast                (ovl_direct_tlast),
+        .ovl_direct_tuser                (ovl_direct_tuser),
         .m_axil_ovl_awaddr               (bar0_ovl_awaddr),
         .m_axil_ovl_awvalid              (bar0_ovl_awvalid),
         .m_axil_ovl_awready              (bar0_ovl_awready),
@@ -3401,8 +3387,8 @@ module zu4ev_pcie_card_top #(
         .ovl_video_guard_sticky          (),
         .ovl_video_guard_count           (),
         .ovl_video_poison                (),
-        .ovl_mem_clk                     (ovl_wr_clk),
-        .ovl_mem_rst_n                   (ovl_wr_rst_n),
+        .ovl_mem_clk                     (capture_clk),
+        .ovl_mem_rst_n                   (dp_mem_rst_n),
         .ovl_wr_enable                   (1'b0),
         .ovl_wr_dst_base                 (49'd0),
         .ovl_wr_slot_bytes               (32'd0),
@@ -3437,6 +3423,12 @@ module zu4ev_pcie_card_top #(
         .ovl_wr_slot_ready_m             (),
         .ovl_wr_last_slot_m              (),
         .ovl_wr_slot_bytes_m             (),
+        .ovl_base_vblank_p               (1'b0),
+        .ovl_direct_tdata                (),
+        .ovl_direct_tvalid               (),
+        .ovl_direct_tready               (1'b0),
+        .ovl_direct_tlast                (),
+        .ovl_direct_tuser                (),
         .m_axil_ovl_awaddr               (),
         .m_axil_ovl_awvalid              (),
         .m_axil_ovl_awready              (1'b1),
@@ -3524,11 +3516,8 @@ module zu4ev_pcie_card_top #(
         .M_AXI_HPM1_FPD_wvalid(ps_hpm1_wvalid),
 `endif
 `ifdef SC7F0_RGB_COMPOSITOR
-        .ovl_hp3_clk(ovl_wr_clk),
-        // ---- S_AXI_HP2_FPD: overlay-plane reader B, read-only, 300 MHz ----
-        // Read-only master, so the write channels of the PS slave port are
-        // terminated with valid low / ready low rather than left floating: an
-        // AXI slave port with a floating AWVALID can sample X and deadlock.
+        .ovl_hp3_clk(capture_clk),
+        // ---- S_AXI_HP2_FPD: idle (overlay reader replaced by direct pull) ----
         .S_AXI_HP2_FPD_awaddr(49'd0), .S_AXI_HP2_FPD_awlen(8'd0),
         .S_AXI_HP2_FPD_awsize(3'd0), .S_AXI_HP2_FPD_awburst(2'd1),
         .S_AXI_HP2_FPD_awid(6'd0), .S_AXI_HP2_FPD_awlock(1'b0),
@@ -3539,28 +3528,28 @@ module zu4ev_pcie_card_top #(
         .S_AXI_HP2_FPD_wlast(1'b0), .S_AXI_HP2_FPD_wvalid(1'b0),
         .S_AXI_HP2_FPD_wready(), .S_AXI_HP2_FPD_bid(),
         .S_AXI_HP2_FPD_bresp(), .S_AXI_HP2_FPD_bvalid(), .S_AXI_HP2_FPD_bready(1'b0),
-        .S_AXI_HP2_FPD_araddr(rd_b_araddr[48:0]), .S_AXI_HP2_FPD_arlen(rd_b_arlen),
-        .S_AXI_HP2_FPD_arsize(rd_b_arsize), .S_AXI_HP2_FPD_arburst(rd_b_arburst),
+        .S_AXI_HP2_FPD_araddr(49'd0), .S_AXI_HP2_FPD_arlen(8'd0),
+        .S_AXI_HP2_FPD_arsize(3'd0), .S_AXI_HP2_FPD_arburst(2'd1),
         .S_AXI_HP2_FPD_arid(6'd0), .S_AXI_HP2_FPD_arlock(1'b0),
         .S_AXI_HP2_FPD_arcache(4'd3), .S_AXI_HP2_FPD_arprot(3'd0),
-        .S_AXI_HP2_FPD_arqos(4'hF), .S_AXI_HP2_FPD_aruser(1'b0),
-        .S_AXI_HP2_FPD_arvalid(rd_b_arvalid), .S_AXI_HP2_FPD_arready(rd_b_arready),
+        .S_AXI_HP2_FPD_arqos(4'd0), .S_AXI_HP2_FPD_aruser(1'b0),
+        .S_AXI_HP2_FPD_arvalid(1'b0), .S_AXI_HP2_FPD_arready(rd_b_arready),
         .S_AXI_HP2_FPD_rdata(rd_b_rdata), .S_AXI_HP2_FPD_rid(),
         .S_AXI_HP2_FPD_rresp(rd_b_rresp), .S_AXI_HP2_FPD_rlast(rd_b_rlast),
-        .S_AXI_HP2_FPD_rvalid(rd_b_rvalid), .S_AXI_HP2_FPD_rready(rd_b_rready),
+        .S_AXI_HP2_FPD_rvalid(rd_b_rvalid), .S_AXI_HP2_FPD_rready(1'b0),
 
-        // ---- S_AXI_HP3_FPD: overlay plane writer, write-only, 300 MHz ----
-        .S_AXI_HP3_FPD_awaddr(ovl_hp3_awaddr), .S_AXI_HP3_FPD_awlen(ovl_hp3_awlen),
-        .S_AXI_HP3_FPD_awsize(ovl_hp3_awsize), .S_AXI_HP3_FPD_awburst(ovl_hp3_awburst),
+        // ---- S_AXI_HP3_FPD: idle (overlay writer replaced by direct pull) ----
+        .S_AXI_HP3_FPD_awaddr(49'd0), .S_AXI_HP3_FPD_awlen(8'd0),
+        .S_AXI_HP3_FPD_awsize(3'd0), .S_AXI_HP3_FPD_awburst(2'd1),
         .S_AXI_HP3_FPD_awid(6'd0), .S_AXI_HP3_FPD_awlock(1'b0),
-        .S_AXI_HP3_FPD_awcache(ovl_hp3_awcache), .S_AXI_HP3_FPD_awprot(3'd0),
+        .S_AXI_HP3_FPD_awcache(4'd3), .S_AXI_HP3_FPD_awprot(3'd0),
         .S_AXI_HP3_FPD_awqos(4'd0), .S_AXI_HP3_FPD_awuser(1'b0),
-        .S_AXI_HP3_FPD_awvalid(ovl_hp3_awvalid), .S_AXI_HP3_FPD_awready(ovl_hp3_awready),
-        .S_AXI_HP3_FPD_wdata(ovl_hp3_wdata), .S_AXI_HP3_FPD_wstrb(ovl_hp3_wstrb),
-        .S_AXI_HP3_FPD_wlast(ovl_hp3_wlast), .S_AXI_HP3_FPD_wvalid(ovl_hp3_wvalid),
+        .S_AXI_HP3_FPD_awvalid(1'b0), .S_AXI_HP3_FPD_awready(ovl_hp3_awready),
+        .S_AXI_HP3_FPD_wdata(128'd0), .S_AXI_HP3_FPD_wstrb(16'd0),
+        .S_AXI_HP3_FPD_wlast(1'b0), .S_AXI_HP3_FPD_wvalid(1'b0),
         .S_AXI_HP3_FPD_wready(ovl_hp3_wready), .S_AXI_HP3_FPD_bid(),
         .S_AXI_HP3_FPD_bresp(ovl_hp3_bresp), .S_AXI_HP3_FPD_bvalid(ovl_hp3_bvalid),
-        .S_AXI_HP3_FPD_bready(ovl_hp3_bready),
+        .S_AXI_HP3_FPD_bready(1'b0),
         .S_AXI_HP3_FPD_araddr(49'd0), .S_AXI_HP3_FPD_arlen(8'd0),
         .S_AXI_HP3_FPD_arsize(3'd0), .S_AXI_HP3_FPD_arburst(2'd1),
         .S_AXI_HP3_FPD_arid(6'd0), .S_AXI_HP3_FPD_arlock(1'b0),

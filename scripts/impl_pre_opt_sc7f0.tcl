@@ -57,7 +57,11 @@ if {![file isdirectory $sc7f0_impl_pre_dir]} {
 source [file join $sc7f0_impl_pre_dir check_sc7f0_capture_gray.tcl]
 if {[info exists ::env(SC7F0_RGB_COMPOSITOR)] &&
     [string tolower [string trim $::env(SC7F0_RGB_COMPOSITOR)]] in {1 true yes}} {
-    source [file join $sc7f0_impl_pre_dir apply_sc7f0_overlay_cdc.tcl]
+    if {[llength [get_cells -quiet -hier -regexp {.*u_overlay_writer/.*}]] > 0} {
+        source [file join $sc7f0_impl_pre_dir apply_sc7f0_overlay_cdc.tcl]
+    } else {
+        puts "SC7F0_OVERLAY_CDC_APPLY_SKIPPED direct pull-mode overlay active (no u_overlay_writer)"
+    }
     source [file join $sc7f0_impl_pre_dir apply_sc7f0_tx_io_first_stage.tcl]
     source [file join $sc7f0_impl_pre_dir apply_sc7f0_tx_tmds_clock_forward.tcl]
 } else {
