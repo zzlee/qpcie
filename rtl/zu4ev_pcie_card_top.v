@@ -284,7 +284,12 @@ module zu4ev_pcie_card_top #(
 `ifdef SC7F0_DEBUG_ONLY
     assign capture_clk = pcie_user_clk;
     assign capture_rst_n = video_engine_rst_n;
+    wire ovl_wr_clk = pcie_user_clk;
+    wire ovl_wr_rst_n = video_engine_rst_n;
 `else
+    BUFGCE_DIV #(.BUFGCE_DIVIDE(1)) u_capture_clock (
+        .I(pl_clk_300m_ibufg), .CE(1'b1), .CLR(!sys_300m_rst_n),
+        .O(capture_clk));
     wire capture_mmcm_clkout0, capture_mmcm_fb, capture_mmcm_locked;
     MMCME4_BASE #(
         .BANDWIDTH("OPTIMIZED"),
@@ -302,9 +307,15 @@ module zu4ev_pcie_card_top #(
         .RST(!sys_300m_rst_n),
         .CLKFBIN(capture_mmcm_fb)
     );
-    BUFGCE u_capture_clock (
+    wire ovl_wr_clk;
+    BUFGCE u_ovl_wr_clock (
         .I(capture_mmcm_clkout0), .CE(1'b1),
-        .O(capture_clk));
+        .O(ovl_wr_clk));
+    wire ovl_wr_rst_n;
+    sc7f0_reset_sync #(.SOURCES(2)) u_ovl_wr_reset (
+        .dest_clk(ovl_wr_clk),
+        .src_rst_n({sys_300m_rst_n, sys_100m_rst_n}),
+        .dest_rst_n(ovl_wr_rst_n));
     wire capture_reset;
     // Same rule as u_dp_mem_reset: one crossing per source, combine in-domain.
     wire capture_all_n;
@@ -1544,6 +1555,35 @@ module zu4ev_pcie_card_top #(
     wire [3:0]   ovl_wr_slot_release_m, ovl_wr_slot_ready_m;
     wire [1:0]   ovl_wr_last_slot_m;
     wire [31:0]  ovl_wr_slot_bytes_m;
+    // CDC between ovl_wr_clk (250 MHz overlay writer) and capture_clk (300 MHz compositor)
+    wire [3:0]   ovl_wr_slot_ready_c, ovl_wr_slot_release_c;
+    wire [1:0]   ovl_wr_last_slot_c;
+    wire [31:0]  ovl_wr_slot_bytes_c;
+    genvar cdc_i;
+    generate
+        for (cdc_i = 0; cdc_i < 4; cdc_i = cdc_i + 1) begin : g_ovl_slot_cdc
+            xpm_cdc_single #(
+                .DEST_SYNC_FF(4), .INIT_SYNC_FF(0), .SIM_ASSERT_CHK(0), .SRC_INPUT_REG(1)
+            ) u_ovl_slot_ready_cdc (
+                .src_clk(ovl_wr_clk), .src_in(ovl_wr_slot_ready_m[cdc_i]),
+                .dest_clk(capture_clk), .dest_out(ovl_wr_slot_ready_c[cdc_i]));
+            xpm_cdc_pulse #(
+                .DEST_SYNC_FF(4), .INIT_SYNC_FF(0), .REG_OUTPUT(0), .RST_USED(1), .SIM_ASSERT_CHK(0)
+            ) u_ovl_slot_rel_cdc (
+                .src_clk(capture_clk), .src_rst(!dp_mem_rst_n), .src_pulse(ovl_wr_slot_release_c[cdc_i]),
+                .dest_clk(ovl_wr_clk), .dest_rst(!ovl_wr_rst_n), .dest_pulse(ovl_wr_slot_release_m[cdc_i]));
+        end
+    endgenerate
+    xpm_cdc_gray #(
+        .DEST_SYNC_FF(4), .INIT_SYNC_FF(0), .REG_OUTPUT(1), .SIM_ASSERT_CHK(0), .SIM_LOSSLESS_GRAY_CHK(0), .WIDTH(2)
+    ) u_ovl_last_slot_cdc (
+        .src_clk(ovl_wr_clk), .src_in_bin(ovl_wr_last_slot_m),
+        .dest_clk(capture_clk), .dest_out_bin(ovl_wr_last_slot_c));
+    xpm_cdc_array_single #(
+        .DEST_SYNC_FF(2), .INIT_SYNC_FF(0), .SIM_ASSERT_CHK(0), .SRC_INPUT_REG(1), .WIDTH(32)
+    ) u_ovl_slot_bytes_cdc (
+        .src_clk(ovl_wr_clk), .src_in(ovl_wr_slot_bytes_m),
+        .dest_clk(capture_clk), .dest_out(ovl_wr_slot_bytes_c));
     wire [31:0]  bar0_ovl_awaddr, bar0_ovl_wdata, bar0_ovl_araddr, bar0_ovl_rdata;
     wire [3:0]   bar0_ovl_wstrb;
     wire [1:0]   bar0_ovl_bresp, bar0_ovl_rresp;
@@ -1625,11 +1665,11 @@ module zu4ev_pcie_card_top #(
         .blend_enable(blend_enable),
         .alpha_force_opaque(alpha_force_opaque),
         .blend_unlock(blend_unlock),
-        .ovl_slot_ready_m(ovl_wr_slot_ready_m),
-        .ovl_last_slot_m(ovl_wr_last_slot_m),
-        .ovl_slot_bytes_m(ovl_wr_slot_bytes_m),
+        .ovl_slot_ready_m(ovl_wr_slot_ready_c),
+        .ovl_last_slot_m(ovl_wr_last_slot_c),
+        .ovl_slot_bytes_m(ovl_wr_slot_bytes_c),
         .ovl_hw_auto_slot(ovl_hw_auto_slot),
-        .ovl_slot_release_m(ovl_wr_slot_release_m),
+        .ovl_slot_release_m(ovl_wr_slot_release_c),
         .m_axis_video_tdata(disp_video_tdata),
         .m_axis_video_tvalid(disp_video_tvalid),
         .m_axis_video_tready(disp_video_tready),
@@ -3280,8 +3320,8 @@ module zu4ev_pcie_card_top #(
         .ovl_video_guard_sticky          (ovl_video_guard_sticky),
         .ovl_video_guard_count           (ovl_video_guard_count),
         .ovl_video_poison                (ovl_video_poison),
-        .ovl_mem_clk                     (capture_clk),
-        .ovl_mem_rst_n                   (dp_mem_rst_n),
+        .ovl_mem_clk                     (ovl_wr_clk),
+        .ovl_mem_rst_n                   (ovl_wr_rst_n),
         .ovl_wr_enable                   (ovl_ctrl_wr_enable),
         .ovl_wr_dst_base                 (ovl_ctrl_wr_dst_base),
         .ovl_wr_slot_bytes               (ovl_ctrl_wr_slot_bytes),
@@ -3361,8 +3401,8 @@ module zu4ev_pcie_card_top #(
         .ovl_video_guard_sticky          (),
         .ovl_video_guard_count           (),
         .ovl_video_poison                (),
-        .ovl_mem_clk                     (capture_clk),
-        .ovl_mem_rst_n                   (dp_mem_rst_n),
+        .ovl_mem_clk                     (ovl_wr_clk),
+        .ovl_mem_rst_n                   (ovl_wr_rst_n),
         .ovl_wr_enable                   (1'b0),
         .ovl_wr_dst_base                 (49'd0),
         .ovl_wr_slot_bytes               (32'd0),
@@ -3484,6 +3524,7 @@ module zu4ev_pcie_card_top #(
         .M_AXI_HPM1_FPD_wvalid(ps_hpm1_wvalid),
 `endif
 `ifdef SC7F0_RGB_COMPOSITOR
+        .ovl_hp3_clk(ovl_wr_clk),
         // ---- S_AXI_HP2_FPD: overlay-plane reader B, read-only, 300 MHz ----
         // Read-only master, so the write channels of the PS slave port are
         // terminated with valid low / ready low rather than left floating: an

@@ -1114,13 +1114,17 @@ Port;FD4A0000;FD4AFFFF;0|FPD;DPDMA;FD4C0000;FD4CFFFF;0|FPD;DDR_XMPU5_CFG;FD05000
 
       set hp3 [create_bd_intf_port -mode Slave -vlnv xilinx.com:interface:aximm_rtl:1.0 S_AXI_HP3_FPD]
       set_property -dict [list CONFIG.DATA_WIDTH {128} CONFIG.ADDR_WIDTH {49} \
-          CONFIG.AWUSER_WIDTH {1} CONFIG.ARUSER_WIDTH {1} CONFIG.FREQ_HZ {300000000}] $hp3
+          CONFIG.AWUSER_WIDTH {1} CONFIG.ARUSER_WIDTH {1} CONFIG.FREQ_HZ {250000000}] $hp3
       connect_bd_intf_net $hp3 [get_bd_intf_pins zynq_ultra_ps_e_0/S_AXI_HP3_FPD]
 
       set_property CONFIG.ASSOCIATED_BUSIF \
-          S_AXI_HP1_FPD:S_AXI_HP2_FPD:S_AXI_HP3_FPD [get_bd_ports dp_mem_clk]
+          S_AXI_HP1_FPD:S_AXI_HP2_FPD [get_bd_ports dp_mem_clk]
       connect_bd_net [get_bd_ports dp_mem_clk] \
-        [get_bd_pins zynq_ultra_ps_e_0/saxihp2_fpd_aclk] \
+        [get_bd_pins zynq_ultra_ps_e_0/saxihp2_fpd_aclk]
+
+      create_bd_port -dir I -type clk -freq_hz 250000000 ovl_hp3_clk
+      set_property CONFIG.ASSOCIATED_BUSIF S_AXI_HP3_FPD [get_bd_ports ovl_hp3_clk]
+      connect_bd_net [get_bd_ports ovl_hp3_clk] \
         [get_bd_pins zynq_ultra_ps_e_0/saxihp3_fpd_aclk]
 
       # Reader-B (overlay plane) reset on PS EMIO GPIO bit 3, the same idiom the
