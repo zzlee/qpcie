@@ -400,7 +400,7 @@ foreach {sc7f0_ov_n sc7f0_ov_dst_pat} {
     if {[llength $sc7f0_ov_d] != 1} {
         error "SC7F0_OVERLAY_SYNC_VERIFY_MISSING $sc7f0_ov_n: $sc7f0_ov_dst_pat matched [llength $sc7f0_ov_d] cells"
     }
-    set sc7f0_ov_p [get_timing_paths -to $sc7f0_ov_d -delay_type max -max_paths 64 -nworst 4]
+    set sc7f0_ov_p [get_timing_paths -to [get_pins "[get_property NAME $sc7f0_ov_d]/D"] -delay_type max -max_paths 64 -nworst 4]
     if {[llength $sc7f0_ov_p] == 0} {
         error "SC7F0_OVERLAY_SYNC_NOT_APPLIED $sc7f0_ov_n: no timed path at all reaches [get_property NAME $sc7f0_ov_d]/D; a bounded max delay that leaves no path is a swallowed or falsely-pathed crossing."
     }

@@ -111,7 +111,7 @@ foreach {ovsync_name ovsync_dst_pat ovsync_next_pat} {
     # u_pcie_ip/inst/user_lnk_up_reg, plus phys_opt replicas), and checking only
     # the worst path would have let the second, still-unexcepted launch through at
     # 0.337 ns while reporting a clean 3.333 ns endpoint.
-    set ovsync_paths [get_timing_paths -to $ovsync_dst -delay_type max -max_paths 64 -nworst 4]
+    set ovsync_paths [get_timing_paths -to [get_pins "[get_property NAME $ovsync_dst]/D"] -delay_type max -max_paths 64 -nworst 4]
     if {[llength $ovsync_paths] == 0} {
         error "SC7F0_OVERLAY_SYNC_NOT_TIMED $ovsync_name: no timing path reaches [get_property NAME $ovsync_dst]. A synchroniser that reports no path is either falsely pathed or disconnected, and neither may be graded as safe."
     }
