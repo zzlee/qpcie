@@ -368,7 +368,8 @@ static long ovl_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		iowrite32(ctrl, o->csr + QOVL_REG_CTRL);
 
 		comp = (cfg.blend_enable ? BIT(0) : 0) |
-		       (cfg.alpha_opaque ? BIT(1) : 0);
+		       (cfg.alpha_opaque ? BIT(1) : 0) |
+		       ((cfg.flags & QOVL_CFG_RX_PASSTHROUGH) ? BIT(4) : 0);
 		iowrite32(comp, o->csr + QOVL_REG_COMP_CTRL);
 		ioread32(o->csr + QOVL_REG_COMP_CTRL);
 		{

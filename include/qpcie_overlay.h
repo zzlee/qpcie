@@ -139,6 +139,8 @@ struct qovl_busy {
 #define QOVL_SUBMIT_NONBLOCK	(1U << 0)
 #define QOVL_SUBMIT_ASYNC	(1U << 1)
 
+#define QOVL_CFG_RX_PASSTHROUGH	(1U << 0)
+
 struct qovl_config {
 	__u64 ps_dst_base;	/* 0 = default QOVL_PS_POOL_BASE (0x54000000) */
 	__u32 frame_bytes;	/* 0 = default QOVL_RGBA_FRAME_BYTES */
