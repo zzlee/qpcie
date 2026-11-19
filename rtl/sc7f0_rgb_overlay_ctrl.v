@@ -154,6 +154,7 @@ module sc7f0_rgb_overlay_ctrl (
     input  wire [31:0] wr_frames_done,
     input  wire [31:0] wr_bytes_written,
     input  wire [5:0]  wr_sticky,
+    input  wire [3:0]  wr_axi_dbg,
     input  wire        wr_irq_pulse,
     // Review H1/M4: plane discard trigger, arm cross-check, and the fault counters
     // the driver needs to tell zero-data apart from suppressed-data.
@@ -520,7 +521,7 @@ module sc7f0_rgb_overlay_ctrl (
                                           wr_slot_ready, wr_busy,
                                           ovl_ext_tag_blocked, ovl_quarantined,
                                           ovl_quiesced, ovl_busy};
-                    12'h044: r_data_q <= {18'd0, ovl_counts[3:0], wr_sticky[3:0],
+                    12'h044: r_data_q <= {14'd0, wr_axi_dbg, ovl_counts[3:0], wr_sticky[3:0],
                                           wr_active_slot, ovl_outstanding};
                     12'h048: r_data_q <= ovl_bytes_issued;
                     12'h04C: r_data_q <= ovl_bytes_staged;

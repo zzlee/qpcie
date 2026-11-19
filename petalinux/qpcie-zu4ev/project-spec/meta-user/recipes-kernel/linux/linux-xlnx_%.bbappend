@@ -1,6 +1,6 @@
 FILESEXTRAPATHS:prepend := "${THISDIR}/${PN}:"
 
-SRC_URI:append = " file://bsp.cfg file://sc7f0-v4l2-capture.cfg file://sc7f0-hdmi-tx.cfg file://0001-sc7f0-vipp-frame-tap.patch file://0002-sc7f0-vcu-debug-probe.patch file://sc7f0-frame-tap.c file://sc7f0-frame-tap.h"
+SRC_URI:append = " file://bsp.cfg file://sc7f0-v4l2-capture.cfg file://sc7f0-hdmi-tx.cfg file://0001-sc7f0-vipp-frame-tap.patch file://0002-sc7f0-vcu-debug-probe.patch file://0003-sc7f0-si5319-ckin1-genlock.patch file://sc7f0-frame-tap.c file://sc7f0-frame-tap.h"
 KERNEL_FEATURES:append = " bsp.cfg sc7f0-v4l2-capture.cfg sc7f0-hdmi-tx.cfg"
 
 do_patch:append() {

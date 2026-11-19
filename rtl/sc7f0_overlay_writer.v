@@ -303,6 +303,7 @@ module sc7f0_overlay_writer #(
     output reg                      ov_abort_sticky,    // a plane was discarded
     output reg  [31:0]              ov_err_frames,      // frames dropped, never published
     output reg                      ov_abort_busy,      // retirement in progress
+    output wire [3:0]               ov_axi_dbg,         // {awvalid, wvalid, fifo_empty, beats_aw!=beats_b}
     input  wire [7:0]               s_axis_avail_in,    // ingress read side, mem_clk
     output reg                      ov_irq_pulse,       // frame complete
 
@@ -542,6 +543,15 @@ module sc7f0_overlay_writer #(
     xpm_cdc_single #(.DEST_SYNC_FF(4), .SRC_INPUT_REG(1)) u_abort_ack (
         .src_clk(mem_clk), .src_in(abort_done_tgl), .dest_clk(clk),
         .dest_out(abort_done_lvl));
+    wire axi_b_pending_m = (beats_aw != beats_b);
+    xpm_cdc_single #(.DEST_SYNC_FF(4), .SRC_INPUT_REG(1)) u_dbg_awv (
+        .src_clk(mem_clk), .src_in(m_axi_awvalid), .dest_clk(clk), .dest_out(ov_axi_dbg[3]));
+    xpm_cdc_single #(.DEST_SYNC_FF(4), .SRC_INPUT_REG(1)) u_dbg_wv (
+        .src_clk(mem_clk), .src_in(m_axi_wvalid), .dest_clk(clk), .dest_out(ov_axi_dbg[2]));
+    xpm_cdc_single #(.DEST_SYNC_FF(4), .SRC_INPUT_REG(1)) u_dbg_fe (
+        .src_clk(mem_clk), .src_in(fifo_empty_l), .dest_clk(clk), .dest_out(ov_axi_dbg[1]));
+    xpm_cdc_single #(.DEST_SYNC_FF(4), .SRC_INPUT_REG(1)) u_dbg_bp (
+        .src_clk(mem_clk), .src_in(axi_b_pending_m), .dest_clk(clk), .dest_out(ov_axi_dbg[0]));
     // Both counters are strictly +1 per increment (never reloaded, never
     // decremented), which is the lossless case xpm_cdc_gray documents; the
     // destination copy is a read-back status value only.

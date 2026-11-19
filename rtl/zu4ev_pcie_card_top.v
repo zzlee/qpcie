@@ -285,8 +285,25 @@ module zu4ev_pcie_card_top #(
     assign capture_clk = pcie_user_clk;
     assign capture_rst_n = video_engine_rst_n;
 `else
-    BUFGCE_DIV #(.BUFGCE_DIVIDE(1)) u_capture_clock (
-        .I(pl_clk_300m_ibufg), .CE(1'b1), .CLR(!sys_300m_rst_n),
+    wire capture_mmcm_clkout0, capture_mmcm_fb, capture_mmcm_locked;
+    MMCME4_BASE #(
+        .BANDWIDTH("OPTIMIZED"),
+        .CLKFBOUT_MULT_F(5.0),
+        .CLKIN1_PERIOD(3.333),
+        .CLKOUT0_DIVIDE_F(6.0),
+        .DIVCLK_DIVIDE(1),
+        .STARTUP_WAIT("FALSE")
+    ) u_capture_mmcm (
+        .CLKOUT0(capture_mmcm_clkout0),
+        .CLKFBOUT(capture_mmcm_fb),
+        .LOCKED(capture_mmcm_locked),
+        .CLKIN1(pl_clk_300m_ibufg),
+        .PWRDWN(1'b0),
+        .RST(!sys_300m_rst_n),
+        .CLKFBIN(capture_mmcm_fb)
+    );
+    BUFGCE u_capture_clock (
+        .I(capture_mmcm_clkout0), .CE(1'b1),
         .O(capture_clk));
     wire capture_reset;
     // Same rule as u_dp_mem_reset: one crossing per source, combine in-domain.
@@ -1510,7 +1527,7 @@ module zu4ev_pcie_card_top #(
     wire [3:0]   ovl_wr_slot_ready;  wire ovl_wr_busy;
     wire [1:0]   ovl_wr_active_slot;
     wire [31:0]  ovl_wr_frames_done, ovl_wr_bytes_written;
-    wire [5:0]   ovl_wr_sticky;      wire ovl_wr_irq_pulse;
+    wire [5:0]   ovl_wr_sticky;      wire [3:0] ovl_axi_dbg; wire ovl_wr_irq_pulse;
     // Review H1/H2 additions between dma_top, the plane writer and the control
     // block: software plane discard, writer retirement/frames-suppressed, the H2
     // video format guard, and the abandoned-tag (poison) state.
@@ -1706,6 +1723,7 @@ module zu4ev_pcie_card_top #(
         .wr_frames_done(ovl_wr_frames_done),
         .wr_bytes_written(ovl_wr_bytes_written),
         .wr_sticky(ovl_wr_sticky),
+        .wr_axi_dbg(ovl_axi_dbg),
         .wr_irq_pulse(ovl_wr_irq_pulse),
         .blend_enable(blend_enable),
         .alpha_force_opaque(alpha_force_opaque),
@@ -3278,6 +3296,7 @@ module zu4ev_pcie_card_top #(
         .ovl_wr_frames_done              (ovl_wr_frames_done),
         .ovl_wr_bytes_written            (ovl_wr_bytes_written),
         .ovl_wr_sticky                   (ovl_wr_sticky),
+        .ovl_axi_dbg                     (ovl_axi_dbg),
         .ovl_wr_irq_pulse                (ovl_wr_irq_pulse),
         .ovl_awaddr                      (ovl_hp3_awaddr),
         .ovl_awlen                       (ovl_hp3_awlen),
@@ -3358,6 +3377,7 @@ module zu4ev_pcie_card_top #(
         .ovl_wr_frames_done              (),
         .ovl_wr_bytes_written            (),
         .ovl_wr_sticky                   (),
+        .ovl_axi_dbg                     (),
         .ovl_wr_irq_pulse                (),
         .ovl_awaddr                      (),
         .ovl_awlen                       (),

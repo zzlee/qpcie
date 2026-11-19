@@ -1,0 +1,47 @@
+From: SC7F0 Genlock <dev@sc7f0.local>
+Subject: [PATCH] clk: si5324: support 0-ppm CKIN1 genlock when rate matches clkin1
+
+When clkin1 is provided in DT and the requested clkout rate matches
+clk_get_rate(pclkin1) (148.5 MHz for 4K60 2PPC), configure Si5319 to lock
+to CKIN1 (FREE_RUN=0, PD_CK1=0, CKSEL=00, N31=96, N2=9*384, N1=9*4)
+instead of hardcoding XTAL free-run mode.
+
+diff --git a/drivers/clk/clk-si5324.c b/drivers/clk/clk-si5324.c
+index 1111111..2222222 100644
+--- a/drivers/clk/clk-si5324.c
++++ b/drivers/clk/clk-si5324.c
+@@ -762,6 +762,38 @@ static int si5324_clkout_set_rate(struct clk_hw *hw, unsigned long rate,
+ 	u8 n1_hs, n2_hs, bwsel, buf[SI5324_OUT_REGS * 2];
+ 	int i, ret, rc;
+ 
++	if (!IS_ERR(hwdata->drvdata->pclkin1) &&
++	    rate == clk_get_rate(hwdata->drvdata->pclkin1) &&
++	    rate == 148500000UL) {
++		i = 0;
++		buf[i++] = SI5324_CONTROL;    buf[i++] = 0x14;
++		buf[i++] = SI5324_BWSEL;      buf[i++] = 0x62;
++		buf[i++] = SI5324_POWERDOWN;  buf[i++] = 0x40;
++		buf[i++] = SI5324_N1_HS;      buf[i++] = 0xa0; /* N1_HS=9 */
++		buf[i++] = SI5324_NC1_LS_H;   buf[i++] = 0x00;
++		buf[i++] = SI5324_NC1_LS_M;   buf[i++] = 0x00;
++		buf[i++] = SI5324_NC1_LS_L;   buf[i++] = 0x03; /* NC1_LS=4 -> N1=36 */
++		buf[i++] = SI5324_N2_HS_LS_H; buf[i++] = 0xa0; /* N2_HS=9 */
++		buf[i++] = SI5324_N2_LS_H;    buf[i++] = 0x01;
++		buf[i++] = SI5324_N2_LS_L;    buf[i++] = 0x7f; /* N2_LS=384 -> N2=3456 */
++		buf[i++] = 0x2b;              buf[i++] = 0x00; /* N31_H */
++		buf[i++] = 0x2c;              buf[i++] = 0x00; /* N31_M */
++		buf[i++] = 0x2d;              buf[i++] = 0x5f; /* N31_L -> N31=96 */
++		buf[i++] = SI5324_RESET_CALIB;buf[i++] = SI5324_CALIB_EN;
++
++		rc = si5324_reg_write(hwdata->drvdata, SI5324_CKSEL, 0x15);
++		if (rc)
++			return rc;
++		hwdata->drvdata->rate_clkout0 = rate;
++		hwdata->drvdata->params.valid = 0;
++		return si5324_bulk_scatter_write(hwdata->drvdata,
++						 SI5324_OUT_REGS, buf);
++	}
++
+ 	ret = si5324_calcfreqsettings(SI5324_REF_CLOCK, rate, &actual_rate,
+ 				      &n1_hs, &ncn_ls, &n2_hs, &n2_ls, &n3n,
+ 				      &bwsel);

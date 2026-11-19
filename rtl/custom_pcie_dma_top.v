@@ -317,6 +317,7 @@ module custom_pcie_dma_top #(
     output wire [31:0]                                      ovl_wr_frames_done,
     output wire [31:0]                                      ovl_wr_bytes_written,
     output wire [5:0]                                       ovl_wr_sticky,
+    output wire [3:0]                                       ovl_axi_dbg,
     output wire                                             ovl_wr_irq_pulse,
     output wire [48:0]                                      ovl_awaddr,
     output wire [7:0]                                       ovl_awlen,
@@ -1953,6 +1954,7 @@ module custom_pcie_dma_top #(
         .ov_abort_sticky   (ovl_wr_sticky[4]),
         .ov_err_frames     (ovl_wr_err_frames),
         .ov_abort_busy     (ovl_wr_abort_busy),
+        .ov_axi_dbg        (ovl_axi_dbg),
         .ov_irq_pulse      (ovl_wr_irq_pulse),
         .mem_clk           (ovl_mem_clk),
         .mem_rst_n         (ovl_mem_rst_n),
@@ -2000,6 +2002,7 @@ module custom_pcie_dma_top #(
     assign ovl_wr_frames_done           = 32'd0;
     assign ovl_wr_bytes_written         = 32'd0;
     assign ovl_wr_sticky                = 6'd0;
+    assign ovl_axi_dbg                  = 4'd0;
     assign ovl_wr_irq_pulse             = 1'b0;
     assign ovl_awaddr                   = 49'd0;
     assign ovl_awlen                    = 8'd0;
