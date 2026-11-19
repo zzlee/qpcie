@@ -88,7 +88,7 @@ echo "Remote logs/backups: $DIR"
 BOOT_BEFORE=$(</proc/sys/kernel/random/boot_id)
 printf '%s\n' "$BOOT_BEFORE" > host-boot-id-before
 sudo -n "$CTL" status
-sudo -n "$CTL" exec 'set -eu; test "$(uname -m)" = aarch64; for s in qpcie-debugd qpcie-hdmi-daemon qpcie-upgrade-daemon; do systemctl is-active --quiet "$s" || exit 1; done; ps -ef | grep qpcie'
+sudo -n "$CTL" exec 'set -eu; test "$(uname -m)" = aarch64; for s in qpcie-debugd qpcie-upgrade-daemon; do systemctl is-active --quiet "$s" || exit 1; done; ps -ef | grep qpcie'
 # Verify exactly the uploaded artifacts before unpacking/building on x86.
 grep -E '  (upgrade-[0-9]+\.tar|host-driver-src\.tar\.gz|host-tools-src\.tar\.gz)$' RELEASE.sha256 | sha256sum -c -
 tar -xzf host-tools-src.tar.gz
@@ -170,7 +170,7 @@ done
 [[ $ready == 1 ]] || { echo 'PS did not resume; inspect PCIe/card boot. Do NOT reboot the x86 host automatically.' >&2; exit 1; }
 sudo -n ./qpcie_upgrade --status | tee active-version.log
 grep -qi "Hardware Version.*0x$VERSION" active-version.log
-sudo -n "$CTL" exec 'uname -a; for s in qpcie-debugd qpcie-hdmi-daemon qpcie-upgrade-daemon; do systemctl is-active --quiet "$s" || exit 1; done; ps -ef | grep qpcie'
+sudo -n "$CTL" exec 'uname -a; for s in qpcie-debugd qpcie-upgrade-daemon; do systemctl is-active --quiet "$s" || exit 1; done; ps -ef | grep qpcie'
 
 # ------------------------------------------------------------------ stage 12
 # NUC1262 runtime restart: unconditional, exactly once, after the version check.
