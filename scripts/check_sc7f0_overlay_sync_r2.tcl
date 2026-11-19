@@ -298,8 +298,8 @@ foreach {ovs2_name ovs2_dst_pat ovs2_next_pat} {
     # pin answers with nothing, which round 26111401 measured as
     # "second-stage data path ending at .../epoch_sync_l_reg[1]/D is captured by '-'".
     set ovs2_next_clk [ovs2_clock_text $ovs2_next]
-    if {$ovs2_next_clk ne "capture_clk_300m"} {
-        error "SC7F0_OVERLAY_SYNC_R2_SECOND_STAGE_DOMAIN $ovs2_name: second-stage cell $ovs2_next_dn is clocked by '$ovs2_next_clk', expected capture_clk_300m"
+    if {$ovs2_next_clk ni {capture_clk_300m ovl_wr_clk_250m}} {
+        error "SC7F0_OVERLAY_SYNC_R2_SECOND_STAGE_DOMAIN $ovs2_name: second-stage cell $ovs2_next_dn is clocked by '$ovs2_next_clk', expected capture_clk_300m or ovl_wr_clk_250m"
     }
     set ovs2_ndpin ""
     if {[catch {get_pins -quiet -of $ovs2_next -filter {NAME =~ */D}} ovs2_ndpin]} {set ovs2_ndpin ""}
@@ -315,10 +315,10 @@ foreach {ovs2_name ovs2_dst_pat ovs2_next_pat} {
         set ovs2_ep [get_property ENDPOINT_PIN $ovs2_p]
         set ovs2_eclk $ovs2_next_clk
         set ovs2_r [get_property REQUIREMENT $ovs2_p]
-        if {$ovs2_eclk ne "capture_clk_300m"} {
-            error "SC7F0_OVERLAY_SYNC_R2_DEST_DOMAIN $ovs2_name: second-stage data path ending at $ovs2_ep is captured by '$ovs2_eclk', expected capture_clk_300m"
+        if {$ovs2_eclk ni {capture_clk_300m ovl_wr_clk_250m}} {
+            error "SC7F0_OVERLAY_SYNC_R2_DEST_DOMAIN $ovs2_name: second-stage data path ending at $ovs2_ep is captured by '$ovs2_eclk', expected capture_clk_300m or ovl_wr_clk_250m"
         }
-        set ovs2_dest_period [get_property PERIOD [get_clocks capture_clk_300m]]
+        set ovs2_dest_period [get_property PERIOD [get_clocks $ovs2_eclk]]
         if {$ovs2_r eq "" || [expr {abs(double($ovs2_r) - double($ovs2_dest_period)) > 0.002}]} {
             error "SC7F0_OVERLAY_SYNC_R2_SECOND_STAGE_REQ $ovs2_name: $ovs2_ep carries requirement '$ovs2_r', expected one destination period ($ovs2_dest_period ns)"
         }

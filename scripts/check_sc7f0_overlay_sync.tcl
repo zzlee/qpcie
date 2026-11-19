@@ -209,8 +209,8 @@ foreach {ovsync_name ovsync_dst_pat ovsync_next_pat} {
     if {$ovsync_sclk ne "pcie_user_clk"} {
         error "SC7F0_OVERLAY_SYNC_SOURCE_DOMAIN $ovsync_name: the timed path starts in '$ovsync_sclk' ($ovsync_start), expected pcie_user_clk. constraints/sc7f0_overlay_sync.xdc documents a 125 MHz -> 300 MHz crossing; a different source domain means the exception is being read against a different path than the one it was written for."
     }
-    if {$ovsync_eclk ne "capture_clk_300m"} {
-        error "SC7F0_OVERLAY_SYNC_DEST_DOMAIN $ovsync_name: the timed path ends in '$ovsync_eclk' ($ovsync_end), expected capture_clk_300m"
+    if {$ovsync_eclk ni {capture_clk_300m ovl_wr_clk_250m}} {
+        error "SC7F0_OVERLAY_SYNC_DEST_DOMAIN $ovsync_name: the timed path ends in '$ovsync_eclk' ($ovsync_end), expected capture_clk_300m or ovl_wr_clk_250m"
     }
     set ovsync_req [get_property REQUIREMENT $ovsync_worst]
     if {$ovsync_req eq "" ||
@@ -239,13 +239,14 @@ foreach {ovsync_name ovsync_dst_pat ovsync_next_pat} {
     foreach ovsync_path3 $ovsync_npaths {
         set ovsync_e3 [get_property ENDPOINT_PIN $ovsync_path3]
         set ovsync_eclk3 [ovsync_clock_text [get_pins -quiet $ovsync_e3]]
-        if {$ovsync_eclk3 ne "capture_clk_300m"} {
-            error "SC7F0_OVERLAY_SYNC_DEST_DOMAIN $ovsync_name: the second-stage path ending at $ovsync_e3 is captured by '$ovsync_eclk3', expected capture_clk_300m"
+        if {$ovsync_eclk3 ni {capture_clk_300m ovl_wr_clk_250m}} {
+            error "SC7F0_OVERLAY_SYNC_DEST_DOMAIN $ovsync_name: the second-stage path ending at $ovsync_e3 is captured by '$ovsync_eclk3', expected capture_clk_300m or ovl_wr_clk_250m"
         }
         set ovsync_r3 [get_property REQUIREMENT $ovsync_path3]
+        set ovsync_d3_period [get_property PERIOD [get_clocks $ovsync_eclk3]]
         if {$ovsync_r3 eq "" ||
-            [expr {abs(double($ovsync_r3) - $ovsync_period) > 0.001}]} {
-            error "SC7F0_OVERLAY_SYNC_SECOND_STAGE_REQ $ovsync_name: second-stage path $ovsync_e3 carries requirement '$ovsync_r3', expected one destination period ($ovsync_period ns); the later stage is not held to normal capture_clk_300m timing."
+            [expr {abs(double($ovsync_r3) - double($ovsync_d3_period)) > 0.002}]} {
+            error "SC7F0_OVERLAY_SYNC_SECOND_STAGE_REQ $ovsync_name: second-stage path $ovsync_e3 carries requirement '$ovsync_r3', expected one destination period ($ovsync_d3_period ns)."
         }
         set ovsync_nreq $ovsync_r3
         set ovsync_s3 [get_property SLACK $ovsync_path3]

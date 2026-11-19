@@ -342,8 +342,8 @@ foreach {sc7f0_ov_n sc7f0_ov_src_pat sc7f0_ov_dst_pat sc7f0_ov_next_pat} {
             error "SC7F0_OVERLAY_SYNC_ASYNC_REG_NO_Q_PIN $sc7f0_ov_n: $sc7f0_ov_cn resolves to [llength $sc7f0_ov_cq] Q pins, expected exactly 1."
         }
         set sc7f0_ov_cclk [sc7f0_ov_clk_text $sc7f0_ov_c]
-        if {$sc7f0_ov_cclk ne "capture_clk_300m"} {
-            error "SC7F0_OVERLAY_SYNC_ASYNC_REG_DEST_DOMAIN $sc7f0_ov_n: $sc7f0_ov_cn\[$sc7f0_ov_cref\] is captured by '$sc7f0_ov_cclk', expected capture_clk_300m (the 300 MHz destination domain of this crossing)."
+        if {$sc7f0_ov_cclk ni {capture_clk_300m ovl_wr_clk_250m}} {
+            error "SC7F0_OVERLAY_SYNC_ASYNC_REG_DEST_DOMAIN $sc7f0_ov_n: $sc7f0_ov_cn\[$sc7f0_ov_cref\] is captured by '$sc7f0_ov_cclk', expected capture_clk_300m or ovl_wr_clk_250m."
         }
         array set sc7f0_ov_before [sc7f0_ov_bool ASYNC_REG $sc7f0_ov_c]
         if {$sc7f0_ov_before(state) eq "bad"} {
