@@ -170,6 +170,7 @@ module sc7f0_rgb_overlay_ctrl (
     output wire        alpha_force_opaque,
     output wire        blend_unlock,
     output wire        reader_b_reset,
+    output wire        rx_passthrough,
     output wire        wr_auto_advance_m,
     // blend status, same domain as the blend (levels)
     input  wire        blend_locked,
@@ -195,7 +196,7 @@ module sc7f0_rgb_overlay_ctrl (
     // Control storage and synchronised status, declared up front so the
     // register file, the crossing stage and the read mux all refer to the same
     // objects.
-    reg   blend_en_r, alpha_opaque_r, blend_unlock_r, reader_b_reset_r;
+    reg   blend_en_r, alpha_opaque_r, blend_unlock_r, reader_b_reset_r, rx_passthrough_r;
     reg  [3:0] consume_req;
     reg        consume_pulse;
     wire       blend_locked_c, blend_busy_c;
@@ -348,6 +349,7 @@ module sc7f0_rgb_overlay_ctrl (
             wr_force_slot <= 2'd0;
             blend_en_r <= 1'b0; alpha_opaque_r <= 1'b0;
             blend_unlock_r <= 1'b0; reader_b_reset_r <= 1'b0;
+            rx_passthrough_r <= 1'b0;
             consume_req <= 4'd0; consume_pulse <= 1'b1;
             wr_consume <= 4'd0;
             wr_irq_sticky <= 1'b0; ovl_irq_sticky <= 1'b0;
@@ -428,7 +430,8 @@ module sc7f0_rgb_overlay_ctrl (
                     // dead plane.
                     12'h028: if (w_strb_q[0]) ovl_abort_req <= w_data_q[0];
                     12'h030: begin
-                        comp_new = strb_merge({28'd0, reader_b_reset_r,
+                        comp_new = strb_merge({27'd0, rx_passthrough_r,
+                                               reader_b_reset_r,
                                                blend_unlock_r, alpha_opaque_r,
                                                blend_en_r},
                                               w_data_q, w_strb_q);
@@ -436,6 +439,7 @@ module sc7f0_rgb_overlay_ctrl (
                         alpha_opaque_r   <= comp_new[1];
                         blend_unlock_r   <= comp_new[2];
                         reader_b_reset_r <= comp_new[3];
+                        rx_passthrough_r <= comp_new[4];
                     end
                     default: ;   // read-only or reserved
                 endcase
@@ -508,7 +512,8 @@ module sc7f0_rgb_overlay_ctrl (
                     12'h06C: r_data_q <= {30'd0, wr_abort_busy, ovl_abort_req};
                     12'h070: r_data_q <= video_guard_count;
                     12'h074: r_data_q <= wr_err_frames;
-                    12'h030: r_data_q <= {28'd0, reader_b_reset_r, blend_unlock_r,
+                    12'h030: r_data_q <= {27'd0, rx_passthrough_r,
+                                         reader_b_reset_r, blend_unlock_r,
                                          alpha_opaque_r, blend_en_r};
                     12'h040: r_data_q <= {18'd0, ovl_irq_sticky, wr_irq_sticky,
                                           blend_busy_c, blend_locked_c,
@@ -564,7 +569,7 @@ module sc7f0_rgb_overlay_ctrl (
     // (rtl/sc7f0_reset_cdc.v documents why combining sources before a
     // synchroniser is the CDC pattern this tree was flagged for).
     // ------------------------------------------------------------------------
-    wire blend_en_d,  blend_unlock_d, alpha_opaque_d, reader_b_reset_d, wr_auto_adv_d;
+    wire blend_en_d,  blend_unlock_d, alpha_opaque_d, reader_b_reset_d, wr_auto_adv_d, rx_pt_d;
     xpm_cdc_single #(.DEST_SYNC_FF(4), .SRC_INPUT_REG(1)) u_blend_en (
         .src_clk(pcie_clk), .src_in(blend_en_r),
         .dest_clk(mem_clk), .dest_out(blend_en_d));
@@ -580,6 +585,9 @@ module sc7f0_rgb_overlay_ctrl (
     xpm_cdc_single #(.DEST_SYNC_FF(4), .SRC_INPUT_REG(1)) u_wr_auto_adv (
         .src_clk(pcie_clk), .src_in(wr_auto_advance),
         .dest_clk(mem_clk), .dest_out(wr_auto_adv_d));
+    xpm_cdc_single #(.DEST_SYNC_FF(4), .SRC_INPUT_REG(1)) u_rx_passthrough (
+        .src_clk(pcie_clk), .src_in(rx_passthrough_r),
+        .dest_clk(mem_clk), .dest_out(rx_pt_d));
 
     // blend_enable must not come up asserted out of configuration: the blend
     // only ever runs because software asked for it.
@@ -588,6 +596,7 @@ module sc7f0_rgb_overlay_ctrl (
     assign blend_unlock       = blend_unlock_d;
     assign reader_b_reset     = reader_b_reset_d;
     assign wr_auto_advance_m  = wr_auto_adv_d;
+    assign rx_passthrough     = rx_pt_d;
 
     // ------------------------------------------------------------------------
     // mem_clk -> pcie_clk for the blend status levels, and Gray code for the

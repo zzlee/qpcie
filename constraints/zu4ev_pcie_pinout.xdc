@@ -40,6 +40,12 @@ set_property PACKAGE_PIN AJ6 [get_ports hdmi_tx_tmds_clk_n]
 set_property IOSTANDARD LVDS [get_ports hdmi_tx_tmds_clk_p]
 set_property IOSTANDARD LVDS [get_ports hdmi_tx_tmds_clk_n]
 
+# RX Recovered Clock Out to Si5319 CKIN1 for Genlock (Pins AG6/AG5)
+set_property PACKAGE_PIN AG6 [get_ports hdmi_rx_recko_p]
+set_property PACKAGE_PIN AG5 [get_ports hdmi_rx_recko_n]
+set_property IOSTANDARD LVDS [get_ports hdmi_rx_recko_p]
+set_property IOSTANDARD LVDS [get_ports hdmi_rx_recko_n]
+
 # Sheet11 U11-10, Quad226: lane index is the board D0/D1/D2 order.
 # Constrain the physical ports as well as the PHY CHANNEL_ENABLE sites.
 set_property PACKAGE_PIN D2 [get_ports {hdmi_rx_p[0]}]

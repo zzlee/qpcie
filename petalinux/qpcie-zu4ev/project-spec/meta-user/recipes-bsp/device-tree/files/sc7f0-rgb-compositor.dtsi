@@ -416,3 +416,21 @@
 	clocks = <&zynqmp_clk 71>, <&sc7f0_tx_video_clk>, <&si5319 0>,
 		 <&sc7f0_tx_retimer_clk>;
 };
+
+/*
+ * 0-ppm RX-to-TX genlock for zero-frame-buffer pass-through (26111805+):
+ * AG6/AG5 (hdmi_rx_recko_p/n) feeds Si5319 CKIN1 at 148.5 MHz (4K60 2PPC).
+ */
+/ {
+	sc7f0_rx_recko_clk: hdmi-rx-recko-clock {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <148500000>;
+	};
+};
+
+&si5319 {
+	clocks = <&si5319_xtal>, <&sc7f0_rx_recko_clk>;
+	clock-names = "xtal", "clkin1";
+	silabs,pll-source = <0 1>;
+};

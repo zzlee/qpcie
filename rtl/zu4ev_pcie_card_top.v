@@ -56,6 +56,8 @@ module zu4ev_pcie_card_top #(
     output wire [2:0]                                       hdmi_tx_n,
     output wire                                             hdmi_tx_tmds_clk_p,   // Pin AH6 (ODDR TMDS Clk Out)
     output wire                                             hdmi_tx_tmds_clk_n,   // Pin AJ6
+    output wire                                             hdmi_rx_recko_p,      // Pin AG6 (RX Recovered Clk -> Si5319 CKIN1)
+    output wire                                             hdmi_rx_recko_n,      // Pin AG5
 
     // Physical HDMI RX Interface Pins (Bank 46 HDIO 3.3V)
     input  wire                                             hdmi_rx_5v_det,       // Pin A12 (Cable 5V Detect)
@@ -959,8 +961,8 @@ module zu4ev_pcie_card_top #(
         .tx_tmds_clk_n                (),
         .rx_tmds_clk                  (),
         .rx_video_clk                 (phy_rx_video_clk),
-        .rx_tmds_clk_p                (),
-        .rx_tmds_clk_n                (),
+        .rx_tmds_clk_p                (hdmi_rx_recko_p),
+        .rx_tmds_clk_n                (hdmi_rx_recko_n),
         .mgtrefclk0_in                (tx_mgtrefclk0),
         .mgtrefclk1_in                (rx_mgtrefclk1),
         .mgtrefclk0_odiv2_in          (tx_mgtrefclk0_odiv2_bufg),
@@ -1520,7 +1522,7 @@ module zu4ev_pcie_card_top #(
     wire         ovl_video_poison;
     wire         comp_irq_a, comp_irq_b;
     wire         blend_locked, blend_busy, blend_enable, alpha_force_opaque, blend_unlock;
-    wire         reader_b_reset;
+    wire         reader_b_reset, rx_passthrough;
     wire         ovl_hw_auto_slot;
     wire [3:0]   ovl_wr_slot_release_m, ovl_wr_slot_ready_m;
     wire [1:0]   ovl_wr_last_slot_m;
@@ -1549,6 +1551,12 @@ module zu4ev_pcie_card_top #(
         .reader_a_rst_n(display_reader_rst_n),
         .reader_b_rst_n(reader_b_reset_sync & ~reader_b_reset),
         .tx_clk(phy_tx_video_clk),   .tx_rst_n(!tx_video_rst),
+        .rx_clk(phy_rx_video_clk),   .rx_rst_n(!rx_video_rst),
+        .rx_axis_tdata(rx_ss_video_tdata),
+        .rx_axis_tvalid(rx_ss_video_tvalid),
+        .rx_axis_tlast(rx_ss_video_tlast),
+        .rx_axis_tuser(rx_ss_video_tuser),
+        .rx_passthrough(rx_passthrough),
         // Plane A control: axi_crossbar_hdmi M07, 0xB0080000.
         .s_axi_a_awaddr(hdmi_ctl_awaddr[255:224]),
         .s_axi_a_awvalid(hdmi_ctl_awvalid[7]),
@@ -1660,6 +1668,7 @@ module zu4ev_pcie_card_top #(
         .s_axil_pcie_rvalid(bar0_ovl_rvalid),
         .s_axil_pcie_rready(bar0_ovl_rready),
         .wr_auto_advance_m(ovl_hw_auto_slot),
+        .rx_passthrough(rx_passthrough),
         .ovl_enable(ovl_ctrl_enable),
         .ovl_src_addr(ovl_ctrl_src_addr),
         .ovl_xfer_bytes(ovl_ctrl_xfer_bytes),

@@ -52,6 +52,15 @@ module sc7f0_rgb_compositor #(
     input  wire                 tx_clk,
     input  wire                 tx_rst_n,
 
+    // ---- live HDMI RX 2PPC direct pass-through (zero-frame-buffer mode) ---
+    input  wire                 rx_clk,
+    input  wire                 rx_rst_n,
+    input  wire [PPC*24-1:0]    rx_axis_tdata,
+    input  wire                 rx_axis_tvalid,
+    input  wire                 rx_axis_tlast,
+    input  wire                 rx_axis_tuser,
+    input  wire                 rx_passthrough,
+
     // ---- plane A control: AXI-Lite slave on csr_clk ----------------------
     input  wire [31:0]          s_axi_a_awaddr,
     input  wire                 s_axi_a_awvalid,
@@ -418,17 +427,58 @@ module sc7f0_rgb_compositor #(
     wire [OB-1:0] bl_tdata;
     wire          bl_tvalid, bl_tready, bl_tlast, bl_tuser;
 
+    // ------------------------------------------------------------------------
+    // Live HDMI RX -> mem_clk async line FIFO + 2:1 Base Plane MUX
+    // ------------------------------------------------------------------------
+    wire          rx_pt_rx;
+    xpm_cdc_single #(.DEST_SYNC_FF(4), .SRC_INPUT_REG(1)) u_rx_pt_sync (
+        .src_clk(mem_clk), .src_in(rx_passthrough),
+        .dest_clk(rx_clk), .dest_out(rx_pt_rx));
+
+    wire [OB+1:0] rx_head;
+    wire          rx_live_tvalid, rx_live_tready, rx_fifo_wready;
+    sc7f0_dp_fifo #(
+        .WIDTH    (OB+2),
+        .DEPTH    (2048),
+        .MEMORY   ("block"),
+        .W_SOURCES(1),
+        .R_SOURCES(1)
+    ) u_rx_live_cdc (
+        .wclk  (rx_clk),
+        .wrst_n({rx_rst_n}),
+        .wdata ({rx_axis_tuser, rx_axis_tlast, rx_axis_tdata}),
+        .wvalid(rx_axis_tvalid && rx_pt_rx),
+        .wready(rx_fifo_wready),
+        .rclk  (mem_clk),
+        .rrst_n({mem_rst_n}),
+        .rdata (rx_head),
+        .rvalid(rx_live_tvalid),
+        .rready(rx_live_tready)
+    );
+
+    wire [RB-1:0] rx_live_tdata  = {8'hFF, rx_head[47:24], 8'hFF, rx_head[23:0]};
+    wire          rx_live_tlast  = rx_head[OB];
+    wire          rx_live_tuser  = rx_head[OB+1];
+
+    wire [RB-1:0] base_tdata  = rx_passthrough ? rx_live_tdata  : a_vid_tdata;
+    wire          base_tvalid = rx_passthrough ? rx_live_tvalid : a_vid_tvalid;
+    wire          base_tlast  = rx_passthrough ? rx_live_tlast  : a_vid_tlast;
+    wire          base_tuser  = rx_passthrough ? rx_live_tuser  : a_vid_tuser;
+    wire          base_tready;
+    assign a_vid_tready   = rx_passthrough ? 1'b0        : base_tready;
+    assign rx_live_tready = rx_passthrough ? base_tready : 1'b1;
+
     sc7f0_alpha_blend_2ppc #(.PPC(PPC), .QUEUE_DEPTH(16)) u_blend (
         .clk                (mem_clk),
         .rst_n              (mem_rst_n),
         .blend_enable       (blend_en_m),
         .alpha_force_opaque (alpha_opaque_m),
         .unlock             (unlock_m),
-        .s_b_axis_tdata     (a_vid_tdata),
-        .s_b_axis_tvalid    (a_vid_tvalid),
-        .s_b_axis_tready    (a_vid_tready),
-        .s_b_axis_tlast     (a_vid_tlast),
-        .s_b_axis_tuser     (a_vid_tuser),
+        .s_b_axis_tdata     (base_tdata),
+        .s_b_axis_tvalid    (base_tvalid),
+        .s_b_axis_tready    (base_tready),
+        .s_b_axis_tlast     (base_tlast),
+        .s_b_axis_tuser     (base_tuser),
         .s_o_axis_tdata     (b_vid_tdata),
         .s_o_axis_tvalid    (b_vid_tvalid),
         .s_o_axis_tready    (b_vid_tready),

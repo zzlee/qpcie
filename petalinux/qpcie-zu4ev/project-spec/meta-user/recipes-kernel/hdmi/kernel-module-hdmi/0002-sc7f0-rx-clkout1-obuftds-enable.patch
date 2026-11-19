@@ -1,0 +1,26 @@
+From: SC7F0 Genlock Bringup <dev@sc7f0.local>
+Subject: [PATCH] hdmi: rx: enable VPHY RX CLKOUT1 OBUFTDS on stream init for Si5319 genlock
+
+Enable XVphy_Clkout1OBufTdsEnable(..., XVPHY_DIR_RX, TRUE) when the HDMI RX
+MMCM starts so rx_tmds_clk_p/n (AG6/AG5 -> Si5319 CKIN1) is driven instead
+of staying tristated at 0x0158[0]=0.
+
+diff --git a/hdmi/xilinx-hdmirx.c b/hdmi/xilinx-hdmirx.c
+--- a/hdmi/xilinx-hdmirx.c
++++ b/hdmi/xilinx-hdmirx.c
+@@ -893,10 +893,13 @@ static void RxStreamInitCallback(void *CallbackRef)
+ 	}
+ 
+ 	// Enable and configure RX MMCM
+-	if (xhdmi->isvphy)
++	if (xhdmi->isvphy) {
+ 		XVphy_MmcmStart(VphyPtr, 0, XVPHY_DIR_RX);
+-	else
++		XVphy_Clkout1OBufTdsEnable(VphyPtr, XVPHY_DIR_RX, (TRUE));
++	} else {
+ 		XHdmiphy1_MmcmStart(XGtPhyPtr, 0, XHDMIPHY1_DIR_RX);
++		XHdmiphy1_Clkout1OBufTdsEnable(XGtPhyPtr, XHDMIPHY1_DIR_RX, (TRUE));
++	}
+ 	//wait 10ms for PLL to stabilize
+ 	usleep_range(10000, 11000);
+ 	xvphy_mutex_unlock(xhdmi->phy[0]);
