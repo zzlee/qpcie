@@ -5,10 +5,6 @@
 // Remove ethernet aliases so U-Boot / Linux do not attempt network init.
 
 / {
-	chosen {
-		bootargs = "earlycon console=ttyPS0,115200 clk_ignore_unused root=/dev/ram0 rw drm_kms_helper.fbdev_emulation=0";
-	};
-
 	aliases {
 		/delete-property/ ethernet0;
 		/delete-property/ ethernet1;
