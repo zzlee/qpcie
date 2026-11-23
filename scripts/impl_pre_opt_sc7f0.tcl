@@ -65,6 +65,18 @@ if {[info exists ::env(SC7F0_RGB_COMPOSITOR)] &&
         if {[llength $arm_src] > 0 && [llength $arm_dst] > 0} {
             set_max_delay -datapath_only 3.333 -from $arm_src -to $arm_dst
         }
+        set wg_src [get_cells -quiet -hier -regexp {.*u_overlay_ingress/(wr_gray_r|wr_bin)_reg\[.*\]}]
+        set wg_dst [get_pins -quiet -hier -regexp {.*u_overlay_ingress/wr_gray_s1_reg\[.*\]/D}]
+        if {[llength $wg_src] > 0 && [llength $wg_dst] > 0} {
+            set_max_delay -datapath_only 3.333 -from $wg_src -to $wg_dst
+            set_bus_skew -from $wg_src -to $wg_dst 3.333
+        }
+        set rg_src [get_cells -quiet -hier -regexp {.*u_overlay_ingress/(rd_gray_r|rd_bin)_reg\[.*\]}]
+        set rg_dst [get_pins -quiet -hier -regexp {.*u_overlay_ingress/rd_gray_s1_reg\[.*\]/D}]
+        if {[llength $rg_src] > 0 && [llength $rg_dst] > 0} {
+            set_max_delay -datapath_only 3.333 -from $rg_src -to $rg_dst
+            set_bus_skew -from $rg_src -to $rg_dst 3.333
+        }
         puts "SC7F0_OVERLAY_CDC_APPLY_SKIPPED direct pull-mode overlay active (no u_overlay_writer; ingress arm CDC applied)"
     }
     source [file join $sc7f0_impl_pre_dir apply_sc7f0_tx_io_first_stage.tcl]

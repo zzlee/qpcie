@@ -1934,7 +1934,7 @@ module custom_pcie_dma_top #(
     sc7f0_ovl_pull_prefetch #(
         .ACTIVE_BEATS_PER_LINE(1920),
         .ACTIVE_LINES         (2160),
-        .URAM_FIFO_DEPTH      (65536)
+        .URAM_FIFO_DEPTH      (16384)
     ) u_ovl_pull_prefetch (
         .pcie_clk               (clk),
         .pcie_rst_n             (dma_rst_n),

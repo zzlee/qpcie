@@ -297,7 +297,7 @@ module sc7f0_alpha_blend_2ppc #(
     // and never held back by the overlay, which is the whole point of the
     // state machine (see the header).  `lock_fire` excludes the coincidence beat
     // from the passthrough path because that beat goes out blended instead.
-    wire base_only   = !is_locked && !lock_fire && b_valid && stage0_free;
+    wire base_only   = ((!is_locked && !lock_fire) && b_valid && stage0_free) || pair_bad;
 
     // Overlay side: stale beats are drained while seeking, a frame start is held
     // un-popped until the background's own frame start arrives.

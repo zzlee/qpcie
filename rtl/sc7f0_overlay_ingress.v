@@ -480,8 +480,7 @@ module sc7f0_overlay_ingress #(
     // into a fifo_wen next cycle.  wr_data_count only updates the cycle after a write
     // lands, so requiring two free slots (not one, not zero) is what makes a drop
     // impossible; the FIFO can only gain space in the interval.
-    wire [WDQ-1:0] fifo_wr_count;
-    wire fifo_room2 = !fifo_wr_busy && (fifo_wr_count <= (FIFO_DEPTH - 2));
+    wire fifo_room2;
 
     wire fifo_wr_room  = !fifo_full && !fifo_wr_busy;
     wire drain_can_read = d_active && (d_idx != d_total) && fifo_room2;
@@ -527,11 +526,14 @@ module sc7f0_overlay_ingress #(
     wire [5:0]  ovl_inc      = accepted ? 6'd1 : 6'd0;
     wire [5:0]  ovl_dec      = cpl_fin ? 6'd1 : 6'd0;
 
-    // Timeout fires once per stalled window; it also has to clear the ring, which
-    // is why the counters below are written conditionally rather than as deltas.
-    wire timeout_fire = ((ovl_outstanding != 6'd0) ||
-                         (n_live != {(IDX_AW+1){1'b0}})) &&
-                        !progress && (timeout_cnt >= TIMEOUT_CYCLES);
+    // Timeout fires once per stalled window when either PCIe completions are
+    // still owed (ovl_outstanding != 0) or downstream has room (fifo_room2)
+    // yet draining is stuck; pure downstream backpressure with zero
+    // outstanding PCIe reads must pause cleanly without aborting.
+    wire timeout_armed = (ovl_outstanding != 6'd0) ||
+                         ((n_live != {(IDX_AW+1){1'b0}}) && fifo_room2);
+    wire timeout_fire  = timeout_armed && !progress &&
+                         (timeout_cnt >= TIMEOUT_CYCLES);
     // Arm withdrawn while a transfer is live: same cleanup as a timeout.
     wire abandon      = !ovl_go && armed;
     wire abort_now    = timeout_fire || abandon;
@@ -633,6 +635,8 @@ module sc7f0_overlay_ingress #(
                 armed           <= 1'b0;
                 ovl_busy        <= 1'b0;
                 mrd_req_valid   <= 1'b0;
+                d_active        <= 1'b0;
+                rd_pipe         <= 1'b0;
                 abandon_evt   <= 1'b1;      // relabel in-flight as debt (ledger)
                 // busy_bitmap is deliberately NOT cleared here any more.  Clearing
                 // it was the launder: it returned tags that the root complex still
@@ -802,7 +806,7 @@ module sc7f0_overlay_ingress #(
             // epoch that clears the ledger itself.
             ovl_poison_sticky <= poison_sticky_r || abort_now;
             ovl_abort_evt     <= abandon_evt || cpl_drop;
-            if (ovl_outstanding != 6'd0 || n_live != {(IDX_AW+1){1'b0}}) begin
+            if (timeout_armed) begin
                 if (progress) timeout_cnt <= 32'd0;
                 else if (timeout_fire) begin
                     // Give up on this transfer.  The tags still owed are NOT
@@ -822,6 +826,8 @@ module sc7f0_overlay_ingress #(
                     // see the abandon above: the tag space is held by the ledger
                     armed              <= 1'b0;
                     ovl_busy           <= 1'b0;
+                    d_active           <= 1'b0;
+                    rd_pipe            <= 1'b0;
                     for (ti = 0; ti < NSLOT; ti = ti + 1) begin
                         e_live[ti]  <= 1'b0;
                         e_ready[ti] <= 1'b0;
@@ -951,71 +957,130 @@ module sc7f0_overlay_ingress #(
                                         stage_b1[ram_raddr], stage_b0[ram_raddr]};
 
     // ------------------------------------------------------------------------
-    // payload crossing: 256 bit @125 -> 128 bit @300
+    // payload crossing: transparent 64 x 256-bit Gray-code async FIFO (BRAM)
+    // (125 MHz write -> 300 MHz registered BRAM read + 2-entry FWFT + 256->128)
     // ------------------------------------------------------------------------
-    xpm_fifo_async #(
-        .FIFO_MEMORY_TYPE   ("block"),
-        .FIFO_WRITE_DEPTH   (FIFO_DEPTH),
-        .WRITE_DATA_WIDTH   (256),
-        .READ_DATA_WIDTH    (128),
-        .READ_MODE          ("fwft"),
-        .FIFO_READ_LATENCY  (0),
-        .CDC_SYNC_STAGES    (4),
-        .USE_ADV_FEATURES   ("0404"),          // wr_data_count + rd_data_count
-        .WR_DATA_COUNT_WIDTH(WDQ),
-        .RD_DATA_COUNT_WIDTH(RDQ),
-        .SIM_ASSERT_CHK     (1)
-    ) u_xfer (
-        .rst           (p_rst),
-        .wr_clk        (clk),
-        .din           (fifo_wdata),
-        .wr_en         (fifo_wen),
-        .full          (fifo_full),
-        .wr_rst_busy   (fifo_wr_busy),
-        .rd_clk        (mem_clk),
-        .dout          (fifo_dout),
-        .rd_en         (m_axis_tvalid && m_axis_tready),
-        .empty         (fifo_empty),
-        .rd_rst_busy   (fifo_rd_busy),
-        .rd_data_count (fifo_rd_count),
-        .wr_data_count (fifo_wr_count),
-        .sleep         (1'b0),
-        .injectsbiterr (1'b0),
-        .injectdbiterr (1'b0),
-        .prog_full     (), .prog_empty(), .overflow(fifo_ovf), .underflow(),
-        .almost_full   (), .almost_empty(), .wr_ack(), .data_valid(),
-        .dbiterr       (), .sbiterr       ()
-    );
+    localparam integer XF_AW = $clog2(FIFO_DEPTH); // 6
+    (* ram_style = "block" *) reg [256:0] xfer_mem [0:FIFO_DEPTH-1];
+    reg wr_frame_sof;
 
-    assign m_axis_tdata = fifo_dout;
-    assign m_axis_tvalid= !fifo_empty && !fifo_rd_busy && m_all_n;
-    localparam integer AVAIL_MAX = (RDQ >= 9) ? 255 : ((1 << RDQ) - 1);
-    assign m_axis_avail = (fifo_rd_count > AVAIL_MAX[RDQ-1:0]) ? 8'hFF
-                                                              : fifo_rd_count[7:0];
+    function automatic [XF_AW:0] bin2gray(input [XF_AW:0] b);
+        bin2gray = b ^ (b >> 1);
+    endfunction
 
-    // first-beat marker per arm + read-side overflow sticky
-    reg  arm_toggle, sync0, sync1, arm_last, arm_first;
-    reg  [1:0] ovf_sync;
+    function automatic [XF_AW:0] gray2bin(input [XF_AW:0] g);
+        integer gi;
+        begin
+            gray2bin[XF_AW] = g[XF_AW];
+            for (gi = XF_AW - 1; gi >= 0; gi = gi - 1)
+                gray2bin[gi] = gray2bin[gi + 1] ^ g[gi];
+        end
+    endfunction
+
+    reg  [XF_AW:0] wr_bin, wr_gray_r;
+    reg  [XF_AW:0] rd_bin, rd_gray_r;
+    (* ASYNC_REG = "TRUE" *) reg [XF_AW:0] rd_gray_s1, rd_gray_s2, rd_gray_s3;
+    (* ASYNC_REG = "TRUE" *) reg [XF_AW:0] wr_gray_s1, wr_gray_s2, wr_gray_s3;
+
+    wire [XF_AW:0] rd_bin_sync = gray2bin(rd_gray_s3);
+    wire [XF_AW:0] wr_bin_sync = gray2bin(wr_gray_s3);
+    wire [XF_AW:0] wr_used     = wr_bin - rd_bin_sync;
+
+    assign fifo_full    = (wr_used >= FIFO_DEPTH[XF_AW:0]);
+    assign fifo_wr_busy = 1'b0;
+    assign fifo_rd_busy = 1'b0;
+    assign fifo_ovf     = 1'b0;
+    assign fifo_room2   = (wr_used <= (FIFO_DEPTH[XF_AW:0] - 7'd4));
+
     always @(posedge clk or posedge p_rst) begin
-        if (p_rst)          arm_toggle <= 1'b0;
-        else if (arm_ok)    arm_toggle <= ~arm_toggle;
-    end
-    always @(posedge mem_clk or posedge m_rst) begin
-        if (m_rst) begin
-            sync0 <= 1'b0; sync1 <= 1'b0; arm_last <= 1'b0;
-            arm_first <= 1'b1; ovf_sync <= 2'b00;
+        if (p_rst) begin
+            wr_bin       <= {(XF_AW+1){1'b0}};
+            wr_gray_r    <= {(XF_AW+1){1'b0}};
+            rd_gray_s1   <= {(XF_AW+1){1'b0}};
+            rd_gray_s2   <= {(XF_AW+1){1'b0}};
+            rd_gray_s3   <= {(XF_AW+1){1'b0}};
+            wr_frame_sof <= 1'b0;
         end else begin
-            sync0 <= arm_toggle;
-            sync1 <= sync0;
-            ovf_sync <= {ovf_sync[0], fifo_ovf};
-            if (sync1 != arm_last) begin
-                arm_last  <= sync1;
-                arm_first <= 1'b1;
-            end else if (m_axis_tvalid && m_axis_tready)
-                arm_first <= 1'b0;
+            rd_gray_s1 <= rd_gray_r;
+            rd_gray_s2 <= rd_gray_s1;
+            rd_gray_s3 <= rd_gray_s2;
+            if (arm_ok)
+                wr_frame_sof <= 1'b1;
+            if (fifo_wen && !fifo_full) begin
+                wr_bin       <= wr_bin + 1'b1;
+                wr_gray_r    <= bin2gray(wr_bin + 1'b1);
+                wr_frame_sof <= 1'b0;
+            end
         end
     end
-    assign m_axis_tuser     = arm_first && m_axis_tvalid;
+
+    always @(posedge clk) begin
+        if (fifo_wen && !fifo_full)
+            xfer_mem[wr_bin[XF_AW-1:0]] <= {wr_frame_sof, fifo_wdata};
+    end
+
+    reg  [256:0] bram_dout;
+    reg          bram_pipe;
+    reg  [256:0] fwft_buf [0:1];
+    reg  [1:0]   fwft_cnt;
+    reg          fwft_wr_ptr, fwft_rd_ptr;
+    reg          xfer_half;
+
+    wire bram_empty  = (rd_bin == wr_bin_sync);
+    wire bram_ren    = !bram_empty && (({1'b0, fwft_cnt} + {2'b0, bram_pipe}) < 3'd2);
+    wire xfer_rd_en  = m_axis_tvalid && m_axis_tready && xfer_half;
+
+    always @(posedge mem_clk) begin
+        if (bram_ren)
+            bram_dout <= xfer_mem[rd_bin[XF_AW-1:0]];
+    end
+
+    always @(posedge mem_clk or posedge m_rst) begin
+        if (m_rst) begin
+            rd_bin      <= {(XF_AW+1){1'b0}};
+            rd_gray_r   <= {(XF_AW+1){1'b0}};
+            wr_gray_s1  <= {(XF_AW+1){1'b0}};
+            wr_gray_s2  <= {(XF_AW+1){1'b0}};
+            wr_gray_s3  <= {(XF_AW+1){1'b0}};
+            bram_pipe   <= 1'b0;
+            fwft_cnt    <= 2'd0;
+            fwft_wr_ptr <= 1'b0;
+            fwft_rd_ptr <= 1'b0;
+            xfer_half   <= 1'b0;
+        end else begin
+            wr_gray_s1 <= wr_gray_r;
+            wr_gray_s2 <= wr_gray_s1;
+            wr_gray_s3 <= wr_gray_s2;
+            bram_pipe  <= bram_ren;
+            if (bram_ren) begin
+                rd_bin    <= rd_bin + 1'b1;
+                rd_gray_r <= bin2gray(rd_bin + 1'b1);
+            end
+            if (bram_pipe) begin
+                fwft_buf[fwft_wr_ptr] <= bram_dout;
+                fwft_wr_ptr           <= ~fwft_wr_ptr;
+            end
+            if (m_axis_tvalid && m_axis_tready)
+                xfer_half <= ~xfer_half;
+            if (xfer_rd_en)
+                fwft_rd_ptr <= ~fwft_rd_ptr;
+            fwft_cnt <= fwft_cnt + (bram_pipe ? 2'd1 : 2'd0) - (xfer_rd_en ? 2'd1 : 2'd0);
+        end
+    end
+
+    wire [256:0] xfer_dout = fwft_buf[fwft_rd_ptr];
+    assign fifo_empty   = (fwft_cnt == 2'd0);
+    assign m_axis_tdata = xfer_half ? xfer_dout[255:128] : xfer_dout[127:0];
+    assign m_axis_tvalid= !fifo_empty && m_all_n;
+    assign m_axis_avail = 8'd0;
+
+    // read-side overflow sticky (SOF is carried in-band in xfer_dout[256])
+    reg  [1:0] ovf_sync;
+    always @(posedge mem_clk or posedge m_rst) begin
+        if (m_rst) ovf_sync <= 2'b00;
+        else       ovf_sync <= {ovf_sync[0], fifo_ovf};
+    end
+    assign m_axis_tuser     = xfer_dout[256] && !xfer_half && m_axis_tvalid;
     assign m_axis_ovf_sticky= ovf_sync[1];
 endmodule
 `default_nettype wire

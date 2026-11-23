@@ -128,8 +128,9 @@ module sc7f0_pcie_ext_tag_enable #(
             sub           <= 2'b00;
             phase         <= PH_PTR;
             steps         <= 8'd0;
-            devcap_ext_tag<= 1'b0;
-            ext_tag_enable<= 1'b0;
+            // Keep ext_tag_enable / devcap_ext_tag glitch-free across periodic
+            // refresh walks; only link-down, reset, or a completed/failed walk
+            // updates them.
             state         <= ST_REQ;
         end
     endtask

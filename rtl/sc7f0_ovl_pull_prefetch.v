@@ -24,7 +24,7 @@
 module sc7f0_ovl_pull_prefetch #(
     parameter integer ACTIVE_BEATS_PER_LINE = 1920,  // 3840 px / 2 PPC
     parameter integer ACTIVE_LINES          = 2160,
-    parameter integer URAM_FIFO_DEPTH       = 32768  // 32768 x 16 B = 0.5 MB (~34 lines, 16 URAMs)
+    parameter integer URAM_FIFO_DEPTH       = 16384  // 16384 x 16 B = 256 KB (~17 lines, 8 URAMs)
 )(
     // ---- PCIe user clock domain -------------------------------------------
     input  wire         pcie_clk,
@@ -202,32 +202,35 @@ module sc7f0_ovl_pull_prefetch #(
     end
 
     // ------------------------------------------------------------------------
-    // 3. mem_clk (300 MHz): 32-URAM Prefetch FIFO (129b x 65536 = 1.0 MB)
+    // 3. mem_clk (300 MHz): 8-URAM Prefetch FIFO (129b x 16384 = 256 KB)
+    //    Uses READ_MODE="std", FIFO_READ_LATENCY=2 + 8-entry distributed-RAM
+    //    FWFT skid FIFO for > +0.5 ns timing margin at 300 MHz.
     // ------------------------------------------------------------------------
     wire [128:0] uram_dout;
     wire         uram_full, uram_empty, uram_wr_rst_busy, uram_rd_rst_busy;
+    wire         uram_data_valid;
     wire         uram_rd_en;
 
     assign s_axis_tready = !uram_full && !uram_wr_rst_busy;
 
     xpm_fifo_sync #(
-        .CASCADE_HEIGHT     (1),
+        .CASCADE_HEIGHT     (0),
         .DOUT_RESET_VALUE   ("0"),
         .ECC_MODE           ("no_ecc"),
         .FIFO_MEMORY_TYPE   ("ultra"),
-        .FIFO_READ_LATENCY  (0),
+        .FIFO_READ_LATENCY  (2),
         .FIFO_WRITE_DEPTH   (URAM_FIFO_DEPTH),
         .FULL_RESET_VALUE   (0),
         .PROG_EMPTY_THRESH  (10),
         .PROG_FULL_THRESH   (10),
-        .RD_DATA_COUNT_WIDTH(16),
+        .RD_DATA_COUNT_WIDTH(15),
         .READ_DATA_WIDTH    (129),
-        .READ_MODE          ("fwft"),
+        .READ_MODE          ("std"),
         .SIM_ASSERT_CHK     (0),
-        .USE_ADV_FEATURES   ("0000"),
+        .USE_ADV_FEATURES   ("1000"),
         .WAKEUP_TIME        (0),
         .WRITE_DATA_WIDTH   (129),
-        .WR_DATA_COUNT_WIDTH(16)
+        .WR_DATA_COUNT_WIDTH(15)
     ) u_ovl_uram_fifo (
         .sleep        (1'b0),
         .rst          (!mem_rst_n),
@@ -249,11 +252,42 @@ module sc7f0_ovl_pull_prefetch #(
         .underflow    (),
         .rd_rst_busy  (uram_rd_rst_busy),
         .almost_empty (),
-        .data_valid   (),
+        .data_valid   (uram_data_valid),
         .injectsbiterr(1'b0),
         .injectdbiterr(1'b0),
         .sbiterr      (),
         .dbiterr      ()
+    );
+
+    wire [128:0] skid_dout;
+    wire         skid_full, skid_empty;
+    wire [4:0]   skid_count;
+    wire         skid_pop;
+    reg  [4:0]   inflight_reads;
+
+    assign uram_rd_en = !uram_empty && !uram_rd_rst_busy &&
+                        (({1'b0, skid_count} + {1'b0, inflight_reads}) < 6'd16);
+
+    always @(posedge mem_clk or negedge mem_rst_n) begin
+        if (!mem_rst_n) begin
+            inflight_reads <= 5'd0;
+        end else begin
+            inflight_reads <= inflight_reads
+                              + (uram_rd_en      ? 5'd1 : 5'd0)
+                              - (uram_data_valid ? 5'd1 : 5'd0);
+        end
+    end
+
+    sc7f0_dp_sync_fifo #(.WIDTH(129), .DEPTH(16)) u_skid (
+        .clk   (mem_clk),
+        .rst_n (mem_rst_n),
+        .din   (uram_dout),
+        .push  (uram_data_valid && !skid_full),
+        .full  (skid_full),
+        .dout  (skid_dout),
+        .pop   (skid_pop),
+        .empty (skid_empty),
+        .count (skid_count)
     );
 
     // ------------------------------------------------------------------------
@@ -269,16 +303,16 @@ module sc7f0_ovl_pull_prefetch #(
     reg [11:0] col_cnt;
     reg [11:0] row_cnt;
 
-    wire [63:0] cur_64      = half_sel ? uram_dout[127:64] : uram_dout[63:0];
-    wire        beat_is_sof = uram_dout[128] && !half_sel;
+    wire [63:0] cur_64      = half_sel ? skid_dout[127:64] : skid_dout[63:0];
+    wire        beat_is_sof = skid_dout[128] && !half_sel;
     wire [11:0] eff_col     = beat_is_sof ? 12'd0 : col_cnt;
 
-    assign m_o_axis_tvalid = !uram_empty && !uram_rd_rst_busy;
+    assign m_o_axis_tvalid = !skid_empty;
     assign m_o_axis_tdata  = {swizzle_rgba_to_ug934(cur_64[63:32]),
                               swizzle_rgba_to_ug934(cur_64[31:0])};
     assign m_o_axis_tuser  = beat_is_sof;
     assign m_o_axis_tlast  = (eff_col == (ACTIVE_BEATS_PER_LINE[11:0] - 12'd1));
-    assign uram_rd_en      = m_o_axis_tvalid && m_o_axis_tready && half_sel;
+    assign skid_pop        = m_o_axis_tvalid && m_o_axis_tready && half_sel;
 
     always @(posedge mem_clk or negedge mem_rst_n) begin
         if (!mem_rst_n) begin

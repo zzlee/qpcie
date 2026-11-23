@@ -2,7 +2,7 @@ set root [file normalize [file join [file dirname [info script]] ..]]
 cd $root
 create_project sc7f0_live_sim ./build/sc7f0_live_sim -part xczu4ev-fbvb900-2-e -force
 set_property XPM_LIBRARIES {XPM_CDC XPM_FIFO} [current_project]
-add_files [list ./rtl/video_axis_async_fifo.v ./rtl/video_rgb_to_yuv709.v ./rtl/nv12_capture_engine.v ./rtl/video_req_cdc.v ./rtl/rq_tx_encoder.v ./rtl/sg_segment_walker.v]
+add_files [list ./rtl/sc7f0_reset_cdc.v ./rtl/video_axis_async_fifo.v ./rtl/video_rgb_to_yuv709.v ./rtl/nv12_capture_engine.v ./rtl/video_req_cdc.v ./rtl/rq_tx_encoder.v ./rtl/sg_segment_walker.v]
 add_files -fileset sim_1 ./tb/sc7f0_live_video_tb.sv
 set_property top sc7f0_live_video_tb [get_filesets sim_1]
 set_property xsim.simulate.runtime all [get_filesets sim_1]
