@@ -98,12 +98,10 @@ struct qpcie_overlay {
 	u32 frame_bytes;
 	bool hw_active_armed;
 	bool hw_pending;
-	u32 pending_hw_cnt;
 	struct qovl_sw_entry sw_q[QOVL_MAX_SLOTS];
 	u32 sw_head;
 	u32 sw_tail;
 	u32 sw_count;
-	struct delayed_work phase_work;
 };
 
 /* SC7F0-RGB-COMPOSITOR-2PPC.  Exact on purpose (see the gate note above).
@@ -244,44 +242,10 @@ static void ovl_hw_arm_locked(struct qpcie_overlay *o, dma_addr_t slot_iova,
 	ioread32(o->csr + QOVL_REG_CTRL);
 }
 
-static void ovl_phase_work_fn(struct work_struct *work)
-{
-	struct qpcie_overlay *o = container_of(to_delayed_work(work),
-					       struct qpcie_overlay, phase_work);
-	unsigned long flags;
-	bool reschedule = false;
-
-	spin_lock_irqsave(&o->irq_lock, flags);
-	if (!o->dead && o->hw_pending && !o->hw_active_armed) {
-		if (ioread32(o->csr + QOVL_REG_WR_FRAMES_DONE) !=
-		    o->pending_hw_cnt) {
-			/* Initial un-armed refresh finished: hw_pending just
-			 * promoted into P_RUN and hardware pending_* is free. */
-			o->hw_active_armed = true;
-			o->hw_pending = false;
-			if (o->sw_count > 0) {
-				struct qovl_sw_entry e = o->sw_q[o->sw_head];
-				o->sw_head = (o->sw_head + 1U) % QOVL_MAX_SLOTS;
-				o->sw_count--;
-				ovl_hw_arm_locked(o, e.iova, e.xfer);
-				o->hw_pending = true;
-			}
-		} else if (o->sw_count > 0) {
-			reschedule = true;
-		}
-	}
-	spin_unlock_irqrestore(&o->irq_lock, flags);
-
-	if (reschedule)
-		schedule_delayed_work(&o->phase_work, 1);
-}
-
 static int ovl_close(struct inode *inode, struct file *file)
 {
 	struct qpcie_overlay *o = file_ovl(file);
 	unsigned long flags;
-
-	cancel_delayed_work_sync(&o->phase_work);
 
 	/* Only the client is released.  The ring survives on purpose: an armed
 	 * PCIe read must not find its pages freed because the tool that armed it
@@ -444,7 +408,6 @@ static long ovl_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		       ((cfg.flags & QOVL_CFG_RX_PASSTHROUGH) ? BIT(4) : 0);
 		iowrite32(comp, o->csr + QOVL_REG_COMP_CTRL);
 		ioread32(o->csr + QOVL_REG_COMP_CTRL);
-		cancel_delayed_work_sync(&o->phase_work);
 		{
 			unsigned long flags;
 			spin_lock_irqsave(&o->irq_lock, flags);
@@ -466,7 +429,6 @@ static long ovl_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		dma_addr_t slot_iova;
 		unsigned long flags;
 		long wrc;
-		bool sched_phase = false;
 
 		if (!o->bar0_csr_ok)
 			return -EOPNOTSUPP;
@@ -510,16 +472,15 @@ static long ovl_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 		/* Never overwrite pending_* in hardware; queue in sw_q if busy */
 		if (!o->hw_active_armed && !o->hw_pending) {
 			u32 st = ioread32(o->csr + QOVL_REG_STATUS);
-			u32 hw_cnt = ioread32(o->csr + QOVL_REG_WR_FRAMES_DONE);
 
 			ovl_hw_arm_locked(o, slot_iova, xfer);
 			if (!(st & BIT(0))) {
 				o->hw_active_armed = true;
 			} else {
 				/* An un-armed background refresh is in P_RUN,
-				 * so this frame landed in pending_* */
+				 * so this frame landed in pending_*; vblank_irq
+				 * (BIT 9) will fire as soon as it promotes. */
 				o->hw_pending = true;
-				o->pending_hw_cnt = hw_cnt;
 			}
 		} else if (o->hw_active_armed && !o->hw_pending) {
 			ovl_hw_arm_locked(o, slot_iova, xfer);
@@ -529,13 +490,8 @@ static long ovl_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 			o->sw_q[o->sw_tail].xfer = xfer;
 			o->sw_tail = (o->sw_tail + 1U) % QOVL_MAX_SLOTS;
 			o->sw_count++;
-			if (!o->hw_active_armed)
-				sched_phase = true;
 		}
 		spin_unlock_irqrestore(&o->irq_lock, flags);
-
-		if (sched_phase)
-			schedule_delayed_work(&o->phase_work, 1);
 
 		if (!(sub.flags & QOVL_SUBMIT_ASYNC)) {
 			wrc = wait_event_interruptible_timeout(
@@ -706,6 +662,30 @@ void qpcie_overlay_irq_handler(struct qpcie_dev *qdev)
 	wake_up_interruptible(&o->wq);
 }
 
+void qpcie_overlay_vblank_irq_handler(struct qpcie_dev *qdev)
+{
+	struct qpcie_overlay *o = qdev->overlay;
+	unsigned long flags;
+
+	if (!o)
+		return;
+	spin_lock_irqsave(&o->irq_lock, flags);
+	if (!o->dead && o->hw_pending && !o->hw_active_armed) {
+		/* Un-armed background refresh finished: hw_pending promoted to
+		 * P_RUN, so hardware pending_* is free to arm sw_q[0]. */
+		o->hw_active_armed = true;
+		o->hw_pending = false;
+		if (o->sw_count > 0) {
+			struct qovl_sw_entry e = o->sw_q[o->sw_head];
+			o->sw_head = (o->sw_head + 1U) % QOVL_MAX_SLOTS;
+			o->sw_count--;
+			ovl_hw_arm_locked(o, e.iova, e.xfer);
+			o->hw_pending = true;
+		}
+	}
+	spin_unlock_irqrestore(&o->irq_lock, flags);
+}
+
 int qpcie_overlay_init(struct qpcie_dev *qdev)
 {
 	struct qpcie_overlay *o;
@@ -734,7 +714,6 @@ int qpcie_overlay_init(struct qpcie_dev *qdev)
 	mutex_init(&o->lock);
 	init_waitqueue_head(&o->wq);
 	spin_lock_init(&o->irq_lock);
-	INIT_DELAYED_WORK(&o->phase_work, ovl_phase_work_fn);
 	o->frame_bytes = QOVL_RGBA_FRAME_BYTES;
 	o->csr = qdev->bar0_mmio + QOVL_BAR0_OFFSET;
 	o->bar0_csr_ok = (ioread32(o->csr + QOVL_REG_ID) == QOVL_ID_RGB1);
@@ -788,7 +767,6 @@ void qpcie_overlay_remove(struct qpcie_dev *qdev)
 	o->dead = true;
 	o->ring_retained = !!o->vaddr;
 	mutex_unlock(&o->lock);
-	cancel_delayed_work_sync(&o->phase_work);
 	wake_up_interruptible_all(&o->wq);
 
 	misc_deregister(&o->misc);

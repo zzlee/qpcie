@@ -781,6 +781,7 @@ void qpcie_debug_remove(struct qpcie_dev *qdev);
 int qpcie_overlay_init(struct qpcie_dev *qdev);
 void qpcie_overlay_remove(struct qpcie_dev *qdev);
 void qpcie_overlay_irq_handler(struct qpcie_dev *qdev);
+void qpcie_overlay_vblank_irq_handler(struct qpcie_dev *qdev);
 
 int qpcie_upgrade_init(struct qpcie_dev *qdev);
 void qpcie_upgrade_remove(struct qpcie_dev *qdev);

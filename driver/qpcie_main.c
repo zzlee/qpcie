@@ -117,9 +117,11 @@ static irqreturn_t qpcie_irq_handler(int irq, void *data)
     if ((top & BIT(7)) && qdev->v4l2_registered)
         qpcie_v4l2_node_done(qdev, 1);
 
-    /* Level 3 Dispatch: Overlay H2C Frame Write Done (Bit 8) */
+    /* Level 3 Dispatch: Overlay H2C Frame Write Done (Bit 8) & VBlank Promotion (Bit 9) */
     if (top & BIT(8))
         qpcie_overlay_irq_handler(qdev);
+    if (top & BIT(9))
+        qpcie_overlay_vblank_irq_handler(qdev);
 
     /* Step 2: Clear Level 2 TOP status (W1C) */
     iowrite32(top, qdev->bar0_mmio + REG_NEW_GLOBAL_IRQ_TOP);

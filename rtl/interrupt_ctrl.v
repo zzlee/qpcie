@@ -59,6 +59,7 @@ module interrupt_ctrl (
     input  wire [3:1]  h2c_done_ch,
     input  wire [3:0]  a_done_irq,
     input  wire        ovl_wr_done,
+    input  wire        ovl_vblank_irq,
 
     // Error triggers
     input  wire [3:0]  v_overflow_ch,
@@ -88,8 +89,9 @@ module interrupt_ctrl (
     localparam SRC_VCH2 = 4'd5;
     localparam SRC_VCH3 = 4'd6;
     localparam SRC_AUD  = 4'd7;
-    localparam SRC_PERF = 4'd8;
-    localparam SRC_OVL  = 4'd9;
+    localparam SRC_PERF    = 4'd8;
+    localparam SRC_OVL     = 4'd9;
+    localparam SRC_OVL_VBL = 4'd10;
 
     reg [1:0] state;
     reg [3:0] active_source;
@@ -103,6 +105,7 @@ module interrupt_ctrl (
     reg [7:0] vch3_pending;
     reg [7:0] aud_pending;
     reg [7:0] ovl_pending;
+    reg [7:0] ovl_vbl_pending;
     reg [7:0] perf_pending;
 
     // Event signals
@@ -130,8 +133,9 @@ module interrupt_ctrl (
     wire ack_vch2 = (state == SEND_MSI) && msi_ack && (active_source == SRC_VCH2);
     wire ack_vch3 = (state == SEND_MSI) && msi_ack && (active_source == SRC_VCH3);
     wire ack_aud  = (state == SEND_MSI) && msi_ack && (active_source == SRC_AUD);
-    wire ack_ovl  = (state == SEND_MSI) && msi_ack && (active_source == SRC_OVL);
-    wire ack_perf = (state == SEND_MSI) && msi_ack && (active_source == SRC_PERF);
+    wire ack_ovl     = (state == SEND_MSI) && msi_ack && (active_source == SRC_OVL);
+    wire ack_ovl_vbl = (state == SEND_MSI) && msi_ack && (active_source == SRC_OVL_VBL);
+    wire ack_perf    = (state == SEND_MSI) && msi_ack && (active_source == SRC_PERF);
 
     // Arbitration (Strict Priority: ERR > H2C > VCH0 > VCH1 > VCH2 > VCH3 > AUD > OVL > PERF)
     // Note: Errors ALWAYS bypass enable and cannot be masked!
@@ -142,8 +146,9 @@ module interrupt_ctrl (
     wire vch2_req = (vch2_pending != 8'd0) && (vch2_irq_en | reg_irq_ctrl[1]);
     wire vch3_req = (vch3_pending != 8'd0) && (vch3_irq_en | reg_irq_ctrl[1]);
     wire aud_req  = (aud_pending != 8'd0)  && (adev0_irq_en | reg_irq_ctrl[1]);
-    wire ovl_req  = (ovl_pending != 8'd0);
-    wire perf_req = (perf_pending != 8'd0);
+    wire ovl_req     = (ovl_pending != 8'd0);
+    wire ovl_vbl_req = (ovl_vbl_pending != 8'd0);
+    wire perf_req    = (perf_pending != 8'd0);
 
     reg [3:0] arb_winner;
     reg [7:0] arb_code;
@@ -173,6 +178,9 @@ module interrupt_ctrl (
         end else if (ovl_req) begin
             arb_winner = SRC_OVL;
             arb_code   = 8'h08;
+        end else if (ovl_vbl_req) begin
+            arb_winner = SRC_OVL_VBL;
+            arb_code   = 8'h09;
         end else if (perf_req) begin
             arb_winner = SRC_PERF;
             arb_code   = 8'h07;
@@ -192,8 +200,9 @@ module interrupt_ctrl (
             vch2_pending <= 8'd0;
             vch3_pending <= 8'd0;
             aud_pending  <= 8'd0;
-            ovl_pending  <= 8'd0;
-            perf_pending <= 8'd0;
+            ovl_pending     <= 8'd0;
+            ovl_vbl_pending <= 8'd0;
+            perf_pending    <= 8'd0;
         end else begin
             // ERR
             case ({any_err, ack_err})
@@ -248,6 +257,13 @@ module interrupt_ctrl (
             case ({ovl_wr_done, ack_ovl})
                 2'b10: if (ovl_pending != 8'hFF) ovl_pending <= ovl_pending + 8'd1;
                 2'b01: if (ovl_pending != 8'd0)  ovl_pending <= ovl_pending - 8'd1;
+                default: ;
+            endcase
+
+            // OVL_VBL (Overlay VBlank pending->active promotion)
+            case ({ovl_vblank_irq, ack_ovl_vbl})
+                2'b10: if (ovl_vbl_pending != 8'hFF) ovl_vbl_pending <= ovl_vbl_pending + 8'd1;
+                2'b01: if (ovl_vbl_pending != 8'd0)  ovl_vbl_pending <= ovl_vbl_pending - 8'd1;
                 default: ;
             endcase
 
@@ -311,6 +327,7 @@ module interrupt_ctrl (
             if (perf_req)                   irq_top_status[6] <= 1'b1;
             if (h2c_done)                   irq_top_status[7] <= 1'b1;
             if (ovl_wr_done)                irq_top_status[8] <= 1'b1;
+            if (ovl_vblank_irq)             irq_top_status[9] <= 1'b1;
         end
     end
 

@@ -47,6 +47,7 @@ module sc7f0_ovl_pull_prefetch #(
     input  wire         ing_abort_evt,
 
     output reg          ovl_wr_irq_pulse,
+    output reg          ovl_vblank_irq_pulse,
     output reg  [31:0]  ovl_wr_frames_done,
     output reg  [31:0]  ovl_wr_bytes_written,
     output wire         ovl_wr_busy,
@@ -128,12 +129,14 @@ module sc7f0_ovl_pull_prefetch #(
             ing_xfer_bytes        <= 32'd0;
             ing_max_bytes_per_req <= 16'd0;
             ovl_wr_irq_pulse      <= 1'b0;
+            ovl_vblank_irq_pulse  <= 1'b0;
             ovl_wr_frames_done    <= 32'd0;
             ovl_wr_bytes_written  <= 32'd0;
         end else begin
-            host_go_q        <= host_ovl_go;
-            ovl_wr_irq_pulse <= 1'b0;
-            ing_ovl_enable   <= host_ovl_enable;
+            host_go_q            <= host_ovl_go;
+            ovl_wr_irq_pulse     <= 1'b0;
+            ovl_vblank_irq_pulse <= 1'b0;
+            ing_ovl_enable       <= host_ovl_enable;
 
             if (!host_ovl_enable) begin
                 active_valid      <= 1'b0;
@@ -173,6 +176,9 @@ module sc7f0_ovl_pull_prefetch #(
                             ing_max_bytes_per_req <= pending_irq_armed ? pending_max_req : active_max_req;
                             run_irq_armed         <= pending_irq_armed;
                             pending_irq_armed     <= 1'b0;
+                            if (pending_irq_armed) begin
+                                ovl_vblank_irq_pulse <= 1'b1;
+                            end
                         end
                         ing_ovl_go <= 1'b1;
                         p_state    <= P_RUN;

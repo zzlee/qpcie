@@ -1931,6 +1931,7 @@ module custom_pcie_dma_top #(
     assign ovl_status_counts = {27'd0, ovl_axis_ovf_sticky, ovl_sticky_err,
                                 ovl_sticky_unaligned, ovl_sticky_timeout};
 
+    wire ovl_vblank_irq_pulse;
     sc7f0_ovl_pull_prefetch #(
         .ACTIVE_BEATS_PER_LINE(1920),
         .ACTIVE_LINES         (2160),
@@ -1953,6 +1954,7 @@ module custom_pcie_dma_top #(
         .ing_done_pulse         (ovl_ing_done_pulse),
         .ing_abort_evt          (ovl_ingress_abort),
         .ovl_wr_irq_pulse       (ovl_wr_irq_pulse),
+        .ovl_vblank_irq_pulse   (ovl_vblank_irq_pulse),
         .ovl_wr_frames_done     (ovl_wr_frames_done),
         .ovl_wr_bytes_written   (ovl_wr_bytes_written),
         .ovl_wr_busy            (ovl_wr_busy),
@@ -2015,6 +2017,7 @@ module custom_pcie_dma_top #(
     assign ovl_wr_sticky                = 6'd0;
     assign ovl_axi_dbg                  = 4'd0;
     assign ovl_wr_irq_pulse             = 1'b0;
+    wire   ovl_vblank_irq_pulse         = 1'b0;
     assign ovl_awaddr                   = 49'd0;
     assign ovl_awlen                    = 8'd0;
     assign ovl_awsize                   = 3'd0;
@@ -3511,6 +3514,7 @@ module custom_pcie_dma_top #(
         .h2c_done_ch(h2c_done_ch),
         .a_done_irq(a_done_irq_vec),
         .ovl_wr_done(ovl_wr_irq_pulse),
+        .ovl_vblank_irq(ovl_vblank_irq_pulse),
         .v_overflow_ch({3'd0, vch0_overflow_pulse}),
         .v_desc_err_ch(4'd0),
         .v_fifo_err_ch(4'd0),
