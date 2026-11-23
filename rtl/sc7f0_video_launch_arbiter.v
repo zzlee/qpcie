@@ -240,8 +240,7 @@ module sc7f0_video_launch_arbiter #(
     assign thin_enable = thin_active && thin_prof_ok;
     // A refused launch is still consumed and the walker's frame retired.
     wire   thin_launch_refused = thin_launch_take &&
-                                 (!thin_prof_ok || !thin_bus_ok_w ||
-                                  !bus_matches_profile);
+                                 (!thin_prof_ok || !thin_launch_ok);
     assign thin_launch_ack   = hs_src_rcv | thin_launch_refused;
     assign thin_frame_abort  = thin_launch_refused;
 
