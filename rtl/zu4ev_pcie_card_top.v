@@ -1195,6 +1195,11 @@ module zu4ev_pcie_card_top #(
     wire         hdmi_rx_v_tlast  = 1'b0;
     wire         hdmi_rx_v_tuser  = 1'b0;
 `else
+`ifdef SC7F0_RGB_COMPOSITOR
+    wire [95:0] rx_ss_video_up_tdata;
+    wire        rx_ss_video_up_tvalid, rx_ss_video_up_tready;
+    wire        rx_ss_video_up_tlast,  rx_ss_video_up_tuser;
+`endif
     wire [127:0] hdmi_rx_v_tdata;
     wire         hdmi_rx_v_tvalid;
     wire         hdmi_rx_v_tready;
@@ -1213,7 +1218,12 @@ module zu4ev_pcie_card_top #(
         .dest_clk(phy_rx_video_clk), .dest_out(rx_csc_enable));
     wire [127:0] rx_video_packed_tdata;
     hdmi_rx_pixel_pack u_rx_pixel_pack (
-        .native_data(rx_ss_video_tdata), .rgb_mode(rx_pack_rgb),
+`ifdef SC7F0_RGB_COMPOSITOR
+        .native_data(rx_ss_video_up_tdata),
+`else
+        .native_data(rx_ss_video_tdata),
+`endif
+        .rgb_mode(rx_pack_rgb),
         .dma_data(rx_video_packed_tdata));
 
     wire [127:0] rx_csc_data;
@@ -1232,8 +1242,14 @@ module zu4ev_pcie_card_top #(
 `endif
     video_rgb_to_yuv709 u_rx_csc (
         .clk(phy_rx_video_clk), .rst_n(!rx_video_rst), .enable(rx_csc_enable),
-        .s_data(rx_video_packed_tdata), .s_valid(rx_ss_video_tvalid&&raw_rx_enabled),
+        .s_data(rx_video_packed_tdata),
+`ifdef SC7F0_RGB_COMPOSITOR
+        .s_valid(rx_ss_video_up_tvalid&&raw_rx_enabled),
+        .s_sof(rx_ss_video_up_tuser), .s_eol(rx_ss_video_up_tlast),
+`else
+        .s_valid(rx_ss_video_tvalid&&raw_rx_enabled),
         .s_sof(rx_ss_video_tuser), .s_eol(rx_ss_video_tlast),
+`endif
         .s_ready(raw_csc_input_ready),
         .m_data(rx_csc_data), .m_valid(rx_csc_valid),
         .m_sof(rx_csc_sof), .m_eol(rx_csc_eol), .m_ready(rx_csc_ready));
@@ -1257,9 +1273,6 @@ module zu4ev_pcie_card_top #(
     // two geometries are joined by rtl/sc7f0_ppc_upsize.v: two 48-bit beats
     // become one 96-bit beat, same pixels, same raster order, half the beat
     // rate, validated capture-chain geometry kept untouched.
-    wire [95:0] rx_ss_video_up_tdata;
-    wire        rx_ss_video_up_tvalid, rx_ss_video_up_tready;
-    wire        rx_ss_video_up_tlast,  rx_ss_video_up_tuser;
     wire        rx_up_odd_line_sticky, rx_up_out_stall_sticky;
     wire [31:0] rx_up_odd_line_count,  rx_up_out_stall_count;
     // PS-side READY contract.  rtl/sc7f0_capture_pipeline.v publishes the RX
@@ -2361,8 +2374,9 @@ module zu4ev_pcie_card_top #(
     // 4-Channel Dedicated Datapath Wiring:
     // =========================================================================
     // Channel 0 (HDMI RX / TPG mux):
-`ifdef SC7F0_C2H_RGB24
-    // Channel 0 carries the packed RGB24 payload instead of the legacy raw
+`ifdef SC7F0_RGB_COMPOSITOR
+    // Channel 0 is consumed directly by custom_pcie_dma_top's video_ch0_*
+    // (nv12_capture_engine or rgb24), so s_axis_video ch0 loopback is quiesced.
     // video word, so s_axis_video ch0 is quiesced and the dma top's channel-0
     // engine (rtl/sc7f0_rgb24_c2h_engine.v) consumes video_ch0_* instead.
     assign s_video_tdata[127:0] = 128'd0;
