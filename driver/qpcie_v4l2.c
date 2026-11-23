@@ -78,10 +78,6 @@ static int qpcie_vidioc_enum_fmt_vid_cap_mplane(struct file *file, void *priv, s
         return 0;
     }
     if (f->index == 1) {
-        f->pixelformat = V4L2_PIX_FMT_RGB24;
-        return 0;
-    }
-    if (f->index == 2) {
         struct qpcie_v4l2_channel *vch = video_drvdata(file);
 
         if (vch->channel_id != 0 || vch->buf_type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE ||
@@ -377,11 +373,9 @@ static int qpcie_vidioc_try_fmt_vid_cap(struct file *file, void *priv, struct v4
         f->fmt.pix.colorspace = V4L2_COLORSPACE_REC709;
         return 0;
     }
-    if (f->fmt.pix.pixelformat != V4L2_PIX_FMT_RGB24)
-        f->fmt.pix.pixelformat = V4L2_PIX_FMT_NV12;
+    f->fmt.pix.pixelformat = V4L2_PIX_FMT_NV12;
     f->fmt.pix.field = V4L2_FIELD_NONE;
-    f->fmt.pix.colorspace = (f->fmt.pix.pixelformat == V4L2_PIX_FMT_RGB24) ?
-        V4L2_COLORSPACE_SRGB : V4L2_COLORSPACE_REC709;
+    f->fmt.pix.colorspace = V4L2_COLORSPACE_REC709;
     return 0;
 }
 
@@ -429,7 +423,7 @@ static int qpcie_vidioc_try_fmt_vid_cap_mplane(struct file *file, void *priv,
             channel->buf_type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE ||
             ioread32(channel->qdev->bar0_mmio + REG_NEW_GLOBAL_VERSION) < 0x26102204)
             return -EINVAL;
-    } else if (pixelformat != V4L2_PIX_FMT_RGB24) {
+    } else {
         pixelformat = V4L2_PIX_FMT_NV12M;
     }
 
@@ -461,7 +455,7 @@ static int qpcie_vidioc_s_fmt_vid_cap_mplane(struct file *file, void *priv,
             channel->buf_type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE ||
             ioread32(channel->qdev->bar0_mmio + REG_NEW_GLOBAL_VERSION) < 0x26102204)
             return -EINVAL;
-    } else if (pixelformat != V4L2_PIX_FMT_RGB24) {
+    } else {
         pixelformat = V4L2_PIX_FMT_NV12M;
     }
 
@@ -562,7 +556,6 @@ static int qpcie_vidioc_enum_framesizes(struct file *file, void *priv, struct v4
 {
     if (fsize->pixel_format != V4L2_PIX_FMT_NV12M &&
         fsize->pixel_format != V4L2_PIX_FMT_NV16M &&
-        fsize->pixel_format != V4L2_PIX_FMT_RGB24 &&
         fsize->pixel_format != V4L2_PIX_FMT_H264 &&
         fsize->pixel_format != V4L2_PIX_FMT_HEVC)
         return -EINVAL;
@@ -584,7 +577,6 @@ static int qpcie_vidioc_enum_frameintervals(struct file *file, void *priv, struc
 {
     if (fival->pixel_format != V4L2_PIX_FMT_NV12M &&
         fival->pixel_format != V4L2_PIX_FMT_NV16M &&
-        fival->pixel_format != V4L2_PIX_FMT_RGB24 &&
         fival->pixel_format != V4L2_PIX_FMT_H264 &&
         fival->pixel_format != V4L2_PIX_FMT_HEVC)
         return -EINVAL;

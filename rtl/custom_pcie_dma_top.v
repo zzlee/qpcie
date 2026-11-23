@@ -2169,7 +2169,7 @@ module custom_pcie_dma_top #(
         // RGB personality: the launch bus carries PIXELS in its width field, like the
         // ordinary descriptor path.  Legacy profiles keep the historical byte/row
         // field untouched (default 0).  See rtl/thin_desc_fetch_engine.v.
-`ifdef SC7F0_RGB_COMPOSITOR
+`ifdef SC7F0_C2H_RGB24
         .WIDTH_FIELD_PIXELS(1)
 `else
         .WIDTH_FIELD_PIXELS(0)
@@ -2367,7 +2367,7 @@ module custom_pcie_dma_top #(
     wire [31:0] arb_guard_count;
     // thin_engine_enable / thin_frame_abort are declared with the other thin signals,
     // ahead of the walker instantiation that consumes them.
-`ifdef SC7F0_RGB_COMPOSITOR
+`ifdef SC7F0_C2H_RGB24
     // ---- Second launch entry: the THIN walker path -----------------------
     // thin_active (vch0_ctrl[0]) puts channel 0 behind rtl/thin_desc_fetch_engine.v,
     // which builds the same 245-bit launch bus and can launch a frame by itself.
@@ -2400,12 +2400,15 @@ module custom_pcie_dma_top #(
     // rgb_fmt_refused and the guard report pair are DRIVEN BY that instance, so they
     // must not be assigned here as well - a second driver on the same net.
 `endif
-`ifdef SC7F0_RGB_COMPOSITOR
+`ifdef SC7F0_C2H_RGB24
     // Both entries report into one readable pair: a driver reading 0x68[0]/0x70
     // cannot tell a refused legacy descriptor from a refused legacy thin profile,
     // but each entry counts its own refusals and the sticky covers both.
     assign ovl_video_guard_sticky = arb_guard_sticky;
     assign ovl_video_guard_count  = arb_guard_count;
+`else
+    assign ovl_video_guard_sticky = 1'b0;
+    assign ovl_video_guard_count  = 32'd0;
 `endif
 
     // ---- Descriptor crossing: 125 MHz fetch -> 150 MHz engine ------------
@@ -2417,7 +2420,7 @@ module custom_pcie_dma_top #(
     // bind (rtl/sc7f0_video_launch_arbiter.v).  ENABLED is a build-time constant: a
     // profile whose channel-0 engine is already format-aware gets the pre-guard
     // crossing with no refusal and no reporting.
-`ifdef SC7F0_RGB_COMPOSITOR
+`ifdef SC7F0_C2H_RGB24
     localparam ARB_ENABLED = 1;
 `else
     localparam ARB_ENABLED = 0;
@@ -2721,7 +2724,7 @@ module custom_pcie_dma_top #(
     );
 
     // ---- The Channel 0 capture engine itself -----------------------------
-`ifdef SC7F0_RGB_COMPOSITOR
+`ifdef SC7F0_C2H_RGB24
     // Packed RGB24 channel-0 engine.  Same thin-descriptor launch bus, same
     // format code (vch0_ctrl[7:4] == 4'd1, for which rtl/thin_desc_fetch_engine.v
     // already computes stride = width*3 and needs no second plane ring), same

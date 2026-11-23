@@ -1153,7 +1153,7 @@ module zu4ev_pcie_card_top #(
     );
 
     // Ch 0: HDMI 148.5 MHz -> capture 150 MHz, NOT PCIe 125 MHz.
-`ifdef SC7F0_RGB_COMPOSITOR
+`ifdef SC7F0_C2H_RGB24
     // =====================================================================
     // Packed RGB24 host capture path (SC7F0-RGB-COMPOSITOR-2PPC).
     //
@@ -2333,7 +2333,7 @@ module zu4ev_pcie_card_top #(
     assign tpg_cdc_sof=0; assign tpg_cdc_eol=0;
 `endif
 
-`ifdef SC7F0_RGB_COMPOSITOR
+`ifdef SC7F0_C2H_RGB24
     // Channel 0 of the dma top is the packed RGB24 payload in this personality
     // (rtl/sc7f0_rgb24_c2h_engine.v p_axis_*), still launched by the same thin
     // descriptor ring with format code 4'd1, so the host descriptor ABI, the
@@ -2361,7 +2361,7 @@ module zu4ev_pcie_card_top #(
     // 4-Channel Dedicated Datapath Wiring:
     // =========================================================================
     // Channel 0 (HDMI RX / TPG mux):
-`ifdef SC7F0_RGB_COMPOSITOR
+`ifdef SC7F0_C2H_RGB24
     // Channel 0 carries the packed RGB24 payload instead of the legacy raw
     // video word, so s_axis_video ch0 is quiesced and the dma top's channel-0
     // engine (rtl/sc7f0_rgb24_c2h_engine.v) consumes video_ch0_* instead.
@@ -3243,21 +3243,21 @@ module zu4ev_pcie_card_top #(
 
         // ---- SC7F0-RGB-COMPOSITOR-2PPC ---------------------------------
         .video_ch0_avail                 (
-`ifdef SC7F0_RGB_COMPOSITOR
+`ifdef SC7F0_C2H_RGB24
             rgb24_avail
 `else
             11'd0
 `endif
         ),
         .video_ch0_src_overflow_sticky   (
-`ifdef SC7F0_RGB_COMPOSITOR
+`ifdef SC7F0_C2H_RGB24
             rgb24_ovf_sticky
 `else
             1'b0
 `endif
         ),
         .video_ch0_src_line_align_sticky (
-`ifdef SC7F0_RGB_COMPOSITOR
+`ifdef SC7F0_C2H_RGB24
             rgb24_line_align_sticky
 `else
             1'b0
