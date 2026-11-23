@@ -227,7 +227,7 @@ int main(int argc, char **argv)
 		text_draw(fb, 80, BAND_Y0 + 28, 4,
 		          "SC7F0 4K60 HDMI LOOP-THROUGH + PCIE H2C ALPHA BLENDING", white);
 		text_draw(fb, 80, BAND_Y0 + 82, 3,
-		          "BASE: HDMI RX -> PS DDR -> READER-A | OVERLAY: HOST H2C -> PS DDR -> READER-B", muted);
+		          "BASE: HDMI RX -> PL -> BLEND -> TX | OVERLAY: HOST RAM -> PCIE H2C -> URAM -> BLEND", muted);
 		text_draw(fb, 2880, BAND_Y0 + 34, 3, "ALPHA RAMP 0% -> 100%", cyan);
 		for (int k = 0; k < 16; k++) {
 			uint32_t bx0 = 2880 + (uint32_t)k * 54u;
