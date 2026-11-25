@@ -302,6 +302,9 @@ static ssize_t edid_store(struct device *dev, struct device_attribute *attr, con
     struct qpcie_dev *qdev = pci_get_drvdata(pdev);
 
     if (qdev && qdev->bar1_mmio) {
+        int ret = qpcie_management_claim(qdev);
+        if (ret)
+            return ret;
         /* Pulse HPD Low to simulate HDMI Cable Disconnect */
         iowrite32(0x00, qdev->bar1_mmio + 0x0034); // HPD Low
         msleep(50);

@@ -1,0 +1,12 @@
+[Unit]
+Description=SC7F0 laboratory 2160p60 HDMI TX modeset
+After=systemd-udevd.service
+ConditionPathExists=/etc/sc7f0-ps-release
+
+[Service]
+ExecStart=/usr/lib/sc7f0/sc7f0-tx-modeset
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

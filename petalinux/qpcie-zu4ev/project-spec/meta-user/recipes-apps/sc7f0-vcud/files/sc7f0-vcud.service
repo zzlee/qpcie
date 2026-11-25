@@ -21,6 +21,7 @@ ExecStartPre=/usr/lib/sc7f0/sc7f0-capture-init.sh
 # Live mode in the foreground. --daemon would fork and detach, which takes the
 # process out of systemd's supervision - the deployed loose-file copy on the BOOT
 # partition was started that way and nobody could tell whether it was alive.
+EnvironmentFile=-/etc/default/sc7f0-vcud
 ExecStart=/usr/bin/sc7f0_vcud --live
 Restart=always
 RestartSec=5

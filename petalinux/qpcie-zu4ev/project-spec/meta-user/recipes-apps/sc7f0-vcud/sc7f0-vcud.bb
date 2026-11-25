@@ -17,7 +17,7 @@ LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/GPL-2.0-only;md5=801f80980d171d
 # One canonical source, following the existing qpcie-debugd recipe layout.
 QPCIE_ROOT := "${THISDIR}/../../../../../.."
 FILESEXTRAPATHS:prepend := "${THISDIR}/files:${QPCIE_ROOT}/test_app:"
-SRC_URI = "file://sc7f0_vcud.cpp file://sc7f0-vcud.service file://sc7f0-capture-init.sh"
+SRC_URI = "file://sc7f0_vcud.cpp file://au_checked.h file://owned-stage.h file://credit2.h file://peer.inc file://qpcie_sha256.h file://sc7f0-vcud.service file://sc7f0-vcud.defaults file://sc7f0-ps-release file://sc7f0-modetest.service file://sc7f0-tx-modeset file://sc7f0-capture-init.sh"
 S = "${WORKDIR}"
 
 # The capture-initialisation helper is referenced by absolute path from the unit's
@@ -31,11 +31,11 @@ SC7F0_CAPTURE_INIT_PATH = "${libdir}/sc7f0/sc7f0-capture-init.sh"
 # media-ctl       : /usr/bin/media-ctl, used to resolve subdev nodes by entity name
 # Without the last two the unit's ExecStartPre would fail on the card even though the
 # image "boots", which is precisely the class of gap this recipe exists to close.
-DEPENDS  = "libomxil-xlnx libvcu-xlnx"
-RDEPENDS:${PN} += "libomxil-xlnx libvcu-xlnx vcu-firmware v4l-utils media-ctl"
+DEPENDS  = "sc7f0-stage libomxil-xlnx libvcu-xlnx"
+RDEPENDS:${PN} += "sc7f0-stage libdrm-tests libomxil-xlnx libvcu-xlnx vcu-firmware v4l-utils media-ctl"
 
 inherit systemd
-SYSTEMD_SERVICE:${PN} = "sc7f0-vcud.service"
+SYSTEMD_SERVICE:${PN} = "sc7f0-vcud.service sc7f0-modetest.service"
 SYSTEMD_AUTO_ENABLE = "enable"
 
 EXTRA_OEMAKE = ""
@@ -53,6 +53,10 @@ do_compile() {
 }
 
 do_install() {
+    install -D -m 0644 sc7f0-vcud.defaults ${D}${sysconfdir}/default/sc7f0-vcud
+    install -D -m 0644 sc7f0-ps-release ${D}${sysconfdir}/sc7f0-ps-release
+    install -D -m 0755 sc7f0-tx-modeset ${D}${libdir}/sc7f0/sc7f0-tx-modeset
+    install -D -m 0644 sc7f0-modetest.service ${D}${systemd_system_unitdir}/sc7f0-modetest.service
     install -d ${D}${bindir} ${D}${systemd_system_unitdir} ${D}${libdir}/sc7f0
     install -m 0755 sc7f0_vcud ${D}${bindir}/sc7f0_vcud
     install -m 0644 sc7f0-vcud.service ${D}${systemd_system_unitdir}/
@@ -60,3 +64,5 @@ do_install() {
 }
 
 FILES:${PN} += "${systemd_system_unitdir}/sc7f0-vcud.service ${SC7F0_CAPTURE_INIT_PATH}"
+CONFFILES:${PN} += "${sysconfdir}/default/sc7f0-vcud"
+FILES:${PN} += "${libdir}/sc7f0/sc7f0-tx-modeset ${systemd_system_unitdir}/sc7f0-modetest.service"

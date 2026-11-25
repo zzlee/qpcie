@@ -7,6 +7,9 @@
  */
 
 #include "qpcie_driver.h"
+#ifdef QPCIE_HAVE_KMS
+#include "qpcie_kms.h"
+#endif
 #include <linux/delay.h>
 #include <linux/jiffies.h>
 #include <media/v4l2-event.h>
@@ -34,6 +37,48 @@ MODULE_PARM_DESC(sc7f0_nv_min_buffers,
  * raw DPC1 completion magic and the transferred length, so a running board can
  * be watched straight from dmesg.  Reset on each fresh queue setup. */
 static u32 qpcie_vcu_done_trace;
+
+#ifdef QPCIE_HAVE_KMS
+/* A QBUF may publish a descriptor even before STREAMON. Cover the entire
+ * file, including file-backed VMA lifetime, not just streaming_count. */
+struct qpcie_media_fh {
+    struct v4l2_fh fh;
+    struct qpcie_lease *lease;
+};
+static int qpcie_leased_open(struct file *file)
+{
+    struct qpcie_v4l2_channel *vch = video_drvdata(file);
+    struct qpcie_media_fh *fh = kzalloc(sizeof(*fh), GFP_KERNEL);
+    int rc;
+
+    if (!fh)
+        return -ENOMEM;
+    fh->lease = vch->qdev->lease;
+    rc = qpcie_media_open(fh->lease);
+    if (rc) {
+        kfree(fh);
+        return rc;
+    }
+    v4l2_fh_init(&fh->fh, video_devdata(file));
+    file->private_data = &fh->fh;
+    v4l2_fh_add(&fh->fh, file);
+    return 0;
+}
+static int qpcie_leased_release(struct file *file)
+{
+    struct qpcie_media_fh *fh = file->private_data;
+    struct qpcie_lease *lease = fh->lease;
+    int rc = vb2_fop_release(file); /* includes STREAMOFF and frees fh */
+
+    qpcie_media_close(lease);
+    return rc;
+}
+static const struct v4l2_file_operations qpcie_leased_fops = {
+    .owner = THIS_MODULE, .open = qpcie_leased_open,
+    .release = qpcie_leased_release, .read = vb2_fop_read,
+    .poll = vb2_fop_poll, .mmap = vb2_fop_mmap, .unlocked_ioctl = video_ioctl2,
+};
+#endif
 
 static const struct v4l2_file_operations qpcie_v4l2_fops = {
     .owner          = THIS_MODULE,
@@ -193,6 +238,8 @@ static int qpcie_program_tpg(struct qpcie_v4l2_channel *vch, u32 pattern_id,
 
     tpg = qdev->bar1_mmio + qdev->bar1_offset_tpg + (vch->channel_id * 0x100);
     if (reset_pipeline) {
+        if (qdev->kms_overlay)
+            return -EBUSY;
         /* Pulse reset on both TPG (bit 0) and video capture engine/FIFO (bit 1) */
         iowrite32(3, qdev->bar0_mmio + REG_VIDEO_SUB_RESET);
         ioread32(qdev->bar0_mmio + REG_VIDEO_SUB_RESET);
@@ -924,6 +971,7 @@ static const struct v4l2_ioctl_ops qpcie_v4l2_ioctl_ops = {
 };
 
 /* Videobuf2 Queue Operations */
+#include "credit2.inc"
 static int qpcie_queue_setup(struct vb2_queue *vq,
                             unsigned int *nbuffers, unsigned int *nplanes,
                             unsigned int sizes[], struct device *alloc_devs[])
@@ -933,6 +981,7 @@ static int qpcie_queue_setup(struct vb2_queue *vq,
     unsigned int exp_planes;
     unsigned int y_size, uv_size;
 
+    if(vch->c2){struct c2host*c=vch->c2;mutex_lock(&c->m);if(c->dead||!c2recover(c)){mutex_unlock(&c->m);return -EIO;}mutex_unlock(&c->m);if(*nplanes)return *nplanes==1&&sizes[0]>=C2_BYTES?0:-EINVAL;*nplanes=1;sizes[0]=C2_BYTES;return 0;}
     if (vch->channel_id == 1) {
         unsigned int comp_size = 4 * 1024 * 1024;
 
@@ -1421,6 +1470,7 @@ static void qpcie_buf_queue(struct vb2_buffer *vb)
     unsigned int depth;
     int ret;
 
+    if(vch->c2){struct c2host*c=vch->c2;mutex_lock(&c->m);if(c->dead||c->stopping||c->quarantined)c2give(vb,VB2_BUF_STATE_ERROR,0);else {list_add_tail(&buf->list,&c->wait);c2publish(c);}mutex_unlock(&c->m);return;}
     if (vch->channel_id == 0 || (qdev->c2h_only && vch->channel_id == 1)) {
         spin_lock_irqsave(&qdev->ring_lock, flags);
         ret = qpcie_publish_buffer(vch, buf);
@@ -1625,6 +1675,11 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
     bool convert_rgb = false;
     int ret;
 
+    if(vch->c2){ret=c2start(vch->c2);if(!ret)atomic_inc(&qdev->streaming_count);return ret;}
+    if (READ_ONCE(qdev->dma_isolated)) {
+        qpcie_return_all_buffers(vch, VB2_BUF_STATE_QUEUED);
+        return -EIO;
+    }
     if (vch->channel_id == 1 && qdev->c2h_only) {
         atomic_inc(&qdev->streaming_count);
         dev_info(&qdev->pdev->dev,
@@ -1732,6 +1787,11 @@ static int qpcie_start_streaming(struct vb2_queue *vq, unsigned int count)
                      "STREAMON: HDMI source, keeping RX video path out of reset\n");
         } else {
             /* Pulse reset on both TPG (bit 0) and video capture engine/FIFO (bit 1) */
+            if (qdev->kms_overlay) {
+                qpcie_cancel_unstarted_rings(vch);
+                qpcie_return_all_buffers(vch, VB2_BUF_STATE_QUEUED);
+                return -EBUSY;
+            }
             iowrite32(3, qdev->bar0_mmio + REG_VIDEO_SUB_RESET);
             ioread32(qdev->bar0_mmio + REG_VIDEO_SUB_RESET);
             usleep_range(1000, 2000);
@@ -1866,7 +1926,11 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
     bool last_stream;
     u32 head = 0;
     u32 stat_reg = vch->ch_reg_base + REG_VCH_OFFSET_STATUS;
+    bool composed = qdev->kms_overlay && qdev->c2h_only;
+    u32 idle_mask = DMA_STATUS_VIDEO_TX_IDLE |
+                    (composed ? DMA_STATUS_DESC_IDLE : 0);
 
+    if(vch->c2){c2stop(vch->c2);atomic_dec(&qdev->streaming_count);return;}
     if (vch->channel_id == 1 && qdev->c2h_only) {
         /* The Card<->Host offset of this session is no longer meaningful once
          * streaming stops: force re-calibration on the next session. */
@@ -1931,7 +1995,7 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
         do {
             u32 status = ioread32(qdev->bar0_mmio + stat_reg);
 
-            if (status & DMA_STATUS_VIDEO_TX_IDLE) {
+            if (status != U32_MAX && (status & idle_mask) == idle_mask) {
                 drained = true;
                 break;
             }
@@ -1942,6 +2006,15 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
          * touches the shared capture engine, so it must not be issued while
          * the drain already proved there is nothing in flight. */
         if (!drained) {
+#ifdef QPCIE_HAVE_KMS
+            /* Exceptional recovery, never on a normal HDMI STREAMOFF.
+             * Retire KMS before a shared reset. If retirement failed, the
+             * overlay remains pinned and BME stays off until teardown. */
+            if (composed)
+                qpcie_kms_capture_fault(qdev);
+#endif
+            if (READ_ONCE(qdev->dma_isolated))
+                goto isolate;
             dev_warn(&qdev->pdev->dev,
                      "NV12M STREAMOFF Ch0 drain timeout; pulsing video sub-reset\n");
             iowrite32(3, qdev->bar0_mmio + REG_VIDEO_SUB_RESET);
@@ -1953,7 +2026,7 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
             do {
                 u32 status = ioread32(qdev->bar0_mmio + stat_reg);
 
-                if ((status & (DMA_STATUS_VIDEO_TX_IDLE |
+                if (status != U32_MAX && (status & (DMA_STATUS_VIDEO_TX_IDLE |
                                DMA_STATUS_DESC_IDLE)) ==
                     (DMA_STATUS_VIDEO_TX_IDLE | DMA_STATUS_DESC_IDLE)) {
                     drained = true;
@@ -1969,6 +2042,27 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
 
     last_stream = (atomic_read(&qdev->streaming_count) <= 1);
 
+    /* Never reset another live capture channel to recover this queue. */
+    if (composed && !drained && !last_stream) {
+isolate:
+        WRITE_ONCE(qdev->dma_isolated, true);
+        pci_clear_master(qdev->pdev);
+        /* vb2 may unmap USERPTR/imported memory as soon as we return.
+         * If the hardware is unreachable, do not substitute a sleep for
+         * isolation. Wait for a PCI-core disconnect or confirmed stop,
+         * pending reads drained and ordered endpoint readback. */
+        while (!pci_dev_is_disconnected(qdev->pdev)) {
+            u16 cmd;
+            if (!pci_read_config_word(qdev->pdev, PCI_COMMAND, &cmd) &&
+                cmd != U16_MAX && !(cmd & PCI_COMMAND_MASTER) &&
+                pci_wait_for_pending_transaction(qdev->pdev) &&
+                readl(qdev->bar0_mmio + REG_NEW_GLOBAL_ID) == 0x12abe380)
+                break;
+            msleep(100);
+        }
+        last_stream = false;
+    }
+
     /* No new completion IRQ can be generated for a disabled, drained channel,
      * but one may already be running for a buffer we are about to return. Let
      * it finish before the buffers become visible to userspace again. */
@@ -1977,10 +2071,12 @@ static void qpcie_stop_streaming(struct vb2_queue *vq)
     /* 4. Global engine quiesce. This is what actually guarantees no further
      *    PCIe writes to any buffer of any channel, so it happens before the
      *    buffers are returned. */
-    if (last_stream) {
+    if (last_stream && !READ_ONCE(qdev->dma_isolated)) {
         iowrite32(0, qdev->bar0_mmio + REG_PACER_CTRL);
-        qpcie_dma_soft_reset(qdev);
-        qpcie_reprogram_rings(qdev);
+        if (!(composed && drained)) {
+            qpcie_dma_soft_reset(qdev);
+            qpcie_reprogram_rings(qdev);
+        }
         /* Freeze counters after all channel-0 writes have retired. */
         iowrite32(0, qdev->bar0_mmio + REG_PERF_CTRL);
         ioread32(qdev->bar0_mmio + REG_PERF_CTRL);
@@ -2503,6 +2599,8 @@ static void qpcie_v4l2_hdmi_monitor_work_fn(struct work_struct *work)
         schedule_delayed_work(&vch->hdmi_monitor_work, msecs_to_jiffies(250));
 }
 
+extern void qpcie_media_unref(void *p);
+static void c2vdev_release(struct video_device *vdev){struct qpcie_v4l2_channel*v=video_get_drvdata(vdev);kfree(v->c2);v->c2=NULL;qpcie_media_unref(v->qdev);}
 int qpcie_v4l2_init(struct qpcie_dev *qdev)
 {
     u32 hw_caps;
@@ -2815,21 +2913,8 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
             vch->vcu_cfg.pacer_buffer_frames = 8;
             qpcie_vcu_sync_config(vch);
 
-            /* Allocate DPC1 completion record ring for Channel 1 */
-            vch->comp_ring_virt = dma_alloc_coherent(&qdev->pdev->dev,
-                                                     QPCIE_VCU_RING_SIZE * 64,
-                                                     &vch->comp_ring_dma, GFP_KERNEL);
-            if (vch->comp_ring_virt)
-                memset(vch->comp_ring_virt, 0, QPCIE_VCU_RING_SIZE * 64);
-            if (qdev->bar0_mmio) {
-                void __iomem *ring_mmio = qdev->bar0_mmio + QPCIE_BAR0_VCU_RING_OFFSET;
-                iowrite32(QPCIE_VCU_RING_MAGIC, ring_mmio + offsetof(struct qpcie_vcu_host_ring, magic));
-                iowrite32(1, ring_mmio + offsetof(struct qpcie_vcu_host_ring, version));
-                iowrite32(QPCIE_VCU_RING_SIZE, ring_mmio + offsetof(struct qpcie_vcu_host_ring, ring_size));
-                iowrite32(0, ring_mmio + offsetof(struct qpcie_vcu_host_ring, host_head));
-                iowrite32(0, ring_mmio + offsetof(struct qpcie_vcu_host_ring, ps_tail));
-                iowrite32(0, ring_mmio + offsetof(struct qpcie_vcu_host_ring, dropped_count));
-            }
+            vch->c2=kzalloc(sizeof(*vch->c2),GFP_KERNEL);if(!vch->c2){ret=-ENOMEM;goto unreg_v4l2;}
+            {struct c2host*c=vch->c2;c->v=vch;mutex_init(&c->m);INIT_LIST_HEAD(&c->wait);INIT_DELAYED_WORK(&c->work,c2work);c->epoch=(get_random_u32()&0x3fffffff)+1;c2wr(c,0,0);c2wr(c,C2_STATE,C2_OFF);c2wr(c,C2_PEER,0);c2wr(c,1,C2_VERSION);c2wr(c,2,C2_RING);c2wr(c,0,C2_MAGIC);c2rd(c,0);}
         } else {
             v4l2_ctrl_handler_init(&vch->ctrl_handler, i == 0 ? 6 : 1);
             if (i == 0 && !qdev->c2h_only) {
@@ -2868,7 +2953,7 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
                  "[DEBUG STEP 2.4] Node %d: Initializing vb2_queue with %s allocator...\n",
                  i, (i == 1) ? "vb2_dma_contig" : "vb2_dma_sg");
         vch->queue.type            = vch->buf_type;
-        vch->queue.io_modes        = VB2_MMAP | VB2_USERPTR | VB2_DMABUF;
+        vch->queue.io_modes        = vch->c2 ? VB2_MMAP : VB2_MMAP | VB2_USERPTR | VB2_DMABUF;
         vch->queue.drv_priv        = vch;
         vch->queue.buf_struct_size = sizeof(struct qpcie_v4l2_buffer);
         vch->queue.ops             = &qpcie_vb2_ops;
@@ -2929,6 +3014,10 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
             vdev->vfl_dir     = VFL_DIR_RX;
         }
         vdev->fops         = &qpcie_v4l2_fops;
+#ifdef QPCIE_HAVE_KMS
+        if (qdev->lease)
+            vdev->fops = &qpcie_leased_fops;
+#endif
         vdev->ioctl_ops    = &qpcie_v4l2_ioctl_ops;
         vdev->release      = video_device_release_empty;
         vdev->v4l2_dev     = &qdev->v4l2_dev;
@@ -2937,9 +3026,10 @@ int qpcie_v4l2_init(struct qpcie_dev *qdev)
         vdev->lock         = &vch->lock;
         video_set_drvdata(vdev, vch);
 
+        kref_get(&qdev->media_refs);vdev->release=c2vdev_release;
         ret = video_register_device(vdev, VFL_TYPE_VIDEO, -1);
         if (ret) {
-            dev_err(&qdev->pdev->dev, "[DEBUG ERROR] Node %d: video_register_device failed: %d\n", i, ret);
+            c2vdev_release(vdev);dev_err(&qdev->pdev->dev, "[DEBUG ERROR] Node %d: video_register_device failed: %d\n", i, ret);
             goto unreg_v4l2;
         }
 
@@ -3009,6 +3099,9 @@ unreg_v4l2:
     return ret;
 }
 
+/* Freeze before any global DMA reset or BAR teardown. File operations use
+ * the queue lock; open fds retain their video_device and parent storage. */
+void qpcie_c2_detach(struct qpcie_dev*q){struct qpcie_v4l2_channel*v=&q->v4l2_ch[1];struct c2host*c=v->c2;if(!q->v4l2_registered||!c)return;mutex_lock(&v->lock);mutex_lock(&c->m);c->dead=true;mutex_unlock(&c->m);vb2_queue_error(&v->queue);c2stop(c);mutex_lock(&c->m);c2recover(c);mutex_unlock(&c->m);mutex_unlock(&v->lock);}
 void qpcie_v4l2_remove(struct qpcie_dev *qdev)
 {
     int i;
@@ -3025,8 +3118,10 @@ void qpcie_v4l2_remove(struct qpcie_dev *qdev)
     }
 
     qdev->v4l2_registered = false;
+    synchronize_irq(qdev->irq);
     for (i = 0; i < qdev->v4l2_node_count; i++) {
         struct qpcie_v4l2_channel *vch = &qdev->v4l2_ch[i];
+        if(vch->c2){struct c2host*c=vch->c2;mutex_lock(&vch->lock);mutex_lock(&c->m);c->dead=true;mutex_unlock(&c->m);c2stop(c);cancel_delayed_work_sync(&c->work);c2free(c);mutex_unlock(&vch->lock);}
         if (vch->comp_ring_virt) {
             dma_free_coherent(&qdev->pdev->dev,
                               QPCIE_VCU_RING_SIZE * 64,
@@ -3056,6 +3151,7 @@ void qpcie_v4l2_node_done(struct qpcie_dev *qdev, int node_idx)
         return;
 
     vch = &qdev->v4l2_ch[node_idx];
+    if(vch->c2)return; /* worker owns completion retirement */
     /* Per-slot completion can only be proven where the PS writes a DPC1 record,
      * i.e. the c2h-only VCU stream on channel 1.  Raw video (ch0) and the
      * legacy/loopback paths keep the original one-buffer-per-interrupt path. */

@@ -46,7 +46,7 @@ IMAGE_INSTALL:append = " libdrm libdrm-tests"
 # empty and IMAGE_INSTALL is unchanged.
 SC7F0_RGB_COMPOSITOR_VCU_REMOVE ?= ""
 python __anonymous() {
-    if d.getVar('SC7F0_RGB_COMPOSITOR_ENABLE') == '1':
+    if d.getVar('SC7F0_RGB_COMPOSITOR_ENABLE') == '1' and d.getVar('SC7F0_VCU_ENABLE') != '1':
         d.setVar('SC7F0_RGB_COMPOSITOR_VCU_REMOVE',
                  'sc7f0-vcud libomxil-xlnx libvcu-xlnx vcu-firmware')
 }
@@ -82,7 +82,7 @@ IMAGE_INSTALL:append = " sc7f0-dmabuf-loop"
 # after every :append in the file, and every line above stays byte-identical.
 SC7F0_RGB_COMPOSITOR_IMAGE_ADDONS ?= ""
 python __anonymous() {
-    if d.getVar('SC7F0_RGB_COMPOSITOR_ENABLE') == '1':
+    if d.getVar('SC7F0_RGB_COMPOSITOR_ENABLE') == '1' and d.getVar('SC7F0_VCU_ENABLE') != '1':
         d.setVar('SC7F0_RGB_COMPOSITOR_IMAGE_ADDONS', 'sc7f0-capture-init-rgb')
 }
 IMAGE_INSTALL:append = " ${SC7F0_RGB_COMPOSITOR_IMAGE_ADDONS}"

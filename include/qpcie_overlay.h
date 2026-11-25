@@ -135,6 +135,21 @@ struct qovl_busy {
 #define QOVL_REG_STATUS2	0x44U
 #define QOVL_REG_WR_FRAMES_DONE	0x54U
 #define QOVL_REG_ID		0x78U
+/* Optional direct-pull flip ABI. See docs/sc7f0_direct_pull_v1.md. */
+#define QOVL_REG_FLIP_CAP	0x88U
+#define QOVL_FLIP_CAP_V1	0x44500101U
+#define QOVL_REG_FLIP_CTRL	0x8cU
+#define QOVL_FLIP_ENABLE	(1U << 0)
+#define QOVL_FLIP_FRAME_IRQ	(1U << 1)
+#define QOVL_REG_FLIP_SUBMIT	0x90U
+#define QOVL_REG_FLIP_ADMITTED	0x94U
+#define QOVL_REG_FLIP_PENDING	0x98U
+#define QOVL_REG_FLIP_ACTIVE	0x9cU
+#define QOVL_REG_FLIP_RETIRED	0xa0U
+#define QOVL_REG_FLIP_FRAME	0xa4U
+#define QOVL_REG_FLIP_STATUS	0xa8U
+#define QOVL_FLIP_DRAINED	(1U << 0)
+#define QOVL_FLIP_FAULT		(1U << 1)
 
 #define QOVL_SUBMIT_NONBLOCK	(1U << 0)
 #define QOVL_SUBMIT_ASYNC	(1U << 1)

@@ -67,7 +67,7 @@
 				 * only mislabels the graph, but a mislabelled graph is exactly
 				 * what makes a colour-cast bug look like a driver bug.
 				 */
-#if defined(SC7F0_RGB_COMPOSITOR_ENABLE) && SC7F0_RGB_COMPOSITOR_ENABLE
+#if defined(SC7F0_RGB_COMPOSITOR_ENABLE) && SC7F0_RGB_COMPOSITOR_ENABLE && (!defined(SC7F0_VCU_ENABLE) || !SC7F0_VCU_ENABLE)
 				xlnx,video-format = <0>;
 #else
 				xlnx,video-format = <2>;
@@ -101,7 +101,7 @@
 				 * this pair of values (in 1 or 2, out 0), not a fabric change;
 				 * scripts/audit_sc7f0_rgb_compositor_image.sh is what decides it.
 				 */
-#if defined(SC7F0_RGB_COMPOSITOR_ENABLE) && SC7F0_RGB_COMPOSITOR_ENABLE
+#if defined(SC7F0_RGB_COMPOSITOR_ENABLE) && SC7F0_RGB_COMPOSITOR_ENABLE && (!defined(SC7F0_VCU_ENABLE) || !SC7F0_VCU_ENABLE)
 				xlnx,video-format = <0>;
 #else
 				xlnx,video-format = <2>;
@@ -111,7 +111,7 @@
 			};
 			port@1 {
 				reg = <1>;
-#if defined(SC7F0_RGB_COMPOSITOR_ENABLE) && SC7F0_RGB_COMPOSITOR_ENABLE
+#if defined(SC7F0_RGB_COMPOSITOR_ENABLE) && SC7F0_RGB_COMPOSITOR_ENABLE && (!defined(SC7F0_VCU_ENABLE) || !SC7F0_VCU_ENABLE)
 				xlnx,video-format = <0>;
 #else
 				xlnx,video-format = <3>;
@@ -146,7 +146,7 @@
 		 * blue exchanged.  One format on purpose: the driver must have exactly one
 		 * format to negotiate on this node.
 		 */
-#if defined(SC7F0_RGB_COMPOSITOR_ENABLE) && SC7F0_RGB_COMPOSITOR_ENABLE
+#if defined(SC7F0_RGB_COMPOSITOR_ENABLE) && SC7F0_RGB_COMPOSITOR_ENABLE && (!defined(SC7F0_VCU_ENABLE) || !SC7F0_VCU_ENABLE)
 		xlnx,vid-formats = "xbgr8888";
 #else
 		xlnx,vid-formats = "nv12";

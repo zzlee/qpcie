@@ -238,7 +238,7 @@ class PostFlashOrderTests(unittest.TestCase):
             'PS_BOOT_BEFORE=',                      #    PS boot id baseline
             './qpcie_upgrade --reboot',             # 10 warm reset, never the host
             "grep -q 'ready=1'",                    #    mailbox daemon back
-            'grep -qi "Hardware Version.*0x$VERSION"',  # 11 this build is active
+            'grep -qi "Hardware Version.*0x$PL_VERSION" active-version.log',  # 11 this build is active
             'uname -a; for s in qpcie-debugd',       # 11 PS transport services after boot
             RESTART_TX,                             # 12 exactly one runtime restart
             'CAPTURE_ADVISORY_START',               # 13 one advisory read

@@ -14,6 +14,7 @@ struct qpcie_debug {
     struct kref refs;
     struct mutex lock;
     void __iomem *base;
+    struct qpcie_dev *qdev; /* only used under lock after !dead */
     bool dead, opened;
     char name[64];
 };
@@ -97,6 +98,9 @@ static ssize_t debug_write(struct file *file, const char __user *buf,
     if (IS_ERR(words)) return PTR_ERR(words);
     mutex_lock(&d->lock);
     if (d->dead) rc = -ENODEV;
+    else if ((rc = qpcie_management_claim(d->qdev))) {
+        /* Refuse even the first mailbox write before a PS exec can arm. */
+    }
     else {
         for (i = 0; i < count / 4; ++i)
             iowrite32(le32_to_cpu(words[i]), d->base + *pos + i * 4);
@@ -139,6 +143,7 @@ int qpcie_debug_init(struct qpcie_dev *qdev)
     kref_init(&d->refs);
     mutex_init(&d->lock);
     d->base = qdev->bar0_mmio + QDBG_BAR_OFFSET;
+    d->qdev = qdev;
     snprintf(d->name, sizeof(d->name), "qpcie-debug-%s", pci_name(qdev->pdev));
     d->misc.minor = MISC_DYNAMIC_MINOR;
     d->misc.name = d->name;

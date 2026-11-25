@@ -1,0 +1,4 @@
+# Cold-start settings; restart sc7f0-vcud after changing codec or RC mode.
+SC7F0_CODEC=hevc
+RATE=cbr
+SC7F0_AVC_P_RANGE=8

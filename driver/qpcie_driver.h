@@ -22,6 +22,8 @@
 #include <linux/workqueue.h>
 #include <linux/i2c.h>
 #include <linux/mutex.h>
+#include <linux/kref.h>
+#include "qpcie_plane_gate.h"
 #include <uapi/linux/sched/types.h>
 
 #include <media/v4l2-device.h>
@@ -626,6 +628,7 @@ struct qpcie_v4l2_channel {
     bool hdmi_monitor_running;
     /* VCU Hardware Encoder Controls (Channel 1) */
     struct qpcie_vcu_encoder_config vcu_cfg;
+    struct c2host *c2;
     void *comp_ring_virt;
     dma_addr_t comp_ring_dma;
     /* Channel 1 (VCU / Packet DMA) slot occupancy guard.
@@ -672,7 +675,10 @@ struct qpcie_alsa_channel {
     u32 volume;
 };
 
+void qpcie_c2_detach(struct qpcie_dev *);
+void qpcie_media_unref(void *);
 struct qpcie_dev {
+    struct kref media_refs;
     struct pci_dev *pdev;
     void __iomem *bar0_mmio;
     void __iomem *bar1_mmio;
@@ -746,12 +752,26 @@ struct qpcie_dev {
     bool c2h_only; /* Raw video + encoded packet + raw audio personality. */
     struct qpcie_debug *debug;
     struct qpcie_overlay *overlay;
+    struct qpcie_kms *kms;
+    struct qpcie_lease *lease;
+    struct mutex plane_lifecycle;
+    bool kms_overlay, dma_isolated;
     u32 bar1_offset_tpg;
     u32 bar1_offset_i2c;
     u32 bar1_offset_spi_flash;
 };
 
 /* Submodule Function Declarations */
+struct qpcie_lease {
+    struct kref refs;
+    atomic_t owner;
+};
+static inline int qpcie_management_claim(struct qpcie_dev *qdev)
+{
+    return qdev->lease ? qpcie_plane_maintenance(&qdev->lease->owner) : 0;
+}
+int qpcie_media_open(struct qpcie_lease *lease);
+void qpcie_media_close(struct qpcie_lease *lease);
 int qpcie_v4l2_init(struct qpcie_dev *qdev);
 void qpcie_v4l2_remove(struct qpcie_dev *qdev);
 void qpcie_v4l2_irq_handler(struct qpcie_dev *qdev);

@@ -23,6 +23,8 @@ DTC_PPFLAGS:append = "${@' -DSC7F0_HDMI_TX_ENABLE=1' if d.getVar('SC7F0_HDMI_TX_
 # producing a device tree that describes a bitstream that does not exist.
 SC7F0_RGB_COMPOSITOR_ENABLE ?= "0"
 DTC_PPFLAGS:append = "${@' -DSC7F0_RGB_COMPOSITOR_ENABLE=1' if d.getVar('SC7F0_RGB_COMPOSITOR_ENABLE') == '1' else ''}"
+SC7F0_VCU_ENABLE ?= "0"
+DTC_PPFLAGS:append = "${@' -DSC7F0_VCU_ENABLE=1' if d.getVar('SC7F0_VCU_ENABLE') == '1' else ''}"
 
 python __anonymous() {
     if d.getVar("SC7F0_PS_CAPTURE_ENABLE") == "1" and d.getVar("SC7F0_HDMI_RX_ENABLE") != "1":

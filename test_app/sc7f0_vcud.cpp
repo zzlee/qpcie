@@ -1,3 +1,8 @@
+#include "qpcie_sha256.h"
+#include "au_checked.h"
+#include <atomic>
+static bool hevc_mode=false, low_bandwidth=true, integrity=false,direct=false;static const uint8_t* registered[8];static size_t registeredCap[8];static int failure=0;
+static std::atomic<bool> input_draining{false};
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * SC7F0 VCU Video Encoder & Packet DMA Bridge Daemon (sc7f0_vcud)
@@ -129,7 +134,9 @@ extern "C" {
 
 #define VCU_WIDTH               3840
 #define VCU_HEIGHT              2160
-#define NUM_IN_BUFFERS          8
+#ifndef NUM_IN_BUFFERS
+#define NUM_IN_BUFFERS 12
+#endif
 #define NUM_OUT_BUFFERS         8
 
 struct __attribute__((packed)) qpcie_vcu_encoder_config {
@@ -329,6 +336,14 @@ struct vcud_ctx {
     struct h264_stream h264_st;
     uint32_t target_fps;
     uint32_t max_frames;
+    /* AL5E on-chip encoder buffer (L2 prefetch) request: 1 = ask the MCU to use
+     * it, 0 = the historical behaviour (OMX_ALG_VIDEO_PARAM_PREFETCH_BUFFER was
+     * hard-wired to OMX_FALSE).  Maps to AL_TEncSettings.iPrefetchLevel2 in the
+     * Xilinx OMX IL (base/omx_mediatype/omx_mediatype_enc_common.cpp:
+     * isCacheLevel2Enabled()), i.e. it is the *software* half of the L2 feature:
+     * the PL must also instantiate the buffer (VCU IP ENC_BUFFER_EN) or the
+     * driver reports "l2 prefetch size:0 (bits)" at probe. */
+    int l2_prefetch;
 
     /* Live DMA-BUF V4L2 & OpenMAX State */
     int v4l2_fd;
@@ -343,6 +358,8 @@ struct vcud_ctx {
     uint64_t frame_seq;
     std::atomic<uint64_t> total_bytes_sent{0};
     std::atomic<uint32_t> frames_sent{0};
+    std::atomic<uint32_t> omx_picture_aus{0};
+    uint32_t omx_inputs_accepted = 0;
     std::atomic<uint32_t> frames_dropped{0};
 
     /* Newest parameter set pair seen from the encoder, reused to make a
@@ -406,6 +423,7 @@ struct vcud_ctx {
 };
 
 static volatile sig_atomic_t g_stop = 0;
+static void bad_au(int rc,const char* site){if(!__atomic_exchange_n(&failure,rc,__ATOMIC_RELAXED))fprintf(stderr,"[AU ERROR] %s rc=%d; stopping capture\n",site,rc);g_stop=1;}
 static void sig_handler(int sig) {
     (void)sig;
     g_stop = 1;
@@ -425,6 +443,11 @@ static uint64_t get_time_ns(void) {
     return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
 }
 
+// Fixed-size, memory-only event stream. Single relaxed reservation; no I/O or locks in callbacks.
+struct ev19{uint64_t t,pts;uint32_t op,idx,seq,flags,bytes,rc;}; static ev19 evs[600000];static bool trace_events;static unsigned nev;static void ev(unsigned op,unsigned idx,uint64_t pts,unsigned seq=0,unsigned flags=0,unsigned bytes=0,unsigned rc=0){if(!trace_events)return;unsigned i=__atomic_fetch_add(&nev,1,__ATOMIC_RELAXED);if(i<600000)evs[i]={get_time_ns(),pts,op,idx,seq,flags,bytes,rc};}
+#include <sys/syscall.h>
+static unsigned tid19(){static thread_local unsigned id=syscall(SYS_gettid);return id;}
+static uint64_t cpu19(){timespec t;clock_gettime(CLOCK_THREAD_CPUTIME_ID,&t);return t.tv_sec*1000000000ULL+t.tv_nsec;}
 /* Submit variable-length Packet DMA job to sc7f0_ps_packet_reader */
 static int submit_packet_dma(struct vcud_ctx *ctx,
                              uint64_t src_phys, uint64_t dst_phys,
@@ -532,6 +555,7 @@ struct h264_nal_info {
  * and rbsp_trailing_bits. Prepending one to every AU gives h264parse / vah264dec
  * an explicit first NAL per access unit, so the 4 slices of one 4K frame are
  * never split across two AUs nor merged with the next frame. */
+static const uint8_t hevc_aud[]={0,0,0,1,0x46,1,0x50};
 static const uint8_t g_h264_aud[] = { 0x00, 0x00, 0x00, 0x01, 0x09, 0xF0 };
 
 static struct h264_nal_info scan_h264_nals(const uint8_t *data, size_t len) {
@@ -545,18 +569,18 @@ static struct h264_nal_info scan_h264_nals(const uint8_t *data, size_t len) {
                 sc_len = 4;
             }
             if (sc_len > 0) {
-                uint8_t nal_type = data[i + sc_len] & 0x1F;
+                uint8_t nal_type = hevc_mode ? ((data[i+sc_len]>>1)&63) : (data[i+sc_len]&31);
                 /* nal_unit_type 1..5 are the coded slices of a picture */
-                if (nal_type >= 1 && nal_type <= 5)
+                if (hevc_mode ? nal_type<=31 : (nal_type>=1 && nal_type<=5))
                     info.has_vcl = true;
-                if (nal_type == 9) {
+                if (nal_type == (hevc_mode?35:9)) {
                     info.has_aud = true;
-                } else if (nal_type == 7) {
+                } else if (nal_type == (hevc_mode?32:7)) {
                     info.has_sps = true;
                     if (info.sps_pos == len) info.sps_pos = i;
-                } else if (nal_type == 8) {
+                } else if (nal_type == (hevc_mode?34:8)) {
                     info.has_pps = true;
-                } else if (nal_type == 5) {
+                } else if (hevc_mode ? (nal_type>=19 && nal_type<=21) : nal_type==5) {
                     info.is_idr = true;
                     if (info.idr_pos == len) info.idr_pos = i;
                 }
@@ -657,6 +681,10 @@ static void handle_config_sync(struct vcud_ctx *ctx) {
             br.nEncodeBitrate = kbps;
             OMX_ERRORTYPE bErr = OMX_SetConfig(ctx->hEncoder, OMX_IndexConfigVideoBitrate, &br);
             if (bErr == OMX_ErrorNone) {
+                OMX_VIDEO_CONFIG_BITRATETYPE live; initHeader(live); live.nPortIndex=1; auto lr=OMX_GetConfig(ctx->hEncoder, OMX_IndexConfigVideoBitrate, &live); printf("[HEVC] immediate_dynamic_get=%x kbps=%u\n",(unsigned)lr,(unsigned)live.nEncodeBitrate);
+                OMX_VIDEO_PARAM_BITRATETYPE check; initHeader(check); check.nPortIndex=1;
+                OMX_ERRORTYPE r=OMX_GetParameter(ctx->hEncoder,OMX_IndexParamVideoBitrate,&check);
+                printf("[HEVC] bitrate_get=%x mode=%u constant=%u kbps=%u\n",(unsigned)r,(unsigned)check.eControlRate,(unsigned)OMX_Video_ControlRateConstant,(unsigned)check.nTargetBitrate);
                 printf("[VCUD] Dynamically updated target bitrate to %u kbps\n", br.nEncodeBitrate);
             }
         }
@@ -794,7 +822,7 @@ static void pacer_submit_au(struct vcud_ctx *ctx, const uint8_t *payload, size_t
                             const struct h264_nal_info *nal_in = nullptr) {
     struct pacer_state *q = &ctx->pacer;
 
-    pthread_mutex_lock(&q->mtx);
+    ev(12,0,pts_us);pthread_mutex_lock(&q->mtx);ev(13,0,pts_us,pacer_depth_now(q));
 
     /* Shutting down, or the pacer never came up: drop on the floor. Under no
      * circumstances may the encoder wait for us. */
@@ -807,6 +835,7 @@ static void pacer_submit_au(struct vcud_ctx *ctx, const uint8_t *payload, size_t
 
     /* Cache the parameter set pair that precedes an IDR so a header-less IDR AU
      * can still be made self contained before it hits the wire. */
+    try {
     if (nal.has_sps && nal.idr_pos <= len && nal.idr_pos > nal.sps_pos) {
         ctx->cached_sps_pps.assign(payload + nal.sps_pos, payload + nal.idr_pos);
     }
@@ -840,6 +869,7 @@ static void pacer_submit_au(struct vcud_ctx *ctx, const uint8_t *payload, size_t
         return;
     }
 
+    if(!safeau::fits(len,prefix_len,nal.has_aud?0:(hevc_mode?sizeof(hevc_aud):sizeof(g_h264_aud)))){bad_au(-EMSGSIZE,"assembled AU");pthread_mutex_unlock(&q->mtx);return;}
     struct pacer_frame *fr = &q->frames[q->tail % PACER_QUEUE_CAPACITY];
     fr->payload.clear();   /* keeps capacity: steady state allocates nothing */
 
@@ -850,8 +880,8 @@ static void pacer_submit_au(struct vcud_ctx *ctx, const uint8_t *payload, size_t
      *    OMX_ALG_IndexParamVideoAccessUnitDelimiter), to avoid a double AUD. */
     if (!nal.has_aud)
         fr->payload.insert(fr->payload.end(),
-                           g_h264_aud,
-                           g_h264_aud + sizeof(g_h264_aud));
+                           (hevc_mode?hevc_aud:g_h264_aud),
+                           (hevc_mode?hevc_aud:g_h264_aud) + (hevc_mode?sizeof(hevc_aud):sizeof(g_h264_aud)));
 
     /* 2. Sequence parameters in front of a header-less IDR (the cached pair is
      *    kept warm by both a joined SPS/PPS AU and the CODECCONFIG buffer that
@@ -873,9 +903,10 @@ static void pacer_submit_au(struct vcud_ctx *ctx, const uint8_t *payload, size_t
     q->depth.store(depth);
     if (depth > q->peak_depth.load())
         q->peak_depth.store(depth);
-    q->queued++;
+    q->queued++;ev(14,0,pts_us,depth);
 
     pthread_cond_signal(&q->cv);
+    }catch(const std::bad_alloc&){bad_au(-ENOMEM,"pacer copy");}
     pthread_mutex_unlock(&q->mtx);
 }
 
@@ -887,236 +918,7 @@ static void pacer_submit_au(struct vcud_ctx *ctx, const uint8_t *payload, size_t
  * submission run unlocked so a slow or stalled link never keeps the main thread
  * out of request_idr_keyframe() / handle_config_sync(). ps_tail, frame_seq, the
  * staging buffer and the dump files have exactly one writer (this thread). */
-static void pacer_deliver_au(struct vcud_ctx *ctx, const uint8_t *data, size_t total_len,
-                             const struct pacer_frame *meta) {
-    uint64_t now = get_time_ns();
-    bool deliverable = false;
-    uint64_t host_dst = 0;
-    uint64_t host_comp = 0;
-    uint32_t host_cap = 0;
-    uint32_t tail = 0;
-    /* Private DDR staging slot that goes with the host ring slot picked below.
-     * Kept at function scope because the copy happens after state_mutex is
-     * released. */
-    uint32_t staging_slot = 0;
-
-    if (ctx->host_ring && ctx->host_ring->magic == QPCIE_VCU_RING_MAGIC) {
-        std::unique_lock<std::mutex> sl(ctx->state_mutex);
-        uint32_t head = ctx->host_ring->host_head;
-        tail = ctx->host_ring->ps_tail;
-
-        if (head != tail) {
-            ctx->head_tail_match_count = 0;
-            if (!ctx->was_host_connected) {
-                ctx->was_host_connected = true;
-                /* Fresh host session: decoder starts cold, block every AU until an
-                 * IDR/SPS carrying AU makes it through the stream. */
-                ctx->has_streamed_idr = false;
-                ctx->pre_idr_drops = 0;
-                request_idr_keyframe_locked(ctx);
-                /* Let the pacer rebuild its buffer target and re-anchor so the
-                 * ramp-up after a reconnect never bursts. */
-                ctx->pacer_reprime.store(true);
-                printf("[VCUD] Host connected! Requested initial IDR keyframe, "
-                       "stalling stream until IDR/SPS\n");
-                if (ctx->dump_path) {
-                    if (ctx->dump_fp) { fclose(ctx->dump_fp); ctx->dump_fp = nullptr; }
-                    if (ctx->crc_fp) { fclose(ctx->crc_fp); ctx->crc_fp = nullptr; }
-                    ctx->dump_fp = fopen(ctx->dump_path, "wb");
-                    char crc_path[512];
-                    snprintf(crc_path, sizeof(crc_path), "%s.crc", ctx->dump_path);
-                    ctx->crc_fp = fopen(crc_path, "w");
-                    if (ctx->crc_fp) {
-                        fprintf(ctx->crc_fp, "frame,len,crc32\n");
-                        fflush(ctx->crc_fp);
-                    }
-                    ctx->dump_frames_count = 0;
-                    printf("[VCUD] Started synchronized stream dump to %s (max_frames=%u)\n",
-                           ctx->dump_path, ctx->dump_max_frames);
-                }
-            }
-
-            /* --- IDR synchronisation guard -------------------------------
-             * Right after the host (re)connects its decoder holds no SPS/PPS
-             * and no reference frames. Shipping it a leading P-frame AU that
-             * carries neither SPS/PPS nor an IDR slice corrupts the decoder
-             * (grey/green output, error concealment storms). Keep the gate
-             * closed until we actually see an IDR or SPS in the AU. */
-            bool stream_gate_open = true;
-            if (!ctx->has_streamed_idr) {
-                if (meta->is_idr || meta->has_sps) {
-                    ctx->has_streamed_idr = true;
-                    printf("[VCUD] First IDR/SPS received after connect! Streaming unlocked\n");
-                } else {
-                    stream_gate_open = false;
-                    ctx->pre_idr_drops++;
-                    if (ctx->pre_idr_drops == 1 || (ctx->pre_idr_drops % 30) == 0) {
-                        printf("[VCUD] Stream sync: dropping pre-IDR P-frame AU "
-                               "(%u bytes, %u dropped so far)\n",
-                               (unsigned)total_len, ctx->pre_idr_drops);
-                    }
-                }
-            }
-
-            uint32_t slot_idx = tail % QPCIE_VCU_RING_SIZE;
-            volatile struct qpcie_vcu_buffer_slot *slot = &ctx->host_ring->slots[slot_idx];
-
-            host_dst  = slot->host_phys_addr;
-            host_comp = slot->host_comp_addr;
-            host_cap  = slot->host_buf_len;
-
-            /* The DDR staging slot index tracks the host ring slot index 1:1, so
-             * the payload DMA'd into host buffer #k always came from staging slot
-             * #k and staging slot #k cannot be rewritten before the host has
-             * recycled buffer #k (i.e. before the DMA completed). */
-            staging_slot = tail % STAGING_NUM_SLOTS;
-
-            /* An AU larger than the staging slot is treated exactly like one that
-             * does not fit the host VB2 buffer: it is not deliverable, so the
-             * shared drop path requests a healing IDR instead of the DMA
-             * silently reading truncated bitstream. */
-            deliverable = stream_gate_open && host_dst && host_comp &&
-                          host_cap >= total_len && total_len <= STAGING_SLOT_SIZE;
-        } else {
-            /* When head == tail, host buffer queue is momentarily busy/empty.
-             * A single tick of head == tail is normal 1-frame jitter and must NOT
-             * mark the host disconnected (that would cause disastrous IDR insertion
-             * storms), so require a sustained stall before re-arming the gate.
-             *
-             * host_head and ps_tail are monotonically increasing counters and are
-             * never zeroed on streamoff, so the old "head == 0 && tail == 0" test
-             * could only ever fire once per process lifetime: after a stream restart
-             * the gate stayed open and the host decoder was fed orphan P-frames with
-             * no reference picture (corrupted output). */
-            if (++ctx->head_tail_match_count >= 15) {
-                if (ctx->was_host_connected) {
-                    ctx->was_host_connected = false;
-                    ctx->has_streamed_idr = false;
-                    /* 主機飢餓或停止串流達 15 幀（~250ms），標記主機已離線，
-                     * 下次恢復時必須重新請求 IDR 並關閉門禁 */
-                }
-            }
-        }
-        sl.unlock();
-    }
-
-    bool sent = false;
-    if (deliverable) {
-        /* Copy the compressed NAL bitstream into this AU's *own* DDR staging
-         * slot. Never the shared base address: the Packet DMA reads the source
-         * asynchronously after submit_packet_dma() has returned, and a shared
-         * slot let the next AU's memcpy corrupt the frame still in flight. */
-        uint8_t *slot_ptr = (uint8_t *)ctx->ddr_staging +
-                            (size_t)staging_slot * STAGING_SLOT_SIZE;
-        uint64_t slot_phys = DDR_STAGING_BUF_ADDR +
-                             (uint64_t)staging_slot * STAGING_SLOT_SIZE;
-        memcpy(slot_ptr, data, total_len);
-
-        /* 16-byte align length as required by packet reader */
-        uint32_t aligned_len = (uint32_t)((total_len + 15) & ~(size_t)15U);
-        if (aligned_len > host_cap)
-            aligned_len = host_cap & ~15U;
-        /* Hard bound of this slot: zero padding must never spill into the next
-         * slot's buffer (total_len <= STAGING_SLOT_SIZE is already required for
-         * deliverable, this only clamps the padded tail). */
-        if (aligned_len > (uint32_t)STAGING_SLOT_SIZE)
-            aligned_len = (uint32_t)(STAGING_SLOT_SIZE & ~(size_t)15U);
-        if (aligned_len > total_len)
-            memset(slot_ptr + total_len, 0, aligned_len - total_len);
-
-        /* pts_us is the untouched HDMI RX capture timestamp that travelled with
-         * the AU from V4L2 DQBUF through OpenMAX into the pacer queue. The
-         * pacer only decides *when* an AU leaves the card, it never rewrites the
-         * instant it is stamped with; re-timing it here would destroy the capture
-         * timeline and inject PTS jitter (an IDR AU takes ~40ms, a P AU ~0.5ms).
-         * 1us == 150 ticks @ 150MHz hardware clock. */
-        uint64_t pts_150mhz = meta->pts_us * 150;
-
-        /* Hand the slot credit back to the host BEFORE the DMA can possibly
-         * finish, not after submit_packet_dma() returns.
-         *
-         * ps_tail lives in PL BRAM and is the only signal the host driver has
-         * that slot "tail" is free again.  The old order (ring doorbell -> wait
-         * for the submit to return -> ps_tail++) lost a race that the two clock
-         * domains cannot win: the FPGA moves the DPC1 completion record into
-         * host RAM and raises the MSI within ~1 us, the 5 GHz host retires the
-         * buffer, GStreamer re-queues it instantly, and the driver's next QBUF
-         * still reads the stale ps_tail because this 1.2 GHz ARM core has not
-         * executed the store yet.  The host then computes
-         * (host_head + 1 - ps_tail) == 17 > 16, declares "VCU Host Ring full"
-         * and the publish is rejected with -ENOSPC - every 240th frame at 60 Hz.
-         *
-         * Publishing the credit first removes the window entirely: no one can
-         * observe the slot as in flight after the doorbell has been rung, so
-         * the host always reads an up-to-date ps_tail.  The fence plus the
-         * read-back make sure the posted AXI write has actually landed in BRAM
-         * before the doorbell write on a *different* AXI slave can start the
-         * transfer (a DMB alone does not order writes to two separate
-         * endpoints).  The credit is only taken inside the "deliverable"
-         * branch, so an AU for which the host never offered a slot (head ==
-         * tail) can never advance ps_tail. */
-        ctx->host_ring->ps_tail = tail + 1;
-        __sync_synchronize();
-        volatile uint32_t committed_tail = ctx->host_ring->ps_tail;
-        (void)committed_tail;   /* read-back: drain the posted write into BRAM */
-        __sync_synchronize();
-
-        int ret = submit_packet_dma(ctx,
-                                    slot_phys,
-                                    host_dst,
-                                    aligned_len,
-                                    host_cap,
-                                    host_comp,
-                                    pts_150mhz,
-                                    ctx->frame_seq,
-                                    meta->flags);
-        if (ret == 0) {
-            ctx->frame_seq++;
-            ctx->frames_sent++;
-            ctx->total_bytes_sent += aligned_len;
-            sent = true;
-
-            if (ctx->dump_fp && (ctx->dump_max_frames == 0 || ctx->dump_frames_count < ctx->dump_max_frames)) {
-                fwrite(slot_ptr, 1, aligned_len, ctx->dump_fp);
-                fflush(ctx->dump_fp);
-                uint32_t crc = calc_crc32(slot_ptr, aligned_len);
-                if (ctx->crc_fp) {
-                    fprintf(ctx->crc_fp, "%u,%u,0x%08X\n", ctx->dump_frames_count, aligned_len, crc);
-                    fflush(ctx->crc_fp);
-                }
-                ctx->dump_frames_count++;
-                if (ctx->dump_max_frames > 0 && ctx->dump_frames_count >= ctx->dump_max_frames) {
-                    printf("[VCUD] Verification dump completed: %u frames written to %s\n",
-                           ctx->dump_frames_count, ctx->dump_path);
-                    fclose(ctx->dump_fp);
-                    ctx->dump_fp = nullptr;
-                    if (ctx->crc_fp) { fclose(ctx->crc_fp); ctx->crc_fp = nullptr; }
-                }
-            }
-        }
-    }
-
-    if (!sent) {
-        /* Note: when the AU was deliverable the slot credit was already handed
-         * to the host above (ps_tail = tail + 1 precedes the doorbell, which is
-         * what kills the host-side "Ring full" race).  A Packet DMA that
-         * refuses to accept the job therefore can no longer wedge the ring with
-         * a slot the host believes is still in flight: the host reclaims the
-         * buffer through its completion path instead.  This AU never reached
-         * the host, so the downstream decoder just lost its reference chain
-         * (grey/green artefacts until the next GOP IDR) - ask the VCU to insert
-         * an IDR on the very next frame so the decoder recovers immediately
-         * instead of waiting a full GOP. */
-        while (csr_read32(ctx, REG_PKT_STATUS) & 0x08) {
-            csr_write32(ctx, REG_PKT_DOORBELL_POP, 1);
-        }
-        ctx->frames_dropped++;
-        host_ring_bump_dropped(ctx);
-        std::lock_guard<std::mutex> sl(ctx->state_mutex);
-        request_idr_drop_heal_locked(ctx, now);
-    }
-}
-
+#include "peer.inc"
 static void *pacer_thread_main(void *arg) {
     struct vcud_ctx *ctx = (struct vcud_ctx *)arg;
     struct pacer_state *q = &ctx->pacer;
@@ -1152,6 +954,7 @@ static void *pacer_thread_main(void *arg) {
            PACER_QUEUE_CAPACITY, nominal_interval_ns);
 
     while (!ctx->pacer_stop_req.load(std::memory_order_acquire)) {
+        service2(ctx);
         bool prev_enable = cfg_enable;
         uint32_t prev_depth = cfg_depth;
         pacer_get_config(ctx, &cfg_enable, &cfg_depth);
@@ -1188,14 +991,6 @@ static void *pacer_thread_main(void *arg) {
 
         /* --- 2. fresh host session: flush the stale pre-IDR backlog --- */
         if (ctx->pacer_reprime.exchange(false)) {
-            uint32_t flushed = pacer_depth_now(q);
-            q->head = q->tail;
-            q->depth.store(0);
-            if (flushed > 0) {
-                q->flushed += flushed;
-                printf("[VCUD PACER] Host session reset: discarded %u queued pre-IDR AUs, re-priming\n",
-                       flushed);
-            }
             anchored = false;
             prime_start_ns = 0;
         }
@@ -1314,7 +1109,7 @@ static void *pacer_thread_main(void *arg) {
         }
 
         /* --- 6. deliver --- */
-        pacer_deliver_au(ctx, scratch.data(), len, &meta);
+        deliver2(ctx, scratch.data(), len, &meta);
     }
 
     printf("[VCUD PACER] Thread offline (queued=%u sent=%u drops=%u full=%u flushed=%u resyncs=%u anchors=%u peak=%u)\n",
@@ -1419,6 +1214,7 @@ static OMX_ERRORTYPE omx_empty_buffer_done(OMX_HANDLETYPE hComponent, OMX_PTR pA
     struct vcud_ctx *ctx = (struct vcud_ctx *)pAppData;
     int idx = (int)(uintptr_t)pBuffer->pAppPrivate;
 
+    uint64_t pts19=pBuffer->nTimeStamp;ev(4,idx,pts19);if(input_draining.load(std::memory_order_acquire))return OMX_ErrorNone;
     /* Re-queue buffer back to VIPP V4L2 queue */
     struct v4l2_plane planes[1];
     memset(planes, 0, sizeof(planes));
@@ -1431,7 +1227,7 @@ static OMX_ERRORTYPE omx_empty_buffer_done(OMX_HANDLETYPE hComponent, OMX_PTR pA
         b.length = 1;
         b.m.planes = planes;
     }
-    if (ioctl(ctx->v4l2_fd, VIDIOC_QBUF, &b) < 0) {
+    int qr=ioctl(ctx->v4l2_fd, VIDIOC_QBUF, &b);ev(5,idx,pts19,0,0,0,qr<0?errno:0);if(qr<0){
         perror("[VCUD V4L2] QBUF in EmptyBufferDone");
     }
     return OMX_ErrorNone;
@@ -1457,9 +1253,17 @@ static OMX_ERRORTYPE omx_fill_buffer_done(OMX_HANDLETYPE hComponent, OMX_PTR pAp
 {
     struct vcud_ctx *ctx = (struct vcud_ctx *)pAppData;
 
+    unsigned oi=0;while(oi<NUM_OUT_BUFFERS && pBuffer!=ctx->outHeaders[oi])oi++;
+    if(!pBuffer||oi==NUM_OUT_BUFFERS||pBuffer->nSize<sizeof(*pBuffer)){bad_au(-EINVAL,"unknown output header");return OMX_ErrorBadParameter;}
+    int check=safeau::span(pBuffer->pBuffer,registered[oi],registeredCap[oi],pBuffer->nAllocLen,pBuffer->nOffset,pBuffer->nFilledLen);
+    if(check){bad_au(check,"output span");return OMX_ErrorBadParameter;}
+    uint64_t op=pBuffer->nTimeStamp,ct=cpu19();ev(8,oi,op,tid19(),0,pBuffer->nFilledLen);bool recycled=false;
+    auto recycle=[&](){pBuffer->nFilledLen=0;ev(10,oi,op,tid19(),0,(unsigned)(cpu19()-ct));auto rc=OMX_FillThisBuffer(hComponent,pBuffer);ev(11,oi,op,tid19(),0,0,rc);if(rc!=OMX_ErrorNone)bad_au(-EIO,"FillThisBuffer");recycled=true;};
     if (pBuffer->nFilledLen > 0 && !g_stop) {
         const uint8_t *au = pBuffer->pBuffer + pBuffer->nOffset;
         size_t au_len = (size_t)pBuffer->nFilledLen;
+        char original[65]="-";if(integrity)qpcie_sha256_buffer(au,au_len,original);
+        if(!direct){static thread_local safeau::Scratch cache;int rc=cache.copy(au,au_len);if(rc){bad_au(rc,"scratch allocation/copy");return OMX_ErrorInsufficientResources;}au=cache.buf;}
 
         /* Prefer the OpenMAX output timestamp, which is propagated from the
          * V4L2 DQBUF capture timestamp (HDMI RX sampling time, microseconds)
@@ -1485,11 +1289,13 @@ static OMX_ERRORTYPE omx_fill_buffer_done(OMX_HANDLETYPE hComponent, OMX_PTR pAp
         bool header_only = ((pBuffer->nFlags & OMX_BUFFERFLAG_CODECCONFIG) != 0) ||
                            (!au_nal.has_vcl && (au_nal.has_sps || au_nal.has_pps));
 
+        ev(6,0,pts_us,au_nal.is_idr,pBuffer->nFlags,au_len,header_only);
+        if(audit2){char dg[65]="-";if(integrity)qpcie_sha256_buffer(au,au_len,dg);fprintf(audit2,"G %llu %zu %u %d %d %s %s %u %u\n",(unsigned long long)pts_us,au_len,(unsigned)pBuffer->nFlags,au_nal.is_idr,header_only,dg,original,pBuffer->nOffset,pBuffer->nAllocLen); }
         if (header_only) {
             /* Cache only a buffer that starts with an SPS so the prefix we
              * prepend to a header-less IDR is always a complete SPS/PPS pair. */
             if (au_nal.has_sps && au_nal.sps_pos < au_len)
-                ctx->cached_sps_pps.assign(au + au_nal.sps_pos, au + au_len);
+                try{ctx->cached_sps_pps.assign(au + au_nal.sps_pos,au+au_len);}catch(const std::bad_alloc&){bad_au(-ENOMEM,"header cache");return OMX_ErrorInsufficientResources;}
 
             uint32_t n = ++ctx->standalone_header_drops;
             if (n == 1 || (n % 30) == 0)
@@ -1501,14 +1307,16 @@ static OMX_ERRORTYPE omx_fill_buffer_done(OMX_HANDLETYPE hComponent, OMX_PTR pAp
              * buffer exactly as required (nFilledLen = 0 + OMX_FillThisBuffer +
              * return OMX_ErrorNone) via the single shared recycle path below. */
         } else {
+            if (au_nal.has_vcl)
+                ctx->omx_picture_aus.fetch_add(1, std::memory_order_relaxed);
+
             pacer_submit_au(ctx, au, au_len, pts_us, &au_nal);
         }
     }
 
     /* Recycle output buffer back to OpenMAX encoder immediately: no PCIe wait. */
     if (!g_stop) {
-        pBuffer->nFilledLen = 0;
-        OMX_FillThisBuffer(hComponent, pBuffer);
+        if(!recycled)recycle();
     }
 
     return OMX_ErrorNone;
@@ -1543,6 +1351,8 @@ static int run_live_loop(struct vcud_ctx *ctx) {
         return -1;
     }
 
+    printf("[DEPTH] VIPP REQBUFS wanted=%d returned=%u\n", NUM_IN_BUFFERS,req.count);
+    if(req.count < NUM_IN_BUFFERS) return -1;
     for (int i = 0; i < NUM_IN_BUFFERS; i++) {
         struct v4l2_exportbuffer eb;
         memset(&eb, 0, sizeof(eb));
@@ -1574,7 +1384,7 @@ static int run_live_loop(struct vcud_ctx *ctx) {
         .FillBufferDone = omx_fill_buffer_done,
     };
 
-    const char *comp_name = "OMX.allegro.h264.hardware.encoder";
+    const char *comp_name = hevc_mode?"OMX.allegro.h265.hardware.encoder":"OMX.allegro.h264.hardware.encoder";
     err = OMX_GetHandle(&ctx->hEncoder, (OMX_STRING)comp_name, ctx, &callbacks);
     if (err != OMX_ErrorNone) {
         fprintf(stderr, "[VCUD ERROR] OMX_GetHandle failed: 0x%x\n", err);
@@ -1605,6 +1415,8 @@ static int run_live_loop(struct vcud_ctx *ctx) {
     inPort.nBufferCountActual = NUM_IN_BUFFERS;
     OMX_SetParameter(ctx->hEncoder, OMX_IndexParamPortDefinition, &inPort);
     OMX_GetParameter(ctx->hEncoder, OMX_IndexParamPortDefinition, &inPort);
+    printf("[DEPTH] OMX input actual=%u min=%u\n",(unsigned)inPort.nBufferCountActual,(unsigned)inPort.nBufferCountMin);
+    if(inPort.nBufferCountActual!=NUM_IN_BUFFERS)return -1;
     size_t inBufSize = inPort.nBufferSize;
 
     // Set buffer mode for Port 0 -> DMA-BUF!
@@ -1619,7 +1431,7 @@ static int run_live_loop(struct vcud_ctx *ctx) {
     initHeader(outFormat);
     outFormat.nPortIndex = 1;
     OMX_GetParameter(ctx->hEncoder, OMX_IndexParamVideoPortFormat, &outFormat);
-    outFormat.eCompressionFormat = OMX_VIDEO_CodingAVC;
+    outFormat.eCompressionFormat = hevc_mode?(OMX_VIDEO_CODINGTYPE)OMX_ALG_VIDEO_CodingHEVC:OMX_VIDEO_CodingAVC;
     outFormat.xFramerate = ctx->target_fps << 16;
     OMX_SetParameter(ctx->hEncoder, OMX_IndexParamVideoPortFormat, &outFormat);
 
@@ -1627,8 +1439,8 @@ static int run_live_loop(struct vcud_ctx *ctx) {
     OMX_VIDEO_PARAM_PROFILELEVELTYPE profLvl;
     initHeader(profLvl);
     profLvl.nPortIndex = 1;
-    profLvl.eProfile = OMX_VIDEO_AVCProfileHigh;
-    profLvl.eLevel = (OMX_U32)OMX_VIDEO_AVCLevel51;
+    profLvl.eProfile = hevc_mode?(OMX_U32)OMX_ALG_VIDEO_HEVCProfileMain:(OMX_U32)OMX_VIDEO_AVCProfileHigh;
+    profLvl.eLevel = hevc_mode?(OMX_U32)OMX_ALG_VIDEO_HEVCMainTierLevel51:(OMX_U32)OMX_VIDEO_AVCLevel51;
     err = OMX_SetParameter(ctx->hEncoder, OMX_IndexParamVideoProfileLevelCurrent, &profLvl);
     if (err == OMX_ErrorNone) {
         printf("[VCUD] AVC Profile/Level set to High / Level 5.1\n");
@@ -1640,7 +1452,7 @@ static int run_live_loop(struct vcud_ctx *ctx) {
     OMX_VIDEO_PARAM_AVCTYPE avcParam;
     initHeader(avcParam);
     avcParam.nPortIndex = 1;
-    if (OMX_GetParameter(ctx->hEncoder, OMX_IndexParamVideoAvc, &avcParam) == OMX_ErrorNone) {
+    if (!hevc_mode && OMX_GetParameter(ctx->hEncoder, OMX_IndexParamVideoAvc, &avcParam) == OMX_ErrorNone) {
         avcParam.eProfile = OMX_VIDEO_AVCProfileHigh;
         avcParam.eLevel = OMX_VIDEO_AVCLevel51;
         avcParam.bEntropyCodingCABAC = OMX_TRUE;
@@ -1662,14 +1474,33 @@ static int run_live_loop(struct vcud_ctx *ctx) {
         printf("[VCUD] Filler data disabled\n");
     }
 
-    // Disable Prefetch Buffer (direct DMA-BUF path)
+    /* AL5E L2 (on-chip encoder buffer) prefetch.  The previous builds asked the
+     * MCU not to use it, and the PL had no buffer at all, so the encoder ran
+     * entirely from PS DDR4.  Ask for it by default now, and read the value back
+     * from the component so the card log records what the encoder actually
+     * accepted (that is the evidence, not this request). */
     OMX_ALG_VIDEO_PARAM_PREFETCH_BUFFER prefetchParam;
     initHeader(prefetchParam);
     prefetchParam.nPortIndex = 1;
-    prefetchParam.bEnablePrefetchBuffer = OMX_FALSE;
+    prefetchParam.bEnablePrefetchBuffer = ctx->l2_prefetch ? OMX_TRUE : OMX_FALSE;
     err = OMX_SetParameter(ctx->hEncoder, (OMX_INDEXTYPE)OMX_ALG_IndexParamVideoPrefetchBuffer, &prefetchParam);
     if (err == OMX_ErrorNone) {
-        printf("[VCUD] Prefetch buffer disabled\n");
+        OMX_ALG_VIDEO_PARAM_PREFETCH_BUFFER probe;
+        initHeader(probe);
+        probe.nPortIndex = 1;
+        OMX_ERRORTYPE gErr = OMX_GetParameter(ctx->hEncoder,
+                            (OMX_INDEXTYPE)OMX_ALG_IndexParamVideoPrefetchBuffer, &probe);
+        /* A failed Get is reported as unknown, never as "disabled": reading a
+         * component that does not implement this Get as a refusal would be a
+         * false measurement.  The independent number is the kernel's
+         * "al5e ...: l2 prefetch size:<n> (bits)" line at probe time. */
+        printf("[VCUD] L2 prefetch requested=%s, encoder reports=%s (get=0x%08x)\n",
+               ctx->l2_prefetch ? "enabled" : "disabled",
+               gErr != OMX_ErrorNone ? "unknown"
+                   : (probe.bEnablePrefetchBuffer == OMX_TRUE ? "enabled" : "disabled"),
+               (unsigned)gErr);
+    } else {
+        fprintf(stderr, "[VCUD WARNING] SetParameter PrefetchBuffer failed: 0x%08x (continuing with the encoder default)\n", (unsigned)err);
     }
 
     // Output port definition
@@ -1683,6 +1514,9 @@ static int run_live_loop(struct vcud_ctx *ctx) {
     outPort.nBufferCountActual = NUM_OUT_BUFFERS;
     OMX_SetParameter(ctx->hEncoder, OMX_IndexParamPortDefinition, &outPort);
     OMX_GetParameter(ctx->hEncoder, OMX_IndexParamPortDefinition, &outPort);
+    printf("[HEVC] component=%s codec=%u geometry=%ux%u fps_q16=%u\n",comp_name,(unsigned)outPort.format.video.eCompressionFormat,(unsigned)outPort.format.video.nFrameWidth,(unsigned)outPort.format.video.nFrameHeight,(unsigned)outPort.format.video.xFramerate);
+    if(outPort.format.video.eCompressionFormat!=(hevc_mode?(OMX_VIDEO_CODINGTYPE)OMX_ALG_VIDEO_CodingHEVC:OMX_VIDEO_CodingAVC) || outPort.format.video.nFrameWidth!=3840 || outPort.format.video.nFrameHeight!=2160 || outPort.format.video.xFramerate!=(60u<<16)) return -1;
+    printf("[DEPTH] OMX output actual=%u\n",(unsigned)outPort.nBufferCountActual);
     size_t outBufSize = outPort.nBufferSize;
 
     // Set buffer mode for Port 1 -> NORMAL
@@ -1692,6 +1526,7 @@ static int run_live_loop(struct vcud_ctx *ctx) {
     modeOut.eMode = OMX_ALG_BUF_NORMAL;
     OMX_SetParameter(ctx->hEncoder, (OMX_INDEXTYPE)OMX_ALG_IndexPortParamBufferMode, &modeOut);
 
+    OMX_ALG_VIDEO_PARAM_LOW_BANDWIDTH low;initHeader(low);low.nPortIndex=1;low.bEnableLowBandwidth=low_bandwidth?OMX_TRUE:OMX_FALSE;if(OMX_SetParameter(ctx->hEncoder,(OMX_INDEXTYPE)OMX_ALG_IndexParamVideoLowBandwidth,&low))return -1;
     // Configure periodic IDR frequency (GOP / Keyframe interval)
     OMX_ALG_VIDEO_PARAM_INSTANTANEOUS_DECODING_REFRESH idrParam;
     initHeader(idrParam);
@@ -1760,13 +1595,14 @@ static int run_live_loop(struct vcud_ctx *ctx) {
     OMX_VIDEO_PARAM_BITRATETYPE bitrateParam;
     initHeader(bitrateParam);
     bitrateParam.nPortIndex = 1;
-    bitrateParam.eControlRate = OMX_Video_ControlRateConstant;
-    bitrateParam.nTargetBitrate = 25000; /* 25 Mbps in kbps */
+    const bool vbr=getenv("RATE") && !strcmp(getenv("RATE"),"vbr");bitrateParam.eControlRate=vbr?OMX_Video_ControlRateVariable:OMX_Video_ControlRateConstant;
+    bitrateParam.nTargetBitrate = 40000; /* 25 Mbps in kbps */
     err = OMX_SetParameter(ctx->hEncoder, OMX_IndexParamVideoBitrate, &bitrateParam);
     if (err == OMX_ErrorNone) {
-        printf("[VCUD] Target Bitrate set to %u kbps (25 Mbps)\n", bitrateParam.nTargetBitrate);
+        printf("[VCUD] Target Bitrate set to %u kbps (initial)\n", bitrateParam.nTargetBitrate);
     }
 
+    OMX_ALG_VIDEO_PARAM_MAX_BITRATE peak;initHeader(peak);peak.nPortIndex=1;peak.nMaxBitrate=vbr?60000:40000; if(OMX_SetParameter(ctx->hEncoder,(OMX_INDEXTYPE)OMX_ALG_IndexParamVideoMaxBitrate,&peak))return -1;
     // 3. State transition: Loaded -> Idle
     OMX_SendCommand(ctx->hEncoder, OMX_CommandStateSet, OMX_StateIdle, NULL);
 
@@ -1785,6 +1621,7 @@ static int run_live_loop(struct vcud_ctx *ctx) {
             fprintf(stderr, "[VCUD ERROR] OMX_AllocateBuffer output %d failed: 0x%x\n", j, err);
             return -1;
         }
+        registered[j]=ctx->outHeaders[j]->pBuffer;registeredCap[j]=ctx->outHeaders[j]->nAllocLen;
     }
 
     sem_wait(&ctx->semState);
@@ -1797,6 +1634,10 @@ static int run_live_loop(struct vcud_ctx *ctx) {
     /* Start the card-side output pacer BEFORE the encoder is handed any output
      * buffer: FillBufferDone may fire as soon as the first OMX_FillThisBuffer
      * completes, and it must always have a running consumer to queue into. */
+    if(OMX_GetParameter(ctx->hEncoder,OMX_IndexParamVideoBitrate,&bitrateParam)||OMX_GetParameter(ctx->hEncoder,(OMX_INDEXTYPE)OMX_ALG_IndexParamVideoMaxBitrate,&peak)||bitrateParam.eControlRate!=(vbr?OMX_Video_ControlRateVariable:OMX_Video_ControlRateConstant)||peak.nMaxBitrate!=(vbr?60000:40000))return -1;
+    if(OMX_GetParameter(ctx->hEncoder,(OMX_INDEXTYPE)OMX_ALG_IndexParamVideoLowBandwidth,&low)||(bool)low.bEnableLowBandwidth!=low_bandwidth||OMX_GetParameter(ctx->hEncoder,(OMX_INDEXTYPE)OMX_ALG_IndexParamVideoSlices,&slices)||slices.nNumSlices!=4||OMX_GetParameter(ctx->hEncoder,(OMX_INDEXTYPE)OMX_ALG_IndexParamVideoInstantaneousDecodingRefresh,&idrParam)||idrParam.nInstantaneousDecodingRefreshFrequency!=30||OMX_GetParameter(ctx->hEncoder,(OMX_INDEXTYPE)OMX_ALG_IndexParamVideoPrefetchBuffer,&prefetchParam)||(bool)prefetchParam.bEnablePrefetchBuffer!=(bool)ctx->l2_prefetch)return -1;printf("[RUN] executing low=%d slices=%u IDR=%u prefetch=%d\n",low.bEnableLowBandwidth,slices.nNumSlices,idrParam.nInstantaneousDecodingRefreshFrequency,prefetchParam.bEnablePrefetchBuffer);
+    if(!hevc_mode && (OMX_GetParameter(ctx->hEncoder,OMX_IndexParamVideoAvc,&avcParam)||!avcParam.bEntropyCodingCABAC))return -1;if(!hevc_mode)printf("[AVC] executing cabac=%d profile=%u\n",avcParam.bEntropyCodingCABAC,avcParam.eProfile);
+    printf("[RC] executing component=%s mode=%u target=%u max=%u\n",comp_name,(unsigned)bitrateParam.eControlRate,(unsigned)bitrateParam.nTargetBitrate,(unsigned)peak.nMaxBitrate);
     if (pacer_start(ctx) < 0) {
         fprintf(stderr, "[VCUD ERROR] Cannot start card-side output pacer\n");
         return -1;
@@ -1804,7 +1645,7 @@ static int run_live_loop(struct vcud_ctx *ctx) {
 
     // Prime output buffers
     for (int j = 0; j < NUM_OUT_BUFFERS; j++) {
-        OMX_FillThisBuffer(ctx->hEncoder, ctx->outHeaders[j]);
+        ev(10,j,0,tid19());auto rft=OMX_FillThisBuffer(ctx->hEncoder, ctx->outHeaders[j]);ev(11,j,0,tid19(),0,0,rft);
     }
 
     // Queue input buffers to V4L2
@@ -1824,8 +1665,10 @@ static int run_live_loop(struct vcud_ctx *ctx) {
             perror("[VCUD ERROR] Initial VIDIOC_QBUF");
             return -1;
         }
+        ev(7,i,0);
     }
 
+    printf("[DEPTH] VIPP QBUF successful=%d OMX imported=%d\n", NUM_IN_BUFFERS,NUM_IN_BUFFERS); unsigned seen=0;
     // Start V4L2 STREAMON
     if (ioctl(ctx->v4l2_fd, VIDIOC_STREAMON, &ctx->v4l2_type) < 0) {
         perror("[VCUD ERROR] VIDIOC_STREAMON");
@@ -1837,6 +1680,7 @@ static int run_live_loop(struct vcud_ctx *ctx) {
         ctx->vcu_cfg->ps_encoder_status = 1; /* Running */
     }
 
+    /* No 4ms monitoring or luma sampling in the qualification runs. */
     uint64_t t_last_stat = get_time_ns();
     uint32_t stat_frames_last = 0;
     uint64_t stat_bytes_last = 0;
@@ -1870,18 +1714,20 @@ static int run_live_loop(struct vcud_ctx *ctx) {
             break;
         }
 
-        uint32_t idx = b.index;
+        ev(1,b.index,(uint64_t)b.timestamp.tv_sec*1000000+b.timestamp.tv_usec,b.sequence,b.flags,(ctx->v4l2_type==V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)?planes[0].bytesused:b.bytesused);uint32_t idx = b.index; if(idx>=NUM_IN_BUFFERS)return -1; if(!(seen & (1u<<idx))){ seen|=1u<<idx; printf("[DEPTH] DQ index=%u seen=%x\n",idx,seen); }
         ctx->inHeaders[idx]->nFilledLen = (ctx->v4l2_type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) ?
                                           planes[0].bytesused : b.bytesused;
         ctx->inHeaders[idx]->nOffset = 0;
         ctx->inHeaders[idx]->nTimeStamp = b.timestamp.tv_sec * 1000000ULL + b.timestamp.tv_usec;
 
         /* Feed to VCU IP (Zero-copy DDR read) */
+        uint64_t tpts=ctx->inHeaders[idx]->nTimeStamp;ev(2,idx,tpts,b.sequence);
         err = OMX_EmptyThisBuffer(ctx->hEncoder, ctx->inHeaders[idx]);
-        if (err != OMX_ErrorNone) {
+        ev(3,idx,tpts,b.sequence,0,0,err);if (err != OMX_ErrorNone) {
             fprintf(stderr, "[VCUD] OMX_EmptyThisBuffer error: 0x%x\n", err);
             break;
         }
+        ++ctx->omx_inputs_accepted;
 
         /* Periodic Telemetry & Probes every second */
         uint64_t now = get_time_ns();
@@ -1898,6 +1744,10 @@ static int run_live_loop(struct vcud_ctx *ctx) {
             uint32_t p_msi = csr_read32(ctx, REG_PKT_PROBE_MSI);
             uint32_t p_fsm = csr_read32(ctx, REG_PKT_PROBE_FSM);
 
+            if(ctx->vcu_cfg && ctx->vcu_cfg->codec_type==1) { OMX_VIDEO_CONFIG_BITRATETYPE br; initHeader(br);br.nPortIndex=1;auto rc=OMX_GetConfig(ctx->hEncoder,OMX_IndexConfigVideoBitrate,&br);printf("[HEVC ACTIVE] rc=%x kbps=%u seq=%u\n",(unsigned)rc,(unsigned)br.nEncodeBitrate,ctx->vcu_cfg->ps_ack_seq); }
+            OMX_VIDEO_CONFIG_BITRATETYPE br;initHeader(br);br.nPortIndex=1;auto brc=OMX_GetConfig(ctx->hEncoder,OMX_IndexConfigVideoBitrate,&br);printf("[C2STAT] rate=%u rc=%x nocredit=%u pregate=%u oversize=%u revoke=%u\n",(unsigned)br.nEncodeBitrate,(unsigned)brc,nocredit2,pregate2,big2,late2);
+            printf("[ENC STAT] accepted=%u picture_aus=%u\n", ctx->omx_inputs_accepted,
+                   ctx->omx_picture_aus.load(std::memory_order_relaxed));
             printf("[LIVE STAT] Sent: %u (%.1f FPS, %.2f Mbps, drops: %u) | DMA Probes: SUB=%u DONE=%u MSI=%u ERR=%u FSM=0x%02x\n",
                    cur_frames, fps, mbps, ctx->frames_dropped.load(),
                    p_sub, p_done, p_msi, p_err, p_fsm & 0xFF);
@@ -1931,33 +1781,40 @@ static int run_live_loop(struct vcud_ctx *ctx) {
      * Packet DMA engine or the host ring. */
     pacer_stop(ctx);
 
-    // Teardown
-    ioctl(ctx->v4l2_fd, VIDIOC_STREAMOFF, &ctx->v4l2_type);
-    for (int i = 0; i < NUM_IN_BUFFERS; i++) close(ctx->dma_fds[i]);
-    close(ctx->v4l2_fd);
-
+    // Stop requeue; retain the fd and exported backing until all OMX callbacks finish.
+    input_draining.store(true,std::memory_order_release);
     OMX_SendCommand(ctx->hEncoder, OMX_CommandStateSet, OMX_StateIdle, NULL);
     sem_wait(&ctx->semState);
+    ioctl(ctx->v4l2_fd, VIDIOC_STREAMOFF, &ctx->v4l2_type);
     OMX_SendCommand(ctx->hEncoder, OMX_CommandStateSet, OMX_StateLoaded, NULL);
     for (int i = 0; i < NUM_IN_BUFFERS; i++) OMX_FreeBuffer(ctx->hEncoder, 0, ctx->inHeaders[i]);
     for (int j = 0; j < NUM_OUT_BUFFERS; j++) OMX_FreeBuffer(ctx->hEncoder, 1, ctx->outHeaders[j]);
     sem_wait(&ctx->semState);
     OMX_FreeHandle(ctx->hEncoder);
+    for(int i=0;i<NUM_IN_BUFFERS;i++)close(ctx->dma_fds[i]);
+    close(ctx->v4l2_fd);
     OMX_Deinit();
 
     return 0;
 }
 
 int main(int argc, char **argv) {
-    setlinebuf(stdout);
+    trace_events=getenv("EVS")!=nullptr; integrity=getenv("INTEGRITY")!=nullptr;direct=getenv("DIRECT")!=nullptr;setlinebuf(stdout);
     setlinebuf(stderr);
     printf("=== SC7F0 VCU Video Encoder & Packet DMA Daemon (sc7f0_vcud) ===\n");
 
     struct vcud_ctx ctx{};
     ctx.target_fps = 60;
+    ctx.l2_prefetch = 1;   /* use the PL on-chip encoder buffer if the IP has one */
     ctx.live_mode = true; /* Default to true zero-copy live mode */
 
     bool daemon_mode = false;
+    const char *codec=getenv("SC7F0_CODEC");
+    if(codec && strcmp(codec,"hevc") && strcmp(codec,"avc")){fprintf(stderr,"invalid SC7F0_CODEC\n");return 2;}
+    hevc_mode=codec && !strcmp(codec,"hevc");
+    const char *range=getenv("SC7F0_AVC_P_RANGE");
+    if(range && strcmp(range,"8") && strcmp(range,"16")){fprintf(stderr,"invalid AVC P range\n");return 2;}
+    low_bandwidth=hevc_mode || !range || !strcmp(range,"8");
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
@@ -1971,7 +1828,9 @@ int main(int argc, char **argv) {
                    "  --pacer <0|1>       Override the card-side output pacer (default: follow the\n"
                    "                      host mailbox word 0xBC, which the host driver sets to 1)\n"
                    "  --pacer-frames <N>  Override the pacer pre-buffer depth, 1..30 (default: follow\n"
-                   "                      the host mailbox word 0xC0, which the host driver sets to 8)\n",
+                   "                      the host mailbox word 0xC0, which the host driver sets to 8)\n"
+                   "  --l2-prefetch <0|1> Ask the AL5E to use (1, default) or ignore (0) the on-chip\n"
+                   "                      VCU encoder buffer; A/B switch for throughput measurement\n",
                    argv[0]);
             return 0;
         } else if (!strcmp(argv[i], "--daemon") || !strcmp(argv[i], "-d")) {
@@ -1993,6 +1852,8 @@ int main(int argc, char **argv) {
             ctx.dump_path = argv[++i];
         } else if (!strcmp(argv[i], "--dump-frames") && i + 1 < argc) {
             ctx.dump_max_frames = atoi(argv[++i]);
+        } else if (!strcmp(argv[i], "--l2-prefetch") && i + 1 < argc) {
+            ctx.l2_prefetch = atoi(argv[++i]) ? 1 : 0;
         } else if (!strcmp(argv[i], "--pacer") && i + 1 < argc) {
             ctx.pacer_enable_cli = atoi(argv[++i]) ? 1 : 0;
         } else if (!strcmp(argv[i], "--pacer-frames") && i + 1 < argc) {
@@ -2047,21 +1908,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    /* 3. Map the DDR staging ring @ 0x50000000 (16 MiB = 16 slots x 1 MiB).
-     *    The cma,qdmabuf@50000000 reserved pool is 64 MiB, so a 16 MiB ring
-     *    fits with room to spare. One slot per host ring slot: see
-     *    STAGING_SLOT_SIZE / STAGING_NUM_SLOTS above. */
-    ctx.ddr_staging = (volatile uint8_t *)mmap(NULL, (size_t)STAGING_RING_SIZE,
-                                               PROT_READ | PROT_WRITE,
-                                               MAP_SHARED, ctx.mem_fd, DDR_STAGING_BUF_ADDR);
-    if (ctx.ddr_staging == MAP_FAILED) {
-        perror("[VCUD ERROR] Cannot map DDR Staging buffer");
-        munmap((void *)ctx.bram_base, PL_SHARED_BRAM_SIZE);
-        munmap((void *)ctx.csr_base, PL_CSR_PACKET_SIZE);
-        close(ctx.mem_fd);
-        return 1;
-    }
-
+    if(getenv("AUDIT")){audit2=fopen(getenv("AUDIT"),"wx");if(!audit2)return 1;setvbuf(audit2,nullptr,_IOLBF,0); } if(!allocate2()){perror("C2 allocate/attach");return 1;}
     /* Verify PL Packet DMA Controller Magic */
     uint32_t magic = csr_read32(&ctx, REG_PKT_MAGIC);
     uint32_t version = csr_read32(&ctx, REG_PKT_VERSION);
@@ -2101,11 +1948,12 @@ int main(int argc, char **argv) {
         ctx.vcu_cfg->ps_encoder_status = 0; /* Stopped */
 
     /* Cleanup */
-    munmap((void *)ctx.ddr_staging, (size_t)STAGING_RING_SIZE);
+    if(ioctl(mapper,_IO('s',3)))perror("C2 held mapping");close(mapper); for(auto &s:slots)free_slot(s);
     munmap((void *)ctx.bram_base, PL_SHARED_BRAM_SIZE);
     munmap((void *)ctx.csr_base, PL_CSR_PACKET_SIZE);
     close(ctx.mem_fd);
 
+    if(getenv("EVS")){FILE*f=fopen(getenv("EVS"),"wb");if(f){fwrite(evs,sizeof(ev19),nev<600000?nev:600000,f);fclose(f);}printf("[TRACE] reserved=%u\n",nev);}
     printf("[VCUD] Daemon cleanly shutdown.\n");
-    return ret;
+    return failure?1:ret;
 }
