@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <math.h>
 #include <signal.h>
 #include <stdint.h>
@@ -168,15 +169,42 @@ static void text_draw(uint8_t *fb, uint32_t x, uint32_t y, uint32_t scale,
 	}
 }
 
+static void usage(FILE *out, const char *prog)
+{
+	fprintf(out, "Usage: %s [--dev PATH] [--seconds N] [--msi] [--help]\n"
+	        "MSI is always enabled; --msi is accepted for compatibility.\n"
+	        "N is a decimal duration in seconds (0 = until signal).\n", prog);
+}
+
 int main(int argc, char **argv)
 {
 	const char *dev = "/dev/qpcie-ovl-0000:03:00.0";
 	unsigned seconds = 0; /* 0 = run until signal */
-	int use_msi = 0;
+	int help = 0;
 	for (int i = 1; i < argc; i++) {
-		if (!strcmp(argv[i], "--dev") && i + 1 < argc) dev = argv[++i];
-		else if (!strcmp(argv[i], "--seconds") && i + 1 < argc) seconds = strtoul(argv[++i], NULL, 0);
-		else if (!strcmp(argv[i], "--msi")) use_msi = 1;
+		if (!strcmp(argv[i], "--dev") && i + 1 < argc &&
+		    argv[i+1][0] && argv[i+1][0] != '-') {
+			dev = argv[++i];
+		} else if (!strcmp(argv[i], "--seconds") && i + 1 < argc) {
+			const char *arg = argv[++i];
+			char *end;
+			errno = 0;
+			unsigned long n = strtoul(arg, &end, 10);
+			if (*arg < '0' || *arg > '9' || *end || errno || n > UINT_MAX)
+				goto invalid;
+			seconds = (unsigned)n;
+		} else if (!strcmp(argv[i], "--help")) {
+			help = 1;
+		} else if (strcmp(argv[i], "--msi")) {
+invalid:
+			fprintf(stderr, "Invalid argument: %s\n", argv[i]);
+			usage(stderr, argv[0]);
+			return 2;
+		}
+	}
+	if (help) {
+		usage(stdout, argv[0]);
+		return 0;
 	}
 
 	signal(SIGINT, on_sig);
@@ -192,12 +220,12 @@ int main(int argc, char **argv)
 	                        PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
 	if (fb_base == MAP_FAILED) { perror("mmap"); close(fd); return 1; }
 
-	printf("BASE_IOVA=0x%llx STRIDE=%llu NSLOTS=%u MSI=%d\n",
+	printf("BASE_IOVA=0x%llx STRIDE=%llu NSLOTS=%u MSI=1\n",
 	       (unsigned long long)ring.base_iova,
-	       (unsigned long long)ring.stride, ring.nslots, use_msi);
+	       (unsigned long long)ring.stride, ring.nslots);
 	fflush(stdout);
 
-	if (use_msi) {
+	{
 		struct qovl_config cfg = {
 			.ps_dst_base = QOVL_PS_POOL_BASE,
 			.frame_bytes = SLOT_BYTES,
@@ -254,6 +282,7 @@ int main(int argc, char **argv)
 
 	uint32_t inflight_q[2] = { 0, 0 };
 	uint32_t last_seq = 0;
+	int rc = 0;
 	struct timespec t0, t_rep;
 	clock_gettime(CLOCK_MONOTONIC, &t0);
 	t_rep = t0;
@@ -301,13 +330,14 @@ int main(int argc, char **argv)
 		last_x[s] = x; last_y[s] = y; has_last[s] = 1;
 		frame++;
 
-		if (use_msi) {
+		{
 			/* Keep 2 frames pipelined (1 active + 1 pending in HW):
 			 * dequeue (WAIT) the oldest in-flight frame before queuing the next. */
 			if (inflight_q[0]) {
 				struct qovl_wait wt = { .target_seq = inflight_q[0], .timeout_ms = 1000 };
 				if (ioctl(fd, QOVL_IOC_WAIT, &wt)) {
 					perror("QOVL_IOC_WAIT");
+					rc = 1;
 					break;
 				}
 			}
@@ -321,10 +351,12 @@ int main(int argc, char **argv)
 					sub.flags = QOVL_SUBMIT_ASYNC;
 					if (ioctl(fd, QOVL_IOC_SUBMIT, &sub)) {
 						perror("QOVL_IOC_SUBMIT");
+						rc = 1;
 						break;
 					}
 				} else {
 					perror("QOVL_IOC_SUBMIT");
+					rc = 1;
 					break;
 				}
 			}
@@ -344,23 +376,22 @@ int main(int argc, char **argv)
 		if (seconds > 0) {
 			struct timespec now;
 			clock_gettime(CLOCK_MONOTONIC, &now);
-			if ((uint64_t)(now.tv_sec - t0.tv_sec) >= seconds) break;
+			time_t elapsed = now.tv_sec - t0.tv_sec - (now.tv_nsec < t0.tv_nsec);
+			if ((uint64_t)elapsed >= seconds) break;
 		}
 
-		if (!use_msi) {
-			struct timespec nap = { .tv_sec = 0, .tv_nsec = 16666667L };
-			nanosleep(&nap, NULL);
-		}
 	}
 
-	if (use_msi && last_seq) {
+	if (last_seq) {
 		struct qovl_wait wt = { .target_seq = last_seq, .timeout_ms = 1000 };
-		ioctl(fd, QOVL_IOC_WAIT, &wt);
+		if (ioctl(fd, QOVL_IOC_WAIT, &wt)) {
+			perror("QOVL_IOC_WAIT (drain)");
+			rc = 1;
+		}
 	}
 
-	int busy = 0;
-	ioctl(fd, QOVL_IOC_FREE, &busy);
+	/* The driver retains the DMA ring across closes. */
 	munmap(fb_base, (size_t)ring.stride * ring.nslots);
 	close(fd);
-	return 0;
+	return rc;
 }

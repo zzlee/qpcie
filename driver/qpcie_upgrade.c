@@ -37,9 +37,13 @@ static ssize_t firmware_upgrade_write(struct file *filp, struct kobject *kobj,
     void *cpu_addr;
     unsigned long timeout;
     u32 ctrl;
+    int rc;
 
     if (!qdev || !qdev->bar0_mmio || count == 0)
         return -EINVAL;
+    rc = qpcie_management_claim(qdev);
+    if (rc)
+        return rc;
 
     /* Allocate physically contiguous coherent DMA buffer for this chunk */
     cpu_addr = dma_alloc_coherent(&qdev->pdev->dev, count, &dma_handle, GFP_KERNEL);

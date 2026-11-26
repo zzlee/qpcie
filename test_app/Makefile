@@ -78,6 +78,12 @@ sc7f0_fill_oracle: sc7f0_fill_oracle.c
 host_rgb_compositor: host_rgb_compositor.c ../include/qpcie_overlay.h
 	$(CC) -O2 -Wall -Wextra -std=c11 -o $@ host_rgb_compositor.c
 
+# Optional host KMS client (libdrm-dev); independent of the legacy overlay ABI.
+DRM_CFLAGS ?= $(shell pkg-config --cflags libdrm)
+DRM_LIBS ?= $(shell pkg-config --libs libdrm)
+sc7f0_kms: sc7f0_kms.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Wextra -std=c11 $(DRM_CFLAGS) -o $@ $< $(LDFLAGS) $(DRM_LIBS)
+
 qpcie_upgrade: qpcie_upgrade.c
 	$(CC) $(CFLAGS) -o $@ qpcie_upgrade.c $(LDFLAGS)
 
@@ -148,7 +154,7 @@ loopback_test_app: loopback_test_app.c qpcie_control.h
 	$(CC) $(CFLAGS) -o $@ loopback_test_app.c $(LDFLAGS)
 
 clean:
-	rm -f $(TARGETS) $(DMA_TEST_TARGETS) sc7f0_ps_capture sc7f0ctl_compat400 qpcie_debugd qpcie_fw_daemon qpcie_hdmi_daemon *.o *.yuv *.pcm *.raw
+	rm -f $(TARGETS) $(DMA_TEST_TARGETS) sc7f0_kms sc7f0_ps_capture sc7f0ctl_compat400 qpcie_debugd qpcie_fw_daemon qpcie_hdmi_daemon *.o *.yuv *.pcm *.raw
 
 .PHONY: all clean dma-test qpcie_fw_daemon qpcie_hdmi_daemon
 

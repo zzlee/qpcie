@@ -7,9 +7,46 @@
 
 #include "qpcie_driver.h"
 #include "../include/qpcie_debug.h"
+#include "qpcie_kms_v1.h"
 #include <linux/delay.h>
 
 #define SG_PAGES 4
+
+static void lease_free(struct kref *ref)
+{
+    kfree(container_of(ref, struct qpcie_lease, refs));
+}
+
+int qpcie_media_open(struct qpcie_lease *lease)
+{
+    int rc;
+    if (!lease)
+        return 0;
+    rc = qpcie_media_claim(&lease->owner);
+    if (!rc)
+        kref_get(&lease->refs);
+    return rc;
+}
+
+void qpcie_media_close(struct qpcie_lease *lease)
+{
+    if (lease) {
+        atomic_sub(PL_MEDIA, &lease->owner);
+        kref_put(&lease->refs, lease_free);
+    }
+}
+
+#ifdef QPCIE_HAVE_KMS
+#include "qpcie_kms.h"
+static void put_bind_lease(void *arg)
+{
+    struct qpcie_lease *lease = arg;
+    kref_put(&lease->refs, lease_free);
+}
+static bool kms;
+module_param(kms, bool, 0444);
+MODULE_PARM_DESC(kms, "Use DRM instead of the overlay misc frontend, retaining capture and control");
+#endif
 
 void qpcie_dma_soft_reset(struct qpcie_dev *qdev)
 {
@@ -64,7 +101,7 @@ static irqreturn_t qpcie_irq_handler(int irq, void *data)
     /* Canonical v3.0 Three-Level Hierarchy Interrupt Dispatch */
     u32 top = ioread32(qdev->bar0_mmio + REG_NEW_GLOBAL_IRQ_TOP);
 
-    if (!top)
+    if (!top || top == U32_MAX)
         return IRQ_NONE;
 
     /* Level 3 Dispatch: Video CH0 (Bit 0) */
@@ -120,8 +157,12 @@ static irqreturn_t qpcie_irq_handler(int irq, void *data)
     /* Level 3 Dispatch: Overlay H2C Frame Write Done (Bit 8) & VBlank Promotion (Bit 9) */
     if (top & BIT(8))
         qpcie_overlay_irq_handler(qdev);
-    if (top & BIT(9))
+    if (top & BIT(9)) {
+#ifdef QPCIE_HAVE_KMS
+        qpcie_kms_frame_irq(qdev);
+#endif
         qpcie_overlay_vblank_irq_handler(qdev);
+    }
 
     /* Step 2: Clear Level 2 TOP status (W1C) */
     iowrite32(top, qdev->bar0_mmio + REG_NEW_GLOBAL_IRQ_TOP);
@@ -153,6 +194,7 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
     if (!qdev) return -ENOMEM;
 
     qdev->pdev = pdev;
+    mutex_init(&qdev->plane_lifecycle);
     qdev->sg_fetch_mode = sg_fetch_mode;
     pci_set_drvdata(pdev, qdev);
 
@@ -162,8 +204,9 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
         return ret;
     }
 
-    pci_set_master(pdev);
-
+#ifdef QPCIE_HAVE_KMS
+    qdev->kms_overlay = kms;
+#endif
     /* The SG diagnostic and the capture engines emit 256-byte MWr payloads.
      * Instead of a system-wide pci=pcie_bus_perf boot parameter, raise the
      * negotiated MPS on this path only (upstream root port + this endpoint)
@@ -226,7 +269,8 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
              (unsigned long long)pci_resource_len(pdev, 1),
              (unsigned long)pci_resource_flags(pdev, 1));
 
-    ret = pci_request_regions(pdev, "qpcie-dma");
+    ret = qdev->kms_overlay ? pci_request_regions_exclusive(pdev, "qpcie-dma") :
+                              pci_request_regions(pdev, "qpcie-dma");
     if (ret) {
         dev_err(&pdev->dev, "[ERROR] pci_request_regions failed: %d\n", ret);
         goto disable_pci;
@@ -240,6 +284,40 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
         goto release_regions;
     }
     dev_info(&pdev->dev, "[MMIO] BAR0 Mapped Virt Addr: %p\n", qdev->bar0_mmio);
+#ifdef QPCIE_HAVE_KMS
+    if (qdev->kms_overlay) {
+        ret = qpcie_kms_protect(qdev);
+        if (ret == -ENODEV || ret == -EPROTONOSUPPORT || ret == -EACCES) {
+            dev_info(&pdev->dev, "KMS gate closed (%d); using legacy frontend\n", ret);
+            qdev->kms_overlay = false;
+        } else if (ret) {
+            goto unmap_mmio;
+        } else {
+            qdev->lease = kzalloc(sizeof(*qdev->lease), GFP_KERNEL);
+            if (!qdev->lease) {
+                ret = -ENOMEM;
+                goto unmap_mmio;
+            }
+            kref_init(&qdev->lease->refs);
+            atomic_set(&qdev->lease->owner, PL_IDLE);
+            ret = devm_add_action_or_reset(&pdev->dev, put_bind_lease, qdev->lease);
+            if (ret)
+                goto unmap_mmio;
+        }
+    }
+#endif
+
+    /* A prior owner may have left a live direct-pull descriptor. Never
+     * restart bus mastering or run the legacy probe reset to "recover" it. */
+    if (pci_resource_len(pdev, 0) >= QOVL_BAR0_OFFSET + QOVL_REG_FLIP_STATUS + 4 &&
+        (ioread32(qdev->bar0_mmio + REG_NEW_GLOBAL_CAPS) & QPCIE_CAP_RGB_COMPOSITOR) &&
+        ioread32(qdev->bar0_mmio + QOVL_BAR0_OFFSET + QOVL_REG_ID) == QOVL_ID_RGB1 &&
+        dp_present(qdev->bar0_mmio + QOVL_BAR0_OFFSET) &&
+        !dp_idle(qdev->bar0_mmio + QOVL_BAR0_OFFSET)) {
+        dev_err(&pdev->dev, "direct-pull engine not idle; refusing legacy reset\n");
+        ret = -EBUSY;
+        goto unmap_mmio;
+    }
 
     /* BAR1 Mapping: User IP Cores / EDID / Audio Gen */
     qdev->bar1_mmio = pci_iomap(pdev, 1, 0);
@@ -483,6 +561,14 @@ static int qpcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
     /* Optional RGB-compositor overlay plane ring: it self-gates on the fabric
      * version, and a card without sc7f0_overlay_ingress.v must not be able to
      * lose a 33 MB coherent allocation. */
+#ifdef QPCIE_HAVE_KMS
+    if (qdev->kms_overlay) {
+        ret = qpcie_kms_register(qdev);
+        if (ret)
+            dev_warn(&pdev->dev, "KMS not published: %d; capture/control remain available\n", ret);
+        return 0;
+    }
+#endif
     ret = qpcie_overlay_init(qdev);
     if (ret)
         dev_warn(&pdev->dev, "RGB overlay ring unavailable: %d\n", ret);
@@ -527,6 +613,13 @@ unmap_mmio:
 release_regions:
     pci_release_regions(pdev);
 disable_pci:
+    if (qdev->mps_modified) {
+        struct pci_dev *rp = pci_upstream_bridge(pdev);
+
+        pcie_set_mps(pdev, qdev->ep_mps_saved);
+        if (rp)
+            pcie_set_mps(rp, qdev->rp_mps_saved);
+    }
     pci_disable_device(pdev);
     return ret;
 }
@@ -538,6 +631,10 @@ static void qpcie_remove(struct pci_dev *pdev)
 
     dev_info(&pdev->dev, "Removing QPCIe Driver (Minimal Diagnostic Mode)...\n");
 
+#ifdef QPCIE_HAVE_KMS
+    if (qdev->kms)
+        qpcie_kms_remove(qdev);
+#endif
     qpcie_debug_remove(qdev);
     qpcie_upgrade_remove(qdev);
     qpcie_flash_remove(qdev);
@@ -558,7 +655,8 @@ static void qpcie_remove(struct pci_dev *pdev)
         ioread32(qdev->bar0_mmio + REG_VCH0_CTRL); /* Flush posted writes */
 
         /* Full DMA soft reset to flush hardware FIFOs */
-        qpcie_dma_soft_reset(qdev);
+        if (!qdev->dma_isolated)
+            qpcie_dma_soft_reset(qdev);
     }
 
     /* Drain in-flight PCIe TLPs to host memory */
@@ -621,11 +719,29 @@ static void qpcie_remove(struct pci_dev *pdev)
     dev_info(&pdev->dev, "QPCIe Driver Removed Cleanly\n");
 }
 
+#ifdef QPCIE_HAVE_KMS
+static void qpcie_shutdown(struct pci_dev *pdev)
+{
+    struct qpcie_dev *qdev = pci_get_drvdata(pdev);
+
+    if (qdev->kms)
+        qpcie_kms_remove(qdev);
+}
+
+static const struct pci_error_handlers qpcie_err_handlers = {
+    .reset_prepare = qpcie_kms_reset_prepare,
+};
+#endif
+
 static struct pci_driver qpcie_driver = {
     .name     = "qpcie-dma",
     .id_table = qpcie_id_table,
     .probe    = qpcie_probe,
     .remove   = qpcie_remove,
+#ifdef QPCIE_HAVE_KMS
+    .shutdown = qpcie_shutdown,
+    .err_handler = &qpcie_err_handlers,
+#endif
 };
 
 module_pci_driver(qpcie_driver);

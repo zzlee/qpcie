@@ -88,9 +88,14 @@ static int qpcie_alsa_cap_open(struct snd_pcm_substream *substream)
     struct snd_pcm_runtime *runtime = substream->runtime;
 
     unsigned long flags;
+    int rc = qpcie_media_open(ach->qdev->lease);
+    if (rc)
+        return rc;
+    runtime->private_data = ach->qdev->lease;
     spin_lock_irqsave(&ach->slock, flags);
     if (ach->cap_substream) {
         spin_unlock_irqrestore(&ach->slock, flags);
+        qpcie_media_close(runtime->private_data);
         return -EBUSY; // raw and PCM nodes share the canonical ADEV0 engine
     }
     ach->cap_substream = substream;
@@ -120,6 +125,7 @@ static int qpcie_alsa_cap_close(struct snd_pcm_substream *substream)
     struct qpcie_alsa_channel *ach = snd_pcm_substream_chip(substream);
     WRITE_ONCE(ach->cap_substream, NULL);
     synchronize_irq(pci_irq_vector(ach->qdev->pdev, 0));
+    qpcie_media_close(substream->runtime->private_data);
     return 0;
 }
 
@@ -362,6 +368,10 @@ static int qpcie_alsa_play_open(struct snd_pcm_substream *substream)
     struct qpcie_alsa_channel *ach = snd_pcm_substream_chip(substream);
     struct snd_pcm_runtime *runtime = substream->runtime;
 
+    int rc = qpcie_media_open(ach->qdev->lease);
+    if (rc)
+        return rc;
+    runtime->private_data = ach->qdev->lease;
     ach->play_substream = substream;
     runtime->hw = qpcie_alsa_hardware;
     return 0;
@@ -378,6 +388,7 @@ static int qpcie_alsa_play_close(struct snd_pcm_substream *substream)
 
     hrtimer_cancel(&ach->play_timer);
     ach->play_substream = NULL;
+    qpcie_media_close(substream->runtime->private_data);
     return 0;
 }
 
