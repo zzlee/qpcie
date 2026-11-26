@@ -162,6 +162,9 @@ module sc7f0_overlay_ingress #(
     input  wire                     mem_clk,
     input  wire                     mem_rst_n,
     output wire [127:0]             m_axis_tdata,
+    input wire [31:0]               src_cookie,
+    output wire                     issue_domain_ready,
+    output wire [31:0]              m_axis_cookie,
     output wire                     m_axis_tuser,      // first beat since an arm
     output wire                     m_axis_tvalid,
     input  wire                     m_axis_tready,
@@ -185,6 +188,7 @@ module sc7f0_overlay_ingress #(
     sc7f0_reset_sync #(.SOURCES(2)) u_m_reset (
         .dest_clk(mem_clk), .src_rst_n({rst_n, mem_rst_n}), .dest_rst_n(m_all_n));
     wire p_rst = !p_all_n;
+    assign issue_domain_ready = p_all_n;
     wire m_rst = !m_all_n;
 
     // ------------------------------------------------------------------------
@@ -961,7 +965,9 @@ module sc7f0_overlay_ingress #(
     // (125 MHz write -> 300 MHz registered BRAM read + 2-entry FWFT + 256->128)
     // ------------------------------------------------------------------------
     localparam integer XF_AW = $clog2(FIFO_DEPTH); // 6
-    (* ram_style = "block" *) reg [256:0] xfer_mem [0:FIFO_DEPTH-1];
+    (* ram_style = "block" *) reg [288:0] xfer_mem [0:FIFO_DEPTH-1];
+    reg [31:0] wr_cookie;
+    always @(posedge clk) if (arm_ok) wr_cookie <= src_cookie;
     reg wr_frame_sof;
 
     function automatic [XF_AW:0] bin2gray(input [XF_AW:0] b);
@@ -1016,12 +1022,12 @@ module sc7f0_overlay_ingress #(
 
     always @(posedge clk) begin
         if (fifo_wen && !fifo_full)
-            xfer_mem[wr_bin[XF_AW-1:0]] <= {wr_frame_sof, fifo_wdata};
+            xfer_mem[wr_bin[XF_AW-1:0]] <= {wr_cookie, wr_frame_sof, fifo_wdata};
     end
 
-    reg  [256:0] bram_dout;
+    reg  [288:0] bram_dout;
     reg          bram_pipe;
-    reg  [256:0] fwft_buf [0:1];
+    reg  [288:0] fwft_buf [0:1];
     reg  [1:0]   fwft_cnt;
     reg          fwft_wr_ptr, fwft_rd_ptr;
     reg          xfer_half;
@@ -1068,7 +1074,8 @@ module sc7f0_overlay_ingress #(
         end
     end
 
-    wire [256:0] xfer_dout = fwft_buf[fwft_rd_ptr];
+    wire [288:0] xfer_dout = fwft_buf[fwft_rd_ptr];
+    assign m_axis_cookie = xfer_dout[288:257];
     assign fifo_empty   = (fwft_cnt == 2'd0);
     assign m_axis_tdata = xfer_half ? xfer_dout[255:128] : xfer_dout[127:0];
     assign m_axis_tvalid= !fifo_empty && m_all_n;

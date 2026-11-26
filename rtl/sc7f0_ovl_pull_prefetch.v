@@ -36,6 +36,9 @@ module sc7f0_ovl_pull_prefetch #(
     input  wire [31:0]  host_xfer_bytes,
     input  wire [15:0]  host_max_bytes_per_req,
 
+    output wire         blank_p,
+    input wire [31:0]   s_cookie,
+    output wire [31:0]  m_cookie,
     output reg          ing_ovl_enable,
     output reg          ing_ovl_go,
     output reg  [63:0]  ing_src_addr,
@@ -73,6 +76,7 @@ module sc7f0_ovl_pull_prefetch #(
     // 1. CDC: base_vblank_p_m (mem_clk 300 MHz -> pcie_clk)
     // ------------------------------------------------------------------------
     wire base_vblank_p;
+    assign blank_p = base_vblank_p;
     xpm_cdc_pulse #(
         .DEST_SYNC_FF  (4),
         .INIT_SYNC_FF  (0),
@@ -217,7 +221,25 @@ module sc7f0_ovl_pull_prefetch #(
     wire         uram_data_valid;
     wire         uram_rd_en;
 
-    assign s_axis_tready = !uram_full && !uram_wr_rst_busy;
+    // Frame metadata is sparse: budget four 32-bit words, not an extra
+    // 32 bits in every row of the 16K payload URAM. Reserve a metadata entry
+    // atomically with the tagged SOF write. Hold it across output stalls.
+    reg [31:0] cookies [0:3];
+    reg [2:0] cookie_w, cookie_r;
+    wire cookies_full = cookie_w == {~cookie_r[2],cookie_r[1:0]};
+    assign s_axis_tready = !uram_full && !uram_wr_rst_busy &&
+                           !(s_axis_tuser && cookies_full);
+    wire push_cookie = s_axis_tuser && s_axis_tready && s_axis_tvalid;
+    always @(posedge mem_clk)
+        if (push_cookie) cookies[cookie_w[1:0]] <= s_cookie;
+    assign m_cookie = cookies[cookie_r[1:0]];
+    always @(posedge mem_clk or negedge mem_rst_n)
+        if (!mem_rst_n) begin cookie_w<=0; cookie_r<=0; end
+        else begin
+            if (push_cookie) cookie_w<=cookie_w+1'b1;
+            if (m_o_axis_tuser && m_o_axis_tvalid && m_o_axis_tready)
+                cookie_r<=cookie_r+1'b1;
+        end
 
     xpm_fifo_sync #(
         .CASCADE_HEIGHT     (0),

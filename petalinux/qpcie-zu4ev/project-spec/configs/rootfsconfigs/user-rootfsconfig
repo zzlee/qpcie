@@ -7,3 +7,14 @@ CONFIG_qpcie-v4l2-bridge
 CONFIG_qpcie-debugd
 CONFIG_sc7f0-ps-capture
 CONFIG_sc7f0-vcud
+# Official KMS userspace for the HDMI output bring-up: libdrm plus the upstream
+# modetest (libdrm-tests), used to drive the xlnx,pl-disp -> v-hdmi-tx-ss DRM
+# pipeline.  No private display tool is added.
+CONFIG_libdrm
+CONFIG_libdrm-tests
+# Userspace MMIO for the two windows that have no in-tree driver yet (plane-B
+# reader at 0xB0090000 and the overlay/plane-writer control at 0xB00A0000).
+# peek/poke come from the meta-oe peekpoke recipe and are already listed in
+# this project's rootfs_config; without them there is no way to read the
+# 0x6C ID register on a board that boots.
+CONFIG_peekpoke

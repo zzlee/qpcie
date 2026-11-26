@@ -188,6 +188,12 @@ if {$display_enable || $rgb_enable} {
 }
 if {$rgb_enable} {
     lappend verilog_defs SC7F0_RGB_COMPOSITOR=1
+    if {!$vcu_enable} {
+        lappend verilog_defs SC7F0_PS_FRMBUF_RGBX=1
+    }
+}
+if {$vcu_enable} {
+    lappend verilog_defs SC7F0_ENABLE_VCU=1
 }
 set_property verilog_define $verilog_defs [current_fileset]
 set_property XPM_LIBRARIES {XPM_CDC XPM_FIFO XPM_MEMORY} [current_project]
@@ -278,10 +284,8 @@ if {$debug_profile} {
 puts "Generating ZU4EV Processing System Subsystem (zu4ev_ps_bd)..."
 source ./scripts/create_zu4ev_ps_bd.tcl
 if {$vcu_enable} {
-    # Slim memory interconnect (axi_crossbar + axi_dwidth_converter), the style
-    # measured for Todo 1.2b. Without this branch the call below stays the
-    # original two-argument form, so the VCU-off build is bit-for-bit identical.
-    create_zu4ev_ps_bd [expr {!$debug_profile}] 1 "xbar" $display_enable $rgb_enable
+    set vcu_ic_style [expr {$rgb_enable ? "xbar8" : "xbar"}]
+    create_zu4ev_ps_bd [expr {!$debug_profile}] 1 $vcu_ic_style $display_enable $rgb_enable
 } else {
     create_zu4ev_ps_bd [expr {!$debug_profile}] 0 "" $display_enable $rgb_enable
 }

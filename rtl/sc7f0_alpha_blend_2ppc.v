@@ -144,6 +144,8 @@ module sc7f0_alpha_blend_2ppc #(
     input  wire                 clk,               // 300 MHz pipeline clock
     input  wire                 rst_n,
 
+    input wire [31:0]           ovl_cookie,
+    output reg [31:0]           out_cookie,
     input  wire                 blend_enable,      // 0 = base plane passthrough
     input  wire                 alpha_force_opaque,// drive A to 255 (bring-up aid)
     input  wire                 unlock,            // re-acquire the frame lock
@@ -205,7 +207,9 @@ module sc7f0_alpha_blend_2ppc #(
     // ------------------------------------------------------------------------
     // input queues, one per plane
     // ------------------------------------------------------------------------
-    wire [QB-1:0] b_head, o_head;
+    wire [QB-1:0] b_head;
+    wire [QB+31:0] o_head;
+    reg [31:0] cookie0, cookie1;
     wire          b_empty, o_empty, b_full, o_full;
     // Forward declarations: the pop side is driven from the frame-lock block
     // below (blend pop, re-alignment purge and re-lock drain).
@@ -217,9 +221,9 @@ module sc7f0_alpha_blend_2ppc #(
         .push(s_b_axis_tvalid && !b_full),
         .full(b_full),
         .dout(b_head), .pop(b_pop), .empty(b_empty), .count());
-    sc7f0_dp_sync_fifo #(.WIDTH(QB), .DEPTH(QUEUE_DEPTH)) u_oq (
+    sc7f0_dp_sync_fifo #(.WIDTH(QB+32), .DEPTH(QUEUE_DEPTH)) u_oq (
         .clk(clk), .rst_n(rst_n),
-        .din({s_o_axis_tuser, s_o_axis_tlast, s_o_axis_tdata}),
+        .din({ovl_cookie,s_o_axis_tuser, s_o_axis_tlast, s_o_axis_tdata}),
         .push(s_o_axis_tvalid && !o_full),
         .full(o_full),
         .dout(o_head), .pop(o_pop), .empty(o_empty), .count());
@@ -471,6 +475,7 @@ module sc7f0_alpha_blend_2ppc #(
                 a0_r          <= a0_w;
                 en0_r         <= blend_enable && paired_ok;
                 pthru0_r      <= base_only;
+                cookie0       <= blend_enable && paired_ok ? o_head[QB+:32] : 0;
                 stage0_sof    <= b_sof;
                 stage0_eol    <= b_eol;
                 stage0_valid  <= 1'b1;
@@ -482,6 +487,7 @@ module sc7f0_alpha_blend_2ppc #(
             if (stage0_valid && stage1_free) begin
                 prod_r       <= prod_w;
                 bg_r         <= bg0_r;
+                cookie1      <= cookie0;
                 stage1_sof   <= stage0_sof;
                 stage1_eol   <= stage0_eol;
                 pthru1_r     <= pthru0_r;
@@ -493,6 +499,7 @@ module sc7f0_alpha_blend_2ppc #(
             // ---- stage 2 / output register ---------------------------------
             if (stage1_valid && out_free) begin
                 m_axis_tdata  <= blend_w;
+                out_cookie    <= cookie1;
                 m_axis_tuser  <= stage1_sof;
                 m_axis_tlast  <= stage1_eol;
                 m_axis_tvalid <= 1'b1;

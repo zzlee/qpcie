@@ -136,6 +136,11 @@ module sc7f0_rgb_overlay_ctrl (
     input  wire        ovl_quiesced,
     input  wire        ovl_quarantined,
     input  wire        ovl_ext_tag_blocked,
+    output reg [1:0] flip_control,
+    output wire flip_submit,
+    output wire [31:0] flip_cookie,
+    input wire [31:0] flip_admitted, flip_pending, flip_active, flip_retired, flip_frame,
+    input wire [1:0] flip_status,
     input  wire [31:0] ovl_counts,        // {.., ovf, err, unaligned, timeout}
     input  wire        ovl_done_pulse,    // one cycle per plane fully drained
 
@@ -329,6 +334,8 @@ module sc7f0_rgb_overlay_ctrl (
     wire wr_strobe = aw_hold && w_hold && !b_pending;
     wire [11:0] wr_off = aw_addr_q[11:0];
     wire [11:0] rd_off = m_araddr[11:0];
+    assign flip_submit = wr_strobe && wr_off==12'h090 && (&w_strb_q);
+    assign flip_cookie = w_data_q;
 
     // writer irq / plane-complete levels, stretched so a read cannot miss them
     reg wr_irq_sticky, ovl_irq_sticky;
@@ -339,6 +346,7 @@ module sc7f0_rgb_overlay_ctrl (
             aw_addr_q <= 32'd0; w_data_q <= 32'd0; w_strb_q <= 4'd0;
             r_valid_q <= 1'b0; r_data_q <= 32'd0;
             ovl_enable <= 1'b0; ovl_go <= 1'b0;
+            flip_control<=0;
             ovl_abort_req <= 1'b0; arm_mismatch_sticky <= 1'b0;
             ovl_quiesce_req <= 1'b0; ovl_discard_pending <= 1'b0;
             ovl_src_addr <= 64'd0;
@@ -365,6 +373,11 @@ module sc7f0_rgb_overlay_ctrl (
             if (wr_strobe) begin
                 aw_hold <= 1'b0; w_hold <= 1'b0; b_pending <= 1'b1;
                 case (wr_off)
+                    12'h08c: if (w_strb_q[0]) begin
+                        flip_control[1]<=w_data_q[1];
+                        if (!w_data_q[0] || (!ovl_enable && !ovl_go && flip_status[0]))
+                            flip_control[0]<=w_data_q[0];
+                    end
                     12'h000: begin
                         ctrl_new = strb_merge({21'd0, wr_slot_count, wr_force_slot,
                                                wr_auto_advance, wr_enable,
@@ -469,6 +482,14 @@ module sc7f0_rgb_overlay_ctrl (
             if (m_arvalid && m_arready && !r_valid_q) begin
                 r_valid_q <= 1'b1;
                 case (rd_off)
+                    12'h088: r_data_q <= 32'h44500101;
+                    12'h08c: r_data_q <= {30'd0, flip_control};
+                    12'h094: r_data_q <= flip_admitted;
+                    12'h098: r_data_q <= flip_pending;
+                    12'h09c: r_data_q <= flip_active;
+                    12'h0a0: r_data_q <= flip_retired;
+                    12'h0a4: r_data_q <= flip_frame;
+                    12'h0a8: r_data_q <= {30'd0, flip_status};
                     12'h000: r_data_q <= {21'd0, wr_slot_count, wr_force_slot,
                                           wr_auto_advance, wr_enable,
                                           ovl_discard_pending, ovl_quiesce_req,

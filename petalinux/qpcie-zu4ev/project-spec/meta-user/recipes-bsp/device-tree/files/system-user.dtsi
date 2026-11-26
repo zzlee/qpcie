@@ -29,7 +29,7 @@
  * a dtc error, so the include has to be conditional rather than "harmless".
  * Every other personality keeps the encoder description byte-identical.
  */
-#if !defined(SC7F0_RGB_COMPOSITOR_ENABLE) || !SC7F0_RGB_COMPOSITOR_ENABLE
+#if !defined(SC7F0_RGB_COMPOSITOR_ENABLE) || !SC7F0_RGB_COMPOSITOR_ENABLE || (defined(SC7F0_VCU_ENABLE) && SC7F0_VCU_ENABLE)
 #include "vcu.dtsi"
 #endif
 

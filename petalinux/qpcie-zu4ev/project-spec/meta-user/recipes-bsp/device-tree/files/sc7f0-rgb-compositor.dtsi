@@ -78,6 +78,27 @@
 	 * of /delete-node/ is used rather than the label form because the dtc in
 	 * 2023.2 accepts both but only the name form is unambiguous here.
 	 */
+#if defined(SC7F0_VCU_ENABLE) && SC7F0_VCU_ENABLE
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		/* Direct-pull overlay uses PL URAM (no PS-DDR overlay_pool).
+		 * Shrink cma_vcu from 672 MiB to 544 MiB (0x54000000..0x76000000)
+		 * and place cma_display at 0x76000000..0x7E000000 (128 MiB). */
+		cma_vcu: cma,vcu@54000000 {
+			reg = <0x0 0x54000000 0x0 0x22000000>;
+		};
+
+		cma_display: cma,display@76000000 {
+			compatible = "shared-dma-pool";
+			reusable;
+			reg = <0x0 0x76000000 0x0 0x08000000>;
+			label = "cma,display";
+		};
+	};
+#else
 	reserved-memory {
 		/delete-node/ cma,vcu@54000000;
 	};
@@ -124,6 +145,7 @@
 			label = "cma,display";
 		};
 	};
+#endif
 };
 
 /*
@@ -325,7 +347,9 @@
 		 */
 		reset-gpios = <&gpio 81 GPIO_ACTIVE_LOW>;
 		/* 4K RGBA32 plane = 33177600 B; slot rotation lives in the pool. */
+#if !defined(SC7F0_VCU_ENABLE) || !SC7F0_VCU_ENABLE
 		memory-region = <&sc7f0_overlay_pool>;
+#endif
 		status = "okay";
 	};
 
@@ -371,7 +395,9 @@
 		interrupts = <0 106 4>;
 		clocks = <&zynqmp_clk 71>;
 		clock-names = "s_axi_aclk";
+#if !defined(SC7F0_VCU_ENABLE) || !SC7F0_VCU_ENABLE
 		memory-region = <&sc7f0_overlay_pool>;
+#endif
 		status = "okay";
 	};
 };

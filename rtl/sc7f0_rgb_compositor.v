@@ -153,6 +153,9 @@ module sc7f0_rgb_compositor #(
     output wire                 s_o_axis_tready,
     input  wire                 s_o_axis_tlast,
     input  wire                 s_o_axis_tuser,
+    input wire [31:0]           ovl_cookie,
+    output wire [31:0]          present_cookie,
+    output wire                 output_sof,
     output reg                  base_vblank_p,
 
     // ---- composited video, tx_clk, PPC pixels of native RGB ---------------
@@ -528,7 +531,9 @@ module sc7f0_rgb_compositor #(
         end
     end
 
+    assign output_sof = bl_tvalid && bl_tready && bl_tuser;
     sc7f0_alpha_blend_2ppc #(.PPC(PPC), .QUEUE_DEPTH(16)) u_blend (
+        .ovl_cookie(ovl_cookie), .out_cookie(present_cookie),
         .clk                (mem_clk),
         .rst_n              (mem_rst_n),
         .blend_enable       (blend_en_m),

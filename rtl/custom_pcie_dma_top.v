@@ -342,6 +342,11 @@ module custom_pcie_dma_top #(
     output wire [31:0]                                      ovl_wr_slot_bytes_m,
 
     // Direct pull-mode H2C overlay stream (ovl_mem_clk domain)
+    input wire [1:0] flip_control,
+    input wire flip_submit, flip_sof,
+    input wire [31:0] flip_cookie, flip_present,
+    output wire [31:0] flip_tag, flip_admitted, flip_pending, flip_active, flip_retired, flip_frame,
+    output wire [1:0] flip_status,
     input  wire                                             ovl_base_vblank_p,
     output wire [63:0]                                      ovl_direct_tdata,
     output wire                                             ovl_direct_tvalid,
@@ -1841,7 +1846,9 @@ module custom_pcie_dma_top #(
     // priority in rq_tx_encoder, so it can never delay an H2C read.
     // ---------------------------------------------------------------------
 `ifdef SC7F0_RGB_COMPOSITOR
-    wire ovl_quiesce = ovl_quiesce_req | sg_h2c_busy;
+    wire flip_go;
+    wire flip_mux = flip_control[0] || flip_go || flip_status[1];
+    wire ovl_quiesce = ovl_quiesce_req | sg_h2c_busy | (flip_mux && !flip_control[0]);
     // Review H1: pause and discard are different things and must not be merged.
     // ovl_quiesce ALONE only stops NEW MRd issue (rtl/sc7f0_overlay_ingress.v
     // keeps consuming the completions it already owes and still stages them), so
@@ -1870,6 +1877,50 @@ module custom_pcie_dma_top #(
     wire [63:0]  pull_ing_src_addr;
     wire [31:0]  pull_ing_xfer_bytes;
     wire [15:0]  pull_ing_max_req;
+    wire blank_p;
+    wire [31:0] run_cookie, ingress_cookie;
+    wire [63:0] flip_addr;
+    wire [15:0] flip_cap;
+    reg [31:0] sent_m;
+    reg send_m;
+    wire received, new_shown;
+    wire [31:0] shown_data;
+    reg [31:0] shown;
+    always @(posedge ovl_mem_clk or negedge ovl_mem_rst_n)
+        if (!ovl_mem_rst_n) begin sent_m<=0; send_m<=0; end
+        else begin
+            if (received) send_m<=0;
+            else if (!send_m && flip_sof && flip_present!=0 && flip_present!=sent_m) begin
+                sent_m<=flip_present; send_m<=1;
+            end
+        end
+    xpm_cdc_handshake #(.WIDTH(32),.DEST_EXT_HSK(0),.DEST_SYNC_FF(4),.SRC_SYNC_FF(4))
+        u_flip_present (.src_clk(ovl_mem_clk),.src_in(sent_m),.src_send(send_m),
+                        .src_rcv(received),.dest_clk(clk),.dest_req(new_shown),
+                        .dest_out(shown_data),.dest_ack(1'b0));
+    always @(posedge clk or negedge rst_n)
+        if (!rst_n) shown<=0; else if (new_shown) shown<=shown_data;
+    wire frame_tick;
+    xpm_cdc_pulse #(.DEST_SYNC_FF(4),.REG_OUTPUT(1),.RST_USED(1))
+        u_flip_frame (.src_clk(ovl_mem_clk),.src_pulse(flip_sof),.src_rst(!ovl_mem_rst_n),
+                      .dest_clk(clk),.dest_rst(!rst_n),.dest_pulse(frame_tick));
+    reg [31:0] frame_q;
+    always @(posedge clk or negedge rst_n)
+        if(!rst_n) frame_q<=0; else if(frame_tick) frame_q<=frame_q+1'b1;
+    assign flip_frame=frame_q;
+    // Observe the exact reset release that owns the MRd issuer. A second
+    // synchronizer for mem reset creates differing epochs (26112407 CDC-11).
+    wire issue_domain_ready;
+    sc7f0_flip_scheduler u_flip (
+        .clk(clk),.rst_n(rst_n),.run_ok(issue_domain_ready && ext_tag_enable),.mode(flip_control[0]),
+        .submit(flip_submit),.blank(blank_p),.cookie(flip_cookie),.bytes(ovl_xfer_bytes),
+        .shown(shown),.addr(ovl_src_addr),.cap(ovl_max_bytes_per_req),.busy(ovl_status_busy),
+        .debt(ovl_status_quarantined),.quiet(ovl_status_quiesced && !ovl_mrd_req_valid && !pull_ing_go),
+        .issue_idle(!ovl_mrd_req_valid && ovl_status_outstanding==0 && !ovl_status_quarantined),
+        .done(ovl_ing_done_pulse),.abort_evt(ovl_plane_abort),
+        .admitted(flip_admitted),.pending(flip_pending),.active(flip_active),.retired(flip_retired),
+        .run_cookie(run_cookie),.run_addr(flip_addr),.run_cap(flip_cap),.go(flip_go),
+        .fault(flip_status[1]),.drained(flip_status[0]));
 
     sc7f0_overlay_ingress #(
         .OVL_TAG_BASE   (64),
@@ -1882,11 +1933,14 @@ module custom_pcie_dma_top #(
         .clk                   (clk),
         .rst_n                 (dma_rst_n),
         .epoch_rst_n           (rst_n),
-        .ovl_enable            (pull_ing_enable),
-        .ovl_src_addr          (pull_ing_src_addr),
-        .ovl_xfer_bytes        (pull_ing_xfer_bytes),
-        .ovl_max_bytes_per_req (pull_ing_max_req),
-        .ovl_go                (pull_ing_go),
+        .src_cookie            (flip_mux ? run_cookie : 32'd0),
+        .issue_domain_ready    (issue_domain_ready),
+        .m_axis_cookie         (ingress_cookie),
+        .ovl_enable            (flip_mux ? (!flip_status[1] && ext_tag_enable) : pull_ing_enable),
+        .ovl_src_addr          (flip_mux ? flip_addr : pull_ing_src_addr),
+        .ovl_xfer_bytes        (flip_mux ? 32'd33177600 : pull_ing_xfer_bytes),
+        .ovl_max_bytes_per_req (flip_mux ? flip_cap : pull_ing_max_req),
+        .ovl_go                (flip_mux ? flip_go : pull_ing_go),
         .quiesce               (ovl_quiesce),
         .discard_pending       (ovl_discard_pending),
         .mrd_req_valid         (ovl_mrd_req_valid),
@@ -1931,7 +1985,8 @@ module custom_pcie_dma_top #(
     assign ovl_status_counts = {27'd0, ovl_axis_ovf_sticky, ovl_sticky_err,
                                 ovl_sticky_unaligned, ovl_sticky_timeout};
 
-    wire ovl_vblank_irq_pulse;
+    wire legacy_vblank;
+    wire ovl_vblank_irq_pulse = flip_control[0] ? (flip_control[1] && frame_tick) : legacy_vblank;
     sc7f0_ovl_pull_prefetch #(
         .ACTIVE_BEATS_PER_LINE(1920),
         .ACTIVE_LINES         (2160),
@@ -1939,7 +1994,8 @@ module custom_pcie_dma_top #(
     ) u_ovl_pull_prefetch (
         .pcie_clk               (clk),
         .pcie_rst_n             (dma_rst_n),
-        .host_ovl_enable        (ovl_enable_eff),
+        .host_ovl_enable        (ovl_enable_eff && !flip_control[0]),
+        .blank_p(blank_p),.s_cookie(ingress_cookie),.m_cookie(flip_tag),
         .host_ovl_go            (ovl_go & ~ovl_abort_req),
         .host_src_addr          (ovl_src_addr),
         .host_xfer_bytes        (ovl_xfer_bytes),
@@ -1954,7 +2010,7 @@ module custom_pcie_dma_top #(
         .ing_done_pulse         (ovl_ing_done_pulse),
         .ing_abort_evt          (ovl_ingress_abort),
         .ovl_wr_irq_pulse       (ovl_wr_irq_pulse),
-        .ovl_vblank_irq_pulse   (ovl_vblank_irq_pulse),
+        .ovl_vblank_irq_pulse   (legacy_vblank),
         .ovl_wr_frames_done     (ovl_wr_frames_done),
         .ovl_wr_bytes_written   (ovl_wr_bytes_written),
         .ovl_wr_busy            (ovl_wr_busy),

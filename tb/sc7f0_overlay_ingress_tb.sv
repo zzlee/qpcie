@@ -240,7 +240,7 @@ module sc7f0_overlay_ingress_tb;
             $display("DRN t=%0d act=%0b idx=%0d tot=%0d head=%0d canrd=%0b rdpipe=%0b raddr=%0d rdata0=%02h wen=%0b wdata0=%02h wcnt=%0d room2=%0b ready=%0b",
                      $time, dut.d_active, dut.d_idx, dut.d_total, dut.head,
                      dut.drain_can_read, dut.rd_pipe, dut.ram_raddr, dut.ram_rdata[7:0],
-                     dut.fifo_wen, dut.fifo_wdata[7:0], dut.fifo_wr_count, dut.fifo_room2,
+                     dut.fifo_wen, dut.fifo_wdata[7:0], dut.wr_used, dut.fifo_room2,
                      (dut.n_live != 0) && dut.e_ready[dut.head]);
         end
     end
@@ -285,7 +285,7 @@ module sc7f0_overlay_ingress_tb;
                      dut.n_live, dut.head, dut.tail, ovl_outstanding,
                      dut.d_active, dut.d_idx, dut.d_total, ovl_bytes_issued,
                      ovl_bytes_staged, ovl_bytes_drained, ovl_unexpected,
-                     ovl_overflow, dut.fifo_wr_count);
+                     ovl_overflow, dut.wr_used);
             for (int k = 0; k < NSLOT; k = k + 1)
                 $display("%s   SLOT%0d live=%0b rdy=%0b got=%0d exp=%0d tag=%02d",
                          tag, k, dut.e_live[k], dut.e_ready[k], dut.e_got[k],

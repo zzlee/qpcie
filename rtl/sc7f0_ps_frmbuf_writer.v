@@ -103,7 +103,7 @@ module sc7f0_ps_frmbuf_writer (
     input  wire                m_axi_mm_video_RVALID,
     output wire                m_axi_mm_video_RREADY
 );
-`ifdef SC7F0_RGB_COMPOSITOR
+`ifdef SC7F0_PS_FRMBUF_RGBX
     // The CSC's 24-bit RGB stream goes straight into the RGBX writer: this IP's video
     // input carries three bytes per pixel and the writer pads each pixel to the 32-bit
     // memory word itself.  A fabric repack to 32 bits per pixel was this round's first

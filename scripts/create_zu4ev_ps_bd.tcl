@@ -1098,34 +1098,33 @@ Port;FD4A0000;FD4AFFFF;0|FPD;DPDMA;FD4C0000;FD4CFFFF;0|FPD;DDR_XMPU5_CFG;FD05000
       if {!$hdmi_control} {
         error "SC7F0_RGB_COMPOSITOR requires the full (hdmi_control) PS BD profile: HP2/HP3 and the 300 MHz dp_mem_clk only exist there"
       }
-      if {$vcu} {
-        error "SC7F0_RGB_COMPOSITOR and the VCU cannot coexist: both claim S_AXI_HP2_FPD/S_AXI_HP3_FPD and the encoder IRQ slot"
-      }
       set_property -dict [list \
         CONFIG.PSU__USE__S_AXI_GP4 {1} \
         CONFIG.PSU__SAXIGP4__DATA_WIDTH {128} \
         CONFIG.PSU__USE__S_AXI_GP5 {1} \
         CONFIG.PSU__SAXIGP5__DATA_WIDTH {128}] $zynq_ultra_ps_e_0
 
-      set hp2 [create_bd_intf_port -mode Slave -vlnv xilinx.com:interface:aximm_rtl:1.0 S_AXI_HP2_FPD]
-      set_property -dict [list CONFIG.DATA_WIDTH {128} CONFIG.ADDR_WIDTH {49} \
-          CONFIG.AWUSER_WIDTH {1} CONFIG.ARUSER_WIDTH {1} CONFIG.FREQ_HZ {300000000}] $hp2
-      connect_bd_intf_net $hp2 [get_bd_intf_pins zynq_ultra_ps_e_0/S_AXI_HP2_FPD]
+      if {!$vcu} {
+        set hp2 [create_bd_intf_port -mode Slave -vlnv xilinx.com:interface:aximm_rtl:1.0 S_AXI_HP2_FPD]
+        set_property -dict [list CONFIG.DATA_WIDTH {128} CONFIG.ADDR_WIDTH {49} \
+            CONFIG.AWUSER_WIDTH {1} CONFIG.ARUSER_WIDTH {1} CONFIG.FREQ_HZ {300000000}] $hp2
+        connect_bd_intf_net $hp2 [get_bd_intf_pins zynq_ultra_ps_e_0/S_AXI_HP2_FPD]
 
-      set hp3 [create_bd_intf_port -mode Slave -vlnv xilinx.com:interface:aximm_rtl:1.0 S_AXI_HP3_FPD]
-      set_property -dict [list CONFIG.DATA_WIDTH {128} CONFIG.ADDR_WIDTH {49} \
-          CONFIG.AWUSER_WIDTH {1} CONFIG.ARUSER_WIDTH {1} CONFIG.FREQ_HZ {250000000}] $hp3
-      connect_bd_intf_net $hp3 [get_bd_intf_pins zynq_ultra_ps_e_0/S_AXI_HP3_FPD]
+        set hp3 [create_bd_intf_port -mode Slave -vlnv xilinx.com:interface:aximm_rtl:1.0 S_AXI_HP3_FPD]
+        set_property -dict [list CONFIG.DATA_WIDTH {128} CONFIG.ADDR_WIDTH {49} \
+            CONFIG.AWUSER_WIDTH {1} CONFIG.ARUSER_WIDTH {1} CONFIG.FREQ_HZ {250000000}] $hp3
+        connect_bd_intf_net $hp3 [get_bd_intf_pins zynq_ultra_ps_e_0/S_AXI_HP3_FPD]
 
-      set_property CONFIG.ASSOCIATED_BUSIF \
-          S_AXI_HP1_FPD:S_AXI_HP2_FPD [get_bd_ports dp_mem_clk]
-      connect_bd_net [get_bd_ports dp_mem_clk] \
-        [get_bd_pins zynq_ultra_ps_e_0/saxihp2_fpd_aclk]
+        set_property CONFIG.ASSOCIATED_BUSIF \
+            S_AXI_HP1_FPD:S_AXI_HP2_FPD [get_bd_ports dp_mem_clk]
+        connect_bd_net [get_bd_ports dp_mem_clk] \
+          [get_bd_pins zynq_ultra_ps_e_0/saxihp2_fpd_aclk]
 
-      create_bd_port -dir I -type clk -freq_hz 250000000 ovl_hp3_clk
-      set_property CONFIG.ASSOCIATED_BUSIF S_AXI_HP3_FPD [get_bd_ports ovl_hp3_clk]
-      connect_bd_net [get_bd_ports ovl_hp3_clk] \
-        [get_bd_pins zynq_ultra_ps_e_0/saxihp3_fpd_aclk]
+        create_bd_port -dir I -type clk -freq_hz 250000000 ovl_hp3_clk
+        set_property CONFIG.ASSOCIATED_BUSIF S_AXI_HP3_FPD [get_bd_ports ovl_hp3_clk]
+        connect_bd_net [get_bd_ports ovl_hp3_clk] \
+          [get_bd_pins zynq_ultra_ps_e_0/saxihp3_fpd_aclk]
+      }
 
       # Reader-B (overlay plane) reset on PS EMIO GPIO bit 3, the same idiom the
       # VCU used for bit 0: the in-tree xilinx_frmbuf driver requires a
@@ -1335,7 +1334,20 @@ Port;FD4A0000;FD4AFFFF;0|FPD;DPDMA;FD4C0000;FD4CFFFF;0|FPD;DDR_XMPU5_CFG;FD05000
       connect_bd_intf_net [get_bd_intf_pins vcu_0/M_AXI_ENC1] [get_bd_intf_pins xbar_vcu_enc/S01_AXI]
       connect_bd_net [get_bd_ports dp_mem_clk] [get_bd_pins xbar_vcu_enc/aclk]
       connect_bd_net [get_bd_pins vcu_rst_mem/peripheral_aresetn] [get_bd_pins xbar_vcu_enc/aresetn]
-      connect_bd_intf_net [get_bd_intf_pins xbar_vcu_enc/M00_AXI] [get_bd_intf_pins zynq_ultra_ps_e_0/S_AXI_HP2_FPD]
+
+      # Pipeline register slice between xbar_vcu_enc and PS8 HP2 to break the
+      # 300 MHz hard-block VCU_i -> LUT3 -> PS8_i setup path (-10 ps in 26112401).
+      set reg_vcu_enc [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_register_slice:2.1 reg_vcu_enc]
+      set_property -dict [list \
+        CONFIG.PROTOCOL {AXI4} CONFIG.READ_WRITE_MODE {READ_WRITE} \
+        CONFIG.DATA_WIDTH {128} CONFIG.ADDR_WIDTH {44} CONFIG.ID_WIDTH {5} \
+        CONFIG.REG_AW {7} CONFIG.REG_W {7} CONFIG.REG_B {7} \
+        CONFIG.REG_AR {7} CONFIG.REG_R {7} \
+      ] $reg_vcu_enc
+      connect_bd_net [get_bd_ports dp_mem_clk] [get_bd_pins reg_vcu_enc/aclk]
+      connect_bd_net [get_bd_pins vcu_rst_mem/peripheral_aresetn] [get_bd_pins reg_vcu_enc/aresetn]
+      connect_bd_intf_net [get_bd_intf_pins xbar_vcu_enc/M00_AXI] [get_bd_intf_pins reg_vcu_enc/S_AXI]
+      connect_bd_intf_net [get_bd_intf_pins reg_vcu_enc/M_AXI] [get_bd_intf_pins zynq_ultra_ps_e_0/S_AXI_HP2_FPD]
 
       # MCU path: a 1:1 32 -> 128-bit upsizer, nothing else.  SI_ID_WIDTH keeps
       # the VCU's 3-bit MCU ID so responses find their requester.
@@ -1462,48 +1474,33 @@ Port;FD4A0000;FD4AFFFF;0|FPD;DPDMA;FD4C0000;FD4CFFFF;0|FPD;DDR_XMPU5_CFG;FD05000
     }
     set_property -dict [list CONFIG.PSU__USE__IRQ1 {1}] $zynq_ultra_ps_e_0
     create_bd_port -dir I -from 3 -to 0 -type intr pl_ps_irq1
-    # Four bits into a four-bit-wide vector: no concat, no truncation, no
-    # renumbering of anything on pl_ps_irq0, and no source left unrouted (the
-    # previous 3-bit vector had nowhere to put hdmi_tx_irq).
     connect_bd_net [get_bd_ports pl_ps_irq1] [get_bd_pins zynq_ultra_ps_e_0/pl_ps_irq1]
-    # pl_ps_irq0 must reach the PS in this personality too.  Bits 0..4 carry the
-    # mailbox, VPHY (SPI 90 / INTID 122), HDMI RX SS (SPI 91 / INTID 123),
-    # dualpath and the capture writer.  The $disp, $vcu and default branches all
-    # made this connection; the RGB branch connected only pl_ps_irq1, so the whole
-    # IRQ0 bank floated.  Measured consequence on the deployed card: an INTR_EN
-    # write of the vendor RX_CLKDET_FREQ_CHANGE mask cleared that bit in INTR_MASK
-    # (0xB0000118 0xC00006FF -> 0xC000067F) and a fresh reference-clock event
-    # re-latched INTR_STS (0xB000011C 0x00000000 -> 0x00000080), yet GIC INTID 122
-    # counted zero forever, while the only bank that is wired here (pl_ps_irq1,
-    # HDMI TX SS at INTID 139) did deliver an interrupt.
-    connect_bd_net [get_bd_ports pl_ps_irq0] [get_bd_pins zynq_ultra_ps_e_0/pl_ps_irq0]
-    # Assert the actual wiring, not the port's existence.  This block runs while
-    # the block design is being built: there is no open synthesized or
-    # implemented netlist yet, so the netlist commands get_nets/get_pins are
-    # illegal here and raise [Common 17-53] "No open design" (that is what
-    # aborted round M's first attempt).  Use the BD-scoped queries only, and
-    # require both ends of the connection to resolve to one and the same BD net.
-    # Measured in Vivado 2023.2 (preflight log logs/bd_preflight.log): a BD input
-    # port is NOT a bd_pin, so get_bd_pins of the net returns the single IP pin
-    # only and the port is enumerated by get_bd_ports.  The assertion therefore
-    # requires exactly one IP pin and exactly one BD port on that one shared net,
-    # i.e. the net really is port -> PS pin and nothing else taps or replaces it.
-    set sc7f0_irq0_pin_nets [get_bd_nets -of_objects [get_bd_pins zynq_ultra_ps_e_0/pl_ps_irq0]]
-    set sc7f0_irq0_port_nets [get_bd_nets -of_objects [get_bd_ports pl_ps_irq0]]
-    set sc7f0_irq0_net [lindex $sc7f0_irq0_pin_nets 0]
-    set sc7f0_irq0_net_pins [get_bd_pins -of_objects $sc7f0_irq0_net]
-    set sc7f0_irq0_net_ports [get_bd_ports -of_objects $sc7f0_irq0_net]
-    if {[llength $sc7f0_irq0_pin_nets] != 1 ||
-        [llength $sc7f0_irq0_port_nets] != 1 ||
-        $sc7f0_irq0_net ne [lindex $sc7f0_irq0_port_nets 0] ||
-        [llength $sc7f0_irq0_net_pins] != 1 ||
-        [llength $sc7f0_irq0_net_ports] != 1} {
-      error [format {SC7F0_RGB_IRQ0_ASSERT ps_pin_net_count=%d bd_port_net_count=%d ps_pin_net=%s bd_port_net=%s net_pin_count=%d net_port_count=%d expected exactly one shared BD net carrying exactly one BD pin (zynq_ultra_ps_e_0/pl_ps_irq0) and exactly one BD port (pl_ps_irq0)} [llength $sc7f0_irq0_pin_nets] [llength $sc7f0_irq0_port_nets] [join $sc7f0_irq0_pin_nets ,] [join $sc7f0_irq0_port_nets ,] [llength $sc7f0_irq0_net_pins] [llength $sc7f0_irq0_net_ports]]
+    if {$vcu} {
+      # When VCU coexists with RGB_COMPOSITOR (direct pull, HP2/HP3 free),
+      # pl_ps_irq0[4:0] stays SPI 89..93 and vcu_host_interrupt takes bit 5 (SPI 94).
+      set vcu_irq_cat [create_bd_cell -type ip -vlnv xilinx.com:ip:xlconcat:2.1 vcu_irq_cat]
+      set_property -dict [list CONFIG.NUM_PORTS {2} CONFIG.IN0_WIDTH {5} CONFIG.IN1_WIDTH {1}] $vcu_irq_cat
+      connect_bd_net [get_bd_ports pl_ps_irq0] [get_bd_pins vcu_irq_cat/In0]
+      connect_bd_net [get_bd_pins vcu_0/vcu_host_interrupt] [get_bd_pins vcu_irq_cat/In1]
+      connect_bd_net [get_bd_pins vcu_irq_cat/dout] [get_bd_pins zynq_ultra_ps_e_0/pl_ps_irq0]
+      puts [format {SC7F0_RGB_IRQ_OK pl_ps_irq1[3:0] = SPI 104..107; pl_ps_irq0[4:0] = SPI 89..93; vcu_host_interrupt = SPI 94}]
+    } else {
+      connect_bd_net [get_bd_ports pl_ps_irq0] [get_bd_pins zynq_ultra_ps_e_0/pl_ps_irq0]
+      set sc7f0_irq0_pin_nets [get_bd_nets -of_objects [get_bd_pins zynq_ultra_ps_e_0/pl_ps_irq0]]
+      set sc7f0_irq0_port_nets [get_bd_nets -of_objects [get_bd_ports pl_ps_irq0]]
+      set sc7f0_irq0_net [lindex $sc7f0_irq0_pin_nets 0]
+      set sc7f0_irq0_net_pins [get_bd_pins -of_objects $sc7f0_irq0_net]
+      set sc7f0_irq0_net_ports [get_bd_ports -of_objects $sc7f0_irq0_net]
+      if {[llength $sc7f0_irq0_pin_nets] != 1 ||
+          [llength $sc7f0_irq0_port_nets] != 1 ||
+          $sc7f0_irq0_net ne [lindex $sc7f0_irq0_port_nets 0] ||
+          [llength $sc7f0_irq0_net_pins] != 1 ||
+          [llength $sc7f0_irq0_net_ports] != 1} {
+        error [format {SC7F0_RGB_IRQ0_ASSERT ps_pin_net_count=%d bd_port_net_count=%d ps_pin_net=%s bd_port_net=%s net_pin_count=%d net_port_count=%d expected exactly one shared BD net carrying exactly one BD pin (zynq_ultra_ps_e_0/pl_ps_irq0) and exactly one BD port (pl_ps_irq0)} [llength $sc7f0_irq0_pin_nets] [llength $sc7f0_irq0_port_nets] [join $sc7f0_irq0_pin_nets ,] [join $sc7f0_irq0_port_nets ,] [llength $sc7f0_irq0_net_pins] [llength $sc7f0_irq0_net_ports]]
+      }
+      puts [format {SC7F0_RGB_IRQ_OK pl_ps_irq1[3:0] = tx/overlay_writer/readerB/readerA = DT SPI 107/106/105/104 (INTID 139/138/137/136); pl_ps_irq0 stays 5 bits = SPI 89..93}]
+      puts [format {SC7F0_RGB_IRQ0_CONNECTED net=%s net_pin=%s net_port=%s mailbox/VPHY/hdmi_rx/dualpath/capture = SPI 89..93 (INTID 121..125)} $sc7f0_irq0_net [join $sc7f0_irq0_net_pins ,] [join $sc7f0_irq0_net_ports ,]]
     }
-    # Braced format strings: a bare [3:0] inside a double-quoted Tcl string is a
-    # command substitution, not text.
-    puts [format {SC7F0_RGB_IRQ_OK pl_ps_irq1[3:0] = tx/overlay_writer/readerB/readerA = DT SPI 107/106/105/104 (INTID 139/138/137/136); pl_ps_irq0 stays 5 bits = SPI 89..93}]
-    puts [format {SC7F0_RGB_IRQ0_CONNECTED net=%s net_pin=%s net_port=%s mailbox/VPHY/hdmi_rx/dualpath/capture = SPI 89..93 (INTID 121..125)} $sc7f0_irq0_net [join $sc7f0_irq0_net_pins ,] [join $sc7f0_irq0_net_ports ,]]
   } elseif {$vcu} {
     # xlconcat keeps the legacy vector in dout[4:0] and puts the VCU encoder
     # interrupt in dout[5] (GIC SPI 94).  IN0_WIDTH makes In0 a 5-bit input.

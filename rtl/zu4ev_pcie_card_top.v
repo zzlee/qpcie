@@ -1569,6 +1569,9 @@ module zu4ev_pcie_card_top #(
     wire [1:0]   ovl_wr_last_slot_m;
     wire [31:0]  ovl_wr_slot_bytes_m;
     wire         ovl_base_vblank_p;
+    wire [31:0] flip_tag, flip_present, flip_cookie, flip_admitted, flip_pending, flip_active, flip_retired, flip_frame;
+    wire [1:0] flip_control, flip_status;
+    wire flip_sof, flip_submit;
     wire [63:0]  ovl_direct_tdata;
     wire         ovl_direct_tvalid, ovl_direct_tready, ovl_direct_tlast, ovl_direct_tuser;
     wire [31:0]  bar0_ovl_awaddr, bar0_ovl_wdata, bar0_ovl_araddr, bar0_ovl_rdata;
@@ -1663,6 +1666,7 @@ module zu4ev_pcie_card_top #(
         .s_o_axis_tlast(ovl_direct_tlast),
         .s_o_axis_tuser(ovl_direct_tuser),
         .base_vblank_p(ovl_base_vblank_p),
+        .ovl_cookie(flip_tag), .present_cookie(flip_present), .output_sof(flip_sof),
         .m_axis_video_tdata(disp_video_tdata),
         .m_axis_video_tvalid(disp_video_tvalid),
         .m_axis_video_tready(disp_video_tready),
@@ -1679,6 +1683,9 @@ module zu4ev_pcie_card_top #(
         .blend_base_passthru(blend_base_passthru));
 
     sc7f0_rgb_overlay_ctrl u_overlay_ctrl (
+        .flip_control(flip_control), .flip_submit(flip_submit), .flip_cookie(flip_cookie),
+        .flip_admitted(flip_admitted), .flip_pending(flip_pending), .flip_active(flip_active),
+        .flip_retired(flip_retired), .flip_frame(flip_frame), .flip_status(flip_status),
         .csr_clk(pl_clk0),      .csr_rst_n(sys_100m_rst_n),
         .pcie_clk(pcie_user_clk), .pcie_rst_n(pcie_user_rst_n),
         .mem_clk(capture_clk),  .mem_rst_n(dp_mem_rst_n),
@@ -3352,6 +3359,10 @@ module zu4ev_pcie_card_top #(
         .ovl_wr_last_slot_m              (ovl_wr_last_slot_m),
         .ovl_wr_slot_bytes_m             (ovl_wr_slot_bytes_m),
         .ovl_base_vblank_p               (ovl_base_vblank_p),
+        .flip_tag(flip_tag), .flip_present(flip_present), .flip_sof(flip_sof),
+        .flip_control(flip_control), .flip_submit(flip_submit), .flip_cookie(flip_cookie),
+        .flip_admitted(flip_admitted), .flip_pending(flip_pending), .flip_active(flip_active),
+        .flip_retired(flip_retired), .flip_frame(flip_frame), .flip_status(flip_status),
         .ovl_direct_tdata                (ovl_direct_tdata),
         .ovl_direct_tvalid               (ovl_direct_tvalid),
         .ovl_direct_tready               (ovl_direct_tready),
@@ -3530,6 +3541,7 @@ module zu4ev_pcie_card_top #(
         .M_AXI_HPM1_FPD_wvalid(ps_hpm1_wvalid),
 `endif
 `ifdef SC7F0_RGB_COMPOSITOR
+`ifndef SC7F0_ENABLE_VCU
         .ovl_hp3_clk(capture_clk),
         // ---- S_AXI_HP2_FPD: idle (overlay reader replaced by direct pull) ----
         .S_AXI_HP2_FPD_awaddr(49'd0), .S_AXI_HP2_FPD_awlen(8'd0),
@@ -3572,6 +3584,7 @@ module zu4ev_pcie_card_top #(
         .S_AXI_HP3_FPD_arvalid(1'b0), .S_AXI_HP3_FPD_arready(),
         .S_AXI_HP3_FPD_rdata(), .S_AXI_HP3_FPD_rid(), .S_AXI_HP3_FPD_rresp(),
         .S_AXI_HP3_FPD_rlast(), .S_AXI_HP3_FPD_rvalid(), .S_AXI_HP3_FPD_rready(1'b0),
+`endif
 
         // Reader-B reset, PS EMIO GPIO output bit 3.
         .frmbuf_rd_b_resetn(reader_b_gpio_reset),
