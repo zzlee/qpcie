@@ -80,6 +80,8 @@ ssh "$HOST" bash -s -- "$REMOTE" "$VERSION" "$VERIFY_ONLY" <<'REMOTE_SCRIPT' 2>&
 set -euo pipefail
 DIR=$1 VERSION=$2 VERIFY_ONLY=$3
 CTL="$HOME/sc7f0/bin/sc7f0ctl"
+export TMPDIR="$DIR/tmp"
+mkdir -m 700 "$TMPDIR"
 exec 9>"$HOME/sc7f0/tmp/.upgrade.lock"
 flock -n 9 || { echo 'Another upgrade is active'; exit 1; }
 cd "$DIR"
@@ -94,7 +96,7 @@ grep -E '  (upgrade-[0-9]+\.tar|host-driver-src\.tar\.gz|host-tools-src\.tar\.gz
 tar -xzf host-tools-src.tar.gz
 cc -O2 -Wall test_app/qpcie_upgrade.c -o qpcie_upgrade
 if ((!VERIFY_ONLY)); then
-    if fuser /dev/video0 2>/dev/null; then
+    if sudo -n fuser /dev/video0 /dev/video1 /dev/qpcie-ovl-* 2>/dev/null; then
         echo 'Capture is active; stop preview/capture before flashing' >&2; exit 1
     fi
     tar -xzf host-driver-src.tar.gz
@@ -115,9 +117,8 @@ fi
 # COMMIT - the fallback picks the candidate whose srcversion equals the running
 # module's, which is the same object, not merely some file with the right name.
 RUNNING_SRCVERSION=$(cat /sys/module/qpcie/srcversion 2>/dev/null || true)
-INSTALLED=$(modinfo -n qpcie 2>/dev/null || true)
-if [[ -z $INSTALLED ]]; then
-    for candidate in "/lib/modules/$(uname -r)/extra/qpcie.ko" "$HOME/qpcie.ko"; do
+INSTALLED=
+    for candidate in "$HOME/sc7f0/bin/qpcie.ko" "$(modinfo -n qpcie 2>/dev/null || true)" "$HOME/sc7f0/src/driver/qpcie.ko"; do
         [[ -f $candidate ]] || continue
         sv=$(modinfo -F srcversion "$candidate" 2>/dev/null || true)
         if [[ -n $RUNNING_SRCVERSION && $sv == "$RUNNING_SRCVERSION" ]]; then
@@ -126,13 +127,11 @@ if [[ -z $INSTALLED ]]; then
             break
         fi
     done
-fi
 [[ -n $INSTALLED ]] || {
     echo 'REFUSE_UNKNOWN_RUNNING_MODULE: cannot find the file that backs the loaded qpcie' >&2
     echo "  modinfo -n failed and no candidate matches srcversion=${RUNNING_SRCVERSION:-unknown}" >&2
     exit 1; }
 cp "$INSTALLED" module-before.ko
-[[ ! -f $HOME/qpcie.ko ]] || cp "$HOME/qpcie.ko" home-module-before.ko
 # rmmod, NOT modprobe -r: keep the vb2 dependencies loaded. Restore on failure.
 systemctl --user stop wireplumber
 trap 'systemctl --user start wireplumber || true' EXIT
@@ -144,9 +143,9 @@ if ! sudo -n insmod driver/qpcie.ko; then
     echo 'New driver rejected; restored old module. Firmware not committed.' >&2
     exit 1
 fi
-sudo -n install -D -m 0644 driver/qpcie.ko "/lib/modules/$(uname -r)/extra/qpcie.ko"
-sudo -n depmod -a
-cp driver/qpcie.ko "$HOME/qpcie.ko"
+# This lab host keeps the module used for explicit insmod inside its SC7F0
+# tree. Do not modify the system module tree/indices or the home root.
+install -m 0644 driver/qpcie.ko "$HOME/sc7f0/bin/qpcie.ko"
 sudo -n ./qpcie_upgrade --commit | tee commit.log
 # Independent post-COMMIT readback over the PS mailbox, before any reboot.
 sudo -n "$CTL" exec 'sha256sum /run/media/BOOT-mmcblk0p1/BOOT.BIN /run/media/BOOT-mmcblk0p1/image.ub /run/media/BOOT-mmcblk0p1/boot.scr' > readback.sha256
