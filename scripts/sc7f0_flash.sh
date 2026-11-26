@@ -68,6 +68,12 @@ fi
 VERSION=$(<"$OUT/VERSION")
 [[ $VERSION =~ ^[0-9]{8}$ ]] || exit 1
 (cd "$OUT"; sha256sum -c RELEASE.sha256)
+PL_VERSION=$VERSION
+if [[ -f $OUT/PL_VERSION || $VERSION == 26112501 ]]; then
+    # Reviewed lab release manifest (not a signature supplied by the package).
+    python3 "$(dirname "$0")/sc7f0_lab_transition.py" "$OUT/RELEASE.sha256"
+    PL_VERSION=$(cat "$OUT/PL_VERSION"); [[ $PL_VERSION == 26112419 ]]
+fi
 if ((!VERIFY_ONLY && !YES)); then
     read -r -p "Write card eMMC and restart CARD PS only on $HOST (0x$VERSION)? Type YES: " answer
     [[ $answer == YES ]] || { echo 'Cancelled'; exit 1; }
@@ -75,10 +81,13 @@ fi
 REMOTE=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$HOST" 'mkdir -p "$HOME/sc7f0/tmp" && mktemp -d "$HOME/sc7f0/tmp/upgrade.XXXXXXXX"')
 [[ $REMOTE =~ ^/[a-zA-Z0-9_./-]+$ ]] || { echo 'Unexpected remote path' >&2; exit 1; }
 scp "$OUT/upgrade-$VERSION.tar" "$OUT/host-driver-src.tar.gz" "$OUT/host-tools-src.tar.gz" "$OUT/RELEASE.sha256" "$HOST:$REMOTE/"
+if [[ $VERSION != "$PL_VERSION" ]]; then
+    scp "$(dirname "$0")/sc7f0_lab_transition.py" "$HOST:$REMOTE/"
+fi
 # All operations share one remote lock. A failed VERIFY never reaches COMMIT.
-ssh "$HOST" bash -s -- "$REMOTE" "$VERSION" "$VERIFY_ONLY" <<'REMOTE_SCRIPT' 2>&1 | tee "$OUT/logs/flash.log"
+ssh "$HOST" bash -s -- "$REMOTE" "$VERSION" "$VERIFY_ONLY" "$PL_VERSION" <<'REMOTE_SCRIPT' 2>&1 | tee "$OUT/logs/flash.log"
 set -euo pipefail
-DIR=$1 VERSION=$2 VERIFY_ONLY=$3
+DIR=$1 VERSION=$2 VERIFY_ONLY=$3 PL_VERSION=$4
 CTL="$HOME/sc7f0/bin/sc7f0ctl"
 export TMPDIR="$DIR/tmp"
 mkdir -m 700 "$TMPDIR"
@@ -89,19 +98,86 @@ echo "Remote logs/backups: $DIR"
 [[ $(uname -m) == x86_64 ]]
 BOOT_BEFORE=$(</proc/sys/kernel/random/boot_id)
 printf '%s\n' "$BOOT_BEFORE" > host-boot-id-before
-sudo -n "$CTL" status
-sudo -n "$CTL" exec 'set -eu; test "$(uname -m)" = aarch64; for s in qpcie-debugd qpcie-upgrade-daemon; do systemctl is-active --quiet "$s" || exit 1; done; ps -ef | grep qpcie'
 # Verify exactly the uploaded artifacts before unpacking/building on x86.
+if [[ $VERSION != "$PL_VERSION" ]]; then
+    python3 sc7f0_lab_transition.py RELEASE.sha256
+fi
 grep -E '  (upgrade-[0-9]+\.tar|host-driver-src\.tar\.gz|host-tools-src\.tar\.gz)$' RELEASE.sha256 | sha256sum -c -
 tar -xzf host-tools-src.tar.gz
 cc -O2 -Wall test_app/qpcie_upgrade.c -o qpcie_upgrade
-if ((!VERIFY_ONLY)); then
+orig_kms=$(cat /sys/module/qpcie/parameters/kms 2>/dev/null || echo N)
+if ((!VERIFY_ONLY)) || [[ $VERSION != "$PL_VERSION" ]]; then
     if sudo -n fuser /dev/video0 /dev/video1 /dev/qpcie-ovl-* 2>/dev/null; then
         echo 'Capture is active; stop preview/capture before flashing' >&2; exit 1
     fi
     tar -xzf host-driver-src.tar.gz
-    make -C driver -j4
+    kms_build=0; [[ $VERSION == "$PL_VERSION" && $orig_kms != Y ]] || kms_build=1
+    make -C driver -j4 QPCIE_KMS="$kms_build"
+    if ((kms_build)); then nm --defined-only driver/qpcie.ko | grep -w qpcie_kms_protect >kms-symbol; fi
     [[ $(modinfo -F vermagic driver/qpcie.ko) == "$(uname -r) "* ]]
+    sha256sum driver/qpcie.ko > target-module.sha256
+    uname -r > target-kernel
+fi
+resolve_running_module(){
+RUNNING_SRCVERSION=$(cat /sys/module/qpcie/srcversion 2>/dev/null || true)
+INSTALLED=
+RUNNING_ID=$(tail -c20 /sys/module/qpcie/notes/.note.gnu.build-id | xxd -p)
+    # An engineering source can have been insmod'ed from its own staging
+    # directory. Never substitute a similarly named but mismatched module.
+    while IFS= read -r -d '' candidate; do
+        [[ -f $candidate ]] || continue
+        sv=$(modinfo -F srcversion "$candidate" 2>/dev/null || true)
+        id=$(readelf -n "$candidate" | awk '/Build ID:/ {print $NF}'); if [[ -n $RUNNING_SRCVERSION && $sv == "$RUNNING_SRCVERSION" && -n $RUNNING_ID && $id == "$RUNNING_ID" ]]; then
+            INSTALLED=$candidate
+            echo "RUNNING_MODULE_RESOLVED $candidate srcversion=$sv"
+            break
+        fi
+    done < <(printf '%s\0' "$HOME/sc7f0/bin/qpcie.ko" "$(modinfo -n qpcie 2>/dev/null || true)" "$HOME/sc7f0/src/driver/qpcie.ko"
+             find "$HOME/sc7f0/tmp" -xdev -path "$DIR" -prune -o -type f -name qpcie.ko -print0)
+[[ -n $INSTALLED ]] || {
+    echo 'REFUSE_UNKNOWN_RUNNING_MODULE: cannot find the file that backs the loaded qpcie' >&2
+    echo "  modinfo -n failed and no candidate matches srcversion=${RUNNING_SRCVERSION:-unknown}" >&2
+    exit 1; }
+ }
+# A KMS owner hides raw PCI resources by design. Transition only at idle to
+# maintenance on the *same verified module*, inside this transaction's lock.
+maintenance=0
+finish_flash(){
+    local rc=$?; trap - EXIT
+    if ((maintenance)); then
+        sudo -n rmmod qpcie && sudo -n insmod "$DIR/kms-before.ko" kms=1 || rc=1
+    fi
+    systemctl --user start wireplumber || rc=1
+    exit "$rc"
+}
+if [[ $orig_kms == Y ]]; then
+    resolve_running_module; cp "$INSTALLED" kms-before.ko
+    systemctl --user stop wireplumber;trap finish_flash EXIT
+    [[ $(cat /sys/module/qpcie/refcnt) == 0 ]] && sudo -n grep -qx '[[:space:]]*active=0' /sys/kernel/debug/dri/0000:03:00.0/state || exit 1
+    if sudo -n fuser /dev/dri/card0 /dev/video0 /dev/video1 /dev/qpcie-*; then exit 1; fi
+    sudo -n rmmod qpcie; if ! sudo -n insmod kms-before.ko kms=0;then sudo -n insmod kms-before.ko kms=1;exit 1;fi
+    maintenance=1
+fi
+sudo -n "$CTL" status
+sudo -n "$CTL" exec 'set -eu; test "$(uname -m)" = aarch64; for s in qpcie-debugd qpcie-upgrade-daemon; do systemctl is-active --quiet "$s" || exit 1; done; ps -ef | grep qpcie'
+mode=standard
+if [[ $VERSION != "$PL_VERSION" ]]; then
+    sudo -n ./qpcie_upgrade --status > source-status
+    source_pl=$(sed -nE 's/^ -> Hardware Version  : 0x([0-9A-F]{8}) .*/\1/p' source-status)
+    source_ps=$(sudo -n "$CTL" exec 'set -e; if test -e /etc/sc7f0-ps-release; then cat /etc/sc7f0-ps-release; else h=$(sha256sum /usr/bin/sc7f0_vcud); echo "vcud:${h%% *}"; fi')
+    # The source and target FITs contain the same VERIFY/COMMIT daemon.
+    # Measure the running process, not just a path in the root filesystem.
+    sudo -n "$CTL" exec 'set -e; p=$(systemctl show -p MainPID --value qpcie-upgrade-daemon); sha256sum /proc/$p/exe' > source-transport.sha256
+    grep -Ex '6fc60056f3609a19c68b162ef6ff252deecaf81173eddd89be9bff7baa845b40  /proc/[1-9][0-9]*/exe' source-transport.sha256
+    sudo -n "$CTL" exec 'grep -q "^/dev/mmcblk0p1 /run/media/BOOT-mmcblk0p1 " /proc/mounts && sha256sum /run/media/BOOT-mmcblk0p1/BOOT.BIN /run/media/BOOT-mmcblk0p1/image.ub /run/media/BOOT-mmcblk0p1/boot.scr' > source-emmc.sha256
+    mode=$(python3 sc7f0_lab_transition.py RELEASE.sha256 "$source_ps" "$source_pl" source-emmc.sha256)
+    if [[ $mode == full-boot-chain ]]; then
+        # ZynqMP CRL_APB.BOOT_MODE_USER: measured eMMC mode, no alternate
+        # boot selection. An SD-started PS can also see the eMMC partition.
+        sudo -n "$CTL" exec 'set -e; pm=/sys/kernel/debug/zynqmp-firmware/pm; echo PM_MMIO_READ 0xff5e0200 > "$pm"; cat "$pm"' > source-boot-mode
+        grep -Eix 'REG value: 0x0*6' source-boot-mode
+    fi
+    echo "Verified $mode source PS=$source_ps PL=$source_pl target PS=$VERSION PL=$PL_VERSION" | tee transition.log
 fi
 sudo -n ./qpcie_upgrade --package "upgrade-$VERSION.tar" | tee verify.log
 sudo -n "$CTL" exec 'tail -n 15 /var/log/messages'
@@ -116,36 +192,31 @@ fi
 # ("modinfo: ERROR: Module qpcie not found") and aborts the flash before any
 # COMMIT - the fallback picks the candidate whose srcversion equals the running
 # module's, which is the same object, not merely some file with the right name.
-RUNNING_SRCVERSION=$(cat /sys/module/qpcie/srcversion 2>/dev/null || true)
-INSTALLED=
-    for candidate in "$HOME/sc7f0/bin/qpcie.ko" "$(modinfo -n qpcie 2>/dev/null || true)" "$HOME/sc7f0/src/driver/qpcie.ko"; do
-        [[ -f $candidate ]] || continue
-        sv=$(modinfo -F srcversion "$candidate" 2>/dev/null || true)
-        if [[ -n $RUNNING_SRCVERSION && $sv == "$RUNNING_SRCVERSION" ]]; then
-            INSTALLED=$candidate
-            echo "RUNNING_MODULE_RESOLVED $candidate srcversion=$sv"
-            break
-        fi
-    done
-[[ -n $INSTALLED ]] || {
-    echo 'REFUSE_UNKNOWN_RUNNING_MODULE: cannot find the file that backs the loaded qpcie' >&2
-    echo "  modinfo -n failed and no candidate matches srcversion=${RUNNING_SRCVERSION:-unknown}" >&2
-    exit 1; }
+resolve_running_module
 cp "$INSTALLED" module-before.ko
+sha256sum module-before.ko > module-before.sha256
 # rmmod, NOT modprobe -r: keep the vb2 dependencies loaded. Restore on failure.
 systemctl --user stop wireplumber
-trap 'systemctl --user start wireplumber || true' EXIT
+trap finish_flash EXIT
 sudo -n modprobe videobuf2-v4l2
 sudo -n modprobe videobuf2-dma-sg
-sudo -n rmmod qpcie
-if ! sudo -n insmod driver/qpcie.ko; then
-    sudo -n insmod module-before.ko
-    echo 'New driver rejected; restored old module. Firmware not committed.' >&2
-    exit 1
+[[ $(cat /sys/module/qpcie/refcnt) == 0 ]]
+if sudo -n fuser /dev/dri/card0 /dev/video0 /dev/video1 /dev/qpcie-*; then exit 1; fi
+if [[ $mode == standard ]]; then
+    sudo -n rmmod qpcie
+    if ! sudo -n insmod driver/qpcie.ko; then
+        sudo -n insmod module-before.ko
+        echo 'New driver rejected; restored old module. Firmware not committed.' >&2
+        exit 1
+    fi
+    install -m 0644 driver/qpcie.ko "$HOME/sc7f0/bin/qpcie.ko"
 fi
-# This lab host keeps the module used for explicit insmod inside its SC7F0
-# tree. Do not modify the system module tree/indices or the home root.
-install -m 0644 driver/qpcie.ko "$HOME/sc7f0/bin/qpcie.ko"
+# For lab transitions keep the verified source management module through COMMIT
+# and reset. Its peer and the target use identical upgrade client source.
+PS_BOOT_BEFORE=$(sudo -n "$CTL" exec 'cat /proc/sys/kernel/random/boot_id')
+[[ $PS_BOOT_BEFORE =~ ^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$ ]]
+printf '%s\n' "$PS_BOOT_BEFORE" > ps-boot-id-before
+maintenance=0 # once COMMIT is issued, never apply a blind rollback
 sudo -n ./qpcie_upgrade --commit | tee commit.log
 # Independent post-COMMIT readback over the PS mailbox, before any reboot.
 sudo -n "$CTL" exec 'sha256sum /run/media/BOOT-mmcblk0p1/BOOT.BIN /run/media/BOOT-mmcblk0p1/image.ub /run/media/BOOT-mmcblk0p1/boot.scr' > readback.sha256
@@ -156,10 +227,7 @@ actual={Path(n).name:h for h,n in (line.split() for line in Path('readback.sha25
 assert actual==expected, (actual,expected)
 print('EMMC_READBACK_SHA_PASS')
 PY
-# The PS boot id before the reset is the only proof later that the card really
-# restarted; a stale eMMC readback plus an unchanged boot id is "nothing happened".
-PS_BOOT_BEFORE=$( { sudo -n "$CTL" exec 'cat /proc/sys/kernel/random/boot_id' | grep -Eo '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | tail -1; } || true )
-[[ -n $PS_BOOT_BEFORE ]] || { echo 'REFUSE_UNKNOWN_PS_BOOT_ID: the PS boot id could not be read before the reset, so "the PS restarted" could never be proved.' >&2; exit 1; }
+[[ $(sudo -n "$CTL" exec 'cat /proc/sys/kernel/random/boot_id') == "$PS_BOOT_BEFORE" ]]
 sudo -n ./qpcie_upgrade --reboot | tee reboot.log
 ready=0
 for attempt in $(seq 1 45); do
@@ -168,7 +236,7 @@ for attempt in $(seq 1 45); do
 done
 [[ $ready == 1 ]] || { echo 'PS did not resume; inspect PCIe/card boot. Do NOT reboot the x86 host automatically.' >&2; exit 1; }
 sudo -n ./qpcie_upgrade --status | tee active-version.log
-grep -qi "Hardware Version.*0x$VERSION" active-version.log
+grep -qi "Hardware Version.*0x$PL_VERSION" active-version.log
 sudo -n "$CTL" exec 'uname -a; for s in qpcie-debugd qpcie-upgrade-daemon; do systemctl is-active --quiet "$s" || exit 1; done; ps -ef | grep qpcie'
 
 # ------------------------------------------------------------------ stage 12
@@ -225,8 +293,24 @@ print('EMMC_PERSISTED_ACROSS_REBOOT')
 PY
 PS_BOOT_AFTER=$( { sudo -n "$CTL" exec 'cat /proc/sys/kernel/random/boot_id' | grep -Eo '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | tail -1; } || true )
 [[ -n $PS_BOOT_AFTER && $PS_BOOT_AFTER != "$PS_BOOT_BEFORE" ]] || { echo "PS boot id is unchanged (${PS_BOOT_AFTER:-unreadable}); the warm reset did not actually happen." >&2; exit 1; }
+if [[ $VERSION != "$PL_VERSION" ]]; then
+    sudo -n "$CTL" exec 'cat /etc/sc7f0-ps-release' | grep -Fx "$VERSION"
+fi
 echo "PS_BOOT_ID $PS_BOOT_BEFORE -> $PS_BOOT_AFTER (the PS restarted)"
 [[ $(</proc/sys/kernel/random/boot_id) == "$BOOT_BEFORE" ]] || { echo 'The x86 host boot id changed; this script must never reboot the host.' >&2; exit 1; }
-echo "FLASH_PASS: active=0x$VERSION; eMMC hashes verified before and after the reboot; exactly one MCU runtime restart; PS boot id changed; x86 boot ID unchanged."
+if [[ $orig_kms == Y || $mode != standard ]]; then
+    [[ $(cat /sys/module/qpcie/refcnt) == 0 ]]
+    if sudo -n fuser /dev/dri/card0 /dev/video0 /dev/video1 /dev/qpcie-*; then exit 1; fi
+    sha256sum -c target-module.sha256
+    sudo -n rmmod qpcie
+    sudo -n insmod driver/qpcie.ko kms=1
+    sudo -n udevadm settle --timeout=15
+    test -d /sys/bus/pci/devices/0000:03:00.0/drm/card0
+    test "$(cat /sys/module/qpcie/parameters/kms)" = Y
+    target_id=$(readelf -n driver/qpcie.ko | awk '/Build ID:/ {print $NF}')
+    [[ -n $target_id && $target_id == "$(tail -c20 /sys/module/qpcie/notes/.note.gnu.build-id | xxd -p)" ]]
+    install -m 0644 driver/qpcie.ko "$HOME/sc7f0/bin/qpcie.ko"
+fi
+echo "FLASH_PASS: package=$VERSION active=0x$PL_VERSION; eMMC hashes verified before and after the reboot; exactly one MCU runtime restart; PS boot id changed; x86 boot ID unchanged."
 echo 'FIRMWARE FLASH PASSED / 升級完成，擷取功能未驗證。Capture/overlay/display acceptance is a separate test; a successful flash alone is not image success.'
 REMOTE_SCRIPT
