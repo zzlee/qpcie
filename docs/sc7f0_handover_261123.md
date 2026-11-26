@@ -36,6 +36,45 @@
 
 ---
 
+## 2.5 2026-11-24 更新：VCU 編碼器啟用與四路併發實測（交接重點）
+
+- **測試版號**：`0x26112403`（已燒錄於 `rd@192.168.190.247`；目前工作目錄有未提交修改）
+- **釋出包路徑**：`/mnt/data-root/home/zzlee/sc7f0-vivado-builds/rgb-vcu-26112403/release/upgrade-26112403.tar`
+- **PetaLinux 隔離建置目錄**：`/mnt/data-root/home/zzlee/sc7f0-vivado-builds/rgb-vcu-26112401/ps-work/petalinux/qpcie-zu4ev`
+
+### 本次已完成整合與修改（尚未 commit）
+1. **RTL / BD 解除 `SC7F0_RGB_COMPOSITOR` 與 `SC7F0_ENABLE_VCU` 互斥**：
+   - [scripts/create_zu4ev_ps_bd.tcl](file:///home/zzlee/qpcie/scripts/create_zu4ev_ps_bd.tcl)：因 H2C Overlay 已改用 PL URAM direct-pull（不再使用 `HP2`/`HP3`），將 `HP2`/`HP3` 歸還 VCU；將 `vcu_host_interrupt` 透過 `vcu_irq_cat` 接至 `pl_ps_irq0[5]`（SPI 94），保留 `pl_ps_irq1[3:0]`（SPI 104–107）；並在 `xbar_vcu_enc/M00_AXI` 與 `S_AXI_HP2_FPD` 之間加入 `reg_vcu_enc`（`axi_register_slice`）切開 300 MHz 路徑。
+   - [scripts/build_zu4ev.tcl](file:///home/zzlee/qpcie/scripts/build_zu4ev.tcl)：傳遞 `SC7F0_ENABLE_VCU=1`；僅在 `rgb_enable && !vcu_enable` 時定義 `SC7F0_PS_FRMBUF_RGBX=1`；`rgb_enable` 搭配 VCU 時使用精簡 `xbar8`。
+   - [rtl/zu4ev_pcie_card_top.v](file:///home/zzlee/qpcie/rtl/zu4ev_pcie_card_top.v)：`SC7F0_ENABLE_VCU` 時隱藏 `S_AXI_HP2_FPD` / `S_AXI_HP3_FPD` / `ovl_hp3_clk` 外部 idle tie-off。
+   - [rtl/sc7f0_ps_frmbuf_writer.v](file:///home/zzlee/qpcie/rtl/sc7f0_ps_frmbuf_writer.v)：改以 `` `ifdef SC7F0_PS_FRMBUF_RGBX `` 切換，使 VCU 啟用時 `u_ps_capture` 切回支援 NV12 的 `sc7f0_frmbuf_wr`。
+2. **PetaLinux / Device Tree**：
+   - [petalinuxbsp.conf](file:///home/zzlee/qpcie/petalinux/qpcie-zu4ev/project-spec/meta-user/conf/petalinuxbsp.conf)、[device-tree.bbappend](file:///home/zzlee/qpcie/petalinux/qpcie-zu4ev/project-spec/meta-user/recipes-bsp/device-tree/device-tree.bbappend)、[system-user.dtsi](file:///home/zzlee/qpcie/petalinux/qpcie-zu4ev/project-spec/meta-user/recipes-bsp/device-tree/files/system-user.dtsi)：新增 `SC7F0_VCU_ENABLE = "1"` 並重新引入 `vcu.dtsi`。
+   - [sc7f0-rgb-compositor.dtsi](file:///home/zzlee/qpcie/petalinux/qpcie-zu4ev/project-spec/meta-user/recipes-bsp/device-tree/files/sc7f0-rgb-compositor.dtsi)：移除未使用的 `sc7f0_overlay_pool`，調整 CMA 為 `cma,vcu@54000000`（544 MiB）+ `cma,display@76000000`（128 MiB）。
+   - [sc7f0-ps-capture.dtsi](file:///home/zzlee/qpcie/petalinux/qpcie-zu4ev/project-spec/meta-user/recipes-bsp/device-tree/files/sc7f0-ps-capture.dtsi)：`SC7F0_VCU_ENABLE=1` 時切回 `nv12` 與 YCbCr 4:2:0 CSC 設定。
+   - [petalinux-image-minimal.bbappend](file:///home/zzlee/qpcie/petalinux/qpcie-zu4ev/project-spec/meta-user/recipes-core/images/petalinux-image-minimal.bbappend)：`SC7F0_VCU_ENABLE=1` 時保留 `sc7f0-vcud` / `libvcu-xlnx` / `vcu-firmware`，並停用 `sc7f0-capture-init-rgb`。
+
+### `0x26112403` 實測數據
+- **Vivado 資源與時序（全數收斂）**：
+  - `CLB LUTs`: `84,828 / 87,840 (96.57%)`、`Block RAM Tile`: `121.5 / 128 (94.92%)`、`URAM`: `8 / 48 (16.67%)`
+  - `WNS = +0.055 ns`、`WHS = +0.010 ns`、`WPWS = 0.000 ns`（0 failing endpoints）
+- **30 秒四路併發測試**（HDMI 直通 + H2C Overlay + `/dev/video0` `NM16` + `/dev/video1` GStreamer H.264 CBR 40Mbps MP4）：
+  - **V4L2 `NM16` (`/dev/video0`)**：穩定 `60.00 fps`（1800 frames）。
+  - **H2C Overlay**：前段 `30.00 fps`、後段穩定 `60.00 fps`（`frames=840..960`）。
+  - **VCU H.264 MP4 (`/dev/video1` → `/home/rd/sc7f0/captures/test_vcu_40m_cbr.mp4`, 128 MiB)**：
+    - 完成 1800 frames 錄影且 PCIe DMA `ERR=0`。
+    - **瓶頸**：因目前 `ENC_BUFFER_EN = false`（`l2 prefetch size: 0`），VCU 編碼效能受限於 PS DDR4 頻寬，板卡 `sc7f0_vcud` 僅能維持 **`34–41 fps`（平均 ~37 fps）**，導致 1800 frames 耗時 `69.19 秒`（`ffprobe` 平均 `25.90 fps`、碼率 `15.5 Mbps`，且期間有 2 次掉幀造成解碼 MB error）。
+
+### 下一位 Agent 的 P0 交接任務（VCU URAM L2 Buffer + 60fps 驗證）
+1. **P0-1：開啟 VCU `URAM_ONLY` L2 Prefetch Buffer**：
+   - 在 [scripts/create_zu4ev_ps_bd.tcl](file:///home/zzlee/qpcie/scripts/create_zu4ev_ps_bd.tcl#L1215) 將 `CONFIG.ENC_BUFFER_EN` 設為 `{true}`、明確指定 `CONFIG.ENC_BUFFER_TYPE {0}`（`URAM_ONLY`，不動到 94.9% 滿載的 BRAM），並確認所需 URAM 數 ≤ 剩餘 40 顆（若超過則用 `ENC_BUFFER_MANUAL_OVERRIDE` 或 `ENC_BUFFER_MOTION_VEC_RANGE` 限縮在 40 顆內）。
+   - 重新建置 Vivado（匯出 XSA 時注意 `check_sc7f0_named_constraints.tcl` 會因既有 `u_overlay_writer`/`u_vid_phy_controller` 重命名而回報 FAIL，可確認 `timing_summary_routed.rpt` `WNS>=0` 後直接 `write_hw_platform`）、重編 PetaLinux、打包燒錄測試機。
+2. **P0-2：重測四路併發 4K60 + GStreamer CBR 40Mbps MP4**：
+   - 驗證 `sc7f0_vcud` 達到滿速 **60.0 fps**、`drops` 不再增加、MP4 `duration` 與 `nb_frames` 一致（`30s / 1800 frames @ 60 fps`）、實測碼率貼近 **40 Mbps CBR** 且 `ffprobe` 解碼零錯誤。
+   - 若功能與 60fps 全部通過，記得整理 `petalinux` 自動生成檔案（勿將 `.petalinux/metadata` / `statistics` 等雜檔誤 commit）並 commit 乾淨程式碼。
+
+---
+
 ## 3. 主要異動檔案清單
 
 - **RTL**：
@@ -87,4 +126,8 @@ sudo /home/rd/sc7f0/bin/sc7f0_ovl_ball_demo --msi --seconds 1800
 
 # 3. Host 端啟動 V4L2 4K60 NV16 (NM16) / NV12 (NM12) 採集
 v4l2-ctl -d /dev/video0 --set-fmt-video=width=3840,height=2160,pixelformat=NM16 --stream-mmap=4 --stream-count=108000 --stream-to=/dev/null
+
+# 4. Host 端啟動 VCU H.264 40Mbps CBR 錄製成 MP4（30 秒範例）
+v4l2-ctl -d /dev/video1 -c video_bitrate_mode=1,video_bitrate=40000000
+gst-launch-1.0 -e v4l2src device=/dev/video1 num-buffers=1800 do-timestamp=true ! "video/x-h264,width=3840,height=2160,framerate=60/1" ! h264parse ! mp4mux ! filesink location=/home/rd/sc7f0/captures/test_vcu_40m_cbr.mp4
 ```
